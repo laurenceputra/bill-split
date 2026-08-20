@@ -6,6 +6,32 @@ export type PayerState = { personId: string; amount: string };
 const MAX_SHARE_VALUE = 1_000_000;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
+export type AmountInputLength = 'normal' | 'long' | 'very-long';
+
+/** Keep large monetary values readable without relying on per-element styles. */
+export function amountInputLength(value: string): AmountInputLength {
+  const length = value.trim().length;
+  if (length >= 16) return 'very-long';
+  if (length >= 10) return 'long';
+  return 'normal';
+}
+
+export function amountInputClass(value: string): string {
+  return `amount-input amount-input--${amountInputLength(value)}`;
+}
+
+export function amountFieldClass(value: string): string {
+  return `amount-field amount-field--${amountInputLength(value)}`;
+}
+
+export function hasNewerServerVersion(initialVersion: number | undefined, serverVersion: number | undefined, dirty: boolean): boolean {
+  return dirty && initialVersion !== undefined && serverVersion !== undefined && serverVersion > initialVersion;
+}
+
+export function isExpenseConflict(status: number | undefined, code: string | undefined): boolean {
+  return status === 409 || code === 'CONFLICT';
+}
+
 export function currentPayerSelection(personId: string | undefined, members: GroupMember[]): string {
   return (personId && members.some((member) => member.personId === personId) ? personId : members[0]?.personId) || '';
 }
@@ -121,4 +147,8 @@ export function settlementSuggestion(balances: Record<string, Balances>, current
   const currencies = Object.keys(balances).sort((a, b) => (a === groupCurrency ? -1 : b === groupCurrency ? 1 : a.localeCompare(b)));
   const debts = currencies.flatMap((currency) => balances[currency]?.simplified.filter((debt) => debt.amountMinor > 0) || []);
   return debts.find((debt) => debt.fromPersonId === currentPersonId || debt.toPersonId === currentPersonId) || debts[0];
+}
+
+export function settlementSuggestionFingerprint(suggestion: PairwiseBalance | undefined, groupCurrency: Currency, fallbackFrom = '', fallbackTo = ''): string {
+  return [suggestion?.currency || groupCurrency, suggestion?.fromPersonId || fallbackFrom, suggestion?.toPersonId || fallbackTo, suggestion?.amountMinor ?? ''].join(':');
 }

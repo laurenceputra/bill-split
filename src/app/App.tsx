@@ -1,14 +1,14 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
 import { currencyOptions, type ExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
 import { ApiError, api, getActivity, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements } from './api';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, currentPayerSelection, normalizeSinglePayer, previewAllocation, settlementSuggestion, type AllocationState } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
-import { invalidateForMutation, RESOURCE_FRESHNESS, resourceKeys, useResource, useResourceIdentityEpoch } from './resource-cache';
+import { invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, useResource, useResourceIdentityEpoch } from './resource-cache';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -133,10 +133,10 @@ function ExpenseForm() {
   const formUserId = meResource.data?.id || 'pending';
   const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(formUserId, id), meResource.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, meResource.data?.id ? () => hydrateGroup(meResource.data!.id, id) : undefined);
   const detailResource = useResource<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(resourceKeys.expenseDetail(formUserId, expenseId || 'new'), meResource.data?.id, async (signal) => expenseId ? getExpenseDetails(expenseId, signal) : { expense: undefined as unknown as Expense, history: [] }, RESOURCE_FRESHNESS.expenseDetail, expenseId && meResource.data?.id ? () => hydrateExpenseDetails(meResource.data!.id, expenseId) : undefined);
-  const [members, setMembers] = useState<GroupMember[]>([]);
-  const [group, setGroup] = useState<Group>();
-  const [currentPersonId, setCurrentPersonId] = useState('');
-  const [currentUserId, setCurrentUserId] = useState('');
+  const group = groupResource.data?.group;
+  const members = groupResource.data?.members || [];
+  const currentPersonId = meResource.data?.personId || '';
+  const currentUserId = meResource.data?.id || '';
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState<Currency>('USD');
@@ -153,39 +153,71 @@ function ExpenseForm() {
   const [payersOpen, setPayersOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>();
-  const [offlineData, setOfflineData] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [updatedElsewhere, setUpdatedElsewhere] = useState(false);
   const [formReady, setFormReady] = useState(false);
+  const routeKey = `${formUserId}:${id}:${expenseId || 'new'}`;
+  const initializedRoute = useRef<string | undefined>(undefined);
+  const initializedVersion = useRef<number | undefined>(undefined);
+  const markDirty = () => setDirty(true);
+
+  useEffect(() => {
+    if (initializedRoute.current === routeKey) return;
+    initializedRoute.current = undefined;
+    initializedVersion.current = undefined;
+    setFormReady(false);
+    setDirty(false);
+    setUpdatedElsewhere(false);
+    setError(undefined);
+  }, [routeKey]);
 
   useEffect(() => {
     const groupResult = groupResource.data;
     const me = meResource.data;
-    if (!groupResult || !me) return;
-      setGroup(groupResult.group); setMembers(groupResult.members); setCurrentPersonId(me.personId); setCurrentUserId(me.id); setOfflineData(Boolean(groupResource.offline || meResource.offline || detailResource.offline));
-      const expense = detailResource.data?.expense;
-      setCurrency(expense?.currency ?? groupResult.group.currency);
-      if (expense) {
-        const loadedMethod = expense.splits[0]?.metadata?.method;
-        const nextMethod: SplitMethod = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal';
-        setDescription(expense.description); setAmount(moneyInput(expense.amountMinor)); setDate(expense.date); setCategory(expense.category || ''); setNotes(expense.notes || ''); setMethod(nextMethod); setSelected(expense.splits.map((split) => split.personId)); setAllocationValues(allocationStateFromSplits(expense.splits, nextMethod)); setExistingSplitMetadata(allocationMetadataByPerson(expense.splits)); setVersion(expense.version); setPayerRows(expense.payers.map((payer) => ({ personId: payer.personId, amount: moneyInput(payer.amountMinor) })));
-      } else {
-        const payer = currentPayerSelection(me.personId, groupResult.members);
-        setSelected(groupResult.members.map((member) => member.personId)); setPayerRows(payer ? [{ personId: payer, amount: '' }] : []);
+    const expense = detailResource.data?.expense;
+    if (!groupResult || !me || (expenseId && !expense)) return;
+
+    if (initializedRoute.current === routeKey) {
+      if (expense?.version === initializedVersion.current || (!expense && initializedVersion.current === undefined)) return;
+      if (dirty) {
+        if (hasNewerServerVersion(initializedVersion.current, expense?.version, true)) setUpdatedElsewhere(true);
+        return;
       }
-      setFormReady(true);
-  }, [groupResource.data, groupResource.offline, meResource.data, meResource.offline, detailResource.data, detailResource.offline]);
+      initializedRoute.current = undefined;
+    }
+
+    const loadedMethod = expense?.splits[0]?.metadata?.method;
+    const nextMethod: SplitMethod = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal';
+    setCurrency(expense?.currency ?? groupResult.group.currency);
+    if (expense) {
+      setDescription(expense.description); setAmount(moneyInput(expense.amountMinor)); setDate(expense.date); setCategory(expense.category || ''); setNotes(expense.notes || ''); setMethod(nextMethod); setSelected(expense.splits.map((split) => split.personId)); setAllocationValues(allocationStateFromSplits(expense.splits, nextMethod)); setExistingSplitMetadata(allocationMetadataByPerson(expense.splits)); setVersion(expense.version); setPayerRows(expense.payers.map((payer) => ({ personId: payer.personId, amount: moneyInput(payer.amountMinor) })));
+    } else {
+      const payer = currentPayerSelection(me.personId, groupResult.members);
+      setDescription(''); setAmount(''); setDate(today()); setCategory(''); setNotes(''); setMethod('equal'); setAllocationValues({}); setExistingSplitMetadata({}); setVersion(undefined); setSelected(groupResult.members.map((member) => member.personId)); setPayerRows(payer ? [{ personId: payer, amount: '' }] : []);
+    }
+    initializedRoute.current = routeKey;
+    initializedVersion.current = expense?.version;
+    setDirty(false);
+    setUpdatedElsewhere(false);
+    setFormReady(true);
+  }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey]);
 
   const resourceError = error || meResource.error || groupResource.error || (expenseId && detailResource.error);
-  if (resourceError && !(group && formReady)) return <Layout><ErrorBox error={resourceError} /></Layout>;
+  const routeReady = initializedRoute.current === routeKey && formReady;
+  if (resourceError && !(group && routeReady)) return <Layout><ErrorBox error={resourceError} /></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
+  if (!routeReady) return <Layout><Loading /></Layout>;
+  const offlineData = Boolean(groupResource.offline || meResource.offline || detailResource.offline);
   const editUnavailable = Boolean(expenseId) && (!online || offlineData);
   const amountMinor = (() => { try { return parseMoney(amount, currency); } catch { return 0; } })();
   const preview = previewAllocation(amountMinor, selected, method, allocationValues, currency);
   const isYou = (personId: string) => personId === currentPersonId;
-  const setAmountAndPayer = (value: string) => { setAmount(value); if (payerRows.length === 1) setPayerRows((rows) => rows.map((row) => ({ ...row, amount: value }))); };
-  const toggleSplit = (personId: string) => setSelected((current) => current.includes(personId) ? current.filter((idValue) => idValue !== personId) : [...current, personId]);
-  const updateAllocation = (personId: string, value: string) => setAllocationValues((current) => ({ ...current, [personId]: value }));
-  const addPayer = () => { const personId = members.find((member) => !payerRows.some((payer) => payer.personId === member.personId))?.personId; if (personId) setPayerRows((rows) => [...rows, { personId, amount: '' }]); };
-  const removePayer = (index: number) => setPayerRows((rows) => normalizeSinglePayer(rows.filter((_, rowIndex) => rowIndex !== index), amount));
+  const setAmountAndPayer = (value: string) => { markDirty(); setAmount(value); if (payerRows.length === 1) setPayerRows((rows) => rows.map((row) => ({ ...row, amount: value }))); };
+  const toggleSplit = (personId: string) => { markDirty(); setSelected((current) => current.includes(personId) ? current.filter((idValue) => idValue !== personId) : [...current, personId]); };
+  const updateAllocation = (personId: string, value: string) => { markDirty(); setAllocationValues((current) => ({ ...current, [personId]: value })); };
+  const addPayer = () => { const personId = members.find((member) => !payerRows.some((payer) => payer.personId === member.personId))?.personId; if (personId) { markDirty(); setPayerRows((rows) => [...rows, { personId, amount: '' }]); } };
+  const removePayer = (index: number) => { markDirty(); setPayerRows((rows) => normalizeSinglePayer(rows.filter((_, rowIndex) => rowIndex !== index), amount)); };
+  const resetToServer = () => { setDirty(false); setUpdatedElsewhere(false); setError(undefined); };
   const payerIsFullTotal = payerRows.length === 1 && amount.trim() !== '' && amountMinor > 0 && (() => { try { return parseMoney(payerRows[0].amount, currency) === amountMinor; } catch { return false; } })();
   const payerSummary = payerRows.length === 1 ? `Paid by ${isYou(payerRows[0].personId) ? 'You' : nameOf(members, payerRows[0].personId)}` : payerRows.length ? `Paid by ${payerRows.length} people` : 'Choose who paid';
   const payerSummaryDetail = payerRows.length === 1 ? (payerIsFullTotal ? 'Entire total' : 'Amount needs review') : payerRows.length ? 'Configure exact amounts' : 'Choose a payer';
@@ -211,24 +243,31 @@ function ExpenseForm() {
           await flushOutbox();
           invalidateForMutation.expenseChanged(id, undefined, currentUserId);
        }
-      nav(`/groups/${id}`);
-    } catch (cause) { setSubmitting(false); setError(cause); }
+       nav(`/groups/${id}`);
+     } catch (cause) {
+       if (expenseId && currentUserId && cause instanceof ApiError && isExpenseConflict(cause.status, cause.code)) {
+         const detailKey = resourceKeys.expenseDetail(currentUserId, expenseId);
+         invalidateResource(detailKey, currentUserId, { revalidate: false });
+         void revalidate(detailKey, currentUserId, { force: true, reason: 'mutation' }).catch(() => undefined);
+       }
+       setSubmitting(false); setError(cause);
+     }
   };
 
   return <Layout>
-      <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{expenseId ? 'Edit expense' : 'New expense'}</p><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{resourceError ? <p className="cache-status" role="status">Showing cached form data; refresh failed and your edits are preserved.</p> : null}
-      {editUnavailable ? <p className="offline-banner" role="status">Editing expenses is online-only. Reconnect before saving changes.</p> : null}<form className="expense-form reading-width" onSubmit={submit}>
-       <Field label="Amount and currency" className="amount-field"><CurrencySelect value={currency} onChange={setCurrency} /><input required inputMode="decimal" aria-label="Expense amount" placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
-       <Field label="Description" className="field--compact"><input required placeholder="What was this for?" value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
+       <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{expenseId ? 'Edit expense' : 'New expense'}</p><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{resourceError ? <p className="cache-status" role="status">Showing cached form data; refresh failed and your edits are preserved.</p> : null}
+       {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">Editing expenses is online-only. Reconnect before saving changes.</p> : null}<form className="expense-form reading-width" onSubmit={submit}>
+        <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
+        <Field label="Description" className="field--compact"><input required placeholder="What was this for?" value={description} onChange={(event) => { markDirty(); setDescription(event.target.value); }} /></Field>
        <button className="summary-row" type="button" onClick={() => setPayersOpen(true)}><span><span className="summary-row__label">{payerSummary}</span><small>{payerSummaryDetail}</small></span><strong>Change</strong></button>
        <fieldset><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
-      <div className="secondary-fields"><Field label="Split method" className="field--compact"><select value={method} onChange={(event) => setMethod(event.target.value as SplitMethod)}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
-        {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input required inputMode="decimal" aria-label={`${member.name} ${method} value`} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" role="alert">{preview.error}</p> : null}</div>}
-        <div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field><Field label="Category (optional)" className="field--compact"><input value={category} onChange={(event) => setCategory(event.target.value)} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
+       <div className="secondary-fields"><Field label="Split method" className="field--compact"><select value={method} onChange={(event) => { markDirty(); setMethod(event.target.value as SplitMethod); }}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
+         {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input className={amountInputClass(allocationValues[member.personId] || '')} data-amount-length={amountInputLength(allocationValues[member.personId] || '')} required inputMode="decimal" aria-label={`${member.name} ${method} value`} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" role="alert">{preview.error}</p> : null}</div>}
+         <div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="Category (optional)" className="field--compact"><input value={category} onChange={(event) => { markDirty(); setCategory(event.target.value); }} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea rows={3} value={notes} onChange={(event) => { markDirty(); setNotes(event.target.value); }} /></Field>
       </div>
        {error ? <ErrorBox error={error} /> : null}<Button className="full-width-button" disabled={submitting || editUnavailable} type="submit">{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Save expense'}</Button>
     </form>
-     {payersOpen && <Modal title="Who paid?" onClose={() => setPayersOpen(false)}><p className="muted">Use one payer for a quick entry, or add people and enter exact amounts.</p><div className="payer-list">{payerRows.map((payer, index) => <div className={`payer-row${payerRows.length > 1 ? ' payer-row--removable' : ''}`} key={`${payer.personId}-${index}`}><select aria-label={`Payer ${index + 1}: ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)}`} value={payer.personId} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row))}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}{isYou(member.personId) ? ' · You' : ''}</option>)}</select><input required inputMode="decimal" aria-label={`Amount paid by ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} placeholder="Amount" value={payer.amount} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row))} />{payerRows.length > 1 && <Button type="button" variant="secondary" aria-label={`Remove payer ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} onClick={() => removePayer(index)}>Remove</Button>}</div>)}</div><p className="allocation-summary" role="status">Payers total {formatMoney(payerRows.reduce((sum, payer) => { try { return sum + parseMoney(payer.amount || '0', currency); } catch { return sum; } }, 0), currency)} of {formatMoney(amountMinor, currency)}</p><Button className="full-width-button" type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button><Button className="full-width-button" type="button" onClick={() => setPayersOpen(false)}>Done</Button></Modal>}
+      {payersOpen && <Modal title="Who paid?" onClose={() => setPayersOpen(false)}><p className="muted">Use one payer for a quick entry, or add people and enter exact amounts.</p><div className="payer-list">{payerRows.map((payer, index) => <div className={`payer-row${payerRows.length > 1 ? ' payer-row--removable' : ''}`} key={`${payer.personId}-${index}`}><select aria-label={`Payer ${index + 1}: ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)}`} value={payer.personId} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row)); }}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}{isYou(member.personId) ? ' · You' : ''}</option>)}</select><input className={amountInputClass(payer.amount)} data-amount-length={amountInputLength(payer.amount)} required inputMode="decimal" aria-label={`Amount paid by ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} placeholder="Amount" value={payer.amount} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row)); }} />{payerRows.length > 1 && <Button type="button" variant="secondary" aria-label={`Remove payer ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} onClick={() => removePayer(index)}>Remove</Button>}</div>)}</div><p className="allocation-summary" role="status">Payers total {formatMoney(payerRows.reduce((sum, payer) => { try { return sum + parseMoney(payer.amount || '0', currency); } catch { return sum; } }, 0), currency)} of {formatMoney(amountMinor, currency)}</p><Button className="full-width-button" type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button><Button className="full-width-button" type="button" onClick={() => setPayersOpen(false)}>Done</Button></Modal>}
   </Layout>;
 }
 
@@ -269,17 +308,33 @@ function Settle() {
   const [operation] = useState(operationId);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>();
+  const [dirty, setDirty] = useState(false);
+  const settlementRouteKey = `${settleUserId}:${id}`;
+  const initializedRoute = useRef<string | undefined>(undefined);
+  const initializedSuggestion = useRef<string | undefined>(undefined);
+  const markDirty = () => setDirty(true);
   const offlineData = Boolean(me.offline || groupResource.offline || balancesResource.offline);
+  const suggestion = group && me.data && balancesResource.data ? settlementSuggestion(balancesResource.data.balances, me.data.personId, group.currency) : undefined;
+  const fallbackFrom = suggestion?.fromPersonId || members[0]?.personId || '';
+  const fallbackTo = suggestion?.toPersonId || members.find((member) => member.personId !== fallbackFrom)?.personId || '';
+  const suggestionFingerprint = group ? settlementSuggestionFingerprint(suggestion, group.currency, fallbackFrom, fallbackTo) : '';
+
   useEffect(() => {
     if (!group || !me.data || !balancesResource.data) return;
-    const suggestion = settlementSuggestion(balancesResource.data.balances, me.data.personId, group.currency);
-    setCurrency(suggestion?.currency || group.currency); setFrom(suggestion?.fromPersonId || members[0]?.personId || ''); setTo(suggestion?.toPersonId || members.find((member) => member.personId !== (suggestion?.fromPersonId || members[0]?.personId))?.personId || ''); setAmount(suggestion ? moneyInput(suggestion.amountMinor) : '');
-  }, [group, me.data, balancesResource.data, members]);
+    const routeChanged = initializedRoute.current !== settlementRouteKey;
+    if (!routeChanged && dirty) return;
+    if (!routeChanged && initializedSuggestion.current === suggestionFingerprint) return;
+    setCurrency(suggestion?.currency || group.currency); setFrom(fallbackFrom); setTo(fallbackTo); setAmount(suggestion ? moneyInput(suggestion.amountMinor) : '');
+    initializedRoute.current = settlementRouteKey;
+    initializedSuggestion.current = suggestionFingerprint;
+    setDirty(false);
+  }, [balancesResource.data, dirty, fallbackFrom, fallbackTo, group, me.data, settlementRouteKey, suggestion, suggestionFingerprint]);
   const resourceError = error || me.error || groupResource.error || balancesResource.error;
   if (!group) return <Layout>{resourceError ? <ErrorBox error={resourceError} /> : <Loading />}</Layout>;
    if (!online || offlineData) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Cached balance</p><h1>Settle up</h1></div></div><p className="offline-banner" role="status">Settlements are online-only. Reconnect to submit; cached balances remain available.</p>{Object.entries(balancesResource.data?.balances || {}).map(([currencyKey, balance]) => <section className="reading-width" key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}</span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}</Layout>;
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operation }) }); invalidateForMutation.settlementChanged(id, me.data?.id); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
-    return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{currentPersonId ? 'Suggested from your balance' : 'Payment'}</p><h1>Settle up</h1></div></div><p className="muted">Record a payment. Partial settlements are supported.</p><form className="reading-width" onSubmit={submit}><Field label="Who paid?"><select value={from} onChange={(event) => setFrom(event.target.value)}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => setTo(event.target.value)}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><Field label={`Amount (${currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></Field>{error ? <ErrorBox error={error} /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
+   const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operation }) }); invalidateForMutation.settlementChanged(id, me.data?.id); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
+      const resetSuggestion = () => { setCurrency(suggestion?.currency || group.currency); setFrom(fallbackFrom); setTo(fallbackTo); setAmount(suggestion ? moneyInput(suggestion.amountMinor) : ''); initializedRoute.current = settlementRouteKey; initializedSuggestion.current = suggestionFingerprint; setDirty(false); };
+     return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{currentPersonId ? 'Suggested from your balance' : 'Payment'}</p><h1>Settle up</h1></div></div><p className="muted">Record a payment. Partial settlements are supported.</p><form className="reading-width" onSubmit={submit}><Field label="Who paid?"><select value={from} onChange={(event) => { markDirty(); setFrom(event.target.value); }}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => { markDirty(); setTo(event.target.value); }}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /></Field><Field label={`Amount (${currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" value={amount} onChange={(event) => { markDirty(); setAmount(event.target.value); }} /></Field>{dirty ? <Button className="full-width-button" type="button" variant="secondary" onClick={resetSuggestion}>Reset to current suggestion</Button> : null}{error ? <ErrorBox error={error} /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
 }
 
 function Activity() {

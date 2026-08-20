@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
 
 afterEach(() => { resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
@@ -66,6 +66,19 @@ describe('resource cache', () => {
     expect(calls).toBe(0);
     await revalidate(key, 'user-a', { force: true, reason: 'mutation' });
     expect(calls).toBe(1);
+  });
+
+  it('makes an invalidated expense detail immediately eligible for recovery refresh', async () => {
+    const key = resourceKeys.expenseDetail('user-a', 'expense-conflict');
+    seedResource(key, 'user-a', { expense: { version: 1 }, history: [] });
+    let calls = 0;
+    configureResource(key, 'user-a', async () => { calls += 1; return { expense: { version: 2 }, history: [] }; });
+    const stop = trackVisibleResource(key, 'user-a');
+    invalidateResource(key, 'user-a', { revalidate: false });
+    await revalidate(key, 'user-a', { force: true, reason: 'mutation' });
+    stop();
+    expect(calls).toBe(1);
+    expect(getResourceSnapshot<{ expense: { version: number } }>(key, 'user-a').data?.expense.version).toBe(2);
   });
 
   it('builds account-scoped keys consistently and switches active identity', () => {

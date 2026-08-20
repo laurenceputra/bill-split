@@ -161,14 +161,14 @@ export function seedResource<T>(key: ResourceKey, userId: string, data: T, fetch
   notify(resource);
 }
 
-export function invalidateResource(key: ResourceKey, userId = activeUserId || '') {
+export function invalidateResource(key: ResourceKey, userId = activeUserId || '', options: { revalidate?: boolean } = {}) {
   const resource = entry<unknown>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
   resource.generation += 1;
   resource.controller?.abort();
   resource.forcePending = { force: true, reason: 'mutation' };
   resource.snapshot = stable({ ...resource.snapshot, stale: true, error: undefined, revalidating: false, loading: false });
   notify(resource);
-  if (resource.visible > 0) void revalidate(key, userId, resource.forcePending);
+  if (options.revalidate !== false && resource.visible > 0) void revalidate(key, userId, resource.forcePending);
 }
 
 export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') { for (const key of keys) invalidateResource(key, userId); }

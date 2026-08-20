@@ -425,6 +425,19 @@ form > button {
   padding: var(--space-3) var(--space-4);
 }
 
+.updated-elsewhere {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.updated-elsewhere > span {
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+
 .cache-status {
   margin: calc(var(--space-2) * -1) 0 var(--space-3);
   color: var(--color-ink-muted);
@@ -577,6 +590,8 @@ form > button {
 
 .amount-field {
   display: grid;
+  width: 100%;
+  min-width: 0;
   grid-template-columns: minmax(5.5rem, 7rem) minmax(0, 1fr);
   grid-template-areas:
     "label label"
@@ -585,40 +600,96 @@ form > button {
   gap: var(--space-2);
 }
 
+.amount-field--very-long {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "label"
+    "currency"
+    "amount";
+}
+
+.amount-field--very-long > select {
+  width: max-content;
+  min-width: 5.5rem;
+  max-width: 100%;
+}
+
+.amount-field--very-long > input {
+  width: 100%;
+}
+
 .amount-field > span {
   grid-area: label;
 }
 
 .amount-field > input {
   grid-area: amount;
+  width: 100%;
   min-width: 0;
   min-height: 3rem;
+  overflow: auto;
   border: 0;
   background: transparent;
   color: var(--color-ink);
   font-size: var(--text-amount);
+  font-variant-numeric: tabular-nums;
   font-weight: 850;
-  letter-spacing: -0.08em;
+  letter-spacing: -0.025em;
   line-height: var(--line-height-tight);
-  padding: 0;
+  padding: 0 0.875rem 0 0;
   text-align: right;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .amount-field > select {
   grid-area: currency;
   min-width: 0;
   min-height: 2.75rem;
-  padding-inline: var(--space-2);
+  padding-left: 0.875rem;
+  padding-right: 2.5rem;
+}
+
+.amount-input {
+  min-width: 0;
+  overflow: auto;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  padding-right: 0.875rem;
+  text-overflow: clip;
+}
+
+.amount-input--long {
+  font-size: 0.76rem;
+  letter-spacing: 0;
+}
+
+.amount-field > input.amount-input--long {
+  font-size: clamp(1.85rem, 8vw, 2.75rem);
+}
+
+.amount-input--very-long {
+  font-size: 0.6rem;
+  letter-spacing: 0;
+}
+
+.amount-field > input.amount-input--very-long {
+  font-size: clamp(1.15rem, 5vw, 2rem);
+  letter-spacing: 0;
 }
 
 .field--compact {
   gap: var(--space-1);
 }
 
-.field--compact input,
-.field--compact select {
+.field--compact input {
   min-height: 2.75rem;
   padding: var(--space-2) var(--space-3);
+}
+
+.field--compact select {
+  min-height: 2.75rem;
+  padding: var(--space-2) 2.5rem var(--space-2) 0.875rem;
 }
 
 .secondary-fields {
@@ -823,6 +894,7 @@ form > button {
 
 .allocation-row > input {
   min-width: 0;
+  overflow: auto;
 }
 
 .allocation-row__amount {
