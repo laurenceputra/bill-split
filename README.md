@@ -36,6 +36,8 @@ Production defaults to `ENVIRONMENT=production` and has no development bypass. F
 
 2. Configure Cloudflare Access for the Worker hostname. Set `ACCESS_TEAM_DOMAIN` (for example `team.cloudflareaccess.com`) and `ACCESS_AUD` as Worker variables/secrets; these values are intentionally not included here. For example, an operator may use `npx wrangler secret put ACCESS_TEAM_DOMAIN` and `npx wrangler secret put ACCESS_AUD`, or configure them in the dashboard. `src/worker/index.ts` obtains the Access JWKS from `/cdn-cgi/access/certs` and verifies the JWT signature, issuer, and audience before using its email claim. A raw email header is not trusted in production. Use `npx wrangler types` when binding or variable changes need regenerated Worker types.
 
+   Recommended session settings are a shorter application/policy session (24 hours or 7 days) and a one-month global session. Access sessions are not sliding, and BillSplit stores no application refresh token. Managed OAuth may make monthly reauthentication silent, but users can still see the reconnect banner when the Access session expires. Never place real domains, audiences, credentials, or tokens in this repository.
+
 3. Deploy:
 
    ```sh
@@ -58,7 +60,7 @@ Keep production Access values in Wrangler encrypted secrets (`wrangler secret pu
 
 ## Data and API
 
-`migrations/0001_initial.sql` is the initial schema. Apply `migrations/0002_production_safety.sql` as well: it adds owner/member roles, linked-user uniqueness, mutable-record versions, and group-scoped request-hash idempotency claims. `seed/seed.sql` is for local development only.
+`migrations/0001_initial.sql` is the schema migration currently checked in. Apply every migration in `migrations/` to each environment; seed data, when used locally, must remain local.
 
 Important endpoints include:
 
@@ -78,6 +80,8 @@ The app includes groups, owner/member access, multi-payer expense editing, equal
 
 `public/manifest.webmanifest`, the SVG icon, and `public/sw.js` provide the installable PWA shell. The service worker uses a versioned, bounded allowlist for static shell assets, serves navigation with a cached `index.html` fallback (including deep expense routes), and never caches `/api`, Cloudflare Access paths, or mutation responses.
 
-The app supports trusted-device offline capture for **new expenses only**. After a successful online visit, the unlocked browser profile stores the last verified identity, group/member snapshots, and recent group data in user-scoped IndexedDB. A new expense is written to a durable, leased IndexedDB outbox before any network attempt, then replayed with the same payload and `client_operation_id` once connectivity and Cloudflare Access are available. Pending rows show Waiting to sync, Syncing, Sign in to sync, or Sync failed and can be retried or discarded (with confirmation); hung writes time out and remain retryable. Offline edits, deletes, settlements, membership changes, exports, and other reads without a matching cached snapshot remain unavailable. Local cache access is not server authorization: replay still requires the normal Cloudflare Access session, and no local token bypasses it.
+The app supports trusted-device offline capture for **new expenses only**. After a successful online visit, the unlocked browser profile stores the last verified identity, group/member snapshots, and recent group data in user-scoped IndexedDB. A new expense is written to a durable, leased IndexedDB outbox before any network attempt, then replayed with the same payload and `client_operation_id` once connectivity and Cloudflare Access are available. Pending rows show Waiting to sync, Syncing, Sign in to sync, or Sync failed and can be retried or discarded (with confirmation); hung writes time out and remain retryable. If an Access session expires, API calls return an AJAX-friendly 401, the shell shows an accessible reconnect action, and an online top-level reload goes back through Access. No reload is attempted while offline, and queued expenses remain in IndexedDB and resume after a successful Access visit. Offline edits, deletes, settlements, membership changes, exports, and other reads without a matching cached snapshot remain unavailable. Local cache access is not server authorization: replay still requires the normal Cloudflare Access session, and no local token bypasses it.
+
+Settings can clear cached identity, groups, snapshots, and recent preferences without deleting pending or delivery-uncertain outbox operations. Those operations must be resolved through their queue controls. Logging out uses the app-domain top-level endpoint `/cdn-cgi/access/logout`; it warns when expenses are unsynced and does not expose or commit any token.
 
 Remaining intentional MVP limitations are no offline editing/deletion/settlement/membership sync, no currency conversion, and no receipt upload UI. IndexedDB can be cleared by the browser or unavailable in private/restricted contexts; those conditions are surfaced rather than silently dropping queued expenses. The `attachments` table and optional `RECEIPTS` R2 binding remain an extension point; any future routes must check group membership before issuing object access. D1 migrations must be applied explicitly in each environment, and production Access policy configuration remains an operator responsibility.

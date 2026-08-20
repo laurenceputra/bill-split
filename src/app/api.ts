@@ -4,6 +4,19 @@ import { readGroupSnapshot, readGroups, readLastVerifiedIdentity, reconcileOutbo
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
 export type ApiResponse<T> = { data: T; userId?: string };
+export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
+export type AuthState = { required: boolean; code?: AuthRequiredCode };
+
+let authState: AuthState = { required: false };
+const authListeners = new Set<() => void>();
+export const getAuthState = () => authState;
+export const subscribeAuthState = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
+export const clearAuthRequired = () => { if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
+const signalAuthRequired = (code: AuthRequiredCode) => {
+  authState = { required: true, code };
+  authListeners.forEach((listener) => listener());
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-auth-required', { detail: { code } }));
+};
 
 export class ApiError extends Error {
   readonly status?: number;
@@ -31,14 +44,20 @@ const cacheWrite = async (write: () => Promise<unknown>) => { try { await write(
 export async function apiWithMeta<T>(path: string, init?: RequestInit): Promise<ApiResponse<T>> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
+  headers.set('X-Requested-With', 'XMLHttpRequest');
   if (import.meta.env.DEV) headers.set('X-Dev-Email', devEmail());
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...init, headers }); }
   catch { throw new ApiError('Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR' }); }
+  // Access may return a plain redirect/login document rather than our JSON error.
+  // Publish this before parsing so HTML responses cannot hide an expired session.
+  if (response.status === 401) signalAuthRequired('AUTH_REQUIRED');
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
     const message = body?.error?.message || `Request failed (${response.status})`;
-    throw new ApiError(message, { status: response.status, code: body?.error?.code });
+    const code = body?.error?.code;
+    if (response.status === 401 && (code === 'AUTH_INVALID' || code === 'IDENTITY_MISMATCH')) signalAuthRequired(code);
+    throw new ApiError(message, { status: response.status, code });
   }
   return { data: response.status === 204 ? undefined as T : await response.json(), userId: response.headers.get('X-BillSplit-User-Id') || undefined };
 }
@@ -66,6 +85,7 @@ export async function getMe(options: { networkOnly?: boolean } = {}): Promise<Ca
     const result = await apiWithMeta<CurrentUser>('/me');
     const user = result.data;
     await cacheWrite(() => saveVerifiedIdentity({ userId: user.id, email: user.email, personId: user.personId, verifiedAt: new Date().toISOString() }));
+    clearAuthRequired();
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-authenticated', { detail: { userId: user.id } }));
     return { ...user, authoritative: true };
   } catch (error) {

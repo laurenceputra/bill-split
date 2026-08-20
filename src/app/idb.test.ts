@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DB_NAME, DB_VERSION, listOutbox, readGroupSnapshot, readRecent, recoverStaleSyncing, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearCachedData, DB_NAME, DB_VERSION, listOutbox, readGroupSnapshot, readRecent, recoverStaleSyncing, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -31,5 +31,17 @@ describe('user-scoped IndexedDB', () => {
     await saveOutboxItem(expense('stale'));
     await recoverStaleSyncing();
     expect((await listOutbox('user-a'))[0].status).toBe('pending');
+  });
+
+  it('clears private caches while preserving the outbox', async () => {
+    await saveVerifiedIdentity(user('user-a'));
+    await saveGroups({ userId: 'user-a', groups: [], cachedAt: 'a' });
+    await updateGroupSnapshot('user-a', 'group-a', { members: [] });
+    await saveRecent({ choice: 'USD' });
+    await saveOutboxItem(expense('keep'));
+    await clearCachedData();
+    expect(await readRecent()).toBeUndefined();
+    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+    expect(await listOutbox('user-a')).toHaveLength(1);
   });
 });

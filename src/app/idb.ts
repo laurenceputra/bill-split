@@ -128,6 +128,13 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
 
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
 
+/** Remove private cached data without touching the durable expense outbox. */
+export async function clearCachedData() {
+  await transaction(['recent', 'identities', 'groups', 'groupSnapshots'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots']) tx.objectStore(storeName).clear();
+  });
+}
+
 export const saveOutboxItem = (item: ExpenseOutboxItem) => transaction('expenseOutbox', 'readwrite', (tx) => tx.objectStore('expenseOutbox').put(item));
 export const readOutboxItem = (clientOperationId: string) => transaction<ExpenseOutboxItem>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').get(clientOperationId));
 

@@ -1,4 +1,4 @@
-const CACHE = 'bill-split-shell-v4';
+const CACHE = 'bill-split-shell-v5';
 const SHELL_FILES = ['/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
 const MAX_ASSETS = 80;
 const assetPattern = /^\/assets\/[a-zA-Z0-9._-]+\.(?:js|css|svg|png|webp|woff2?)$/;

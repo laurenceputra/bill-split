@@ -5,23 +5,84 @@ import { assertFinancialInput, date, expenseInput, groupInput, personInput, sett
 import { calculateNet, simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError } from '../db/repository';
 
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }; Variables: { auth: { id: string; email: string; personId: string }; repo: Repository } };
+type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }; Variables: { auth: { id: string; email: string; personId: string }; repo: Repository; requestId: string } };
 const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string) => c.json({ error: { code, message } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
+export const MAX_API_BODY_BYTES = 64 * 1024;
+const CONTENT_SECURITY_POLICY = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'";
+const requestIdFor = (request: Request) => {
+  const supplied = request.headers.get('X-Request-ID');
+  return supplied && /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : crypto.randomUUID();
+};
+const setSecurityHeaders = (headers: Headers, requestId: string, apiResponse: boolean) => {
+  headers.set('X-Request-ID', requestId);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Permissions-Policy', 'camera=(), geolocation=(), microphone=(), payment=()');
+  headers.set('X-Frame-Options', 'DENY');
+  if (apiResponse) {
+    headers.set('Cache-Control', 'no-store');
+    headers.set('Pragma', 'no-cache');
+  } else {
+    headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  }
+};
+const readBoundedBody = async (c: any): Promise<boolean> => {
+  const contentLength = c.req.header('Content-Length');
+  if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_API_BODY_BYTES)) return false;
+  const body = c.req.raw.body as ReadableStream<Uint8Array> | null;
+  if (!body) return true;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    total += part.value.byteLength;
+    if (total > MAX_API_BODY_BYTES) {
+      await reader.cancel();
+      return false;
+    }
+    chunks.push(part.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  c.req.raw = new Request(c.req.raw, { body: bytes });
+  c.req.bodyCache = {};
+  return true;
+};
+const allowsMutation = (c: any) => {
+  const url = new URL(c.req.url);
+  const origin = c.req.header('Origin');
+  const fetchSite = c.req.header('Sec-Fetch-Site');
+  const authorization = c.req.header('Authorization');
+  const hasBrowserMetadata = origin !== undefined || fetchSite !== undefined;
+  const exactOrigin = origin === url.origin;
+  const trustedFetchSite = fetchSite === 'same-origin';
+  const explicitBearer = /^Bearer\s+\S+$/i.test(authorization ?? '');
+  if (origin !== undefined && !exactOrigin) return false;
+  if (fetchSite !== undefined && !trustedFetchSite) return false;
+  return exactOrigin || trustedFetchSite || (!hasBrowserMetadata && explicitBearer);
+};
 const repositoryError = (c: any, error: unknown) => {
   if (error instanceof RepositoryError) return jsonError(c, error.code === 'CONFLICT' ? 409 : error.code === 'IDEMPOTENCY_CONFLICT' ? 409 : 500, error.code, error.message);
   throw error;
 };
 
 api.use('/api/*', async (c, next) => {
+  const requestId = requestIdFor(c.req.raw);
+  c.set('requestId', requestId);
+  setSecurityHeaders(c.res.headers, requestId, true);
   if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(c.req.method)) {
-    const origin = c.req.header('Origin');
-    if (origin && origin !== new URL(c.req.url).origin) return jsonError(c, 403, 'ORIGIN_FORBIDDEN', 'Cross-origin mutations are not allowed');
+    if (!allowsMutation(c)) return jsonError(c, 403, 'ORIGIN_FORBIDDEN', 'Mutations require same-origin browser metadata or an explicit bearer authorization');
+    if (!(await readBoundedBody(c))) return jsonError(c, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body must not exceed 64 KiB');
   }
   await next();
   const auth = c.get('auth');
   if (auth) c.res.headers.set('X-BillSplit-User-Id', auth.id);
+  setSecurityHeaders(c.res.headers, requestId, true);
 });
 api.use('/api/*', async (c, next) => {
   const env = c.env;
@@ -47,7 +108,7 @@ api.use('/api/*', async (c, next) => {
     const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
     if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
     c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
-  } catch (error) { console.error(error); return jsonError(c, 500, 'DATABASE_ERROR', 'The request could not be completed'); }
+  } catch { console.error(JSON.stringify({ message: 'database request failed', requestId: c.get('requestId') })); return jsonError(c, 500, 'DATABASE_ERROR', 'The request could not be completed'); }
 });
 
 async function authorizedGroup(c: any, groupId: string): Promise<{ repo: Repository; auth: { id: string; email: string; personId: string }; group: NonNullable<Awaited<ReturnType<Repository['group']>>>; role: 'owner' | 'member' } | Response> {
@@ -99,5 +160,13 @@ api.get('/api/groups/:groupId/export.csv', async (c) => { const x = await author
 api.get('/api/export.json', async (c) => c.json(await getRepo(c).allExport(c.get('auth').id)));
 
 api.notFound((c) => jsonError(c, 404, 'NOT_FOUND', 'API route not found'));
-api.onError((error, c) => { if (error instanceof RepositoryError) return repositoryError(c, error); console.error(error); return jsonError(c, 500, 'INTERNAL_ERROR', 'Unexpected server error'); });
-export default { async fetch(request: Request, env: Env['Bindings'], ctx: ExecutionContext) { const response = await api.fetch(request, env, ctx); if (new URL(request.url).pathname.startsWith('/api')) return response; return env.ASSETS.fetch(request); } };
+api.onError((error, c) => { if (error instanceof RepositoryError) return repositoryError(c, error); console.error(JSON.stringify({ message: 'request failed', requestId: c.get('requestId') })); return jsonError(c, 500, 'INTERNAL_ERROR', 'Unexpected server error'); });
+export default { async fetch(request: Request, env: Env['Bindings'], ctx: ExecutionContext) {
+  const requestId = requestIdFor(request);
+  const url = new URL(request.url);
+  if (url.pathname.startsWith('/api')) return api.fetch(request, env, ctx);
+  const response = await env.ASSETS.fetch(request);
+  const headers = new Headers(response.headers);
+  setSecurityHeaders(headers, requestId, false);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+} };

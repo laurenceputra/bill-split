@@ -312,6 +312,32 @@ form > button {
   padding: var(--space-3) var(--space-4);
 }
 
+.auth-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-border-strong);
+  background: var(--color-coral);
+  color: var(--color-coral-ink);
+  padding: var(--space-3) max(var(--space-4), var(--safe-right)) var(--space-3) max(var(--space-4), var(--safe-left));
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.auth-banner button {
+  flex: 0 0 auto;
+  min-height: 2.35rem;
+  background: var(--color-coral-ink);
+  color: var(--color-coral);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.auth-banner button:hover {
+  opacity: 0.85;
+}
+
 .row > span {
   display: flex;
   min-width: 0;

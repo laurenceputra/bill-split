@@ -21,5 +21,5 @@ export function getNavigationContext(pathname: string): NavigationContext {
     };
   }
 
-  return { groupsPath: '/', morePath: '/' };
+  return { groupsPath: '/', morePath: '/settings' };
 }

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
-import { OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
+import { getOutboxSnapshot, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -64,6 +64,18 @@ describe('durable expense outbox', () => {
     await queue('discard-me');
     await discardOutboxItem('discard-me');
     expect(await listOutbox('user-a')).toEqual([]);
+  });
+
+  it('hides every user queue after shared cached identity is cleared', async () => {
+    await queue('shared-cache');
+    await refreshOutbox();
+    expect(getOutboxSnapshot().map((item) => item.clientOperationId)).toContain('shared-cache');
+    await clearCachedData();
+    await refreshOutbox();
+    expect(getOutboxSnapshot()).toEqual([]);
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    await refreshOutbox();
+    expect(getOutboxSnapshot().map((item) => item.clientOperationId)).toContain('shared-cache');
   });
 
   it('atomically leases an item and only recovers expired leases', async () => {

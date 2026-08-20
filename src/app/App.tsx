@@ -5,8 +5,9 @@ import { currencyOptions, type ExpenseInput } from '../shared/schemas';
 import { formatMoney, parseMoney } from '../domain/money';
 import { ApiError, api, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, currentPayerSelection, normalizeSinglePayer, previewAllocation, settlementSuggestion, type AllocationState } from './form-helpers';
-import { Button, Field, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
-import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
+import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
+import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
+import { clearCachedData } from './idb';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -263,6 +264,46 @@ function Activity() {
   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{!online || offlineData ? <p className="offline-banner" role="status">Activity requires a connection; only new expenses can be captured offline.</p> : error ? <ErrorBox error={error} /> : items.length ? <div className="list">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No activity yet.</Empty>}</Layout>;
 }
 
+function Settings() {
+  const online = useOnlineStatus();
+  const [outbox, setOutbox] = useState<ExpenseOutboxItem[]>(getOutboxSnapshot());
+  const [outboxReady, setOutboxReady] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState<unknown>();
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = subscribeOutbox(() => setOutbox(getOutboxSnapshot()));
+    void initializeOutbox().then(() => { if (active) setOutboxReady(true); }).catch(() => undefined);
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
+  const clearCache = async () => {
+    if (!confirm('Clear cached identity, groups, snapshots, and recent preferences? Pending and uncertain expenses will be preserved.')) return;
+    setClearing(true); setMessage(''); setError(undefined);
+    try {
+      await clearCachedData();
+      window.dispatchEvent(new Event('billsplit-cache-cleared'));
+      setMessage('Cached account and group data cleared. Pending expenses were preserved.');
+    } catch (cause) { setError(cause); }
+    finally { setClearing(false); }
+  };
+
+  const logout = () => {
+    if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. Log out anyway? They will remain on this device but cannot sync until you reconnect.`)) return;
+    window.location.assign('/cdn-cgi/access/logout');
+  };
+
+  return <Layout>
+    <div className="page-title"><div><p className="eyebrow">More</p><h1>Settings</h1></div></div>
+    <section><h2>Device</h2><p className="muted" role="status">{online ? 'Online' : 'Offline'} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
+    <section><h2>Pending expenses</h2>{outbox.length ? <div className="list">{outbox.map((item) => <div className="row" key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><strong>{item.display.currency} {(item.display.amountMinor / 100).toFixed(2)}</strong></div>)}</div> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</section>
+    <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores an Access token, and replay still requires Cloudflare Access. Only use this on a device you trust.</p></section>
+    <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
+    <section><h2>Account</h2><p className="muted">Log out through Cloudflare Access. BillSplit does not handle or disclose your Access tokens.</p><Button variant="danger" disabled={!outboxReady} onClick={logout}>{outboxReady ? 'Log out' : 'Checking pending expenses…'}</Button></section>
+  </Layout>;
+}
+
 export function App() {
-  return <Routes><Route path="/" element={<Home />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }

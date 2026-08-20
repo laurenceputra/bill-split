@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, getExpenses, getGroups } from './api';
+import { ApiError, api, clearAuthRequired, getAuthState, getExpenses, getGroups, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readGroups, saveGroups, saveVerifiedIdentity } from './idb';
 
@@ -12,6 +12,29 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('marks API calls as AJAX requests and publishes auth-required state', async () => {
+    const listener = vi.fn();
+    const authEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent: authEvent });
+    const unsubscribe = subscribeAuthState(listener);
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => { expect(new Headers(init?.headers).get('X-Requested-With')).toBe('XMLHttpRequest'); return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }));
+    await expect(api('/me')).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' });
+    expect(getAuthState()).toEqual({ required: true, code: 'AUTH_REQUIRED' });
+    expect(listener).toHaveBeenCalled();
+    expect(authEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'billsplit-auth-required' }));
+    unsubscribe();
+    clearAuthRequired();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(['plain text', 'Access HTML'])('treats %s 401 responses as auth-required', async (kind) => {
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(kind === 'plain text' ? 'Unauthorized' : '<html><body>Sign in</body></html>', { status: 401, headers: { 'Content-Type': kind === 'plain text' ? 'text/plain' : 'text/html' } })));
+    await expect(api('/me')).rejects.toMatchObject({ status: 401 });
+    expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+    clearAuthRequired();
+  });
+
   it('retains stable server details and distinguishes network failures', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ error: { code: 'GROUP_NOT_FOUND', message: 'No such group' } }, 404)));
     await expect(api('/groups/missing')).rejects.toMatchObject({ status: 404, code: 'GROUP_NOT_FOUND', serverMessage: 'No such group', networkFailure: false });

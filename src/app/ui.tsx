@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
+import { getAuthState, subscribeAuthState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 
@@ -18,7 +19,7 @@ export function Button({ children, variant = 'primary', className = '', ...props
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  return <div className="app-shell"><TopBar /><main className="app-main">{children}</main><BottomNav /></div>;
+  return <div className="app-shell"><TopBar /><AuthBanner /><main className="app-main">{children}</main><BottomNav /></div>;
 }
 
 export function useOnlineStatus() {
@@ -30,16 +31,27 @@ function useInstall() {
   return useSyncExternalStore(subscribeInstall, getInstallState, () => ({ installed: true, canPrompt: false, showIosHelp: false }));
 }
 
+function useAuthRequired() {
+  return useSyncExternalStore(subscribeAuthState, getAuthState, () => ({ required: false }));
+}
+
 function useOutbox() {
   useEffect(() => { void initializeOutbox(); }, []);
   return useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
 }
 
-function InstallAction() {
+export function InstallAction({ showStatus = false }: { showStatus?: boolean } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
-  if (install.installed) return null;
+  if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : null;
   return <div className="install-control"><button className="install-action" type="button" onClick={async () => { if (install.canPrompt) await consumeInstallPrompt(); else setShowHelp((value) => !value); }}>Install BillSplit</button>{(install.showIosHelp || showHelp) ? <span className="install-help">{install.showIosHelp ? <>Share <span aria-hidden="true">→</span> Add to Home Screen</> : 'Follow your browser instructions'}</span> : null}</div>;
+}
+
+function AuthBanner() {
+  const online = useOnlineStatus();
+  const auth = useAuthRequired();
+  if (!auth.required) return null;
+  return <div className="auth-banner" role="alert"><span>Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(window.location.href); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
 }
 
 export function TopBar() {
@@ -57,12 +69,13 @@ export function BottomNav() {
   const onAdd = () => navigate(context.addPath || '/?new=1');
   const isGroups = location.pathname === '/';
   const isActivity = Boolean(context.activityPath && location.pathname === context.activityPath);
+  const isMore = location.pathname === context.morePath;
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={isGroups ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
     {context.activityPath && online ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title={online ? 'Open a group to view activity' : 'Activity requires a connection'}><Icon name="activity" /><span>Activity</span></button>}
     <button className="nav-item nav-item--add" type="button" onClick={onAdd}><Icon name="add" /><span>Add</span></button>
-    {context.groupId && !online ? <button className="nav-item" type="button" disabled title="Settlements require a connection"><Icon name="more" /><span>Settle</span></button> : <Link className="nav-item" to={context.morePath}><Icon name="more" /><span>{context.groupId ? 'Settle' : 'More'}</span></Link>}
+    {context.groupId && !online ? <button className="nav-item" type="button" disabled title="Settlements require a connection"><Icon name="more" /><span>Settle</span></button> : <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>{context.groupId ? 'Settle' : 'More'}</span></Link>}
   </nav>;
 }
 

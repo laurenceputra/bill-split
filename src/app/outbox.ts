@@ -33,7 +33,7 @@ const scheduleRetry = (attempts: number) => {
 };
 export const cancelScheduledRetry = () => { if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; } };
 export function setRetrySchedulerForTests(schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>, clear: (timer: ReturnType<typeof setTimeout>) => void) { const previous = { schedule: scheduleTimer, clear: clearTimer }; scheduleTimer = schedule; clearTimer = clear; return () => { scheduleTimer = previous.schedule; clearTimer = previous.clear; }; }
-async function refresh() { let next: ExpenseOutboxItem[] = []; try { const identity = await readLastVerifiedIdentity(); next = await listOutbox(identity?.userId); } catch { /* Keep an unavailable cache from breaking the shell. */ } if (JSON.stringify(next) !== JSON.stringify(snapshot)) { snapshot = next; notify(); } }
+export async function refreshOutbox() { let next: ExpenseOutboxItem[] = []; try { const identity = await readLastVerifiedIdentity(); next = identity ? await listOutbox(identity.userId) : []; } catch { /* Keep an unavailable cache from breaking the shell. */ } if (JSON.stringify(next) !== JSON.stringify(snapshot)) { snapshot = next; notify(); } }
 const updateSnapshot = (item: ExpenseOutboxItem | undefined) => { if (!item) return; snapshot = snapshot.some((current) => current.clientOperationId === item.clientOperationId) ? snapshot.map((current) => current.clientOperationId === item.clientOperationId ? item : current) : [...snapshot, item]; notify(); };
 export const subscribeOutbox = (listener: OutboxListener) => { listeners.add(listener); void initializeOutbox(); return () => { listeners.delete(listener); }; };
 export const getOutboxSnapshot = () => snapshot;
@@ -42,7 +42,7 @@ export const pendingCount = () => snapshot.length;
 export async function initializeOutbox() {
   if (!initialized) {
     initialized = true;
-    initializationPromise = (async () => { try { await recoverStaleSyncing(); } catch { /* surfaced when enqueueing; UI remains usable online. */ } await refresh(); })();
+    initializationPromise = (async () => { try { await recoverStaleSyncing(); } catch { /* surfaced when enqueueing; UI remains usable online. */ } await refreshOutbox(); })();
   }
   if (initializationPromise) await initializationPromise;
   return flushOutbox();
@@ -70,14 +70,14 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
     await api(`/groups/${claimed.groupId}/expenses`, { method: 'POST', body: JSON.stringify(claimed.payload), signal: controller.signal, headers: { 'X-BillSplit-Expected-User-Id': claimed.userId } });
     const removed = await removeOutboxIfOwned(claimed.clientOperationId, owner);
     if (removed) { snapshot = snapshot.filter((current) => current.clientOperationId !== claimed.clientOperationId); notify(); }
-    else await refresh();
+    else await refreshOutbox();
     return 'removed' as const;
   } catch (error) {
     const apiError = timedOut ? new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true }) : error instanceof ApiError ? error : new ApiError('Unable to sync expense.', { networkFailure: true, code: 'NETWORK_ERROR' });
     const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
     const status: OutboxStatus = apiError.status === 401 || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
     const updated = await updateOutboxIfOwned(claimed.clientOperationId, owner, { status, deliveryUncertain: ambiguous, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: errorDetails(apiError) });
-    if (updated) updateSnapshot(updated); else await refresh();
+    if (updated) updateSnapshot(updated); else await refreshOutbox();
     return status;
   } finally { clearTimeout(timer); }
 }
@@ -85,7 +85,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
 async function markAuthRequired(userId: string, error: ApiError) {
   await recoverStaleSyncing();
   await markOutboxAuthRequired(userId, errorDetails(error));
-  await refresh();
+  await refreshOutbox();
 }
 
 export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
@@ -100,13 +100,13 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
         if (result === 'auth-required') break;
         if (result === 'pending') { scheduleRetry(item.attempts + 1); break; }
       }
-      await refresh();
+      await refreshOutbox();
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         const identity = await readLastVerifiedIdentity();
         if (identity) await markAuthRequired(identity.userId, error);
       } else if (error instanceof ApiError && isRetryable(error)) {
-        try { const identity = await readLastVerifiedIdentity(); const items = await listOutbox(identity?.userId); if (items.length) scheduleRetry(Math.max(...items.map((item) => item.attempts || 1))); } catch { /* IndexedDB availability is reported by the enqueue path. */ }
+        try { const identity = await readLastVerifiedIdentity(); const items = identity ? await listOutbox(identity.userId) : []; if (items.length) scheduleRetry(Math.max(...items.map((item) => item.attempts || 1))); } catch { /* IndexedDB availability is reported by the enqueue path. */ }
       }
     } finally {
       const rerun = flushAgain; flushAgain = false; flushPromise = undefined;
@@ -125,7 +125,7 @@ export async function retryOutboxItem(clientOperationId: string) {
   if (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > Date.now()) throw new OutboxBusyError();
   const reset = await resetOutboxIfIdle(clientOperationId);
   if (!reset) throw new OutboxBusyError();
-  await refresh();
+  await refreshOutbox();
   return flushOutbox();
 }
 
@@ -149,7 +149,7 @@ export function statusLabel(status: OutboxStatus, deliveryUncertain = false) {
 
 export async function handleAuthenticatedUser(userId: string) {
   const changed = await reactivateAuthRequired(userId);
-  await refresh();
+  await refreshOutbox();
   return changed ? flushOutbox() : undefined;
 }
 
@@ -157,6 +157,7 @@ if (typeof window !== 'undefined') {
   void initializeOutbox();
   window.addEventListener('online', () => void flushOutbox());
   window.addEventListener('focus', () => void flushOutbox());
-  window.addEventListener('billsplit-outbox-changed', () => void refresh());
+  window.addEventListener('billsplit-outbox-changed', () => void refreshOutbox());
+  window.addEventListener('billsplit-cache-cleared', () => void refreshOutbox());
   window.addEventListener('billsplit-authenticated', (event) => { const userId = (event as CustomEvent<{ userId?: string }>).detail?.userId; if (userId) void handleAuthenticatedUser(userId); });
 }

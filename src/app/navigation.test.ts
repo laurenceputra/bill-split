@@ -13,6 +13,6 @@ describe('getNavigationContext', () => {
   });
 
   it('keeps add and activity safe on the home path', () => {
-    expect(getNavigationContext('/')).toEqual({ groupsPath: '/', morePath: '/' });
+    expect(getNavigationContext('/')).toEqual({ groupsPath: '/', morePath: '/settings' });
   });
 });
