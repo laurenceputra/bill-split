@@ -176,10 +176,22 @@ class GroupSummaryDb {
   prepare(sql: string) { this.sql = sql; return this; }
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
-    return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: JSON.stringify([{ currency: 'USD', net_minor: 500 }, { currency: 'EUR', net_minor: -250 }]) } as T;
+    return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend' } as T;
   }
   async all<T>() {
     return { results: [{ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: JSON.stringify([{ currency: 'USD', net_minor: 500 }, { currency: 'EUR', net_minor: -250 }]) }] as T[] };
+  }
+}
+
+class GroupAuthorizationDb {
+  sql = '';
+  args: unknown[] = [];
+  constructor(private readonly state: { groupDeleted?: boolean; memberDeleted?: boolean; userId?: string } = {}) {}
+  prepare(sql: string) { this.sql = sql; return this; }
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.state.groupDeleted || this.state.memberDeleted || (this.state.userId && this.args[1] !== this.state.userId)) return null;
+    return { id: this.args[0], name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member', member_count: 2, counterpart_name: 'Friend' } as T;
   }
 }
 
@@ -354,22 +366,23 @@ describe('repository home balance summaries', () => {
     expect(db.sql).toContain('WHERE balance_rank <= 2');
   });
 
-  it('scopes a single-group authorization and ledger query to the requested group', async () => {
-    const db = new GroupSummaryDb();
+  it('uses only active membership and group metadata for single-group authorization', async () => {
+    const db = new GroupAuthorizationDb({ userId: 'user-a' });
     const group = await new Repository(db as never).group('group-1', 'user-a');
-    expect(group?.id).toBe('group-1');
-    expect(db.args).toEqual(['user-a', 'group-1', 'group-1']);
-    expect(db.sql).toContain('AND gm.group_id=?');
-    expect(db.sql).toContain('FROM groups g JOIN authorized_groups gm');
+    expect(group).toMatchObject({ id: 'group-1', role: 'member', memberCount: 2, counterpartName: 'Friend' });
+    expect(group?.balanceSummaries).toBeUndefined();
+    expect(db.args).toEqual(['group-1', 'user-a']);
+    expect(db.sql).toContain('FROM groups g JOIN group_members gm');
     expect(db.sql).toContain('WHERE g.id=? AND g.deleted_at IS NULL');
+    expect(db.sql).toContain('gm.user_id=? AND gm.deleted_at IS NULL');
+    expect(db.sql).not.toMatch(/\bWITH\b/i);
+    expect(db.sql).not.toMatch(/\b(expenses|payers|splits|settlements)\b|authorized_groups|scoped_groups|ledger|group_balances|ranked_balances|balance_json|ROW_NUMBER/i);
   });
 
-  it('omits malformed summaries instead of failing group authorization', async () => {
-    const db = new GroupSummaryDb();
-    db.first = async <T>() => ({ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', balance_summaries: '{bad json' } as T);
-    const group = await new Repository(db as never).group('group-1', 'user-a');
-    expect(group).toMatchObject({ id: 'group-1' });
-    expect(group?.balanceSummaries).toBeUndefined();
+  it('returns no group for an unauthorized or deleted group/member', async () => {
+    await expect(new Repository(new GroupAuthorizationDb({ userId: 'other-user' }) as never).group('group-1', 'user-a')).resolves.toBeNull();
+    await expect(new Repository(new GroupAuthorizationDb({ groupDeleted: true }) as never).group('group-1', 'user-a')).resolves.toBeNull();
+    await expect(new Repository(new GroupAuthorizationDb({ memberDeleted: true }) as never).group('group-1', 'user-a')).resolves.toBeNull();
   });
 
   it('preserves database errors from the scoped group query', async () => {

@@ -85,6 +85,14 @@ const groupSelect = (requestedGroup = false) => `WITH authorized_groups AS (
   FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id
   LEFT JOIN balance_json ON balance_json.group_id=g.id`;
 
+const authorizedGroupSelect = `SELECT g.*,gm.role,
+  (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
+  (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
+    WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
+    ORDER BY p.name LIMIT 1) AS counterpart_name
+  FROM groups g JOIN group_members gm ON gm.group_id=g.id
+  WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -132,7 +140,7 @@ export class Repository {
     return rows.map((row) => mapGroup(row)!).filter(Boolean);
   }
   async group(groupId: string, userId: string): Promise<Group | null> {
-    return mapGroup(await this.db.prepare(`${groupSelect(true)} WHERE g.id=? AND g.deleted_at IS NULL`).bind(userId, groupId, groupId).first<Row>());
+    return mapGroup(await this.db.prepare(authorizedGroupSelect).bind(groupId, userId).first<Row>());
   }
   async membership(groupId: string, userId: string): Promise<'owner' | 'member' | null> {
     const row = await this.db.prepare('SELECT role FROM group_members WHERE group_id=? AND user_id=? AND deleted_at IS NULL').bind(groupId, userId).first<Row>();
