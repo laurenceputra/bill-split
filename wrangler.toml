@@ -1,0 +1,30 @@
+name = "bill-split"
+account_id = "ef5da8772e934578524c5b4bf80d3e4b"
+main = "src/worker/index.ts"
+compatibility_date = "2025-08-01"
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bill-split"
+database_id = "625080f5-ce8d-45a3-9a65-ed264dbf25c3"
+migrations_dir = "migrations"
+
+[vars]
+ENVIRONMENT = "production"
+# Set ACCESS_TEAM_DOMAIN and ACCESS_AUD as dashboard/secret vars in production.
+# R2 is optional: add an [[r2_buckets]] binding named RECEIPTS when enabled.
+
+[[routes]]
+pattern = "billsplit.laurenceputra.com"
+custom_domain = true
+
+[env.dev]
+name = "bill-split-dev"
+[env.dev.vars]
+ENVIRONMENT = "development"
+# Local development only. Do not use this environment for a public hostname.

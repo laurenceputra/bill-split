@@ -1,0 +1,4 @@
+const DB_NAME='bill-split-local';
+export async function saveRecent(value: unknown) { if(!('indexedDB' in window))return; const db=await open(); await new Promise<void>((resolve,reject)=>{const tx=db.transaction('recent','readwrite');tx.objectStore('recent').put(value,'form');tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);}); }
+export async function readRecent<T>():Promise<T|undefined>{if(!('indexedDB' in window))return;const db=await open();return new Promise((resolve,reject)=>{const tx=db.transaction('recent');const req=tx.objectStore('recent').get('form');req.onsuccess=()=>resolve(req.result as T);req.onerror=()=>reject(req.error);});}
+function open():Promise<IDBDatabase>{return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,1);req.onupgradeneeded=()=>req.result.createObjectStore('recent');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}

@@ -1,0 +1,15 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE people (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT, created_at TEXT NOT NULL, deleted_at TEXT);
+CREATE TABLE groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL CHECK(currency IN ('USD','EUR','GBP','AUD','CAD','NZD','SGD','HKD','CHF','CNY','INR')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
+CREATE TABLE group_members (group_id TEXT NOT NULL REFERENCES groups(id), person_id TEXT NOT NULL REFERENCES people(id), user_id TEXT REFERENCES users(id), joined_at TEXT NOT NULL, deleted_at TEXT, PRIMARY KEY(group_id, person_id));
+CREATE TABLE expenses (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id), description TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL CHECK(currency IN ('USD','EUR','GBP','AUD','CAD','NZD','SGD','HKD','CHF','CNY','INR')), expense_date TEXT NOT NULL, category TEXT, notes TEXT, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, client_operation_id TEXT, UNIQUE(created_by, client_operation_id));
+CREATE TABLE payers (expense_id TEXT NOT NULL REFERENCES expenses(id), person_id TEXT NOT NULL REFERENCES people(id), amount_minor INTEGER NOT NULL CHECK(amount_minor >= 0), PRIMARY KEY(expense_id, person_id));
+CREATE TABLE splits (expense_id TEXT NOT NULL REFERENCES expenses(id), person_id TEXT NOT NULL REFERENCES people(id), amount_minor INTEGER NOT NULL CHECK(amount_minor >= 0), metadata_json TEXT, PRIMARY KEY(expense_id, person_id));
+CREATE TABLE revisions (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, revision INTEGER NOT NULL, snapshot_json TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, UNIQUE(entity_type, entity_id, revision));
+CREATE TABLE settlements (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id), from_person_id TEXT NOT NULL REFERENCES people(id), to_person_id TEXT NOT NULL REFERENCES people(id), amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL CHECK(currency IN ('USD','EUR','GBP','AUD','CAD','NZD','SGD','HKD','CHF','CNY','INR')), settlement_date TEXT NOT NULL, note TEXT, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, client_operation_id TEXT, UNIQUE(created_by, client_operation_id), CHECK(from_person_id != to_person_id));
+CREATE TABLE attachments (id TEXT PRIMARY KEY, expense_id TEXT NOT NULL REFERENCES expenses(id), object_key TEXT NOT NULL UNIQUE, content_type TEXT NOT NULL, byte_size INTEGER NOT NULL, created_at TEXT NOT NULL, deleted_at TEXT);
+CREATE INDEX idx_members_person ON group_members(person_id);
+CREATE INDEX idx_expenses_group_date ON expenses(group_id, expense_date DESC);
+CREATE INDEX idx_expenses_operation ON expenses(created_by, client_operation_id);
+CREATE INDEX idx_settlements_group_date ON settlements(group_id, settlement_date DESC);

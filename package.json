@@ -1,0 +1,38 @@
+{
+  "name": "splitwise-cloudflare-pwa",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "npm run build && wrangler deploy --env=\"\"",
+    "deploy:dry-run": "npm run build && wrangler deploy --env=\"\" --dry-run",
+    "cf:types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply bill-split --local",
+    "db:migrate:remote": "wrangler d1 migrations apply bill-split --remote",
+    "db:seed": "wrangler d1 execute bill-split --local --file=./seed/seed.sql"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.4.3",
+    "hono": "^4.7.2",
+    "jose": "^6.0.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.6.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250821.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.4.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5",
+    "wrangler": "^4.23.0"
+  }
+}
