@@ -6,6 +6,7 @@ import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
+const SERVER_INSTALL_STATE = Object.freeze({ installed: true, canPrompt: false, showIosHelp: false });
 
 function Icon({ name }: { name: IconName }) {
   if (name === 'add') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
@@ -28,7 +29,7 @@ export function useOnlineStatus() {
 
 function useInstall() {
   useEffect(() => initializeInstallUX(), []);
-  return useSyncExternalStore(subscribeInstall, getInstallState, () => ({ installed: true, canPrompt: false, showIosHelp: false }));
+  return useSyncExternalStore(subscribeInstall, getInstallState, () => SERVER_INSTALL_STATE);
 }
 
 function useAuthRequired() {

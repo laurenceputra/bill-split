@@ -2,6 +2,23 @@
   min-height: 100vh;
 }
 
+.app-error-boundary {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: var(--color-canvas);
+  padding: var(--space-5);
+}
+
+.app-error-boundary__card {
+  width: min(100%, 30rem);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+  padding: var(--space-6);
+}
+
 .top-bar {
   position: sticky;
   z-index: 5;
