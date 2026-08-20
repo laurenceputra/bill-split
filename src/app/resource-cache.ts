@@ -27,6 +27,7 @@ export interface ResourceSnapshot<T> {
   readonly offline: boolean;
   readonly error?: unknown;
 }
+export type ResourceViewState = 'loading' | 'error' | 'ready';
 export type ResourceLoader<T> = (signal?: AbortSignal) => Promise<T>;
 export type ResourceHydrator<T> = () => Promise<{ data: T; fetchedAt?: number; offline?: boolean } | undefined>;
 export type RevalidateReason = 'route' | 'focus' | 'online' | 'visibility' | 'mutation' | 'auth-restored' | 'identity-check';
@@ -49,6 +50,13 @@ const isIdentityKey = (key: ResourceKey) => key === 'identity';
 const stable = <T>(snapshot: ResourceSnapshot<T>) => Object.freeze(snapshot);
 const notify = <T>(entry: Entry<T>) => entry.listeners.forEach((listener) => listener());
 const idleSnapshot = <T>(userId: string): ResourceSnapshot<T> => stable({ userId, status: 'idle', loading: false, revalidating: false, stale: false, offline: !online() });
+
+/** A resource with no data is never an empty successful result. */
+export function resourceViewState<T>(snapshot: ResourceSnapshot<T>): ResourceViewState {
+  if (snapshot.data !== undefined) return 'ready';
+  if (snapshot.error && !snapshot.loading && snapshot.status !== 'idle') return 'error';
+  return 'loading';
+}
 
 function entry<T>(key: ResourceKey, userId: string, ttl: number): Entry<T> {
   const existing = entries.get(key) as Entry<T> | undefined;
@@ -195,11 +203,12 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
   if (!resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
   if (!online() && resource.snapshot.data !== undefined) return resource.snapshot.data;
-  const force = (options.force === true && options.reason === 'mutation') || (isIdentityKey(key) && options.reason === 'identity-check');
+  const force = options.force === true || (isIdentityKey(key) && options.reason === 'identity-check');
   if (!force && isResourceFresh(resource.snapshot, resource.ttl)) return resource.snapshot.data;
   if (resource.promise) { if (force) resource.forcePending = options; return resource.promise; }
   if (!isVisible()) return resource.snapshot.data;
   const generation = resource.generation;
+  const retryingFromAuthBlocked = isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason === 'auth-restored';
   resource.forcePending = undefined;
   const hasData = resource.snapshot.data !== undefined;
   resource.snapshot = stable({ ...resource.snapshot, status: hasData ? 'ready' : 'loading', loading: !hasData, revalidating: hasData, stale: hasData ? true : resource.snapshot.stale, offline: false, error: undefined });
@@ -213,6 +222,11 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
     return data;
   }).catch((error: unknown) => {
     if (generation !== resource.generation) return resource.snapshot.data as T;
+    if (retryingFromAuthBlocked) {
+      resource.snapshot = stable({ ...resource.snapshot, status: 'auth-blocked', loading: false, revalidating: false, stale: true, offline: !online(), error });
+      notify(resource);
+      throw error;
+    }
     if (error instanceof DOMException && error.name === 'AbortError') { resource.snapshot = stable({ ...resource.snapshot, loading: false, revalidating: false, stale: true, error: undefined }); notify(resource); return resource.snapshot.data as T; }
     const hasCurrent = resource.snapshot.data !== undefined;
     resource.snapshot = stable({ ...resource.snapshot, status: hasCurrent ? 'ready' : 'error', loading: false, revalidating: false, stale: true, offline: !online(), error });

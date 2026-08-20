@@ -8,14 +8,39 @@ import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits
 import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
-import { invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, useResource, useResourceIdentityEpoch } from './resource-cache';
+import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
-function Loading() { return <p className="muted">Loading…</p>; }
-function ErrorBox({ error }: { error: unknown }) { return <div className="error" role="alert">{errorText(error)}</div>; }
+function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
+function ErrorBox({ error, id = 'resource-error', onRetry, retryLabel = 'Try again' }: { error: unknown; id?: string; onRetry?: () => void; retryLabel?: string }) {
+  return <div className="error" id={id} role="alert" aria-live="assertive"><span>{errorText(error)}</span>{onRetry ? <Button type="button" variant="secondary" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
+}
 function Empty({ children }: { children: ReactNode }) { return <div className="empty">{children}</div>; }
+function retryFor<T>(key: string, userId: string | undefined, identityFailure = false) {
+  return () => {
+    if (identityFailure || key === resourceKeys.identity() || userId === undefined) {
+      void revalidate<T>(resourceKeys.identity(), '', { force: true, reason: 'auth-restored' }).catch(() => undefined);
+    } else if (userId !== undefined) {
+      void revalidate<T>(key, userId, { force: true, reason: 'route' }).catch(() => undefined);
+    }
+  };
+}
+function ResourceNotice<T>({ resource, label, retry }: { resource: ResourceSnapshot<T>; label: string; retry?: () => void }) {
+  // A no-data private resource cannot recover while the cached identity is stale.
+  if (resource.data === undefined && getResourceSnapshot('identity').error !== undefined) return null;
+  if (resource.data === undefined) {
+    if (resourceViewState(resource) === 'error') return <ErrorBox error={resource.error} onRetry={retry} id={`${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-error`} />;
+    return resource.loading || resource.status === 'idle' ? <Loading /> : null;
+  }
+  if (resource.revalidating) return <p className="cache-status" role="status">Refreshing {label}…</p>;
+  if (resource.error || resource.stale || resource.offline) return <p className="cache-status" role="status">Showing cached {label}; it may be out of date. {retry ? <button className="inline-action" type="button" onClick={retry}>Retry</button> : null}</p>;
+  return null;
+}
+function CachedIdentityNotice({ resource, id }: { resource: ResourceSnapshot<unknown>; id: string }) {
+  return resource.error ? <ErrorBox error={resource.error} onRetry={retryFor(resourceKeys.identity(), '')} id={id} retryLabel="Retry identity check" /> : null;
+}
 function CurrencySelect({ value, onChange }: { value: Currency; onChange: (value: Currency) => void }) {
   return <select value={value} onChange={(event) => onChange(event.target.value as Currency)}>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
 }
@@ -27,11 +52,11 @@ function Home() {
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const groupsResource = useResource<{ groups: Group[] }>(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id, (signal) => getGroups(signal), RESOURCE_FRESHNESS.groups, me.data?.id ? () => hydrateGroups(me.data!.id) : undefined);
   const groups = groupsResource.data?.groups || [];
-  const error = groupsResource.error || me.error;
   const offline = Boolean(groupsResource.offline || me.offline);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [currency, setCurrency] = useState<Currency>('USD');
+  const [createError, setCreateError] = useState<unknown>();
   const [searchParams, setSearchParams] = useSearchParams();
   const nav = useNavigate();
   const newGroupRequested = searchParams.get('new') === '1';
@@ -48,17 +73,18 @@ function Home() {
   const create = async (event: FormEvent) => {
     event.preventDefault();
     if (!name.trim()) return;
+    setCreateError(undefined);
     try {
       const result = await api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify({ name, currency }) });
       if (result.group) { invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`); }
-    } catch (cause) { /* Keep the cached screen visible while reporting mutation errors. */ console.error(cause); }
+    } catch (cause) { setCreateError(cause); }
   };
 
   return <Layout>
     <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Your groups</h1></div><Button disabled={offlineView} onClick={() => setCreating((current) => !current)} variant="secondary">{creating ? 'Cancel' : '+ New group'}</Button></div>
-    {creating && <Surface><form onSubmit={create}><Field label="Group name"><input required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><Button disabled={offlineView} type="submit">Create group</Button></form></Surface>}
-    {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Group creation requires a connection; Add Expense remains available from cached groups.</p> : null}{error ? <ErrorBox error={error} /> : null}
-    {groupsResource.revalidating || groupsResource.stale ? <p className="cache-status" role="status">{groupsResource.revalidating ? 'Refreshing groups…' : 'Showing stale groups'}</p> : null}{!groups.length && !error && groupsResource.loading ? <Loading /> : !groups.length && !error ? <Empty>No groups yet. Create one to get started.</Empty> : <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.name}</strong><span>{group.currency}</span></Link>)}</div>}
+    {creating && <Surface><form onSubmit={create} aria-describedby={createError ? 'create-group-error' : undefined}><Field label="Group name"><input required value={name} onChange={(event) => { setCreateError(undefined); setName(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={(value) => { setCreateError(undefined); setCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-group-error" /> : null}<Button disabled={offlineView} type="submit">Create group</Button></form></Surface>}
+    {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Group creation requires a connection; Add Expense remains available from cached groups.</p> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
+    {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.name}</strong><span>{group.currency}</span></Link>)}</div> : <Empty>No groups yet. Create one to get started.</Empty>}</> : null}
   </Layout>;
 }
 
@@ -81,49 +107,57 @@ function GroupPage() {
   const [personName, setPersonName] = useState('');
   const [personEmail, setPersonEmail] = useState('');
   const [addingPerson, setAddingPerson] = useState(false);
+  const [addPersonError, setAddPersonError] = useState<unknown>();
   const [pending, setPending] = useState<ExpenseOutboxItem[]>([]);
-  const error = groupResource.error || expensesResource.error || balancesResource.error || settlementsResource.error || me.error;
+  const error = groupResource.error || me.error;
   const offline = Boolean(groupResource.offline || expensesResource.offline || balancesResource.offline || settlementsResource.offline || me.offline);
   const refreshing = [groupResource, expensesResource, balancesResource, settlementsResource].some((resource) => resource.revalidating);
   const partialErrors = [groupResource, expensesResource, balancesResource, settlementsResource].filter((resource) => resource.error);
   useEffect(() => { setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id)); }, [id, currentUserId]);
   useEffect(() => { const unsubscribe = subscribeOutbox(() => setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id))); return () => { unsubscribe(); }; }, [id, currentUserId]);
 
-  if (error && !group) return <Layout><ErrorBox error={error} /><Link className="back" to="/">← Groups</Link></Layout>;
+  if (error && !group) return <Layout><ErrorBox error={error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-error" /><Link className="back" to="/">← Groups</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
   const offlineView = offline || !online;
   const addPerson = async (event: FormEvent) => {
     event.preventDefault();
     if (!personName.trim()) return;
+    setAddPersonError(undefined);
     try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); invalidateForMutation.groupChanged(id, currentUserId); }
-    catch (cause) { /* Mutation errors do not remove the current authoritative view. */ console.error(cause); }
+    catch (cause) { setAddPersonError(cause); }
   };
   const memberLabel = (personId: string) => personId === currentPersonId ? 'You' : nameOf(members, personId);
 
    return <Layout>
      <Link to="/" className="back">← Groups</Link>
      <div className="page-title"><div><p className="eyebrow">{group.currency} group</p><h1>{group.name}</h1></div><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div>
-     {offlineView ? <p className="offline-banner" role="status">Offline · stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection.</p> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
+       {offlineView ? <p className="offline-banner" role="status">Offline · stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection.</p> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
      <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link>{!offlineView ? <><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></> : null}</div>
      <div className="group-overview-grid">
-       {Object.entries(balances).map(([currencyKey, balance]) => <section key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}
-       <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => setAddingPerson((current) => !current)}>{addingPerson ? 'Cancel' : '+ Add'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson}><Field label="Name"><input required value={personName} onChange={(event) => setPersonName(event.target.value)} /></Field><Field label="Email (optional)"><input type="email" value={personEmail} onChange={(event) => setPersonEmail(event.target.value)} /></Field><Button type="submit">Add person</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small> · {member.email}</small> : null}</span>)}</div></section>
+         <section><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
+        <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => { setAddPersonError(undefined); setAddingPerson((current) => !current); }}>{addingPerson ? 'Cancel' : '+ Add'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson} aria-describedby={addPersonError ? 'add-person-error' : undefined}><Field label="Name"><input required value={personName} onChange={(event) => { setAddPersonError(undefined); setPersonName(event.target.value); }} /></Field><Field label="Email (optional)"><input className="email" type="email" value={personEmail} onChange={(event) => { setAddPersonError(undefined); setPersonEmail(event.target.value); }} /></Field>{addPersonError ? <ErrorBox error={addPersonError} id="add-person-error" /> : null}<Button type="submit">Add person</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small className="email"> · {member.email}</small> : null}</span>)}</div></section>
      </div>
      <div className="group-ledger">
-       <section><h2>Recent expenses</h2>{expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} onRetry={() => { void retryOutboxItem(item.clientOperationId).catch((cause) => console.error(cause)); }} onDiscard={() => { if (confirm('Discard this pending expense?')) void discardOutboxItem(item.clientOperationId).catch((cause) => console.error(cause)); }} />)}{expenses.map((expense) => <Link className="row" to={`/groups/${expense.groupId}/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : <Empty>No expenses yet.</Empty>}</section>
-       {settlements.length ? <section><h2>Recent settlements</h2><div className="list">{settlements.map((settlement) => <div className="row" key={settlement.id}><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></div>)}</div></section> : null}
+         <section><h2>Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses yet.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => <Link className="row" to={`/groups/${expense.groupId}/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : null}</section>
+         <section><h2>Recent settlements</h2>{!me.error || settlementsResource.data !== undefined ? <ResourceNotice resource={settlementsResource} label="settlements" retry={retryFor(resourceKeys.settlements(userId, id), me.data?.id)} /> : null}{settlementsResource.data !== undefined && settlements.length ? <div className="list">{settlements.map((settlement) => <div className="row" key={settlement.id}><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></div>)}</div> : settlementsResource.data !== undefined ? <Empty>No settlements yet.</Empty> : null}</section>
      </div>
    </Layout>;
 }
 
-function PendingExpenseRow({ item, onRetry, onDiscard }: { item: ExpenseOutboxItem; onRetry: () => void; onDiscard: () => void }) {
+function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
+  const [error, setError] = useState<unknown>();
+  const [busy, setBusy] = useState(false);
   const syncing = item.status === 'syncing' && (item.leaseExpiresAt === undefined || item.leaseExpiresAt > Date.now());
   const cannotDiscard = syncing || Boolean(item.deliveryUncertain);
   const explanation = syncing ? 'An in-flight server write cannot be safely cancelled.' : item.deliveryUncertain ? 'The server may have committed this expense; retry or wait for reconciliation.' : undefined;
-  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} /><Button disabled={syncing} type="button" variant="secondary" onClick={onRetry}>Retry</Button><Button disabled={cannotDiscard} title={explanation} type="button" variant="danger" onClick={onDiscard}>Discard</Button></div></div>;
+  const retry = async () => { setError(undefined); setBusy(true); try { await retryOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  const discard = async () => { if (!confirm('Discard this pending expense?')) return; setError(undefined); setBusy(true); try { await discardOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} /><Button disabled={syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button><Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
 }
 
 type PayerRow = { personId: string; amount: string };
+type ExpenseErrorTarget = 'description' | 'amount' | 'participants' | 'payers' | 'allocation' | 'form';
+type ExpenseFormError = { error: unknown; target: ExpenseErrorTarget };
 
 function ExpenseForm() {
   const online = useOnlineStatus();
@@ -152,14 +186,14 @@ function ExpenseForm() {
   const [operation] = useState(operationId);
   const [payersOpen, setPayersOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<unknown>();
+  const [formError, setFormError] = useState<ExpenseFormError>();
   const [dirty, setDirty] = useState(false);
   const [updatedElsewhere, setUpdatedElsewhere] = useState(false);
   const [formReady, setFormReady] = useState(false);
   const routeKey = `${formUserId}:${id}:${expenseId || 'new'}`;
   const initializedRoute = useRef<string | undefined>(undefined);
   const initializedVersion = useRef<number | undefined>(undefined);
-  const markDirty = () => setDirty(true);
+  const markDirty = () => { setDirty(true); setFormError(undefined); };
 
   useEffect(() => {
     if (initializedRoute.current === routeKey) return;
@@ -168,7 +202,7 @@ function ExpenseForm() {
     setFormReady(false);
     setDirty(false);
     setUpdatedElsewhere(false);
-    setError(undefined);
+    setFormError(undefined);
   }, [routeKey]);
 
   useEffect(() => {
@@ -202,9 +236,9 @@ function ExpenseForm() {
     setFormReady(true);
   }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey]);
 
-  const resourceError = error || meResource.error || groupResource.error || (expenseId && detailResource.error);
+  const resourceError = meResource.error || groupResource.error || (expenseId && detailResource.error);
   const routeReady = initializedRoute.current === routeKey && formReady;
-  if (resourceError && !(group && routeReady)) return <Layout><ErrorBox error={resourceError} /></Layout>;
+  if (resourceError && !(group && routeReady)) return <Layout><ErrorBox error={resourceError} onRetry={retryFor(expenseId ? resourceKeys.expenseDetail(formUserId, expenseId) : resourceKeys.group(formUserId, id), meResource.data?.id, Boolean(meResource.error))} id="expense-resource-error" /></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
   if (!routeReady) return <Layout><Loading /></Layout>;
   const offlineData = Boolean(groupResource.offline || meResource.offline || detailResource.offline);
@@ -217,7 +251,7 @@ function ExpenseForm() {
   const updateAllocation = (personId: string, value: string) => { markDirty(); setAllocationValues((current) => ({ ...current, [personId]: value })); };
   const addPayer = () => { const personId = members.find((member) => !payerRows.some((payer) => payer.personId === member.personId))?.personId; if (personId) { markDirty(); setPayerRows((rows) => [...rows, { personId, amount: '' }]); } };
   const removePayer = (index: number) => { markDirty(); setPayerRows((rows) => normalizeSinglePayer(rows.filter((_, rowIndex) => rowIndex !== index), amount)); };
-  const resetToServer = () => { setDirty(false); setUpdatedElsewhere(false); setError(undefined); };
+  const resetToServer = () => { setDirty(false); setUpdatedElsewhere(false); setFormError(undefined); };
   const payerIsFullTotal = payerRows.length === 1 && amount.trim() !== '' && amountMinor > 0 && (() => { try { return parseMoney(payerRows[0].amount, currency) === amountMinor; } catch { return false; } })();
   const payerSummary = payerRows.length === 1 ? `Paid by ${isYou(payerRows[0].personId) ? 'You' : nameOf(members, payerRows[0].personId)}` : payerRows.length ? `Paid by ${payerRows.length} people` : 'Choose who paid';
   const payerSummaryDetail = payerRows.length === 1 ? (payerIsFullTotal ? 'Entire total' : 'Amount needs review') : payerRows.length ? 'Configure exact amounts' : 'Choose a payer';
@@ -225,15 +259,22 @@ function ExpenseForm() {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting) return;
-    setSubmitting(true); setError(undefined);
+    setSubmitting(true); setFormError(undefined);
+    let target: ExpenseErrorTarget = 'form';
     try {
+      target = 'description';
       if (!description.trim()) throw new Error('Add a short description.');
+      target = 'amount';
       if (!amount) throw new Error('Enter an expense amount.');
       const cents = parseMoney(amount, currency);
+      target = 'participants';
       if (!selected.length) throw new Error('Select at least one participant.');
+      target = 'payers';
       const payers = payerRows.map((payer) => ({ person_id: payer.personId, amount_minor: parseMoney(payer.amount || '0', currency) }));
-       if (checkedSumMinor(payers.map((payer) => payer.amount_minor)) !== cents) throw new Error('Payer amounts must equal the expense total.');
+      if (checkedSumMinor(payers.map((payer) => payer.amount_minor)) !== cents) throw new Error('Payer amounts must equal the expense total.');
+      target = 'allocation';
       if (preview.error || preview.remainingMinor !== 0) throw new Error(preview.error || 'Split amounts must equal the expense total.');
+      target = 'form';
       const input = { description: description.trim(), amount_minor: cents, currency, date, category: category.trim() || null, notes: notes || null, payers, splits: allocationSplits(selected, method, preview, allocationValues, existingSplitMetadata), version, client_operation_id: expenseId ? undefined : operation };
         if (expenseId) { await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); invalidateForMutation.expenseChanged(id, expenseId, currentUserId); }
        else {
@@ -250,24 +291,24 @@ function ExpenseForm() {
          invalidateResource(detailKey, currentUserId, { revalidate: false });
          void revalidate(detailKey, currentUserId, { force: true, reason: 'mutation' }).catch(() => undefined);
        }
-       setSubmitting(false); setError(cause);
-     }
-  };
+        setSubmitting(false); setFormError({ error: cause, target });
+      }
+   };
 
   return <Layout>
-       <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{expenseId ? 'Edit expense' : 'New expense'}</p><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{resourceError ? <p className="cache-status" role="status">Showing cached form data; refresh failed and your edits are preserved.</p> : null}
-       {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">Editing expenses is online-only. Reconnect before saving changes.</p> : null}<form className="expense-form reading-width" onSubmit={submit}>
-        <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
-        <Field label="Description" className="field--compact"><input required placeholder="What was this for?" value={description} onChange={(event) => { markDirty(); setDescription(event.target.value); }} /></Field>
-       <button className="summary-row" type="button" onClick={() => setPayersOpen(true)}><span><span className="summary-row__label">{payerSummary}</span><small>{payerSummaryDetail}</small></span><strong>Change</strong></button>
-       <fieldset><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
+       <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{expenseId ? 'Edit expense' : 'New expense'}</p><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{meResource.error ? <CachedIdentityNotice resource={meResource} id="expense-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group details" retry={retryFor(resourceKeys.group(formUserId, id), meResource.data?.id)} /> : null}{expenseId && detailResource.error ? <ResourceNotice resource={detailResource} label="expense form data" retry={retryFor(resourceKeys.expenseDetail(formUserId, expenseId), meResource.data?.id)} /> : null}
+       {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">Editing expenses is online-only. Reconnect before saving changes.</p> : null}<form className="expense-form reading-width" onSubmit={submit} aria-describedby={formError ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined}>
+         <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input id="expense-amount" className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" aria-invalid={formError?.target === 'amount'} aria-describedby={formError?.target === 'amount' ? 'expense-form-error' : undefined} placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
+         <Field label="Description" className="field--compact"><input id="expense-description" required aria-invalid={formError?.target === 'description'} aria-describedby={formError?.target === 'description' ? 'expense-form-error' : undefined} placeholder="What was this for?" value={description} onChange={(event) => { markDirty(); setDescription(event.target.value); }} /></Field>
+       <button className="summary-row" type="button" aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} onClick={() => setPayersOpen(true)}><span><span className="summary-row__label">{payerSummary}</span><small>{payerSummaryDetail}</small></span><strong>Change</strong></button>
+       <fieldset aria-describedby={formError?.target === 'participants' ? 'expense-form-error' : undefined}><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} aria-invalid={formError?.target === 'participants'} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
        <div className="secondary-fields"><Field label="Split method" className="field--compact"><select value={method} onChange={(event) => { markDirty(); setMethod(event.target.value as SplitMethod); }}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
-         {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input className={amountInputClass(allocationValues[member.personId] || '')} data-amount-length={amountInputLength(allocationValues[member.personId] || '')} required inputMode="decimal" aria-label={`${member.name} ${method} value`} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" role="alert">{preview.error}</p> : null}</div>}
-         <div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="Category (optional)" className="field--compact"><input value={category} onChange={(event) => { markDirty(); setCategory(event.target.value); }} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea rows={3} value={notes} onChange={(event) => { markDirty(); setNotes(event.target.value); }} /></Field>
+          {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input className={amountInputClass(allocationValues[member.personId] || '')} data-amount-length={amountInputLength(allocationValues[member.personId] || '')} required inputMode="decimal" aria-label={`${member.name} ${method} value`} aria-invalid={formError?.target === 'allocation' || Boolean(preview.error)} aria-describedby={formError?.target === 'allocation' ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" id="allocation-error" role="alert">{preview.error}</p> : null}</div>}
+          <div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="Category (optional)" className="field--compact"><input className="category" value={category} onChange={(event) => { markDirty(); setCategory(event.target.value); }} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea className="notes" rows={3} value={notes} onChange={(event) => { markDirty(); setNotes(event.target.value); }} /></Field>
       </div>
-       {error ? <ErrorBox error={error} /> : null}<Button className="full-width-button" disabled={submitting || editUnavailable} type="submit">{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Save expense'}</Button>
+        {formError ? <ErrorBox error={formError.error} id="expense-form-error" /> : null}<Button className="full-width-button" disabled={submitting || editUnavailable} type="submit">{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Save expense'}</Button>
     </form>
-      {payersOpen && <Modal title="Who paid?" onClose={() => setPayersOpen(false)}><p className="muted">Use one payer for a quick entry, or add people and enter exact amounts.</p><div className="payer-list">{payerRows.map((payer, index) => <div className={`payer-row${payerRows.length > 1 ? ' payer-row--removable' : ''}`} key={`${payer.personId}-${index}`}><select aria-label={`Payer ${index + 1}: ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)}`} value={payer.personId} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row)); }}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}{isYou(member.personId) ? ' · You' : ''}</option>)}</select><input className={amountInputClass(payer.amount)} data-amount-length={amountInputLength(payer.amount)} required inputMode="decimal" aria-label={`Amount paid by ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} placeholder="Amount" value={payer.amount} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row)); }} />{payerRows.length > 1 && <Button type="button" variant="secondary" aria-label={`Remove payer ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} onClick={() => removePayer(index)}>Remove</Button>}</div>)}</div><p className="allocation-summary" role="status">Payers total {formatMoney(payerRows.reduce((sum, payer) => { try { return sum + parseMoney(payer.amount || '0', currency); } catch { return sum; } }, 0), currency)} of {formatMoney(amountMinor, currency)}</p><Button className="full-width-button" type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button><Button className="full-width-button" type="button" onClick={() => setPayersOpen(false)}>Done</Button></Modal>}
+       {payersOpen && <Modal title="Who paid?" description="Use one payer for a quick entry, or add people and enter exact amounts." onClose={() => setPayersOpen(false)}><div className="payer-list">{payerRows.map((payer, index) => <div className={`payer-row${payerRows.length > 1 ? ' payer-row--removable' : ''}`} key={`${payer.personId}-${index}`}><select aria-label={`Payer ${index + 1}: ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)}`} aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} value={payer.personId} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row)); }}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}{isYou(member.personId) ? ' · You' : ''}</option>)}</select><input className={amountInputClass(payer.amount)} data-amount-length={amountInputLength(payer.amount)} required inputMode="decimal" aria-label={`Amount paid by ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} placeholder="Amount" value={payer.amount} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row)); }} />{payerRows.length > 1 && <Button type="button" variant="secondary" aria-label={`Remove payer ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} onClick={() => removePayer(index)}>Remove</Button>}</div>)}</div><p className="allocation-summary" role="status">Payers total {formatMoney(payerRows.reduce((sum, payer) => { try { return sum + parseMoney(payer.amount || '0', currency); } catch { return sum; } }, 0), currency)} of {formatMoney(amountMinor, currency)}</p><Button className="full-width-button" type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button><Button className="full-width-button" type="button" onClick={() => setPayersOpen(false)}>Done</Button></Modal>}
   </Layout>;
 }
 
@@ -283,11 +324,13 @@ function ExpenseDetail() {
   const members = groupResource.data?.members || [];
   const error = detailsResource.error || groupResource.error || me.error;
   const offlineData = Boolean(detailsResource.offline || groupResource.offline || me.offline);
+  const [deleteError, setDeleteError] = useState<unknown>();
+  const [deleting, setDeleting] = useState(false);
   useEffect(() => { if (expense && !id) nav(`/groups/${expense.groupId}/expenses/${expenseId}`, { replace: true }); }, [expense, expenseId, id, nav]);
-  if (!expense && error) return <Layout><ErrorBox error={error} /></Layout>;
+  if (!expense && error) return <Layout><ErrorBox error={error} onRetry={retryFor(resourceKeys.expenseDetail(me.data?.id || 'pending', expenseId), me.data?.id, Boolean(me.error))} id="expense-detail-error" /></Layout>;
   if (!expense) return <Layout><Loading /></Layout>;
-  const remove = async () => { if (!confirm('Delete this expense?')) return; try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); invalidateForMutation.expenseChanged(expense.groupId, expense.id, me.data?.id); nav(`/groups/${expense.groupId}`); } catch (cause) { console.error(cause); } };
-   return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{expense.date}</p><h1>{expense.description}</h1></div><Money amountMinor={expense.amountMinor} currency={expense.currency} size="large" /></div>{detailsResource.revalidating ? <p className="cache-status" role="status">Refreshing expense history…</p> : null}{detailsResource.error || groupResource.error ? <p className="cache-status" role="status">Showing cached expense data; related details may be unavailable.</p> : null}<section className="reading-width"><h2>Payers</h2><div className="list">{expense.payers.map((payer) => <div className="row" key={payer.personId}><span>{nameOf(members, payer.personId)}</span><Money amountMinor={payer.amountMinor} currency={expense.currency} /></div>)}</div><h2>Split</h2><div className="list">{expense.splits.map((split) => <div className="row" key={split.personId}><span>{nameOf(members, split.personId)}</span><Money amountMinor={split.amountMinor} currency={expense.currency} /></div>)}</div>{expense.category ? <p className="muted">Category: {expense.category}</p> : null}{expense.notes ? <p className="muted">{expense.notes}</p> : null}</section>{online && !offlineData ? <div className="actions"><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><Button variant="danger" onClick={remove}>Delete</Button></div> : <p className="offline-banner" role="status">Editing and deleting expenses require a connection.</p>}<section className="reading-width"><h2>History</h2>{history.length ? <div className="list">{history.map((item) => <div className="row" key={item.id}><span>Revision {item.revision}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No edits yet.</Empty>}</section></Layout>;
+  const remove = async () => { if (!confirm('Delete this expense?')) return; setDeleteError(undefined); setDeleting(true); try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); invalidateForMutation.expenseChanged(expense.groupId, expense.id, me.data?.id); nav(`/groups/${expense.groupId}`); } catch (cause) { setDeleteError(cause); } finally { setDeleting(false); } };
+   return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{expense.date}</p><h1>{expense.description}</h1></div><Money amountMinor={expense.amountMinor} currency={expense.currency} size="large" /></div>{me.error ? <CachedIdentityNotice resource={me} id="expense-detail-identity-error" /> : null}{!me.error || detailsResource.data !== undefined ? <ResourceNotice resource={detailsResource} label="expense details" retry={retryFor(resourceKeys.expenseDetail(me.data?.id || 'pending', expenseId), me.data?.id)} /> : null}{!me.error || groupResource.data !== undefined ? <ResourceNotice resource={groupResource} label="member names" retry={retryFor(resourceKeys.group(me.data?.id || 'pending', expense.groupId), me.data?.id)} /> : null}<section className="reading-width"><h2>Payers</h2><div className="list">{expense.payers.map((payer) => <div className="row" key={payer.personId}><span>{nameOf(members, payer.personId)}</span><Money amountMinor={payer.amountMinor} currency={expense.currency} /></div>)}</div><h2>Split</h2><div className="list">{expense.splits.map((split) => <div className="row" key={split.personId}><span>{nameOf(members, split.personId)}</span><Money amountMinor={split.amountMinor} currency={expense.currency} /></div>)}</div>{expense.category ? <p className="muted category">Category: {expense.category}</p> : null}{expense.notes ? <p className="muted notes">{expense.notes}</p> : null}</section>{online && !offlineData ? <div className="actions"><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><Button variant="danger" disabled={deleting} onClick={remove}>{deleting ? 'Deleting…' : 'Delete'}</Button>{deleteError ? <ErrorBox error={deleteError} id="expense-delete-error" /> : null}</div> : <p className="offline-banner" role="status">Editing and deleting expenses require a connection.</p>}<section className="reading-width"><h2>History</h2>{history.length ? <div className="list">{history.map((item) => <div className="row" key={item.id}><span>Revision {item.revision}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No edits yet.</Empty>}</section></Layout>;
 }
 
 function Settle() {
@@ -300,6 +343,7 @@ function Settle() {
   const balancesResource = useResource<{ balances: Record<string, Balances> }>(resourceKeys.balances(settleUserId, id), me.data?.id, (signal) => getBalances(id, signal), RESOURCE_FRESHNESS.balances, me.data?.id ? () => hydrateBalances(me.data!.id, id) : undefined);
   const members = groupResource.data?.members || [];
   const group = groupResource.data?.group;
+  const balances = balancesResource.data?.balances || {};
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
@@ -330,11 +374,12 @@ function Settle() {
     setDirty(false);
   }, [balancesResource.data, dirty, fallbackFrom, fallbackTo, group, me.data, settlementRouteKey, suggestion, suggestionFingerprint]);
   const resourceError = error || me.error || groupResource.error || balancesResource.error;
-  if (!group) return <Layout>{resourceError ? <ErrorBox error={resourceError} /> : <Loading />}</Layout>;
-   if (!online || offlineData) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Cached balance</p><h1>Settle up</h1></div></div><p className="offline-banner" role="status">Settlements are online-only. Reconnect to submit; cached balances remain available.</p>{Object.entries(balancesResource.data?.balances || {}).map(([currencyKey, balance]) => <section className="reading-width" key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}</span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}</Layout>;
+  if (!group) return <Layout>{resourceError ? <ErrorBox error={resourceError} onRetry={retryFor(resourceError === balancesResource.error ? resourceKeys.balances(settleUserId, id) : resourceKeys.group(settleUserId, id), me.data?.id, Boolean(me.error))} id="settle-resource-error" /> : <Loading />}</Layout>;
+   if (!online || offlineData) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{balancesResource.data ? 'Cached balance' : 'Balance unavailable'}</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="offline-banner" role="status">Settlements are online-only. Reconnect to submit; {balancesResource.data ? 'cached balances remain available.' : 'no verified cached balances are available on this device.'}</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} />{balancesResource.data ? Object.entries(balances).map(([currencyKey, balance]) => <section className="reading-width" key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}</span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>) : null}</Layout>;
+    if (balancesResource.data === undefined) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Balance required</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}{!me.error ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /> : null}</Layout>;
    const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operation }) }); invalidateForMutation.settlementChanged(id, me.data?.id); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
       const resetSuggestion = () => { setCurrency(suggestion?.currency || group.currency); setFrom(fallbackFrom); setTo(fallbackTo); setAmount(suggestion ? moneyInput(suggestion.amountMinor) : ''); initializedRoute.current = settlementRouteKey; initializedSuggestion.current = suggestionFingerprint; setDirty(false); };
-     return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{currentPersonId ? 'Suggested from your balance' : 'Payment'}</p><h1>Settle up</h1></div></div><p className="muted">Record a payment. Partial settlements are supported.</p><form className="reading-width" onSubmit={submit}><Field label="Who paid?"><select value={from} onChange={(event) => { markDirty(); setFrom(event.target.value); }}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => { markDirty(); setTo(event.target.value); }}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /></Field><Field label={`Amount (${currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" value={amount} onChange={(event) => { markDirty(); setAmount(event.target.value); }} /></Field>{dirty ? <Button className="full-width-button" type="button" variant="secondary" onClick={resetSuggestion}>Reset to current suggestion</Button> : null}{error ? <ErrorBox error={error} /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
+       return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{currentPersonId ? 'Suggested from your balance' : 'Payment'}</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="muted">Record a payment. Partial settlements are supported.</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /><form className="reading-width" onSubmit={submit} aria-describedby={error ? 'settlement-form-error' : undefined}><Field label="Who paid?"><select value={from} onChange={(event) => { setError(undefined); markDirty(); setFrom(event.target.value); }}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => { setError(undefined); markDirty(); setTo(event.target.value); }}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={(value) => { setError(undefined); markDirty(); setCurrency(value); }} /></Field><Field label={`Amount (${currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-invalid={Boolean(error)} value={amount} onChange={(event) => { setError(undefined); markDirty(); setAmount(event.target.value); }} /></Field>{dirty ? <Button className="full-width-button" type="button" variant="secondary" onClick={resetSuggestion}>Reset to current suggestion</Button> : null}{error ? <ErrorBox error={error} id="settlement-form-error" /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
 }
 
 function Activity() {
@@ -343,7 +388,7 @@ function Activity() {
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const activity = useResource<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id, (signal) => getActivity(id, signal), RESOURCE_FRESHNESS.activity, me.data?.id ? () => hydrateActivity(me.data!.id, id) : undefined);
   const items = activity.data?.activity || [];
-   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{!online || activity.offline ? <p className="offline-banner" role="status">Offline · showing cached activity.</p> : null}{activity.error || me.error ? <p className="cache-status" role="status">Activity refresh failed; cached activity remains available.</p> : null}{activity.revalidating ? <p className="cache-status" role="status">Refreshing activity…</p> : null}{items.length ? <div className="list reading-width">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : activity.loading ? <Loading /> : activity.error || me.error ? null : <Empty>No activity yet.</Empty>}</Layout>;
+   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{!online || activity.offline ? <p className="offline-banner" role="status">Offline · showing cached activity.</p> : null}{me.error && activity.data !== undefined ? <CachedIdentityNotice resource={me} id="activity-identity-error" /> : null}{me.error && activity.data === undefined ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="activity-identity-error" retryLabel="Retry identity check" /> : null}{!me.error || activity.data !== undefined ? <ResourceNotice resource={activity} label="activity" retry={retryFor(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id)} /> : null}{activity.data !== undefined && items.length ? <div className="list reading-width">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : activity.data !== undefined ? <Empty>No activity yet.</Empty> : null}</Layout>;
 }
 
 function Settings() {

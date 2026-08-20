@@ -1,9 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
 
 afterEach(() => { resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
 describe('resource cache', () => {
+  it('distinguishes cold loading, no-data errors, and cached data', () => {
+    expect(resourceViewState(getResourceSnapshot('view-state-cold', 'user-a'))).toBe('loading');
+    const key = 'view-state-error';
+    configureResource(key, 'user-a', async () => { throw new Error('failed'); });
+    return revalidate(key, 'user-a').catch(() => undefined).then(() => {
+      expect(resourceViewState(getResourceSnapshot(key, 'user-a'))).toBe('error');
+      seedResource(key, 'user-a', { value: [] });
+      expect(resourceViewState(getResourceSnapshot(key, 'user-a'))).toBe('ready');
+    });
+  });
+
   it('emits a cached value before a delayed refresh resolves', async () => {
     let resolve!: (value: string) => void;
     const request = new Promise<string>((done) => { resolve = done; });
@@ -150,5 +161,71 @@ describe('resource cache', () => {
     await revalidate('identity', 'identity');
     expect(calls).toBe(0);
     expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
+  });
+
+  it('allows an explicit auth-restored retry to escape the identity block', async () => {
+    let calls = 0;
+    blockResourceIdentity(new Error('AUTH_REQUIRED'));
+    configureResource('identity', 'identity', async () => { calls += 1; return { id: 'user-a' }; });
+
+    await revalidate('identity', '', { force: true, reason: 'auth-restored' });
+
+    expect(calls).toBe(1);
+    expect(getResourceSnapshot<{ id: string }>('identity').data?.id).toBe('user-a');
+  });
+
+  it('restores the identity block after an explicit network retry fails', async () => {
+    let calls = 0;
+    blockResourceIdentity(new Error('AUTH_REQUIRED'));
+    configureResource('identity', 'identity', async () => {
+      calls += 1;
+      throw Object.assign(new Error('network failed'), { networkFailure: true });
+    });
+
+    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow('network failed');
+    expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
+    await revalidate('identity', 'identity', { reason: 'identity-check' });
+    expect(calls).toBe(1);
+  });
+
+  it('restores the identity block after an explicit server-error retry fails', async () => {
+    let calls = 0;
+    blockResourceIdentity(new Error('AUTH_REQUIRED'));
+    configureResource('identity', 'identity', async () => {
+      calls += 1;
+      throw Object.assign(new Error('server failed'), { status: 503 });
+    });
+
+    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow('server failed');
+    expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
+    await revalidate('identity', 'identity', { reason: 'identity-check' });
+    expect(calls).toBe(1);
+  });
+
+  it.each([403, 429])('restores the identity block after an explicit %s retry fails', async (status) => {
+    let calls = 0;
+    blockResourceIdentity(new Error('AUTH_REQUIRED'));
+    configureResource('identity', 'identity', async () => {
+      calls += 1;
+      throw Object.assign(new Error(`request failed (${status})`), { status });
+    });
+
+    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow(`request failed (${status})`);
+    expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
+    await revalidate('identity', 'identity', { reason: 'identity-check' });
+    expect(calls).toBe(1);
+  });
+
+  it('keeps forced route retries scoped to the authenticated user', async () => {
+    const key = resourceKeys.group('user-a', 'group-1');
+    let calls = 0;
+    seedResource(key, 'user-a', { version: 1 });
+    configureResource(key, 'user-a', async () => { calls += 1; return { version: 2 }; });
+
+    await revalidate(key, 'user-a', { force: true, reason: 'route' });
+
+    expect(calls).toBe(1);
+    expect(getResourceSnapshot<{ version: number }>(key, 'user-a').data?.version).toBe(2);
+    expect(getResourceSnapshot(key, 'user-a').userId).toBe('user-a');
   });
 });

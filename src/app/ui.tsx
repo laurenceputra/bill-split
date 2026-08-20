@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
@@ -7,6 +7,8 @@ import { getAuthState, getConnectionState, subscribeAuthState, subscribeConnecti
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
+let modalScrollLocks = 0;
+let modalPreviousOverflow = '';
 
 function Icon({ name }: { name: IconName }) {
   if (name === 'add') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
@@ -20,7 +22,7 @@ export function Button({ children, variant = 'primary', className = '', ...props
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  return <div className="app-shell"><TopBar /><AuthBanner /><main className="app-main">{children}</main><BottomNav /></div>;
+  return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className="app-main" id="main-content" tabIndex={-1}>{children}</main><BottomNav /></div>;
 }
 
 export function useOnlineStatus() {
@@ -69,7 +71,7 @@ export function InstallAction({ showStatus = false }: { showStatus?: boolean } =
   const ios = install.mode === 'ios-manual';
   return <>
     <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void consumeInstallPrompt(); else setShowHelp(true); }}>Install</button></div>
-    {ios && showHelp ? <Modal title="Install BillSplit" onClose={() => setShowHelp(false)}><p className="muted">Add BillSplit to your Home Screen for a faster, app-like experience.</p><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
+    {ios && showHelp ? <Modal title="Install BillSplit" description="Add BillSplit to your Home Screen for a faster, app-like experience." onClose={() => setShowHelp(false)}><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
   </>;
 }
 
@@ -133,15 +135,20 @@ export function Status({ children, tone }: { children: ReactNode; tone: 'positiv
   return <span className={`status status--${tone}`}>{children}</span>;
 }
 
-export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+export function Modal({ title, description, children, onClose }: { title: string; description?: ReactNode; children: ReactNode; onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const titleId = useId();
+  const descriptionId = useId();
   onCloseRef.current = onClose;
   useEffect(() => {
     previousFocus.current = document.activeElement as HTMLElement | null;
+    if (modalScrollLocks === 0) modalPreviousOverflow = document.body.style.overflow;
+    modalScrollLocks += 1;
+    document.body.style.overflow = 'hidden';
     const focusable = dialogRef.current?.querySelector<HTMLElement>('button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    focusable?.focus();
+    (focusable || dialogRef.current)?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCloseRef.current();
       if (event.key !== 'Tab' || !dialogRef.current) return;
@@ -152,11 +159,12 @@ export function Modal({ title, children, onClose }: { title: string; children: R
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener('keydown', onKeyDown);
-    return () => { document.removeEventListener('keydown', onKeyDown); previousFocus.current?.focus(); };
+    return () => { document.removeEventListener('keydown', onKeyDown); modalScrollLocks = Math.max(0, modalScrollLocks - 1); if (!modalScrollLocks) document.body.style.overflow = modalPreviousOverflow; previousFocus.current?.focus(); };
   }, []);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="modal-sheet" role="dialog" aria-modal="true" aria-labelledby="modal-title" ref={dialogRef}>
-      <div className="modal-header"><h2 id="modal-title">{title}</h2><Button type="button" variant="secondary" onClick={onClose} aria-label="Close">Close</Button></div>
+    <div className="modal-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} ref={dialogRef}>
+      <div className="modal-header"><h2 id={titleId}>{title}</h2><Button type="button" variant="secondary" onClick={onClose} aria-label="Close">Close</Button></div>
+      {description ? <div id={descriptionId} className="modal-description">{description}</div> : null}
       {children}
     </div>
   </div>;

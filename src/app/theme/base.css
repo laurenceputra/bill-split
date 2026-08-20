@@ -16,6 +16,8 @@ body {
   font-size: var(--text-md);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
 }
 
 button,
@@ -40,6 +42,7 @@ a {
 
 a {
   color: inherit;
+  overflow-wrap: anywhere;
 }
 
 button:focus-visible,
