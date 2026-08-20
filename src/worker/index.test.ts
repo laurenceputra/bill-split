@@ -45,6 +45,16 @@ describe('worker boundary', () => {
     expect(response.status).toBe(401);
     expect(((await response.json()) as any).error.code).toBe('AUTH_REQUIRED');
   });
+  it('returns the authenticated local user response header', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-BillSplit-User-Id')).toBe('user-1');
+  });
+  it('rejects an outbox identity guard mismatch before the mutation route writes', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/expenses', { method: 'POST', headers: { 'X-Dev-Email': 'dev@example.com', 'X-BillSplit-Expected-User-Id': 'different-user', 'Content-Type': 'application/json' }, body: '{}' }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: 'IDENTITY_MISMATCH' } });
+  });
   it('does not allow a local identity to access a group it is not a member of', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(404);

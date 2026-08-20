@@ -20,6 +20,8 @@ api.use('/api/*', async (c, next) => {
     if (origin && origin !== new URL(c.req.url).origin) return jsonError(c, 403, 'ORIGIN_FORBIDDEN', 'Cross-origin mutations are not allowed');
   }
   await next();
+  const auth = c.get('auth');
+  if (auth) c.res.headers.set('X-BillSplit-User-Id', auth.id);
 });
 api.use('/api/*', async (c, next) => {
   const env = c.env;
@@ -41,7 +43,10 @@ api.use('/api/*', async (c, next) => {
   }
   try {
     const repo = new Repository(env.DB); const identity = await repo.user(email!);
-    c.set('repo', repo); c.set('auth', { id: String(identity.user.id), email: email!, personId: String(identity.person.id) }); await next();
+    const auth = { id: String(identity.user.id), email: email!, personId: String(identity.person.id) };
+    const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
+    if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
+    c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
   } catch (error) { console.error(error); return jsonError(c, 500, 'DATABASE_ERROR', 'The request could not be completed'); }
 });
 
@@ -54,7 +59,7 @@ const ownerOnly = (c: any, x: { role: 'owner' | 'member' }) => x.role === 'owner
 async function validPeople(repo: Repository, groupId: string, ids: string[]) { const members = await repo.members(groupId); const allowed = new Set(members.map((m) => m.personId)); return ids.every((id) => allowed.has(id)); }
 function page(value: string | undefined, fallback: number, max: number) { if (value === undefined) return fallback; const n = Number(value); return Number.isSafeInteger(n) && n >= 0 ? Math.min(n, max) : -1; }
 
-api.get('/api/me', (c) => { const a = c.get('auth'); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
+api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ group: x.group, members: await x.repo.members(c.req.param('groupId')) }); });

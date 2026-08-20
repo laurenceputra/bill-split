@@ -1,6 +1,8 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { getNavigationContext } from './navigation';
+import { consumeInstallPrompt, getInstallState, initializeInstallUX, subscribeInstall } from './install';
+import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 
@@ -19,11 +21,36 @@ export function AppShell({ children }: { children: ReactNode }) {
   return <div className="app-shell"><TopBar /><main className="app-main">{children}</main><BottomNav /></div>;
 }
 
+export function useOnlineStatus() {
+  return useSyncExternalStore((onChange) => { window.addEventListener('online', onChange); window.addEventListener('offline', onChange); return () => { window.removeEventListener('online', onChange); window.removeEventListener('offline', onChange); }; }, () => navigator.onLine, () => true);
+}
+
+function useInstall() {
+  useEffect(() => initializeInstallUX(), []);
+  return useSyncExternalStore(subscribeInstall, getInstallState, () => ({ installed: true, canPrompt: false, showIosHelp: false }));
+}
+
+function useOutbox() {
+  useEffect(() => { void initializeOutbox(); }, []);
+  return useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
+}
+
+function InstallAction() {
+  const install = useInstall();
+  const [showHelp, setShowHelp] = useState(false);
+  if (install.installed) return null;
+  return <div className="install-control"><button className="install-action" type="button" onClick={async () => { if (install.canPrompt) await consumeInstallPrompt(); else setShowHelp((value) => !value); }}>Install BillSplit</button>{(install.showIosHelp || showHelp) ? <span className="install-help">{install.showIosHelp ? <>Share <span aria-hidden="true">→</span> Add to Home Screen</> : 'Follow your browser instructions'}</span> : null}</div>;
+}
+
 export function TopBar() {
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></header>;
+  const online = useOnlineStatus();
+  const outbox = useOutbox();
+  const unsynced = outbox.length;
+  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><InstallAction />{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 export function BottomNav() {
+  const online = useOnlineStatus();
   const location = useLocation();
   const navigate = useNavigate();
   const context = getNavigationContext(location.pathname);
@@ -33,9 +60,9 @@ export function BottomNav() {
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={isGroups ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
-    {context.activityPath ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title="Open a group to view activity"><Icon name="activity" /><span>Activity</span></button>}
+    {context.activityPath && online ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title={online ? 'Open a group to view activity' : 'Activity requires a connection'}><Icon name="activity" /><span>Activity</span></button>}
     <button className="nav-item nav-item--add" type="button" onClick={onAdd}><Icon name="add" /><span>Add</span></button>
-    <Link className="nav-item" to={context.morePath}><Icon name="more" /><span>{context.groupId ? 'Settle' : 'More'}</span></Link>
+    {context.groupId && !online ? <button className="nav-item" type="button" disabled title="Settlements require a connection"><Icon name="more" /><span>Settle</span></button> : <Link className="nav-item" to={context.morePath}><Icon name="more" /><span>{context.groupId ? 'Settle' : 'More'}</span></Link>}
   </nav>;
 }
 

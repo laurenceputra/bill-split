@@ -11,7 +11,7 @@ export interface Payer { personId: string; amountMinor: number }
 export interface Expense {
   id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
   date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
-  updatedAt: string; deletedAt?: string | null; version: number; payers: Payer[]; splits: Split[]
+  updatedAt: string; deletedAt?: string | null; version: number; clientOperationId?: string | null; payers: Payer[]; splits: Split[]
 }
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }

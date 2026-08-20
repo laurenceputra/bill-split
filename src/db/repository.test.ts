@@ -29,7 +29,7 @@ class FakeStatement {
   async run() { this.execute(); return {}; }
   execute() {
     if (this.sql.includes('INSERT INTO idempotency_keys')) { const [kind, userId, groupId, operationId, requestHash, entityId] = this.args; this.db.claim = { kind, userId, groupId, operationId, request_hash: requestHash, requestHash, entityId, entity_id: entityId }; }
-    if (this.sql.includes('INSERT INTO expenses(')) { const [id, groupId, description, amountMinor, currency, date, category, notes, createdBy, createdAt, updatedAt] = this.args; this.db.expense = { id, group_id: groupId, description, amount_minor: amountMinor, currency, expense_date: date, category, notes, created_by: createdBy, created_at: createdAt, updated_at: updatedAt, version: 1 }; }
+    if (this.sql.includes('INSERT INTO expenses(')) { const [id, groupId, description, amountMinor, currency, date, category, notes, createdBy, createdAt, updatedAt, clientOperationId] = this.args; this.db.expense = { id, group_id: groupId, description, amount_minor: amountMinor, currency, expense_date: date, category, notes, created_by: createdBy, created_at: createdAt, updated_at: updatedAt, client_operation_id: clientOperationId, version: 1 }; }
     if (this.sql.includes('INSERT INTO settlements(')) { const [id, groupId, fromPersonId, toPersonId, amountMinor, currency, date, note, createdBy, createdAt, updatedAt] = this.args; this.db.settlement = { id, group_id: groupId, from_person_id: fromPersonId, to_person_id: toPersonId, amount_minor: amountMinor, currency, settlement_date: date, note, created_by: createdBy, created_at: createdAt, updated_at: updatedAt, version: 1 }; }
     if (this.sql.includes('INSERT INTO payers(')) this.db.payers.push({ person_id: this.args[1], amount_minor: this.args[2] });
     if (this.sql.includes('INSERT INTO splits(')) this.db.splits.push({ person_id: this.args[1], amount_minor: this.args[2], metadata_json: this.args[3] });
@@ -86,6 +86,7 @@ describe('repository idempotency', () => {
   it('returns the original entity for a same-payload retry and rejects a mismatch', async () => {
     const repo = new Repository(new FakeDb() as never);
     const first = await repo.createExpense('00000000-0000-4000-8000-000000000010', 'user-1', input('Lunch'));
+    expect(first?.clientOperationId).toBe('retry-1');
     const retry = await repo.createExpense('00000000-0000-4000-8000-000000000010', 'user-1', input('Lunch'));
     expect(retry?.id).toBe(first?.id);
     await expect(repo.createExpense('00000000-0000-4000-8000-000000000010', 'user-1', input('Dinner'))).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });

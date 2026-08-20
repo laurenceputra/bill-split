@@ -130,6 +130,7 @@ export class Repository {
       id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: number(row.amount_minor), currency: currency(row.currency),
       date: text(row.expense_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
       createdBy: text(row.created_by), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1,
+      clientOperationId: row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })(),
       payers: payers.map((p) => ({ personId: text(p.person_id), amountMinor: number(p.amount_minor) })),
       splits: splits.map((s) => ({ personId: text(s.person_id), amountMinor: number(s.amount_minor), metadata: s.metadata_json ? JSON.parse(text(s.metadata_json)) as Record<string, unknown> : undefined })),
       };
