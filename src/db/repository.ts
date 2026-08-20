@@ -411,16 +411,17 @@ export class Repository {
   }
   async activity(groupId: string) {
     const rows = (await this.db.prepare(`
-      SELECT 'expense' AS type,e.id,e.id AS entity_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
+      SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
       FROM expenses e WHERE e.group_id=? AND e.deleted_at IS NULL
       UNION ALL
-      SELECT 'settlement' AS type,s.id,s.id AS entity_id,s.note AS label,s.amount_minor,s.currency,s.settlement_date AS transaction_date,p_from.name AS from_name,p_to.name AS to_name,s.created_at
+      SELECT 'settlement' AS type,s.id,s.id AS entity_id,0 AS entity_active,s.note AS label,s.amount_minor,s.currency,s.settlement_date AS transaction_date,p_from.name AS from_name,p_to.name AS to_name,s.created_at
       FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id
       WHERE s.group_id=? AND s.deleted_at IS NULL
       UNION ALL
        SELECT CASE WHEN (r.entity_type='expense' AND e.deleted_at IS NOT NULL AND e.version = r.revision + 1) OR (r.entity_type='settlement' AND s.deleted_at IS NOT NULL AND s.version = r.revision + 1)
          THEN r.entity_type || '_deleted' ELSE r.entity_type || '_revision' END AS type,
         r.id,r.entity_id,
+        CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active,
         CASE WHEN r.entity_type='expense' THEN json_extract(r.snapshot_json,'$.description') ELSE json_extract(r.snapshot_json,'$.note') END AS label,
         json_extract(r.snapshot_json,'$.amountMinor') AS amount_minor,
         json_extract(r.snapshot_json,'$.currency') AS currency,
@@ -435,7 +436,7 @@ export class Repository {
       ORDER BY created_at DESC LIMIT 100
     `).bind(groupId, groupId, groupId, groupId).all<Row>()).results;
     return rows.map((row) => ({
-      type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id),
+      type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
       amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency),
       transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
       ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}),

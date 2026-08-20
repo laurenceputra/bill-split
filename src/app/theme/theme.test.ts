@@ -54,6 +54,10 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
   });
 
+  it('keeps activity row focus visible inside clipped lists', () => {
+    expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
+  });
+
   it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
     expect(768).toBeGreaterThanOrEqual(48 * 16);
     expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);

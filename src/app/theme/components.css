@@ -537,6 +537,14 @@ form > button {
   background: var(--color-surface-muted);
 }
 
+.row[href]:focus-visible {
+  background: var(--color-surface-muted);
+  /* Keep the focus treatment inside .list, whose overflow clips outer rings. */
+  box-shadow: inset 0 0 0 3px var(--color-focus);
+  outline: 3px solid var(--color-focus);
+  outline-offset: -3px;
+}
+
 .pending-row {
   align-items: flex-start;
   flex-wrap: wrap;

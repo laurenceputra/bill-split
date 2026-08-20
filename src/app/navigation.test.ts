@@ -1,5 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { getNavigationContext } from './navigation';
+import { activityDetailPath, expenseDetailPath, getNavigationContext } from './navigation';
+
+describe('expenseDetailPath', () => {
+  it('requires both IDs and encodes each path segment', () => {
+    expect(expenseDetailPath('group/1', 'expense 1')).toBe('/groups/group%2F1/expenses/expense%201');
+    expect(expenseDetailPath(undefined, 'expense-1')).toBeUndefined();
+    expect(expenseDetailPath('group-1', 'undefined')).toBeUndefined();
+    expect(expenseDetailPath('group-1', '')).toBeUndefined();
+  });
+});
+
+describe('activityDetailPath', () => {
+  it.each([
+    [{ type: 'expense', entityId: 'expense-1', entityActive: true }, '/groups/group-1/expenses/expense-1'],
+    [{ type: 'expense_revision', entityId: 'expense-1', entityActive: true }, '/groups/group-1/expenses/expense-1'],
+  ] as const)('links active expense activity rows', (item, path) => {
+    expect(activityDetailPath('group-1', item)).toBe(path);
+  });
+
+  it.each([
+    { type: 'expense_deleted', entityId: 'expense-1', entityActive: false },
+    { type: 'expense_revision', entityId: 'expense-1', entityActive: false },
+    { type: 'settlement', entityId: 'settlement-1', entityActive: true },
+    { type: 'expense', entityId: '', entityActive: true },
+    { type: 'expense', entityId: 'expense-1' },
+  ])('does not link ineligible, malformed, or legacy rows: %#', (item) => {
+    expect(activityDetailPath('group-1', item)).toBeUndefined();
+  });
+});
 
 describe('getNavigationContext', () => {
   it('classifies the home route and makes Add mean add friend', () => {

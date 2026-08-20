@@ -1,5 +1,5 @@
 import type { Activity, Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
-import { readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroupsIfGenerationMatches, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { normalizeActivity, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroupsIfGenerationMatches, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, seedResource, setResourceIdentity } from './resource-cache';
 
 export type CurrentUser = { id: string; email: string; personId: string };
@@ -262,8 +262,9 @@ export async function getActivity(id: string, signal?: AbortSignal): Promise<Cac
   try {
     const result = await apiWithMeta<{ activity: Activity[] }>(`/groups/${id}/activity`, { signal });
     assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id, activity: result.data.activity, fetchedAt: new Date().toISOString() }));
-    return result.data;
+    const data = { activity: normalizeActivity(result.data.activity) };
+    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id, activity: data.activity, fetchedAt: new Date().toISOString() }));
+    return data;
   } catch (error) {
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readActivity(identity.user.id, id));
@@ -300,7 +301,11 @@ export async function hydrateSettlements(userId: string, id: string) {
 }
 export async function hydrateActivity(userId: string, id: string) {
   const cached = await cacheRead(() => readActivity(userId, id));
-  return cached ? { data: { activity: cached.activity }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
+  // Caches written before entityActive existed are safe to display, but their
+  // rows cannot establish link eligibility. Mark them stale immediately so an
+  // online tab revalidates without discarding the offline-safe presentation.
+  const hasUnknownEligibility = cached?.activity.some((item) => item.entityActive === undefined) === true;
+  return cached ? { data: { activity: cached.activity }, fetchedAt: hasUnknownEligibility ? 0 : cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
 }
 export async function hydrateExpenseDetails(userId: string, id: string) {
   const cached = await cacheRead(() => readExpenseDetails(userId, id));

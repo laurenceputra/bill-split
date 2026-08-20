@@ -67,7 +67,7 @@ describe('user-scoped IndexedDB', () => {
     await updateGroupSnapshot('user-a', 'group-a', { balances: {}, cachedAt: 'balances-time' });
     expect((await readResourceFreshness('user-a', 'group:group-a:group'))?.fetchedAt).toBe(timestamp);
     expect((await readResourceFreshness('user-a', 'group:group-a:balances'))?.fetchedAt).toBe('balances-time');
-    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'e-1', entityId: 'e-1', amountMinor: 100, currency: 'USD', transactionDate: '2026-01-01', label: 'Lunch', createdAt: timestamp }], fetchedAt: timestamp });
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'e-1', entityId: 'e-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '2026-01-01', label: 'Lunch', createdAt: timestamp }], fetchedAt: timestamp });
     await saveExpenseDetails({ userId: 'user-a', expenseId: 'e-1', expense: { id: 'e-1', groupId: 'group-a', description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: timestamp, updatedAt: timestamp, version: 1, payers: [], splits: [] }, history: [], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].label).toBe('Lunch');
     expect((await readExpenseDetails('user-a', 'e-1'))?.expense.id).toBe('e-1');
@@ -90,8 +90,32 @@ describe('user-scoped IndexedDB', () => {
     const timestamp = new Date().toISOString();
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'legacy-event', label: 'Old lunch', createdAt: timestamp } as never], fetchedAt: timestamp });
     const cached = await readActivity('user-a', 'group-a');
-    expect(cached?.activity[0]).toMatchObject({ id: 'legacy-event', label: 'Old lunch', entityId: '', amountMinor: null, currency: null, transactionDate: '' });
+    expect(cached?.activity[0]).toMatchObject({ id: 'legacy-event', label: 'Old lunch', entityId: 'legacy-event', entityActive: undefined, amountMinor: null, currency: null, transactionDate: '' });
     const hydrated = await hydrateActivity('user-a', 'group-a');
-    expect(hydrated?.data.activity[0].entityId).toBe('');
+    expect(hydrated?.data.activity[0].entityId).toBe('legacy-event');
+    expect(hydrated?.fetchedAt).toBe(0);
+  });
+
+  it('normalizes active flags while keeping deleted and settlement activity non-linkable', async () => {
+    const timestamp = new Date().toISOString();
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [
+      { type: 'expense', id: 'expense-1', entityId: 'expense-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Current', createdAt: timestamp },
+      { type: 'expense_revision', id: 'revision-active', entityId: 'expense-1', entity_active: 1, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Edited', createdAt: timestamp } as never,
+      { type: 'expense_deleted', id: 'revision-deleted', entityId: 'expense-2', entityActive: false, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Deleted', createdAt: timestamp },
+      { type: 'expense_revision', id: 'revision-old', entityId: 'expense-2', entity_active: false, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Old edit', createdAt: timestamp } as never,
+      { type: 'settlement', id: 'settlement-1', entityId: 'settlement-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Paid', createdAt: timestamp, fromName: 'A', toName: 'B' },
+      { type: 'expense_revision', id: 'revision-unknown', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Unknown', createdAt: timestamp } as never,
+    ], fetchedAt: timestamp });
+    expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => [item.entityId, item.entityActive])).toEqual([
+      ['expense-1', true], ['expense-1', true], ['expense-2', false], ['expense-2', false], ['settlement-1', false], ['', false],
+    ]);
+  });
+
+  it('never guesses a revision ID as an expense ID in a legacy cache', async () => {
+    const timestamp = new Date().toISOString();
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [
+      { type: 'expense_revision', id: 'revision-only', label: 'Old edit', createdAt: timestamp } as never,
+    ], fetchedAt: timestamp });
+    expect((await readActivity('user-a', 'group-a'))?.activity[0]).toMatchObject({ entityId: '', entityActive: undefined });
   });
 });

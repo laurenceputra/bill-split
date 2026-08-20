@@ -63,6 +63,16 @@ const activityTypes = ['expense', 'settlement', 'expense_revision', 'settlement_
 const isActivityType = (value: unknown): value is Activity['type'] => typeof value === 'string' && (activityTypes as readonly string[]).includes(value);
 export const validActivityEntityId = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
 
+const activityEntityActive = (value: unknown): boolean | undefined => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') {
+    if (value.trim().toLowerCase() === 'true' || value.trim() === '1') return true;
+    if (value.trim().toLowerCase() === 'false' || value.trim() === '0') return false;
+  }
+  return undefined;
+};
+
 /**
  * Older activity caches predate the typed activity payload. Keep their useful
  * labels, but make missing identity fields explicit so a stale row can never
@@ -75,21 +85,30 @@ export function normalizeActivity(value: unknown): Activity[] {
     const row = candidate as Record<string, unknown>;
     if (!isActivityType(row.type) || !validActivityEntityId(row.id)) return [];
     const settlement = row.type.startsWith('settlement');
-    const amountValue = row.amountMinor ?? row.amount;
+    const amountValue = row.amountMinor ?? row.amount_minor ?? row.amount;
     const amount = typeof amountValue === 'number' && Number.isSafeInteger(amountValue) && amountValue >= 0 ? amountValue : null;
     const rawCurrency = typeof row.currency === 'string' && (supportedCurrencies as readonly string[]).includes(row.currency) ? row.currency : null;
     const labelValue = row.label ?? row.description ?? row.note;
+    const explicitEntityId = row.entityId ?? row.entity_id;
+    const entityId = validActivityEntityId(explicitEntityId) ? explicitEntityId.trim() : row.type === 'expense' ? row.id.trim() : '';
+    const parsedEntityActive = activityEntityActive(row.entityActive ?? row.entity_active);
+    const expenseEntity = row.type === 'expense' || row.type === 'expense_revision';
+    // A legacy direct expense row already represents the current entity, so its
+    // event ID is a safe fallback for display/refetch. It is not an eligibility
+    // assertion: only an explicit active flag can make an expense linkable.
+    const entityActive = parsedEntityActive === undefined ? undefined : Boolean(expenseEntity && parsedEntityActive && validActivityEntityId(entityId));
     const base = {
       type: row.type,
       id: row.id.trim(),
-      entityId: validActivityEntityId(row.entityId) ? row.entityId.trim() : '',
+      entityId,
+      entityActive,
       amountMinor: amount,
       currency: rawCurrency as Activity['currency'],
-      transactionDate: typeof (row.transactionDate ?? row.date) === 'string' ? String(row.transactionDate ?? row.date) : '',
+      transactionDate: typeof (row.transactionDate ?? row.transaction_date ?? row.date) === 'string' ? String(row.transactionDate ?? row.transaction_date ?? row.date) : '',
       label: typeof labelValue === 'string' ? labelValue : null,
-      createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
+      createdAt: typeof (row.createdAt ?? row.created_at) === 'string' ? String(row.createdAt ?? row.created_at) : '',
     };
-    return [{ ...base, ...(settlement ? { fromName: typeof row.fromName === 'string' ? row.fromName : null, toName: typeof row.toName === 'string' ? row.toName : null } : {}) } as Activity];
+    return [{ ...base, ...(settlement ? { fromName: typeof (row.fromName ?? row.from_name) === 'string' ? String(row.fromName ?? row.from_name) : null, toName: typeof (row.toName ?? row.to_name) === 'string' ? String(row.toName ?? row.to_name) : null } : {}) } as Activity];
   });
 }
 

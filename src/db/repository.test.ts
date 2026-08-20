@@ -140,8 +140,8 @@ class ActivityStatement {
   bind(..._args: unknown[]) { return this; }
   async all<T>() {
     return { results: [
-      { type: 'expense', id: 'expense-event', entity_id: 'expense-1', label: 'Lunch', amount_minor: 1250, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02T10:00:00Z' },
-      { type: 'settlement_revision', id: 'revision-1', entity_id: 'settlement-1', label: 'Paid back', amount_minor: 500, currency: 'EUR', transaction_date: '2026-01-01', from_name: 'A', to_name: 'B', created_at: '2026-01-02T11:00:00Z' },
+      { type: 'expense', id: 'expense-event', entity_id: 'expense-1', entity_active: 1, label: 'Lunch', amount_minor: 1250, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02T10:00:00Z' },
+      { type: 'settlement_revision', id: 'revision-1', entity_id: 'settlement-1', entity_active: 0, label: 'Paid back', amount_minor: 500, currency: 'EUR', transaction_date: '2026-01-01', from_name: 'A', to_name: 'B', created_at: '2026-01-02T11:00:00Z' },
     ] as T[] };
   }
 }
@@ -160,7 +160,7 @@ class RevisionActivityStatement {
     ];
     const results = revisions.map((revision) => ({
       type: current.deleted_at && current.version === revision.revision + 1 ? 'expense_deleted' : 'expense_revision',
-      id: revision.id, entity_id: revision.entity_id, label: revision.description, amount_minor: revision.amount_minor,
+      id: revision.id, entity_id: revision.entity_id, entity_active: current.deleted_at ? 0 : 1, label: revision.description, amount_minor: revision.amount_minor,
       currency: revision.currency, transaction_date: revision.transaction_date, created_at: revision.created_at,
     }));
     // Keep the fake grounded in raw revision/current-entity state rather than
@@ -313,9 +313,13 @@ describe('repository friend creation', () => {
 
 describe('repository activity mapping', () => {
   it('keeps event IDs separate from canonical entity IDs and carries transaction context', async () => {
-    const activity = await new Repository(new ActivityDb() as never).activity('group-1');
-    expect(activity[0]).toMatchObject({ type: 'expense', id: 'expense-event', entityId: 'expense-1', amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02' });
-    expect(activity[1]).toMatchObject({ type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', fromName: 'A', toName: 'B' });
+    const db = new ActivityDb();
+    const activity = await new Repository(db as never).activity('group-1');
+    expect(activity[0]).toMatchObject({ type: 'expense', id: 'expense-event', entityId: 'expense-1', entityActive: true, amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02' });
+    expect(activity[1]).toMatchObject({ type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', entityActive: false, fromName: 'A', toName: 'B' });
+    expect(db.sql).toContain("SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active");
+    expect(db.sql).toContain("SELECT 'settlement' AS type,s.id,s.id AS entity_id,0 AS entity_active");
+    expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
   });
 
   it('marks only the revision immediately before deletion as deleted', async () => {
@@ -325,6 +329,8 @@ describe('repository activity mapping', () => {
     // edit revisions therefore stay revisions after an edit-then-delete.
     expect(db.sql).toContain("e.deleted_at IS NOT NULL AND e.version = r.revision + 1");
     expect(db.sql).toContain("s.deleted_at IS NOT NULL AND s.version = r.revision + 1");
+    expect(db.sql).toContain("r.entity_type='expense' AND e.deleted_at IS NULL");
+    expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
     expect(activity.map((item) => item.type)).toEqual(['expense_revision', 'expense_deleted']);
     expect(activity.map((item) => item.entityId)).toEqual(['expense-1', 'expense-1']);
   });

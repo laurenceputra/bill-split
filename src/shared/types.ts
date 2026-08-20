@@ -23,6 +23,8 @@ export type ActivityType = 'expense' | 'settlement' | 'expense_revision' | 'sett
 export interface ActivityBase {
   id: string;
   entityId: string;
+  /** Undefined means an older cached row did not carry eligibility state. */
+  entityActive?: boolean;
   amountMinor: number | null;
   currency: Currency | null;
   transactionDate: string;
