@@ -1,62 +1,228 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { Link, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import type { Currency, Expense, Group, GroupMember, Balances, Settlement } from '../shared/types';
+import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import type { Balances, Currency, Expense, Group, GroupMember, Settlement } from '../shared/types';
 import { currencyOptions } from '../shared/schemas';
+import { allocateByWeights, allocateEqual, allocateExact, allocatePercentage, parseMoney } from '../domain/money';
 import { api, getBalances, getExpense, getExpenses, getGroup, getGroups, getSettlements } from './api';
-import { allocateByWeights, allocateEqual, allocateExact, allocatePercentage, parseMoney, formatMoney } from '../domain/money';
+import { Button, Field, Layout, Money, Status, Surface } from './ui';
 
 const today = () => new Date().toISOString().slice(0, 10);
-const money = (minor: number, currency: string) => formatMoney(minor, currency as Group['currency']);
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong';
-function Layout({ children }: { children: ReactNode }) { return <><header><Link to="/" className="brand">Split<span>wise</span>, simply</Link>{import.meta.env.DEV && <label className="dev"><small>Local identity</small><input defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</header><main>{children}</main></>; }
+
 function Loading() { return <p className="muted">Loading…</p>; }
-function ErrorBox({ error }: { error: unknown }) { return <div className="error">{errorText(error)}</div>; }
+function ErrorBox({ error }: { error: unknown }) { return <div className="error" role="alert">{errorText(error)}</div>; }
 function Empty({ children }: { children: ReactNode }) { return <div className="empty">{children}</div>; }
-function CurrencySelect({ value, onChange }: { value: Currency; onChange: (value: Currency) => void }) { return <select value={value} onChange={(event) => onChange(event.target.value as Currency)}>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>; }
+function CurrencySelect({ value, onChange }: { value: Currency; onChange: (value: Currency) => void }) {
+  return <select value={value} onChange={(event) => onChange(event.target.value as Currency)}>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+}
 
 function Home() {
-  const [groups, setGroups] = useState<Group[]>([]); const [error, setError] = useState<unknown>(); const [creating, setCreating] = useState(false); const [name, setName] = useState(''); const [currency, setCurrency] = useState<Currency>('USD'); const nav = useNavigate();
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [error, setError] = useState<unknown>();
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState('');
+  const [currency, setCurrency] = useState<Currency>('USD');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const nav = useNavigate();
+  const newGroupRequested = searchParams.get('new') === '1';
+
   useEffect(() => { getGroups().then((result) => setGroups(result.groups)).catch(setError); }, []);
-  const create = async (event: FormEvent) => { event.preventDefault(); if (!name.trim()) return; try { const result = await api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify({ name, currency }) }); if (result.group) nav(`/groups/${result.group.id}`); } catch (cause) { setError(cause); } };
-  return <Layout><div className="page-title"><div><p className="eyebrow">PRIVATE EXPENSES</p><h1>Your groups</h1></div><button onClick={() => setCreating((current) => !current)}>{creating ? 'Cancel' : '+ New group'}</button></div>{creating && <form onSubmit={create}><label>Group name<input required value={name} onChange={(event) => setName(event.target.value)} /></label><label>Default currency<CurrencySelect value={currency} onChange={setCurrency} /></label><button>Create group</button></form>}{error ? <ErrorBox error={error} /> : null}{!groups.length && !error ? <Empty>No groups yet. Create one to get started.</Empty> : <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.name}</strong><span>{group.currency}</span></Link>)}</div>}</Layout>;
+  useEffect(() => {
+    if (newGroupRequested) {
+      setCreating(true);
+      searchParams.delete('new');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [newGroupRequested, searchParams, setSearchParams]);
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    try {
+      const result = await api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify({ name, currency }) });
+      if (result.group) nav(`/groups/${result.group.id}`);
+    } catch (cause) { setError(cause); }
+  };
+
+  return <Layout>
+    <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Your groups</h1></div><Button onClick={() => setCreating((current) => !current)} variant="secondary">{creating ? 'Cancel' : '+ New group'}</Button></div>
+    {creating && <Surface><form onSubmit={create}>
+      <Field label="Group name"><input required value={name} onChange={(event) => setName(event.target.value)} /></Field>
+      <Field label="Default currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field>
+      <Button type="submit">Create group</Button>
+    </form></Surface>}
+    {error ? <ErrorBox error={error} /> : null}
+    {!groups.length && !error ? <Empty>No groups yet. Create one to get started.</Empty> : <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.name}</strong><span>{group.currency}</span></Link>)}</div>}
+  </Layout>;
 }
 
 function GroupPage() {
-  const { id = '' } = useParams(); const [group, setGroup] = useState<Group>(); const [members, setMembers] = useState<GroupMember[]>([]); const [expenses, setExpenses] = useState<Expense[]>([]); const [settlements, setSettlements] = useState<Settlement[]>([]); const [balances, setBalances] = useState<Record<string, Balances>>({}); const [personName, setPersonName] = useState(''); const [personEmail, setPersonEmail] = useState(''); const [addingPerson, setAddingPerson] = useState(false); const [error, setError] = useState<unknown>();
-  const load = () => Promise.all([getGroup(id), getExpenses(id), getBalances(id), getSettlements(id)]).then(([groupResult, expenseResult, balanceResult, settlementResult]) => { setGroup(groupResult.group); setMembers(groupResult.members); setExpenses(expenseResult.expenses); setBalances(balanceResult.balances); setSettlements(settlementResult.settlements); }).catch(setError);
+  const { id = '' } = useParams();
+  const [group, setGroup] = useState<Group>();
+  const [members, setMembers] = useState<GroupMember[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
+  const [balances, setBalances] = useState<Record<string, Balances>>({});
+  const [personName, setPersonName] = useState('');
+  const [personEmail, setPersonEmail] = useState('');
+  const [addingPerson, setAddingPerson] = useState(false);
+  const [error, setError] = useState<unknown>();
+
+  const load = () => Promise.all([getGroup(id), getExpenses(id), getBalances(id), getSettlements(id)]).then(([groupResult, expenseResult, balanceResult, settlementResult]) => {
+    setGroup(groupResult.group);
+    setMembers(groupResult.members);
+    setExpenses(expenseResult.expenses);
+    setBalances(balanceResult.balances);
+    setSettlements(settlementResult.settlements);
+  }).catch(setError);
   useEffect(() => { void load(); }, [id]);
-  if (error) return <Layout><ErrorBox error={error} /><Link to="/">Back</Link></Layout>; if (!group) return <Layout><Loading /></Layout>;
-  const addPerson = async (event: FormEvent) => { event.preventDefault(); if (!personName.trim()) return; try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); void load(); } catch (cause) { setError(cause); } };
-  return <Layout><Link to="/" className="back">← Groups</Link><div className="page-title"><div><p className="eyebrow">{group.currency} GROUP</p><h1>{group.name}</h1></div><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div><div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></div>{Object.entries(balances).map(([currency, balance]) => <section key={currency}><h2>Balances <small>({currency})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currency}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromName} owes {item.toName}</span><strong>{money(item.amountMinor, currency)}</strong></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}<section><div className="section-title"><h2>People</h2>{group.role === 'owner' && <button className="secondary" onClick={() => setAddingPerson((current) => !current)}>{addingPerson ? 'Cancel' : '+ Add'}</button>}</div>{addingPerson && <form onSubmit={addPerson}><label>Name<input required value={personName} onChange={(event) => setPersonName(event.target.value)} /></label><label>Email (optional)<input type="email" value={personEmail} onChange={(event) => setPersonEmail(event.target.value)} /></label><button>Add person</button></form>}<div className="chips">{members.map((member) => <span key={member.personId}>{member.name}{member.email ? <small> · {member.email}</small> : null}</span>)}</div></section><section><h2>Recent expenses</h2>{expenses.length ? <div className="list">{expenses.map((expense) => <Link className="row" to={`/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><strong>{money(expense.amountMinor, expense.currency)}</strong></Link>)}</div> : <Empty>No expenses yet.</Empty>}</section><small className="muted">{settlements.length} settlement{settlements.length === 1 ? '' : 's'} recorded</small></Layout>;
+
+  if (error) return <Layout><ErrorBox error={error} /><Link className="back" to="/">← Groups</Link></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+
+  const addPerson = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!personName.trim()) return;
+    try {
+      await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) });
+      setPersonName(''); setPersonEmail(''); setAddingPerson(false); void load();
+    } catch (cause) { setError(cause); }
+  };
+
+  return <Layout>
+    <Link to="/" className="back">← Groups</Link>
+    <div className="page-title"><div><p className="eyebrow">{group.currency} group</p><h1>{group.name}</h1></div><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div>
+    <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></div>
+    {Object.entries(balances).map(([currency, balance]) => <section key={currency}><h2>Balances <small>({currency})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currency}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromName} owes {item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currency} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}
+    <section><div className="section-title"><h2>People</h2>{group.role === 'owner' && <Button variant="secondary" onClick={() => setAddingPerson((current) => !current)}>{addingPerson ? 'Cancel' : '+ Add'}</Button>}</div>{addingPerson && <form onSubmit={addPerson}><Field label="Name"><input required value={personName} onChange={(event) => setPersonName(event.target.value)} /></Field><Field label="Email (optional)"><input type="email" value={personEmail} onChange={(event) => setPersonEmail(event.target.value)} /></Field><Button type="submit">Add person</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.name}{member.email ? <small> · {member.email}</small> : null}</span>)}</div></section>
+    <section><h2>Recent expenses</h2>{expenses.length ? <div className="list">{expenses.map((expense) => <Link className="row" to={`/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : <Empty>No expenses yet.</Empty>}</section>
+    {settlements.length ? <section><h2>Recent settlements</h2><div className="list">{settlements.map((settlement) => <div className="row" key={settlement.id}><span>{settlement.date}<small>{settlement.fromPersonId} paid {settlement.toPersonId}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></div>)}</div></section> : null}
+  </Layout>;
 }
 
-type Method = 'equal' | 'exact' | 'percentage' | 'shares'; type PayerRow = { personId: string; amount: string }; const nameOf = (members: GroupMember[], id: string) => members.find((member) => member.personId === id)?.name || id;
+type Method = 'equal' | 'exact' | 'percentage' | 'shares';
+type PayerRow = { personId: string; amount: string };
+const nameOf = (members: GroupMember[], id: string) => members.find((member) => member.personId === id)?.name || id;
+
 function ExpenseForm() {
-  const { id = '', expenseId } = useParams(); const nav = useNavigate(); const [members, setMembers] = useState<GroupMember[]>([]); const [group, setGroup] = useState<Group>(); const [description, setDescription] = useState(''); const [amount, setAmount] = useState(''); const [currency, setCurrency] = useState<Currency>('USD'); const [date, setDate] = useState(today()); const [method, setMethod] = useState<Method>('equal'); const [selected, setSelected] = useState<string[]>([]); const [values, setValues] = useState(''); const [payerRows, setPayerRows] = useState<PayerRow[]>([]); const [version, setVersion] = useState<number>(); const [operationId, setOperationId] = useState(() => crypto.randomUUID()); const [submitting, setSubmitting] = useState(false); const [error, setError] = useState<unknown>();
-  useEffect(() => { let active = true; Promise.all([getGroup(id), expenseId ? getExpense(expenseId) : Promise.resolve(undefined)]).then(([groupResult, expense]) => { if (!active) return; setGroup(groupResult.group); setMembers(groupResult.members); setCurrency(expense?.currency ?? groupResult.group.currency); if (expense) { const loadedMethod = expense.splits[0]?.metadata?.method; const nextMethod: Method = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal'; setDescription(expense.description); setAmount(String(expense.amountMinor / 100)); setDate(expense.date); setMethod(nextMethod); setSelected(expense.splits.map((split) => split.personId)); setVersion(expense.version); setPayerRows(expense.payers.map((payer) => ({ personId: payer.personId, amount: String(payer.amountMinor / 100) }))); setValues(expense.splits.map((split) => nextMethod === 'exact' ? String(split.amountMinor / 100) : typeof split.metadata?.value === 'number' ? String(split.metadata.value) : '').join(',')); } else { setSelected(groupResult.members.map((member) => member.personId)); setPayerRows(groupResult.members[0] ? [{ personId: groupResult.members[0].personId, amount: '' }] : []); } }).catch(setError); return () => { active = false; }; }, [id, expenseId]);
+  const { id = '', expenseId } = useParams();
+  const nav = useNavigate();
+  const [members, setMembers] = useState<GroupMember[]>([]);
+  const [group, setGroup] = useState<Group>();
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [currency, setCurrency] = useState<Currency>('USD');
+  const [date, setDate] = useState(today());
+  const [method, setMethod] = useState<Method>('equal');
+  const [selected, setSelected] = useState<string[]>([]);
+  const [values, setValues] = useState('');
+  const [payerRows, setPayerRows] = useState<PayerRow[]>([]);
+  const [version, setVersion] = useState<number>();
+  const [operationId, setOperationId] = useState(() => crypto.randomUUID());
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<unknown>();
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([getGroup(id), expenseId ? getExpense(expenseId) : Promise.resolve(undefined)]).then(([groupResult, expense]) => {
+      if (!active) return;
+      setGroup(groupResult.group); setMembers(groupResult.members); setCurrency(expense?.currency ?? groupResult.group.currency);
+      if (expense) {
+        const loadedMethod = expense.splits[0]?.metadata?.method;
+        const nextMethod: Method = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal';
+        setDescription(expense.description); setAmount(String(expense.amountMinor / 100)); setDate(expense.date); setMethod(nextMethod); setSelected(expense.splits.map((split) => split.personId)); setVersion(expense.version);
+        setPayerRows(expense.payers.map((payer) => ({ personId: payer.personId, amount: String(payer.amountMinor / 100) })));
+        setValues(expense.splits.map((split) => nextMethod === 'exact' ? String(split.amountMinor / 100) : typeof split.metadata?.value === 'number' ? String(split.metadata.value) : '').join(','));
+      } else {
+        setSelected(groupResult.members.map((member) => member.personId));
+        setPayerRows(groupResult.members[0] ? [{ personId: groupResult.members[0].personId, amount: '' }] : []);
+      }
+    }).catch(setError);
+    return () => { active = false; };
+  }, [id, expenseId]);
+
   useEffect(() => { if (!expenseId) setOperationId(crypto.randomUUID()); }, [description, amount, currency, date, method, selected, values, payerRows, expenseId]);
-  if (error) return <Layout><ErrorBox error={error} /></Layout>; if (!group) return <Layout><Loading /></Layout>;
+  if (error) return <Layout><ErrorBox error={error} /></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+
   const toggleSplit = (personId: string) => setSelected((current) => current.includes(personId) ? current.filter((idValue) => idValue !== personId) : [...current, personId]);
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); try { const cents = parseMoney(amount, currency); if (!selected.length) throw new Error('Select at least one participant'); const payers = payerRows.map((payer) => ({ person_id: payer.personId, amount_minor: parseMoney(payer.amount || '0', currency) })); if (payers.reduce((sum, payer) => sum + payer.amount_minor, 0) !== cents) throw new Error('Payers must sum to the expense amount'); const rawValues = values.split(',').map((value) => value.trim()).filter((value) => value !== ''); let allocations: number[]; if (method === 'equal') allocations = allocateEqual(cents, selected.length); else if (method === 'exact') allocations = allocateExact(cents, rawValues.map((value) => parseMoney(value, currency))); else if (method === 'percentage') allocations = allocatePercentage(cents, rawValues.map(Number)); else allocations = allocateByWeights(cents, rawValues.map(Number)); if (allocations.length !== selected.length) throw new Error('Enter one allocation value per selected person'); const input = { description, amount_minor: cents, currency, date, payers, splits: selected.map((personId, index) => ({ person_id: personId, amount_minor: allocations[index], metadata: { method, value: method === 'exact' ? allocations[index] : rawValues[index] ? Number(rawValues[index]) : undefined } })), version, client_operation_id: expenseId ? undefined : operationId }; if (expenseId) await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); else await api(`/groups/${id}/expenses`, { method: 'POST', body: JSON.stringify(input) }); setOperationId(crypto.randomUUID()); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
   const addPayer = () => { const personId = members.find((member) => !payerRows.some((payer) => payer.personId === member.personId))?.personId; if (personId) setPayerRows((rows) => [...rows, { personId, amount: '' }]); };
-  return <Layout><Link to={`/groups/${id}`} className="back">← {group.name}</Link><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1><form onSubmit={submit}><label>Description<input required value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Currency<CurrencySelect value={currency} onChange={setCurrency} /></label><label>Total ({currency})<input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></label><label>Date<input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label><fieldset><legend>Payers</legend>{payerRows.map((payer, index) => <div className="row" key={payer.personId}><select value={payer.personId} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row))}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select><input required inputMode="decimal" placeholder="Amount" value={payer.amount} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row))} />{payerRows.length > 1 && <button type="button" className="secondary" onClick={() => setPayerRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>Remove</button>}</div>)}<button type="button" className="secondary" onClick={addPayer}>+ Add payer</button></fieldset><fieldset><legend>Split between</legend>{members.map((member) => <label key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => toggleSplit(member.personId)} /> {member.name}</label>)}</fieldset><label>Split method<select value={method} onChange={(event) => setMethod(event.target.value as Method)}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percent basis points (sum 10000)</option><option value="shares">Shares</option></select></label>{method !== 'equal' && <label>{method === 'exact' ? 'Amounts, in currency units' : method === 'percentage' ? 'Basis points, comma separated' : 'Weights, comma separated'}<input required value={values} onChange={(event) => setValues(event.target.value)} placeholder={`One value per selected person (${selected.length})`} /></label>}<p className="muted">{selected.map((personId) => nameOf(members, personId)).join(', ')}</p>{error ? <ErrorBox error={error} /> : null}<button disabled={submitting}>{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Add expense'}</button></form></Layout>;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      const cents = parseMoney(amount, currency);
+      if (!selected.length) throw new Error('Select at least one participant');
+      const payers = payerRows.map((payer) => ({ person_id: payer.personId, amount_minor: parseMoney(payer.amount || '0', currency) }));
+      if (payers.reduce((sum, payer) => sum + payer.amount_minor, 0) !== cents) throw new Error('Payers must sum to the expense amount');
+      const rawValues = values.split(',').map((value) => value.trim()).filter((value) => value !== '');
+      let allocations: number[];
+      if (method === 'equal') allocations = allocateEqual(cents, selected.length);
+      else if (method === 'exact') allocations = allocateExact(cents, rawValues.map((value) => parseMoney(value, currency)));
+      else if (method === 'percentage') allocations = allocatePercentage(cents, rawValues.map(Number));
+      else allocations = allocateByWeights(cents, rawValues.map(Number));
+      if (allocations.length !== selected.length) throw new Error('Enter one allocation value per selected person');
+      const input = { description, amount_minor: cents, currency, date, payers, splits: selected.map((personId, index) => ({ person_id: personId, amount_minor: allocations[index], metadata: { method, value: method === 'exact' ? allocations[index] : rawValues[index] ? Number(rawValues[index]) : undefined } })), version, client_operation_id: expenseId ? undefined : operationId };
+      if (expenseId) await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) });
+      else await api(`/groups/${id}/expenses`, { method: 'POST', body: JSON.stringify(input) });
+      setOperationId(crypto.randomUUID()); nav(`/groups/${id}`);
+    } catch (cause) { setSubmitting(false); setError(cause); }
+  };
+
+  return <Layout><Link to={`/groups/${id}`} className="back">← {group.name}</Link><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1><form onSubmit={submit}>
+    <Field label="Description"><input required value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
+    <div className="form-row"><Field label="Currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><Field label={`Total (${currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></Field></div>
+    <Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field>
+    <fieldset><legend>Payers</legend>{payerRows.map((payer, index) => <div className="row" key={payer.personId}><select aria-label="Payer" value={payer.personId} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row))}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select><input required inputMode="decimal" aria-label="Payer amount" placeholder="Amount" value={payer.amount} onChange={(event) => setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row))} />{payerRows.length > 1 && <Button type="button" variant="secondary" onClick={() => setPayerRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>Remove</Button>}</div>)}<Button type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button></fieldset>
+    <fieldset><legend>Split between</legend>{members.map((member) => <label className="checkbox-row" key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => toggleSplit(member.personId)} /> {member.name}</label>)}</fieldset>
+    <Field label="Split method"><select value={method} onChange={(event) => setMethod(event.target.value as Method)}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
+    {method !== 'equal' && <Field label={method === 'exact' ? 'Amounts, in participant order' : method === 'percentage' ? 'Basis points, in participant order' : 'Weights, in participant order'}><input required placeholder="e.g. 50, 50" value={values} onChange={(event) => setValues(event.target.value)} /></Field>}
+    <p className="muted">Split between: {selected.map((personId) => nameOf(members, personId)).join(', ') || 'nobody selected'}</p>
+    {error ? <ErrorBox error={error} /> : null}<Button disabled={submitting} type="submit">{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Save expense'}</Button>
+  </form></Layout>;
 }
 
 function ExpenseDetail() {
-  const { expenseId = '' } = useParams(); const nav = useNavigate(); const [expense, setExpense] = useState<Expense>(); const [history, setHistory] = useState<Array<{ id: string; revision: number; createdAt: string }>>([]); const [error, setError] = useState<unknown>();
+  const { expenseId = '' } = useParams();
+  const nav = useNavigate();
+  const [expense, setExpense] = useState<Expense>();
+  const [history, setHistory] = useState<Array<{ id: string; revision: number; createdAt: string }>>([]);
+  const [error, setError] = useState<unknown>();
   useEffect(() => { api<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/expenses/${expenseId}`).then((result) => { setExpense(result.expense); setHistory(result.history); }).catch(setError); }, [expenseId]);
-  if (error) return <Layout><ErrorBox error={error} /></Layout>; if (!expense) return <Layout><Loading /></Layout>;
-  return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{expense.date}</p><h1>{expense.description}</h1></div><strong className="big-number">{money(expense.amountMinor, expense.currency)}</strong></div><section><h2>Payers</h2><div className="list">{expense.payers.map((payer) => <div className="row" key={payer.personId}><span>{payer.personId}</span><strong>{money(payer.amountMinor, expense.currency)}</strong></div>)}</div><h2>Split</h2><div className="list">{expense.splits.map((split) => <div className="row" key={split.personId}><span>{split.personId}</span><strong>{money(split.amountMinor, expense.currency)}</strong></div>)}</div></section><div className="actions"><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><button className="danger" onClick={async () => { if (confirm('Delete this expense?')) { try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); nav(`/groups/${expense.groupId}`); } catch (cause) { setError(cause); } } }}>Delete</button></div><section><h2>History</h2>{history.length ? <div className="list">{history.map((item) => <div className="row" key={item.id}><span>Revision {item.revision}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No edits yet.</Empty>}</section></Layout>;
+  if (error) return <Layout><ErrorBox error={error} /></Layout>;
+  if (!expense) return <Layout><Loading /></Layout>;
+  const remove = async () => { if (!confirm('Delete this expense?')) return; try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); nav(`/groups/${expense.groupId}`); } catch (cause) { setError(cause); } };
+  return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{expense.date}</p><h1>{expense.description}</h1></div><Money amountMinor={expense.amountMinor} currency={expense.currency} size="large" /></div><section><h2>Payers</h2><div className="list">{expense.payers.map((payer) => <div className="row" key={payer.personId}><span>{payer.personId}</span><Money amountMinor={payer.amountMinor} currency={expense.currency} /></div>)}</div><h2>Split</h2><div className="list">{expense.splits.map((split) => <div className="row" key={split.personId}><span>{split.personId}</span><Money amountMinor={split.amountMinor} currency={expense.currency} /></div>)}</div></section><div className="actions"><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><Button variant="danger" onClick={remove}>Delete</Button></div><section><h2>History</h2>{history.length ? <div className="list">{history.map((item) => <div className="row" key={item.id}><span>Revision {item.revision}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No edits yet.</Empty>}</section></Layout>;
 }
 
 function Settle() {
-  const { id = '' } = useParams(); const nav = useNavigate(); const [members, setMembers] = useState<GroupMember[]>([]); const [group, setGroup] = useState<Group>(); const [from, setFrom] = useState(''); const [to, setTo] = useState(''); const [amount, setAmount] = useState(''); const [currency, setCurrency] = useState<Currency>('USD'); const [operationId, setOperationId] = useState(() => crypto.randomUUID()); const [submitting, setSubmitting] = useState(false); const [error, setError] = useState<unknown>();
+  const { id = '' } = useParams();
+  const nav = useNavigate();
+  const [members, setMembers] = useState<GroupMember[]>([]);
+  const [group, setGroup] = useState<Group>();
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [amount, setAmount] = useState('');
+  const [currency, setCurrency] = useState<Currency>('USD');
+  const [operationId, setOperationId] = useState(() => crypto.randomUUID());
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<unknown>();
   useEffect(() => { getGroup(id).then((result) => { setGroup(result.group); setMembers(result.members); setCurrency(result.group.currency); setFrom(result.members[0]?.personId || ''); setTo(result.members[1]?.personId || ''); }).catch(setError); }, [id]);
-  useEffect(() => { if (group) setOperationId(crypto.randomUUID()); }, [from, to, amount]);
+  useEffect(() => { if (group) setOperationId(crypto.randomUUID()); }, [from, to, amount, group]);
   if (!group) return <Layout>{error ? <ErrorBox error={error} /> : <Loading />}</Layout>;
   const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operationId }) }); setOperationId(crypto.randomUUID()); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
-  return <Layout><Link to={`/groups/${id}`} className="back">← {group.name}</Link><h1>Settle up</h1><p className="muted">Record a payment. Partial settlements are supported.</p><form onSubmit={submit}><label>Who paid?<select value={from} onChange={(event) => setFrom(event.target.value)}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></label><label>Who received?<select value={to} onChange={(event) => setTo(event.target.value)}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></label><label>Currency<CurrencySelect value={currency} onChange={setCurrency} /></label><label>Amount ({currency})<input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>{error ? <ErrorBox error={error} /> : null}<button disabled={submitting}>{submitting ? 'Recording…' : 'Record payment'}</button></form></Layout>;
+  return <Layout><Link to={`/groups/${id}`} className="back">← {group.name}</Link><h1>Settle up</h1><p className="muted">Record a payment. Partial settlements are supported.</p><form onSubmit={submit}><Field label="Who paid?"><select value={from} onChange={(event) => setFrom(event.target.value)}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => setTo(event.target.value)}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><Field label={`Amount (${currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></Field>{error ? <ErrorBox error={error} /> : null}<Button disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
 }
 
-function Activity() { const { id = '' } = useParams(); const [items, setItems] = useState<Array<{ type: string; id: string; label: string | null; createdAt: string }>>([]); const [error, setError] = useState<unknown>(); useEffect(() => { api<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(`/groups/${id}/activity`).then((result) => setItems(result.activity)).catch(setError); }, [id]); return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{error ? <ErrorBox error={error} /> : items.length ? <div className="list">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No activity yet.</Empty>}</Layout>; }
-export function App() { return <Routes><Route path="/" element={<Home />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>; }
+function Activity() {
+  const { id = '' } = useParams();
+  const [items, setItems] = useState<Array<{ type: string; id: string; label: string | null; createdAt: string }>>([]);
+  const [error, setError] = useState<unknown>();
+  useEffect(() => { api<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(`/groups/${id}/activity`).then((result) => setItems(result.activity)).catch(setError); }, [id]);
+  return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{error ? <ErrorBox error={error} /> : items.length ? <div className="list">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No activity yet.</Empty>}</Layout>;
+}
+
+export function App() {
+  return <Routes><Route path="/" element={<Home />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+}
