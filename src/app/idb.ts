@@ -1,5 +1,5 @@
-import type { Balances, Expense, Group, GroupMember, Settlement } from '../shared/types';
-import type { ExpenseInput } from '../shared/schemas';
+import type { Activity, Balances, Expense, Group, GroupMember, Settlement } from '../shared/types';
+import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 
 export const DB_NAME = 'bill-split-local';
 export const DB_VERSION = 4;
@@ -42,7 +42,7 @@ export interface ResourceFreshness {
 export interface CachedActivity {
   userId: string;
   groupId: string;
-  activity: Array<{ type: string; id: string; label: string | null; createdAt: string }>;
+  activity: Activity[];
   fetchedAt: string;
 }
 
@@ -52,6 +52,40 @@ export interface CachedExpenseDetails {
   expense: Expense;
   history: Array<{ id: string; revision: number; createdAt: string }>;
   fetchedAt: string;
+}
+
+const activityTypes = ['expense', 'settlement', 'expense_revision', 'settlement_revision', 'expense_deleted', 'settlement_deleted'] as const;
+const isActivityType = (value: unknown): value is Activity['type'] => typeof value === 'string' && (activityTypes as readonly string[]).includes(value);
+export const validActivityEntityId = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
+
+/**
+ * Older activity caches predate the typed activity payload. Keep their useful
+ * labels, but make missing identity fields explicit so a stale row can never
+ * produce an `/undefined` link or crash during rendering.
+ */
+export function normalizeActivity(value: unknown): Activity[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const row = candidate as Record<string, unknown>;
+    if (!isActivityType(row.type) || !validActivityEntityId(row.id)) return [];
+    const settlement = row.type.startsWith('settlement');
+    const amountValue = row.amountMinor ?? row.amount;
+    const amount = typeof amountValue === 'number' && Number.isSafeInteger(amountValue) && amountValue >= 0 ? amountValue : null;
+    const rawCurrency = typeof row.currency === 'string' && (supportedCurrencies as readonly string[]).includes(row.currency) ? row.currency : null;
+    const labelValue = row.label ?? row.description ?? row.note;
+    const base = {
+      type: row.type,
+      id: row.id.trim(),
+      entityId: validActivityEntityId(row.entityId) ? row.entityId.trim() : '',
+      amountMinor: amount,
+      currency: rawCurrency as Activity['currency'],
+      transactionDate: typeof (row.transactionDate ?? row.date) === 'string' ? String(row.transactionDate ?? row.date) : '',
+      label: typeof labelValue === 'string' ? labelValue : null,
+      createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
+    };
+    return [{ ...base, ...(settlement ? { fromName: typeof row.fromName === 'string' ? row.fromName : null, toName: typeof row.toName === 'string' ? row.toName : null } : {}) } as Activity];
+  });
 }
 
 export interface ExpenseOutboxItem {
@@ -165,8 +199,11 @@ export const readGroupSnapshot = (userId: string, groupId: string) => transactio
 export const saveResourceFreshness = (value: ResourceFreshness) => transaction('resourceFreshness', 'readwrite', (tx) => tx.objectStore('resourceFreshness').put(value));
 export const readResourceFreshness = (userId: string, resourceKey: string) => transaction<ResourceFreshness>('resourceFreshness', 'readonly', (tx) => tx.objectStore('resourceFreshness').get([userId, resourceKey]));
 
-export const saveActivity = (value: CachedActivity) => transaction('activity', 'readwrite', (tx) => tx.objectStore('activity').put(value));
-export const readActivity = (userId: string, groupId: string) => transaction<CachedActivity>('activity', 'readonly', (tx) => tx.objectStore('activity').get([userId, groupId]));
+export const saveActivity = (value: CachedActivity) => transaction('activity', 'readwrite', (tx) => tx.objectStore('activity').put({ ...value, activity: normalizeActivity(value.activity) }));
+export async function readActivity(userId: string, groupId: string) {
+  const cached = await transaction<CachedActivity>('activity', 'readonly', (tx) => tx.objectStore('activity').get([userId, groupId]));
+  return cached ? { ...cached, activity: normalizeActivity(cached.activity) } : undefined;
+}
 
 export const saveExpenseDetails = (value: CachedExpenseDetails) => transaction('expenseDetails', 'readwrite', (tx) => tx.objectStore('expenseDetails').put(value));
 export const readExpenseDetails = (userId: string, expenseId: string) => transaction<CachedExpenseDetails>('expenseDetails', 'readonly', (tx) => tx.objectStore('expenseDetails').get([userId, expenseId]));

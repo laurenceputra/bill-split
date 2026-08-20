@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { assertFinancialInput, date, expenseInput, groupInput, personInput, settlementInput } from '../shared/schemas';
+import { assertFinancialInput, date, expenseInput, friendInput, groupInput, personInput, settlementInput } from '../shared/schemas';
 import { calculateNet, simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError } from '../db/repository';
 import { BalanceOverflowError, checkedAddMinor } from '../shared/money';
@@ -68,7 +68,7 @@ const allowsMutation = (c: any) => {
   return exactOrigin || trustedFetchSite || (!hasBrowserMetadata && explicitBearer);
 };
 const repositoryError = (c: any, error: unknown) => {
-  if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'CONFLICT' ? 409 : error.code === 'IDEMPOTENCY_CONFLICT' ? 409 : 500, error.code, error.message);
+  if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'CONFLICT' ? 409 : error.code === 'IDEMPOTENCY_CONFLICT' ? 409 : error.code === 'SELF_FRIEND' ? 400 : 500, error.code, error.message);
   throw error;
 };
 const balanceError = (c: any, error: unknown) => error instanceof BalanceOverflowError ? jsonError(c, 422, error.code, error.message) : undefined;
@@ -125,10 +125,11 @@ function page(value: string | undefined, fallback: number, max: number) { if (va
 api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
+api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ group: x.group, members: await x.repo.members(c.req.param('groupId')) }); });
 api.put('/api/groups/:groupId', zValidator('json', groupInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; return c.json({ group: await x.repo.updateGroup(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); });
 api.delete('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; await x.repo.deleteGroup(c.req.param('groupId')); return c.body(null, 204); });
-api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ person: await x.repo.addPerson(c.req.param('groupId'), c.req.valid('json')) }, 201); } catch (error) { return repositoryError(c, error); } });
+api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ person: await x.repo.addPerson(c.req.param('groupId'), c.req.valid('json'), x.auth.id, x.auth.personId) }, 201); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId/people', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ people: await x.repo.members(c.req.param('groupId')) }); });
 
 api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 50, 100); const offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); } catch { return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } return c.json({ expenses: await x.repo.expenses(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, offset }) }); });

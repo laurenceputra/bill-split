@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { getNavigationContext } from './navigation';
 
 describe('getNavigationContext', () => {
-  it('classifies the home route and makes Add mean new group', () => {
+  it('classifies the home route and makes Add mean add friend', () => {
     expect(getNavigationContext('/')).toMatchObject({
       route: 'home',
       activeSection: 'groups',
-      addAction: 'new-group',
-      addLabel: 'New group',
-      addPath: '/?new=1',
+      addAction: 'add-friend',
+      addLabel: 'Add friend',
+      addPath: '/?friend=1',
       primaryPath: '/',
       morePath: '/settings',
     });
@@ -53,7 +53,7 @@ describe('getNavigationContext', () => {
       route: 'legacy-expense-detail',
       activeSection: 'groups',
       primaryPath: '/',
-      addPath: '/?new=1',
+      addPath: '/?friend=1',
     });
     expect(getNavigationContext('/expenses/expense-1').groupId).toBeUndefined();
   });

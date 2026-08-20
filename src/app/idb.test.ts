@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearCachedData, DB_NAME, DB_VERSION, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -66,9 +67,18 @@ describe('user-scoped IndexedDB', () => {
     await updateGroupSnapshot('user-a', 'group-a', { balances: {}, cachedAt: 'balances-time' });
     expect((await readResourceFreshness('user-a', 'group:group-a:group'))?.fetchedAt).toBe(timestamp);
     expect((await readResourceFreshness('user-a', 'group:group-a:balances'))?.fetchedAt).toBe('balances-time');
-    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'e-1', label: 'Lunch', createdAt: timestamp }], fetchedAt: timestamp });
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'e-1', entityId: 'e-1', amountMinor: 100, currency: 'USD', transactionDate: '2026-01-01', label: 'Lunch', createdAt: timestamp }], fetchedAt: timestamp });
     await saveExpenseDetails({ userId: 'user-a', expenseId: 'e-1', expense: { id: 'e-1', groupId: 'group-a', description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: timestamp, updatedAt: timestamp, version: 1, payers: [], splits: [] }, history: [], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].label).toBe('Lunch');
     expect((await readExpenseDetails('user-a', 'e-1'))?.expense.id).toBe('e-1');
+  });
+
+  it('normalizes legacy activity rows without entity fields during cache hydration', async () => {
+    const timestamp = new Date().toISOString();
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'legacy-event', label: 'Old lunch', createdAt: timestamp } as never], fetchedAt: timestamp });
+    const cached = await readActivity('user-a', 'group-a');
+    expect(cached?.activity[0]).toMatchObject({ id: 'legacy-event', label: 'Old lunch', entityId: '', amountMinor: null, currency: null, transactionDate: '' });
+    const hydrated = await hydrateActivity('user-a', 'group-a');
+    expect(hydrated?.data.activity[0].entityId).toBe('');
   });
 });

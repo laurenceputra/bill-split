@@ -1,8 +1,8 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, clearAuthRequired, getAuthState, getConnectionState, getExpenses, getGroups, subscribeAuthState } from './api';
+import { ApiError, api, clearAuthRequired, getActivity, getAuthState, getConnectionState, getExpenses, getGroups, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readGroups, saveGroups, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readGroups, saveGroups, saveVerifiedIdentity } from './idb';
 
 const json = (body: unknown, status = 200, userId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}) } });
 
@@ -12,6 +12,16 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('caches the typed activity payload without losing entity context', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+      ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')
+      : json({ activity: [{ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02', label: 'Lunch', createdAt: '2026-01-03T00:00:00Z' }] }, 200, 'user-a')));
+    const result = await getActivity('group-a');
+    expect(result.activity[0]).toMatchObject({ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', amountMinor: 1250 });
+    expect((await readActivity('user-a', 'group-a'))?.activity[0].entityId).toBe('expense-1');
+  });
+
   it('marks API calls as AJAX requests and publishes auth-required state', async () => {
     const listener = vi.fn();
     const authEvent = vi.fn();

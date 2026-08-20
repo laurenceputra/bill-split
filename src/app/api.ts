@@ -1,4 +1,4 @@
-import type { Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
+import type { Activity, Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
 import { readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroups, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, seedResource, setResourceIdentity } from './resource-cache';
 
@@ -255,10 +255,10 @@ export async function getExpenseDetails(id: string, signal?: AbortSignal): Promi
   }
 }
 
-export async function getActivity(id: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>> {
+export async function getActivity(id: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Activity[] }>> {
   const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(`/groups/${id}/activity`, { signal });
+    const result = await apiWithMeta<{ activity: Activity[] }>(`/groups/${id}/activity`, { signal });
     assertResponseIdentity(result.userId, identity);
     if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id, activity: result.data.activity, fetchedAt: new Date().toISOString() }));
     return result.data;

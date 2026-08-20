@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
+import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
 import { currencyOptions, type ExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
 import { ApiError, api, getActivity, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
-import { clearCachedData } from './idb';
+import { clearCachedData, validActivityEntityId } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -53,38 +53,68 @@ function Home() {
   const groupsResource = useResource<{ groups: Group[] }>(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id, (signal) => getGroups(signal), RESOURCE_FRESHNESS.groups, me.data?.id ? () => hydrateGroups(me.data!.id) : undefined);
   const groups = groupsResource.data?.groups || [];
   const offline = Boolean(groupsResource.offline || me.offline);
-  const [creating, setCreating] = useState(false);
+  const [formMode, setFormMode] = useState<'friend' | 'group'>();
   const [name, setName] = useState('');
   const [currency, setCurrency] = useState<Currency>('USD');
+  const [friendName, setFriendName] = useState('');
+  const [friendEmail, setFriendEmail] = useState('');
+  const [friendCurrency, setFriendCurrency] = useState<Currency>('USD');
+  const [friendOperation] = useState(operationId);
+  const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
   const [createError, setCreateError] = useState<unknown>();
   const [searchParams, setSearchParams] = useSearchParams();
   const nav = useNavigate();
   const newGroupRequested = searchParams.get('new') === '1';
+  const addFriendRequested = searchParams.get('friend') === '1';
   const offlineView = offline || !online;
 
   useEffect(() => {
-    if (newGroupRequested) {
-      setCreating(true);
-      searchParams.delete('new');
-      setSearchParams(searchParams, { replace: true });
+    if (newGroupRequested || addFriendRequested) {
+      setFormMode(newGroupRequested ? 'group' : 'friend');
+      const next = new URLSearchParams(searchParams);
+      next.delete('new');
+      next.delete('friend');
+      setSearchParams(next, { replace: true });
     }
-  }, [newGroupRequested, searchParams, setSearchParams]);
+  }, [addFriendRequested, newGroupRequested, searchParams, setSearchParams]);
 
-  const create = async (event: FormEvent) => {
+  const createGroup = async (event: FormEvent) => {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (submitting || submitLock.current) return;
+    if (!name.trim()) { setCreateError(new Error('Enter a group name.')); return; }
     setCreateError(undefined);
+    submitLock.current = true;
+    setSubmitting(true);
     try {
       const result = await api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify({ name, currency }) });
-      if (result.group) { invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`); }
+      if (!result.group) throw new Error('The group was not created. Try again.');
+      invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`);
     } catch (cause) { setCreateError(cause); }
+    finally { submitLock.current = false; setSubmitting(false); }
+  };
+
+  const createFriend = async (event: FormEvent) => {
+    event.preventDefault();
+    if (submitting || submitLock.current) return;
+    if (!friendName.trim()) { setCreateError(new Error('Enter a friend name.')); return; }
+    setCreateError(undefined);
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      const result = await api<{ group: Group }>('/friends', { method: 'POST', body: JSON.stringify({ name: friendName, email: friendEmail.trim() || undefined, currency: friendCurrency, client_operation_id: friendOperation }) });
+      if (!result.group) throw new Error('The friend group was not created. Try again.');
+      invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`);
+    } catch (cause) { setCreateError(cause); }
+    finally { submitLock.current = false; setSubmitting(false); }
   };
 
   return <Layout>
-    <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Your groups</h1></div><Button disabled={offlineView} onClick={() => setCreating((current) => !current)} variant="secondary">{creating ? 'Cancel' : '+ New group'}</Button></div>
-    {creating && <Surface><form onSubmit={create} aria-describedby={createError ? 'create-group-error' : undefined}><Field label="Group name"><input required value={name} onChange={(event) => { setCreateError(undefined); setName(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={(value) => { setCreateError(undefined); setCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-group-error" /> : null}<Button disabled={offlineView} type="submit">Create group</Button></form></Surface>}
-    {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Group creation requires a connection; Add Expense remains available from cached groups.</p> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
-    {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.name}</strong><span>{group.currency}</span></Link>)}</div> : <Empty>No groups yet. Create one to get started.</Empty>}</> : null}
+    <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Friends &amp; groups</h1></div><div className="home-actions"><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'friend' ? undefined : 'friend'); }}>+ Add friend</Button><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'group' ? undefined : 'group'); }} variant="secondary">New group</Button></div></div>
+     {formMode === 'friend' && <Surface><h2>Add friend</h2><p className="muted">A matching email lets your friend log in and see shared transactions. Without an email, this creates a ledger-only friend.</p><form onSubmit={createFriend} aria-describedby={createError ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-friend-error' : undefined} value={friendName} onChange={(event) => { setCreateError(undefined); setFriendName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={friendEmail} onChange={(event) => { setCreateError(undefined); setFriendEmail(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={friendCurrency} onChange={(value) => { setCreateError(undefined); setFriendCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-friend-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Adding…' : 'Add friend'}</Button></form></Surface>}
+     {formMode === 'group' && <Surface><h2>New group</h2><p className="muted">Create a group for three or more people, then add friends from the group page.</p><form onSubmit={createGroup} aria-describedby={createError ? 'create-group-error' : undefined}><Field label="Group name"><input id="group-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-group-error' : undefined} value={name} onChange={(event) => { setCreateError(undefined); setName(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={(value) => { setCreateError(undefined); setCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-group-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Creating…' : 'Create group'}</Button></form></Surface>}
+     {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Friend and group creation require a connection; Add Expense remains available from cached groups.</p> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
+    {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong>{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</strong><span>{group.currency}</span></Link>)}</div> : <Empty>No groups yet. Add a friend or create a group to get started.</Empty>}</> : null}
   </Layout>;
 }
 
@@ -107,6 +137,7 @@ function GroupPage() {
   const [personName, setPersonName] = useState('');
   const [personEmail, setPersonEmail] = useState('');
   const [addingPerson, setAddingPerson] = useState(false);
+  const [addingPersonSubmitting, setAddingPersonSubmitting] = useState(false);
   const [addPersonError, setAddPersonError] = useState<unknown>();
   const [pending, setPending] = useState<ExpenseOutboxItem[]>([]);
   const error = groupResource.error || me.error;
@@ -121,10 +152,13 @@ function GroupPage() {
   const offlineView = offline || !online;
   const addPerson = async (event: FormEvent) => {
     event.preventDefault();
-    if (!personName.trim()) return;
+     if (addingPersonSubmitting) return;
+     if (!personName.trim()) { setAddPersonError(new Error('Enter a friend name.')); return; }
     setAddPersonError(undefined);
+    setAddingPersonSubmitting(true);
     try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); invalidateForMutation.groupChanged(id, currentUserId); }
     catch (cause) { setAddPersonError(cause); }
+    finally { setAddingPersonSubmitting(false); }
   };
   const memberLabel = (personId: string) => personId === currentPersonId ? 'You' : nameOf(members, personId);
 
@@ -132,10 +166,10 @@ function GroupPage() {
      <Link to="/" className="back">← Groups</Link>
      <div className="page-title"><div><p className="eyebrow">{group.currency} group</p><h1>{group.name}</h1></div><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div>
        {offlineView ? <p className="offline-banner" role="status">Offline · stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection.</p> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
-     <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link>{!offlineView ? <><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></> : null}</div>
-     <div className="group-overview-grid">
-         <section><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
-        <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => { setAddPersonError(undefined); setAddingPerson((current) => !current); }}>{addingPerson ? 'Cancel' : '+ Add'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson} aria-describedby={addPersonError ? 'add-person-error' : undefined}><Field label="Name"><input required value={personName} onChange={(event) => { setAddPersonError(undefined); setPersonName(event.target.value); }} /></Field><Field label="Email (optional)"><input className="email" type="email" value={personEmail} onChange={(event) => { setAddPersonError(undefined); setPersonEmail(event.target.value); }} /></Field>{addPersonError ? <ErrorBox error={addPersonError} id="add-person-error" /> : null}<Button type="submit">Add person</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small className="email"> · {member.email}</small> : null}</span>)}</div></section>
+      <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link>{!offlineView ? <><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></> : null}</div>
+      <div className="group-overview-grid">
+          <section><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
+          <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => { setAddPersonError(undefined); setAddingPerson((current) => !current); }}>{addingPerson ? 'Cancel' : '+ Add friend'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson} aria-describedby={addPersonError ? 'add-person-error' : undefined}><Field label="Friend name"><input id="person-name" required aria-invalid={Boolean(addPersonError)} aria-describedby={addPersonError ? 'add-person-error' : undefined} value={personName} onChange={(event) => { setAddPersonError(undefined); setPersonName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="person-email" className="email" type="email" value={personEmail} onChange={(event) => { setAddPersonError(undefined); setPersonEmail(event.target.value); }} /></Field>{addPersonError ? <ErrorBox error={addPersonError} id="add-person-error" /> : null}<Button disabled={addingPersonSubmitting} type="submit">{addingPersonSubmitting ? 'Adding…' : 'Add friend'}</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small className="email"> · {member.email}</small> : null}</span>)}</div></section>
      </div>
      <div className="group-ledger">
          <section><h2>Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses yet.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => <Link className="row" to={`/groups/${expense.groupId}/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : null}</section>
@@ -386,9 +420,18 @@ function Activity() {
   const online = useOnlineStatus();
   const { id = '' } = useParams();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
-  const activity = useResource<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id, (signal) => getActivity(id, signal), RESOURCE_FRESHNESS.activity, me.data?.id ? () => hydrateActivity(me.data!.id, id) : undefined);
+  const activity = useResource<{ activity: ActivityItem[] }>(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id, (signal) => getActivity(id, signal), RESOURCE_FRESHNESS.activity, me.data?.id ? () => hydrateActivity(me.data!.id, id) : undefined);
   const items = activity.data?.activity || [];
-   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{!online || activity.offline ? <p className="offline-banner" role="status">Offline · showing cached activity.</p> : null}{me.error && activity.data !== undefined ? <CachedIdentityNotice resource={me} id="activity-identity-error" /> : null}{me.error && activity.data === undefined ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="activity-identity-error" retryLabel="Retry identity check" /> : null}{!me.error || activity.data !== undefined ? <ResourceNotice resource={activity} label="activity" retry={retryFor(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id)} /> : null}{activity.data !== undefined && items.length ? <div className="list reading-width">{items.map((item) => <div className="row" key={`${item.type}-${item.id}`}><span>{item.type}: {item.label}</span><small>{item.createdAt}</small></div>)}</div> : activity.data !== undefined ? <Empty>No activity yet.</Empty> : null}</Layout>;
+  const typeLabel = (type: ActivityItem['type']) => ({ expense: 'Expense', settlement: 'Settlement', expense_revision: 'Expense edited', settlement_revision: 'Settlement edited', expense_deleted: 'Expense deleted', settlement_deleted: 'Settlement deleted' })[type];
+  const titleFor = (item: ActivityItem) => item.type.startsWith('settlement') ? `${item.fromName || 'Unknown member'} paid ${item.toName || 'unknown member'}` : item.label || 'Expense';
+  const descriptionFor = (item: ActivityItem) => item.type.startsWith('settlement') ? (item.label || '') : item.label || '';
+  const dateFor = (item: ActivityItem) => item.transactionDate || item.createdAt.slice(0, 10);
+  const row = (item: ActivityItem) => <span><strong>{titleFor(item)}</strong><small>{typeLabel(item.type)} · {dateFor(item)}</small>{descriptionFor(item) && descriptionFor(item) !== titleFor(item) ? <small className="activity-description">{descriptionFor(item)}</small> : null}</span>;
+  const itemRow = (item: ActivityItem) => {
+    const content = <>{row(item)}{item.amountMinor != null && item.currency ? <Money amountMinor={item.amountMinor} currency={item.currency} /> : null}</>;
+     return (item.type === 'expense' || item.type === 'expense_revision') && validActivityEntityId(item.entityId) ? <Link className="row" to={`/groups/${id}/expenses/${item.entityId}`} key={`${item.type}-${item.id}`}>{content}</Link> : <div className="row" key={`${item.type}-${item.id}`}>{content}</div>;
+  };
+   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><h1>Activity</h1>{!online || activity.offline ? <p className="offline-banner" role="status">Offline · showing cached activity.</p> : null}{me.error && activity.data !== undefined ? <CachedIdentityNotice resource={me} id="activity-identity-error" /> : null}{me.error && activity.data === undefined ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="activity-identity-error" retryLabel="Retry identity check" /> : null}{!me.error || activity.data !== undefined ? <ResourceNotice resource={activity} label="activity" retry={retryFor(resourceKeys.activity(me.data?.id || 'pending', id), me.data?.id)} /> : null}{activity.data !== undefined && items.length ? <div className="list reading-width">{items.map(itemRow)}</div> : activity.data !== undefined ? <Empty>No activity yet.</Empty> : null}</Layout>;
 }
 
 function Settings() {

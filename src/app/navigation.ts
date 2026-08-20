@@ -26,8 +26,8 @@ export type NavigationContext = {
   groupContext?: GroupNavigationContext;
   group?: GroupNavigationContext;
   activeSection: NavigationSection;
-  addAction: 'new-group' | 'new-expense';
-  addLabel: 'New group' | 'Add expense';
+  addAction: 'add-friend' | 'new-expense';
+  addLabel: 'Add friend' | 'Add expense';
   /** The primary destination for this navigation context. */
   primaryPath: string;
   /** The route-specific destination, when one exists. */
@@ -94,13 +94,13 @@ export function getNavigationContext(pathname: string): NavigationContext {
     ...(groupId ? { groupId, group } : {}),
     activeSection,
     ...(group ? { groupContext: group } : {}),
-    addAction: hasGroup ? 'new-expense' : 'new-group',
-    addLabel: hasGroup ? 'Add expense' : 'New group',
+    addAction: hasGroup ? 'new-expense' : 'add-friend',
+    addLabel: hasGroup ? 'Add expense' : 'Add friend',
     primaryPath: group?.overviewPath || HOME_PATH,
     contextualPath,
     groupsPath: HOME_PATH,
     activityPath: group?.activityPath,
-    addPath: group?.addPath || '/?new=1',
+    addPath: group?.addPath || '/?friend=1',
     morePath: group?.settlePath || '/settings',
   };
 }

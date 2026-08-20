@@ -4,12 +4,12 @@ import worker from './index';
 class Statement {
   constructor(protected readonly sql: string) {}
   bind(..._args: unknown[]) { return this; }
-  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
+  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return null; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
   async run() { return {}; }
   async all() { return { results: [] }; }
 }
 class MemberStatement extends Statement {
-  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; if (this.sql.includes('FROM groups')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; return null; }
+  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
 }
 class TriggerOverflowStatement extends MemberStatement {
   async all<T>() {

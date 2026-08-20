@@ -84,6 +84,92 @@ class BulkHydrationStatement {
   }
 }
 
+class FriendDb {
+  batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+  existing: Record<string, unknown> | null = null;
+  prepare(sql: string) { return new FriendStatement(this, sql); }
+  async batch(statements: FriendStatement[]) { this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args }))); return []; }
+}
+class FriendStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: FriendDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('lower(email)')) return this.db.existing as T | null;
+    if (this.sql.includes('FROM groups g JOIN')) return { id: 'group-1', name: 'With Friend', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend' } as T;
+    return null;
+  }
+}
+
+class FriendIdempotencyDb {
+  claim: Record<string, unknown> | null = null;
+  person: Record<string, unknown> | null = null;
+  creator: Record<string, unknown> | null = null;
+  batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+  race = false;
+  claimCollision = false;
+  prepare(sql: string) { return new FriendIdempotencyStatement(this, sql); }
+  async batch(statements: FriendIdempotencyStatement[]) {
+    this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args })));
+    if (this.claimCollision) { this.claimCollision = false; throw new Error('UNIQUE constraint failed: idempotency_keys.user_id, idempotency_keys.operation_id'); }
+    if (this.race) { this.race = false; throw new Error('UNIQUE constraint failed: people.lower(email)'); }
+    for (const statement of statements) {
+      if (statement.sql.includes('INSERT INTO idempotency_keys')) this.claim = { kind: statement.args[0], user_id: statement.args[1], operation_id: statement.args[3], request_hash: statement.args[4], entity_id: statement.args[5] };
+    }
+  }
+}
+class FriendIdempotencyStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: FriendIdempotencyDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('FROM idempotency_keys')) return (this.db.claimCollision ? null : this.db.claim) as T | null;
+    if (this.sql.includes('FROM people WHERE id=')) return this.db.creator as T | null;
+    if (this.sql.includes('lower(email)')) return (this.db.race ? null : this.db.person) as T | null;
+    if (this.sql.includes('FROM groups g JOIN')) return this.db.claim ? { id: this.args[0], name: 'With Friend', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend' } as T : null;
+    return null;
+  }
+}
+
+class ActivityDb {
+  sql = '';
+  prepare(sql: string) { this.sql = sql; return new ActivityStatement(sql); }
+}
+class ActivityStatement {
+  constructor(private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async all<T>() {
+    return { results: [
+      { type: 'expense', id: 'expense-event', entity_id: 'expense-1', label: 'Lunch', amount_minor: 1250, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02T10:00:00Z' },
+      { type: 'settlement_revision', id: 'revision-1', entity_id: 'settlement-1', label: 'Paid back', amount_minor: 500, currency: 'EUR', transaction_date: '2026-01-01', from_name: 'A', to_name: 'B', created_at: '2026-01-02T11:00:00Z' },
+    ] as T[] };
+  }
+}
+class RevisionActivityDb {
+  sql = '';
+  prepare(sql: string) { this.sql = sql; return new RevisionActivityStatement(this, sql); }
+}
+class RevisionActivityStatement {
+  constructor(private readonly db: RevisionActivityDb, private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async all<T>() {
+    const current = { group_id: 'group-1', version: 3, deleted_at: '2026-01-03T00:00:00Z' };
+    const revisions = [
+      { id: 'revision-1', entity_type: 'expense', entity_id: 'expense-1', revision: 1, description: 'Lunch', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-02T10:00:00Z' },
+      { id: 'revision-2', entity_type: 'expense', entity_id: 'expense-1', revision: 2, description: 'Dinner', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-03T10:00:00Z' },
+    ];
+    const results = revisions.map((revision) => ({
+      type: current.deleted_at && current.version === revision.revision + 1 ? 'expense_deleted' : 'expense_revision',
+      id: revision.id, entity_id: revision.entity_id, label: revision.description, amount_minor: revision.amount_minor,
+      currency: revision.currency, transaction_date: revision.transaction_date, created_at: revision.created_at,
+    }));
+    // Keep the fake grounded in raw revision/current-entity state rather than
+    // returning a pre-mapped expected payload.
+    if (!this.db.sql.includes('e.version = r.revision + 1')) throw new Error('revision deletion predicate missing');
+    return { results: results as T[] };
+  }
+}
+
 describe('repository idempotency', () => {
   it('returns the original entity for a same-payload retry and rejects a mismatch', async () => {
     const repo = new Repository(new FakeDb() as never);
@@ -144,5 +230,89 @@ describe('repository expense hydration', () => {
     // 91 IDs are split into two chunks, so this is one page query plus two
     // payer/split query pairs, not 183 per-expense hydration queries.
     expect(db.queries).toBe(5);
+  });
+});
+
+describe('repository friend creation', () => {
+  it('creates the ledger-only person, group, and both memberships in one batch', async () => {
+    const db = new FriendDb();
+    const group = await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' });
+    expect(group).toMatchObject({ id: 'group-1', memberCount: 2, counterpartName: 'Friend' });
+    expect(db.batches).toHaveLength(1);
+    expect(db.batches[0]).toHaveLength(4);
+    expect(db.batches[0].map((statement) => statement.sql)).toEqual(expect.arrayContaining([
+      expect.stringContaining('INSERT INTO people'),
+      expect.stringContaining('INSERT INTO groups'),
+      expect.stringContaining('INSERT INTO group_members'),
+    ]));
+  });
+
+  it('uses an existing email person and preserves their linked user membership', async () => {
+    const db = new FriendDb();
+    db.existing = { id: 'person-2', name: 'Friend', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
+    await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', email: 'FRIEND@example.com', currency: 'EUR' });
+    expect(db.batches[0]).toHaveLength(3);
+    const memberStatements = db.batches[0].filter((statement) => statement.sql.includes('INSERT INTO group_members'));
+    expect(memberStatements[1].args[2]).toBe('user-2');
+  });
+
+  it('returns one original group for retries and conflicts on a changed payload', async () => {
+    const db = new FriendIdempotencyDb();
+    const repo = new Repository(db as never);
+    const first = await repo.createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD', client_operation_id: 'friend-op' });
+    const retry = await repo.createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD', client_operation_id: 'friend-op' });
+    expect(retry?.id).toBe(first?.id);
+    await expect(repo.createFriend('user-1', 'person-1', { name: 'Different', currency: 'USD', client_operation_id: 'friend-op' })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect(db.batches).toHaveLength(1);
+  });
+
+  it('recovers the winning group after a concurrent claim collision and rejects a changed payload', async () => {
+    const db = new FriendIdempotencyDb();
+    const repo = new Repository(db as never);
+    const first = await repo.createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD', client_operation_id: 'collision-op' });
+
+    db.claimCollision = true;
+    const retry = await repo.createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD', client_operation_id: 'collision-op' });
+    expect(retry?.id).toBe(first?.id);
+
+    db.claimCollision = true;
+    await expect(repo.createFriend('user-1', 'person-1', { name: 'Different', currency: 'USD', client_operation_id: 'collision-op' })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect(db.batches).toHaveLength(3);
+  });
+
+  it('re-reads a winner after a normalized-email race and retries the atomic group batch', async () => {
+    const db = new FriendIdempotencyDb();
+    db.race = true;
+    db.person = { id: 'person-2', name: 'Friend', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
+    const group = await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', email: 'FRIEND@example.com', currency: 'USD', client_operation_id: 'race-op' });
+    expect(group).toMatchObject({ currency: 'USD' });
+    expect(db.batches).toHaveLength(2);
+    expect(db.batches[1].some((statement) => statement.sql.includes('INSERT INTO people'))).toBe(false);
+  });
+
+  it('rejects the creator email as a structured self-friend error', async () => {
+    const db = new FriendIdempotencyDb();
+    db.creator = { id: 'person-1', email: 'owner@example.com', user_id: 'user-1' };
+    await expect(new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Owner', email: 'OWNER@example.com', currency: 'USD' })).rejects.toMatchObject({ code: 'SELF_FRIEND' });
+    expect(db.batches).toHaveLength(0);
+  });
+});
+
+describe('repository activity mapping', () => {
+  it('keeps event IDs separate from canonical entity IDs and carries transaction context', async () => {
+    const activity = await new Repository(new ActivityDb() as never).activity('group-1');
+    expect(activity[0]).toMatchObject({ type: 'expense', id: 'expense-event', entityId: 'expense-1', amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02' });
+    expect(activity[1]).toMatchObject({ type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', fromName: 'A', toName: 'B' });
+  });
+
+  it('marks only the revision immediately before deletion as deleted', async () => {
+    const db = new RevisionActivityDb();
+    const activity = await new Repository(db as never).activity('group-1');
+    // D1 evaluates this against the current version and deleted_at. Earlier
+    // edit revisions therefore stay revisions after an edit-then-delete.
+    expect(db.sql).toContain("e.deleted_at IS NOT NULL AND e.version = r.revision + 1");
+    expect(db.sql).toContain("s.deleted_at IS NOT NULL AND s.version = r.revision + 1");
+    expect(activity.map((item) => item.type)).toEqual(['expense_revision', 'expense_deleted']);
+    expect(activity.map((item) => item.entityId)).toEqual(['expense-1', 'expense-1']);
   });
 });

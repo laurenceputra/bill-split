@@ -13,6 +13,7 @@ export const date = z.string().refine((value) => {
 const safeMinor = z.number().int().nonnegative().refine(Number.isSafeInteger, 'Amount must be a safe integer');
 export const personInput = z.object({ name: z.string().trim().min(1).max(120), email: z.string().trim().email().max(320).optional().nullable() });
 export const groupInput = z.object({ name: z.string().trim().min(1).max(120), currency: currency.default('USD') });
+export const friendInput = personInput.extend({ currency: currency.default('USD'), client_operation_id: z.string().trim().min(1).max(100).optional() });
 export const payerInput = z.object({ person_id: id, amount_minor: safeMinor });
 export const splitInput = z.object({ person_id: id, amount_minor: safeMinor, metadata: z.record(z.unknown()).optional() });
 export const expenseInput = z.object({
@@ -24,6 +25,7 @@ export const settlementInput = z.object({ from_person_id: id, to_person_id: id, 
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
+export type FriendInput = z.infer<typeof friendInput>;
 
 export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));
