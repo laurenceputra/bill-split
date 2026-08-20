@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthState, subscribeAuthState } from './api';
+import { getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 
@@ -35,6 +35,10 @@ function useAuthRequired() {
   return useSyncExternalStore(subscribeAuthState, getAuthState, () => ({ required: false }));
 }
 
+function useReconnectRequired() {
+  return useSyncExternalStore(subscribeConnectionState, getConnectionState, () => ({ reconnectRequired: false }));
+}
+
 function useOutbox() {
   useEffect(() => { void initializeOutbox(); }, []);
   return useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
@@ -50,8 +54,10 @@ export function InstallAction({ showStatus = false }: { showStatus?: boolean } =
 function AuthBanner() {
   const online = useOnlineStatus();
   const auth = useAuthRequired();
-  if (!auth.required) return null;
-  return <div className="auth-banner" role="alert"><span>Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(window.location.href); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
+  const reconnect = useReconnectRequired();
+  if (!auth.required && !reconnect.reconnectRequired) return null;
+  const message = auth.required ? 'Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.' : 'The connection failed while you are online. Reconnect or check your session; queued expenses remain on this device.';
+  return <div className="auth-banner" role="alert"><span>{message}</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(window.location.href); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
 }
 
 export function TopBar() {

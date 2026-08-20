@@ -11,6 +11,16 @@ class Statement {
 class MemberStatement extends Statement {
   async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; if (this.sql.includes('FROM groups')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; return null; }
 }
+class TriggerOverflowStatement extends MemberStatement {
+  async all<T>() {
+    if (this.sql.includes('FROM people p JOIN group_members')) return { results: [{ person_id: '00000000-0000-4000-8000-000000000003', name: 'Dev', email: null, joined_at: '', role: 'owner' }, { person_id: '00000000-0000-4000-8000-000000000004', name: 'Other', email: null, joined_at: '', role: 'member' }] as T[] };
+    return { results: [] as T[] };
+  }
+}
+class TriggerOverflowDb {
+  prepare(sql: string) { return new TriggerOverflowStatement(sql); }
+  async batch(_statements: unknown[]) { throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); }
+}
 const env = (extra: Record<string, unknown> = {}) => ({ ENVIRONMENT: 'development', DB: { prepare: (sql: string) => new Statement(sql) }, ASSETS: { fetch: () => new Response('asset') }, ...extra }) as any;
 const sameOriginHeaders = { Origin: 'https://split.example', 'Sec-Fetch-Site': 'same-origin' };
 
@@ -38,6 +48,27 @@ class GoneOnUpdateStatement {
     return { results: [] as T[] };
   }
   async run() { return {}; }
+}
+
+class OverflowStatement extends Statement {
+  async first<T>() {
+    if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
+    if (this.sql.includes('FROM people')) return { id: 'person-a', name: 'A' } as T;
+    if (this.sql.includes('FROM groups')) return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' } as T;
+    return null;
+  }
+  async all<T>() {
+    const max = Number.MAX_SAFE_INTEGER;
+    if (this.sql.includes('FROM expenses')) return { results: [
+      { id: 'expense-1', group_id: 'group-1', description: 'One', amount_minor: max, currency: 'USD', expense_date: '2025-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
+      { id: 'expense-2', group_id: 'group-1', description: 'Two', amount_minor: max, currency: 'USD', expense_date: '2025-01-02', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
+    ] as T[] };
+    if (this.sql.includes('FROM payers')) return { results: [{ expense_id: 'expense-1', person_id: 'person-a', amount_minor: max }, { expense_id: 'expense-2', person_id: 'person-a', amount_minor: max }] as T[] };
+    if (this.sql.includes('FROM splits')) return { results: [{ expense_id: 'expense-1', person_id: 'person-b', amount_minor: max }, { expense_id: 'expense-2', person_id: 'person-b', amount_minor: max }] as T[] };
+    if (this.sql.includes('FROM settlements')) return { results: [] as T[] };
+    if (this.sql.includes('FROM people p JOIN group_members')) return { results: [{ person_id: 'person-a', name: 'A', email: null, joined_at: '', role: 'owner' }, { person_id: 'person-b', name: 'B', email: null, joined_at: '', role: 'member' }] as T[] };
+    return { results: [] as T[] };
+  }
 }
 
 describe('worker boundary', () => {
@@ -125,5 +156,19 @@ describe('worker boundary', () => {
     const response = await worker.fetch(new Request('https://split.example/api/settlements/00000000-0000-4000-8000-000000000002', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ from_person_id: '00000000-0000-4000-8000-000000000003', to_person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100, currency: 'USD', date: '2025-01-01', version: 1 }) }), env({ DB: new GoneOnUpdateDb() }), {} as ExecutionContext);
     expect(response.status).toBe(409);
     expect(((await response.json()) as any).error).toMatchObject({ code: 'CONFLICT' });
+  });
+  it('returns a structured 422 when individually safe expenses overflow an aggregate balance', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new OverflowStatement(sql) } }), {} as ExecutionContext);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+  });
+  it('maps D1 ledger trigger failures to 422 for expense and settlement writes', async () => {
+    const database = new TriggerOverflowDb();
+    const expenseResponse = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/expenses', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Ledger limit', amount_minor: 100, currency: 'USD', date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100 }] }) }), env({ DB: database }), {} as ExecutionContext);
+    expect(expenseResponse.status).toBe(422);
+    expect(await expenseResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+    const settlementResponse = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/settlements', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ from_person_id: '00000000-0000-4000-8000-000000000003', to_person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100, currency: 'USD', date: '2025-01-01' }) }), env({ DB: database }), {} as ExecutionContext);
+    expect(settlementResponse.status).toBe(422);
+    expect(await settlementResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
   });
 });

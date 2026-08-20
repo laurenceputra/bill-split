@@ -6,16 +6,32 @@ export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authorit
 export type ApiResponse<T> = { data: T; userId?: string };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
 export type AuthState = { required: boolean; code?: AuthRequiredCode };
+export type ConnectionState = { reconnectRequired: boolean };
 
 let authState: AuthState = { required: false };
+let connectionState: ConnectionState = { reconnectRequired: false };
 const authListeners = new Set<() => void>();
+const connectionListeners = new Set<() => void>();
 export const getAuthState = () => authState;
 export const subscribeAuthState = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
+export const getConnectionState = () => connectionState;
+export const subscribeConnectionState = (listener: () => void) => { connectionListeners.add(listener); return () => connectionListeners.delete(listener); };
 export const clearAuthRequired = () => { if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
   authState = { required: true, code };
   authListeners.forEach((listener) => listener());
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-auth-required', { detail: { code } }));
+};
+const signalReconnectRequired = () => {
+  if (connectionState.reconnectRequired) return;
+  connectionState = { reconnectRequired: true };
+  connectionListeners.forEach((listener) => listener());
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-reconnect-required'));
+};
+const clearReconnectRequired = () => {
+  if (!connectionState.reconnectRequired) return;
+  connectionState = { reconnectRequired: false };
+  connectionListeners.forEach((listener) => listener());
 };
 
 export class ApiError extends Error {
@@ -24,8 +40,9 @@ export class ApiError extends Error {
   readonly serverMessage?: string;
   readonly networkFailure: boolean;
   readonly isNetworkError: boolean;
+  readonly reconnectRequired: boolean;
 
-  constructor(message: string, options: { status?: number; code?: string; networkFailure?: boolean } = {}) {
+  constructor(message: string, options: { status?: number; code?: string; networkFailure?: boolean; reconnectRequired?: boolean } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = options.status;
@@ -33,6 +50,7 @@ export class ApiError extends Error {
     this.serverMessage = options.status === undefined ? undefined : message;
     this.networkFailure = options.networkFailure === true;
     this.isNetworkError = this.networkFailure;
+    this.reconnectRequired = options.reconnectRequired === true;
   }
 }
 
@@ -48,18 +66,46 @@ export async function apiWithMeta<T>(path: string, init?: RequestInit): Promise<
   if (import.meta.env.DEV) headers.set('X-Dev-Email', devEmail());
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...init, headers }); }
-  catch { throw new ApiError('Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR' }); }
-  // Access may return a plain redirect/login document rather than our JSON error.
-  // Publish this before parsing so HTML responses cannot hide an expired session.
-  if (response.status === 401) signalAuthRequired('AUTH_REQUIRED');
+  catch {
+    const reconnectRequired = typeof navigator !== 'undefined' && navigator.onLine !== false;
+    if (reconnectRequired) signalReconnectRequired();
+    throw new ApiError(reconnectRequired ? 'Connection failed while online. Reconnect or check your session.' : 'Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired });
+  }
+
+  const finalUrl = (() => { try { return new URL(response.url); } catch { return undefined; } })();
+  const accessOrLoginFinalUrl = finalUrl && (finalUrl.pathname.startsWith('/cdn-cgi/access/') || finalUrl.pathname.startsWith('/access/') || /(?:^|\/)login(?:\/|$)/i.test(finalUrl.pathname));
+  const contentType = response.headers.get('content-type') || '';
+  const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected || Boolean(accessOrLoginFinalUrl);
+  const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
+  if (authResponse) signalAuthRequired('AUTH_REQUIRED');
+
+  if (response.status === 204) {
+    if (authResponse) throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
+    if (!response.ok) throw new ApiError(`Request failed (${response.status})`, { status: response.status });
+    clearReconnectRequired();
+    return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined };
+  }
+
+  const bodyText = await response.clone().text();
+  let body: { error?: { code?: string; message?: string } } | T | null = null;
+  try { body = JSON.parse(bodyText) as { error?: { code?: string; message?: string } } | T; } catch { /* handled as an auth/session response below */ }
+  if (authResponse) {
+    throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
+  }
+  if (body === null || unexpectedFormat) {
+    if (response.status >= 500) throw new ApiError(`Request failed (${response.status})`, { status: response.status, code: 'SERVER_ERROR' });
+    signalReconnectRequired();
+    throw new ApiError('The server returned an unexpected response. Reconnect and check your session before retrying.', { status: response.status, code: 'PROTOCOL_ERROR', reconnectRequired: true });
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
-    const message = body?.error?.message || `Request failed (${response.status})`;
-    const code = body?.error?.code;
+    const errorBody = body as { error?: { code?: string; message?: string } };
+    const message = errorBody?.error?.message || `Request failed (${response.status})`;
+    const code = errorBody?.error?.code;
     if (response.status === 401 && (code === 'AUTH_INVALID' || code === 'IDENTITY_MISMATCH')) signalAuthRequired(code);
     throw new ApiError(message, { status: response.status, code });
   }
-  return { data: response.status === 204 ? undefined as T : await response.json(), userId: response.headers.get('X-BillSplit-User-Id') || undefined };
+  clearReconnectRequired();
+  return { data: body as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined };
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> { return (await apiWithMeta<T>(path, init)).data; }

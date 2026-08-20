@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { checkedSumMinor } from './money';
 
 export const id = z.string().uuid();
 export const supportedCurrencies = ['USD', 'EUR', 'GBP', 'AUD', 'CAD', 'NZD', 'SGD', 'HKD', 'CHF', 'CNY', 'INR'] as const;
@@ -28,7 +29,7 @@ export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));
   const uniqueSplits = new Set(input.splits.map((s) => s.person_id));
   if (uniquePayers.size !== input.payers.length || uniqueSplits.size !== input.splits.length) throw new Error('Each payer and split person must be unique');
-  const safeSum = (values: number[]) => values.reduce((sum, value) => { const next = sum + value; if (!Number.isSafeInteger(next)) throw new Error('Amounts must be safe integers'); return next; }, 0);
+  const safeSum = (values: number[]) => checkedSumMinor(values);
   if (safeSum(input.payers.map((p) => p.amount_minor)) !== input.amount_minor) throw new Error('Payers must sum to expense amount');
   if (safeSum(input.splits.map((s) => s.amount_minor)) !== input.amount_minor) throw new Error('Splits must sum to expense amount');
   if (input.payers.some((p) => !Number.isSafeInteger(p.amount_minor)) || input.splits.some((s) => !Number.isSafeInteger(s.amount_minor))) throw new Error('Amounts must be safe integers');

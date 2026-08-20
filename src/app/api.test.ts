@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, clearAuthRequired, getAuthState, getExpenses, getGroups, subscribeAuthState } from './api';
+import { ApiError, api, clearAuthRequired, getAuthState, getConnectionState, getExpenses, getGroups, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readGroups, saveGroups, saveVerifiedIdentity } from './idb';
 
@@ -33,6 +33,44 @@ describe('frontend API errors and cache fallback', () => {
     await expect(api('/me')).rejects.toMatchObject({ status: 401 });
     expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
     clearAuthRequired();
+  });
+
+  it('treats a redirected API response as auth-required', async () => {
+    clearAuthRequired();
+    const response = Object.defineProperties(new Response('<html>login</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }), { redirected: { value: true }, url: { value: 'https://split.test/cdn-cgi/access/login' } });
+    vi.stubGlobal('fetch', vi.fn(async () => response));
+    await expect(api('/groups')).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+  });
+
+  it('treats invalid JSON 2xx as a protocol/session-check response, not confirmed auth', async () => {
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{not-json', { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    await expect(api('/groups')).rejects.toMatchObject({ status: 200, code: 'PROTOCOL_ERROR', reconnectRequired: true });
+    expect(getAuthState().required).toBe(false);
+  });
+
+  it('treats an HTML 2xx response as a protocol/session-check response', async () => {
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>unexpected</html>', { status: 200, headers: { 'Content-Type': 'text/html' } })));
+    await expect(api('/groups')).rejects.toMatchObject({ status: 200, code: 'PROTOCOL_ERROR', reconnectRequired: true });
+    expect(getAuthState().required).toBe(false);
+  });
+
+  it('surfaces an online network failure as reconnect guidance without changing auth state', async () => {
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('connection reset'); }));
+    await expect(api('/groups')).rejects.toMatchObject({ networkFailure: true, reconnectRequired: true });
+    expect(getAuthState().required).toBe(false);
+    expect(getConnectionState()).toEqual({ reconnectRequired: true });
+  });
+
+  it('keeps an HTML 503 as a retryable server failure rather than auth-required', async () => {
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html><body>upstream unavailable</body></html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
+    await expect(api('/groups')).rejects.toMatchObject({ status: 503, code: 'SERVER_ERROR', networkFailure: false });
+    expect(getAuthState().required).toBe(false);
   });
 
   it('retains stable server details and distinguishes network failures', async () => {

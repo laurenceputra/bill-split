@@ -60,7 +60,7 @@ Keep production Access values in Wrangler encrypted secrets (`wrangler secret pu
 
 ## Data and API
 
-`migrations/0001_initial.sql` is the schema migration currently checked in. Apply every migration in `migrations/` to each environment; seed data, when used locally, must remain local.
+All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. Seed data, when used locally, must remain local.
 
 Important endpoints include:
 
@@ -69,7 +69,7 @@ Important endpoints include:
 - `GET/POST /api/groups/:id/settlements`, `PUT/DELETE /api/settlements/:id`
 - balances (raw and deterministic simplified debts), activity, versioned JSON export, group JSON/CSV export
 
-Expense and settlement writes validate membership, supported two-decimal ISO currency, real calendar dates, safe integer values, participant uniqueness, and exact payer/split totals before using D1 `batch()` for atomic related writes. Supported currencies are USD, EUR, GBP, AUD, CAD, NZD, SGD, HKD, CHF, CNY, and INR; currencies with a different minor-unit exponent (for example JPY) are intentionally rejected. `client_operation_id` claims are scoped by mutation kind, authenticated user, and group and include a request hash. Updates and deletes require the loaded integer `version`, use conditional writes, and snapshot the previous state in `revisions`. Pairwise semantics are “from owes to”; debt simplification is deterministic. Every active expense and settlement currency is returned separately and is never netted or hidden by the group default.
+Expense and settlement writes validate membership, supported two-decimal ISO currency, real calendar dates, safe integer values, participant uniqueness, and exact payer/split totals before using D1 `batch()` for atomic related writes. D1 ledger-limit triggers are authoritative for races and return structured `BALANCE_OVERFLOW`/422 errors; checked application arithmetic remains in place for legacy or imported data. Supported currencies are USD, EUR, GBP, AUD, CAD, NZD, SGD, HKD, CHF, CNY, and INR; currencies with a different minor-unit exponent (for example JPY) are intentionally rejected. `client_operation_id` claims are scoped by mutation kind, authenticated user, and group and include a request hash. Updates and deletes require the loaded integer `version`, use conditional writes, and snapshot the previous state in `revisions`. Pairwise semantics are “from owes to”; debt simplification is deterministic. Every active expense and settlement currency is returned separately and is never netted or hidden by the group default.
 Conditional mutations guard the parent and child statements in one D1 batch and then verify the resulting version. This avoids silent stale overwrites even where a D1 batch does not expose a convenient affected-row count; a failed post-batch version check returns `CONFLICT`.
 
 The expense list supports bounded pagination and `q`, `person`, `category`, `from`, `to`, and `currency` filters. JSON responses use `{ error: { code, message } }` for structured failures.

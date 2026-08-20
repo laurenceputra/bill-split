@@ -8,8 +8,9 @@ class FakeDb {
   settlement: Record<string, unknown> | null = null;
   payers: Array<Record<string, unknown>> = [];
   splits: Array<Record<string, unknown>> = [];
+  overflow = false;
   prepare(sql: string) { return new FakeStatement(this, sql); }
-  async batch(statements: FakeStatement[]) { for (const statement of statements) statement.execute(); return []; }
+  async batch(statements: FakeStatement[]) { if (this.overflow) throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); for (const statement of statements) statement.execute(); return []; }
 }
 class FakeStatement {
   args: unknown[] = [];
@@ -42,8 +43,9 @@ class StaleMutationDb {
   expense = { id: 'expense-1', group_id: 'group-1', description: 'Lunch', amount_minor: 100, currency: 'USD', expense_date: '2025-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1 };
   settlement = { id: 'settlement-1', group_id: 'group-1', from_person_id: 'person-1', to_person_id: 'person-2', amount_minor: 100, currency: 'USD', settlement_date: '2025-01-01', created_at: '', updated_at: '', version: 1 };
   batches = 0;
+  failure: Error | undefined;
   prepare(sql: string) { return new StaleMutationStatement(this, sql); }
-  async batch(_statements: StaleMutationStatement[]) { this.batches += 1; throw new Error('UNIQUE constraint failed: revisions.entity_type, revisions.entity_id, revisions.revision'); }
+  async batch(_statements: StaleMutationStatement[]) { this.batches += 1; throw this.failure || new Error('UNIQUE constraint failed: revisions.entity_type, revisions.entity_id, revisions.revision'); }
 }
 class StaleMutationStatement {
   args: unknown[] = [];
@@ -119,6 +121,17 @@ describe('repository mutation safety', () => {
     const db = new StaleMutationDb();
     db.batch = async () => { throw new Error('UNIQUE constraint failed: payers.expense_id, payers.person_id'); };
     await expect(new Repository(db as never).updateExpense('expense-1', 'user-1', { ...input('Lunch'), client_operation_id: undefined, version: 1 })).rejects.toThrow('payers.expense_id');
+  });
+
+  it('maps the authoritative D1 ledger trigger to a stable overflow error', async () => {
+    const expenseDb = new FakeDb(); expenseDb.overflow = true;
+    await expect(new Repository(expenseDb as never).createExpense('group-1', 'user-1', input('Overflow'))).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const settlementDb = new FakeDb(); settlementDb.overflow = true;
+    await expect(new Repository(settlementDb as never).createSettlement('group-1', 'user-1', { from_person_id: '00000000-0000-0000-0000-000000000001', to_person_id: '00000000-0000-0000-0000-000000000002', amount_minor: 100, currency: 'USD', date: '2025-01-01', client_operation_id: 'overflow-settlement' })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const expenseUpdateDb = new StaleMutationDb(); expenseUpdateDb.failure = new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW');
+    await expect(new Repository(expenseUpdateDb as never).updateExpense('expense-1', 'user-1', { ...input('Updated'), client_operation_id: undefined, version: 1 })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const settlementUpdateDb = new StaleMutationDb(); settlementUpdateDb.failure = new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW');
+    await expect(new Repository(settlementUpdateDb as never).updateSettlement('settlement-1', 'user-1', settlementInput)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
   });
 });
 

@@ -43,6 +43,22 @@ describe('durable expense outbox', () => {
     expect((await readOutboxItem('no-cached-send'))?.status).toBe('pending');
   });
 
+  it('keeps an online connection failure pending and retryable', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('connection reset'); }));
+    await queue('online-network-failure');
+    await flushOutbox();
+    expect(await readOutboxItem('online-network-failure')).toMatchObject({ status: 'pending' });
+    expect((await readOutboxItem('online-network-failure'))?.status).not.toBe('failed');
+  });
+
+  it('keeps an HTML 503 response pending instead of requiring auth', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/api/me') ? response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }) : new Response('<html>temporarily unavailable</html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
+    await queue('html-server-error');
+    await flushOutbox();
+    expect(await readOutboxItem('html-server-error')).toMatchObject({ status: 'pending', deliveryUncertain: true, lastError: { status: 503, code: 'SERVER_ERROR' } });
+  });
+
   it.each(['network', 'server', 408, 429])('keeps %s failures pending', async (kind) => {
       const status = typeof kind === 'number' ? kind : kind === 'server' ? 503 : 500;
       vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); if (kind === 'network') throw new TypeError('offline'); return response({}, status); }));

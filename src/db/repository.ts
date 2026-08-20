@@ -1,16 +1,18 @@
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { Expense, Group, GroupMember, Settlement } from '../shared/types';
+import { checkedMinor } from '../shared/money';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR', message: string) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW', message: string) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
+const minor = (value: unknown) => checkedMinor(value);
 const currency = (value: unknown) => text(value) as Expense['currency'];
 const stableJson = (value: unknown): string => JSON.stringify(value, (_key, nested) => nested && typeof nested === 'object' && !Array.isArray(nested) ? Object.fromEntries(Object.entries(nested as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) : nested);
 
@@ -127,12 +129,12 @@ export class Repository {
       const payers = payerRows.get(text(row.id)) ?? [];
       const splits = splitRows.get(text(row.id)) ?? [];
       return {
-      id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: number(row.amount_minor), currency: currency(row.currency),
+      id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
       date: text(row.expense_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
       createdBy: text(row.created_by), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1,
       clientOperationId: row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })(),
-      payers: payers.map((p) => ({ personId: text(p.person_id), amountMinor: number(p.amount_minor) })),
-      splits: splits.map((s) => ({ personId: text(s.person_id), amountMinor: number(s.amount_minor), metadata: s.metadata_json ? JSON.parse(text(s.metadata_json)) as Record<string, unknown> : undefined })),
+      payers: payers.map((p) => ({ personId: text(p.person_id), amountMinor: minor(p.amount_minor) })),
+      splits: splits.map((s) => ({ personId: text(s.person_id), amountMinor: minor(s.amount_minor), metadata: s.metadata_json ? JSON.parse(text(s.metadata_json)) as Record<string, unknown> : undefined })),
       };
     });
   }
@@ -172,10 +174,13 @@ export class Repository {
   private static isRevisionUnique(error: unknown) {
     return Repository.isUnique(error) && error instanceof Error && /revisions\.(entity_type|entity_id|revision)/i.test(error.message);
   }
+  private static isBalanceOverflow(error: unknown) { return error instanceof Error && /BALANCE_OVERFLOW|ledger total/i.test(error.message); }
+  private static balanceOverflow() { return new RepositoryError('BALANCE_OVERFLOW', 'The group ledger total exceeds the safe integer range'); }
   private async conditionalBatch(statements: ReturnType<D1Database['prepare']>[]) {
     try {
       await this.db.batch(statements);
     } catch (error) {
+      if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
       // A concurrent mutation can collide on the revision number. Only that
       // known unique constraint is a stale-write signal; child/table errors
       // must retain their original meaning and still roll the batch back.
@@ -187,7 +192,7 @@ export class Repository {
   async createExpense(groupId: string, userId: string, input: ExpenseInput) {
     const scopedOperation = input.client_operation_id ? `${groupId}:${input.client_operation_id}` : undefined;
     const hash = stableJson(input);
-    const operation = input.client_operation_id ? await this.operation('expense.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: false };
+    const operation = input.client_operation_id ? await this.operation('expense.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
     if (!operation.claim) { const existing = await this.expense(operation.id); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
     const id = operation.id, t = now();
     const statements = [
@@ -197,6 +202,7 @@ export class Repository {
       ...input.splits.map((s) => this.db.prepare('INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) VALUES(?,?,?,?)').bind(id, s.person_id, s.amount_minor, s.metadata ? JSON.stringify(s.metadata) : null)),
     ];
     try { await this.db.batch(statements); } catch (error) {
+      if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
       if (!input.client_operation_id || !Repository.isUnique(error)) throw error;
       const existing = await this.existingClaim('expense.create', userId, groupId, input.client_operation_id);
       if (!existing) throw error;
@@ -235,11 +241,11 @@ export class Repository {
     return true;
   }
 
-  private mapSettlement(row: Row): Settlement { return { id: text(row.id), groupId: text(row.group_id), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id), amountMinor: number(row.amount_minor), currency: currency(row.currency), date: text(row.settlement_date), note: row.note == null ? null : text(row.note), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1 }; }
+  private mapSettlement(row: Row): Settlement { return { id: text(row.id), groupId: text(row.group_id), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id), amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.settlement_date), note: row.note == null ? null : text(row.note), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1 }; }
   async settlements(groupId: string) { return (await this.db.prepare('SELECT * FROM settlements WHERE group_id=? AND deleted_at IS NULL ORDER BY settlement_date DESC,created_at DESC').bind(groupId).all<Row>()).results.map((row) => this.mapSettlement(row)); }
   async settlement(id: string) { const row = await this.db.prepare('SELECT * FROM settlements WHERE id=? AND deleted_at IS NULL').bind(id).first<Row>(); return row ? this.mapSettlement(row) : null; }
   async createSettlement(groupId: string, userId: string, input: SettlementInput) {
-    const hash = stableJson(input), operation = input.client_operation_id ? await this.operation('settlement.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: false };
+    const hash = stableJson(input), operation = input.client_operation_id ? await this.operation('settlement.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
     if (!operation.claim) { const existing = await this.settlement(operation.id); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
     const id = operation.id, t = now();
     const statements = [
@@ -247,6 +253,7 @@ export class Repository {
       this.db.prepare('INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)').bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null),
     ];
     try { await this.db.batch(statements); } catch (error) {
+      if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
       if (!input.client_operation_id || !Repository.isUnique(error)) throw error;
       const existing = await this.existingClaim('settlement.create', userId, groupId, input.client_operation_id);
       if (!existing) throw error; if (text(existing.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');

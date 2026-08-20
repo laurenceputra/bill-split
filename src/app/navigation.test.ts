@@ -15,4 +15,8 @@ describe('getNavigationContext', () => {
   it('keeps add and activity safe on the home path', () => {
     expect(getNavigationContext('/')).toEqual({ groupsPath: '/', morePath: '/settings' });
   });
+
+  it('retains group context on canonical expense detail routes', () => {
+    expect(getNavigationContext('/groups/group-123/expenses/expense-1').groupId).toBe('group-123');
+  });
 });

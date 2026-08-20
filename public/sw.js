@@ -9,15 +9,33 @@ const sameOriginFinal = (response, expectedPath) => response.ok && !response.red
 const htmlType = (response) => response.headers.get('content-type')?.toLowerCase().includes('text/html');
 const assetType = (path, response) => { const type = response.headers.get('content-type')?.toLowerCase() || ''; if (path.endsWith('.js')) return type.includes('javascript') || type.includes('ecmascript'); if (path.endsWith('.css')) return type.includes('text/css'); if (path.endsWith('.svg')) return type.includes('svg'); if (path.endsWith('.png')) return type.includes('png'); if (path.endsWith('.webp')) return type.includes('webp'); return type.includes('font'); };
 const extractAssets = (html) => [...html.matchAll(/(?:src|href)=["']([^"']+)["']/gi)].map((match) => match[1]).map((value) => { try { return new URL(value, self.location.origin); } catch { return undefined; } }).filter((url) => url && url.origin === self.location.origin && assetPattern.test(url.pathname)).map((url) => url.pathname).filter((path, index, all) => all.indexOf(path) === index);
-const validShellHtml = (response, html) => sameOriginFinal(response, '/index.html') && htmlType(response) && cacheControlAllowsStorage(response) && /id=["']root["']/.test(html) && extractAssets(html).length > 0;
+const validShellHtml = (response, html, requestedPath = '/index.html') => {
+  try {
+    const url = new URL(response.url);
+    return response.ok && !response.redirected && url.origin === self.location.origin && !isAccessPath(url.pathname) && [requestedPath, '/', '/index.html'].includes(url.pathname) && htmlType(response) && cacheControlAllowsStorage(response) && /id=["']root["']/.test(html) && extractAssets(html).length > 0;
+  } catch { return false; }
+};
 const trimAssets = async (cache) => { const requests = await cache.keys(); const removable = requests.filter((request) => !SHELL_FILES.includes(new URL(request.url).pathname) && new URL(request.url).pathname !== '/'); if (removable.length > MAX_ASSETS) await Promise.all(removable.slice(0, removable.length - MAX_ASSETS).map((request) => cache.delete(request))); };
 
-async function installCompleteShell() {
-  const cache = await caches.open(CACHE);
-  const indexResponse = await fetch(new Request('/index.html', { cache: 'no-store' }));
-  const html = await indexResponse.clone().text();
-  if (!validShellHtml(indexResponse, html)) throw new Error('The current app shell is not safe to cache.');
+const replaceShell = async (cache, response) => {
+  const previousIndex = await cache.match('/index.html');
+  const previousRoot = await cache.match('/');
+  try {
+    await Promise.all([cache.put('/index.html', response.clone()), cache.put('/', response.clone())]);
+  } catch (error) {
+    await Promise.all([
+      previousIndex ? cache.put('/index.html', previousIndex.clone()) : cache.delete('/index.html'),
+      previousRoot ? cache.put('/', previousRoot.clone()) : cache.delete('/'),
+    ]);
+    throw error;
+  }
+};
+
+async function refreshCompleteShell(navigationResponse, requestedPath) {
+  const html = await navigationResponse.clone().text();
+  if (!validShellHtml(navigationResponse, html, requestedPath)) throw new Error('The current app shell is not safe to cache.');
   const assets = extractAssets(html);
+  const cache = await caches.open(CACHE);
   const staticResponses = await Promise.all(SHELL_FILES.slice(1).map(async (path) => ({ path, response: await fetch(new Request(path, { cache: 'no-store' })) })));
   for (const { path, response } of staticResponses) {
     const expectedType = path.endsWith('.webmanifest') ? response.headers.get('content-type')?.toLowerCase().includes('json') : path.endsWith('.svg') ? response.headers.get('content-type')?.toLowerCase().includes('svg') : response.headers.get('content-type')?.toLowerCase().includes('png');
@@ -25,11 +43,19 @@ async function installCompleteShell() {
   }
   const assetResponses = await Promise.all(assets.map(async (path) => ({ path, response: await fetch(new Request(path, { cache: 'no-store' })) })));
   for (const { path, response } of assetResponses) if (!sameOriginFinal(response, path) || !assetType(path, response) || !cacheControlAllowsStorage(response)) throw new Error(`Unsafe app asset: ${path}`);
-  await cache.put('/index.html', indexResponse.clone());
-  await cache.put('/', indexResponse.clone());
-  for (const { path, response } of staticResponses) await cache.put(path, response.clone());
-  for (const { path, response } of assetResponses) await cache.put(path, response.clone());
+
+  // Populate every current dependency before replacing either shell entry. If
+  // any fetch or validation fails, the old index/root pair remains untouched.
+  for (const { path, response } of [...staticResponses, ...assetResponses]) await cache.put(path, response.clone());
+  await replaceShell(cache, navigationResponse);
   await trimAssets(cache);
+}
+
+async function installCompleteShell() {
+  const indexResponse = await fetch(new Request('/index.html', { cache: 'no-store' }));
+  const html = await indexResponse.clone().text();
+  if (!validShellHtml(indexResponse, html)) throw new Error('The current app shell is not safe to cache.');
+  await refreshCompleteShell(indexResponse, '/index.html');
 }
 
 self.addEventListener('install', (event) => event.waitUntil(installCompleteShell().then(() => self.skipWaiting())));
@@ -41,10 +67,9 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || isAccessPath(url.pathname)) return;
   if (event.request.mode === 'navigate') {
-    event.respondWith(fetch(event.request).then(async (response) => {
-      if (url.pathname === '/index.html' && sameOriginFinal(response, '/index.html') && htmlType(response) && cacheControlAllowsStorage(response)) await (await caches.open(CACHE)).put('/index.html', response.clone());
-      return response;
-    }).catch(() => caches.match(event.request).then((response) => response || caches.match('/index.html') || caches.match('/'))));
+    const networkResponse = fetch(event.request);
+    event.waitUntil(networkResponse.then((response) => refreshCompleteShell(response, url.pathname)).catch(() => undefined));
+    event.respondWith(networkResponse.catch(() => caches.match(event.request).then((response) => response || caches.match('/index.html') || caches.match('/'))));
     return;
   }
   if (!isAllowedAsset(url)) return;

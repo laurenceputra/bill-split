@@ -1,5 +1,5 @@
 import type { Balances, Currency, GroupMember, PairwiseBalance, Split, SplitMethod } from '../shared/types';
-import { allocateByWeights, allocateEqual, allocatePercentage, parseMoney } from '../domain/money';
+import { allocateByWeights, allocateEqual, allocatePercentage, checkedSumMinor, parseMoney } from '../domain/money';
 
 export type AllocationState = Record<string, string>;
 export type PayerState = { personId: string; amount: string };
@@ -44,8 +44,8 @@ function safeAllocation(amountMinor: number, weights: number[]): boolean {
 
 function checkedAllocations(selected: string[], allocations: number[], amountMinor: number): Record<string, number> | undefined {
   if (allocations.length !== selected.length || allocations.some((value) => !Number.isSafeInteger(value) || value < 0)) return undefined;
-  const total = allocations.reduce((sum, value) => sum + value, 0);
-  if (!Number.isSafeInteger(total) || total !== amountMinor) return undefined;
+  const total = checkedSumMinor(allocations);
+  if (total !== amountMinor) return undefined;
   return Object.fromEntries(selected.map((id, index) => [id, allocations[index]]));
 }
 
@@ -77,17 +77,13 @@ export function previewAllocation(amountMinor: number, selected: string[], metho
     if (raw.some((value) => !value.trim())) return emptyPreview('Enter a value for every selected person.');
     if (method === 'exact') {
       const exact = raw.map((value) => parseMoney(value, currency));
-      const total = exact.reduce((sum, value) => {
-        const next = sum + value;
-        if (!Number.isSafeInteger(next)) throw new Error('Exact allocations exceed the safe amount range.');
-        return next;
-      }, 0);
+      const total = checkedSumMinor(exact);
       const checked = checkedAllocations(selected, exact, amountMinor);
       return { allocations: checked || {}, remainingMinor: amountMinor - total, remainingPercent: null, totalValue: total, error: checked ? undefined : 'Exact amounts must equal the expense total.' };
     }
     if (method === 'percentage') {
       const basisPoints = raw.map(percentageBasisPoints);
-      const totalBasisPoints = basisPoints.reduce((sum, value) => sum + value, 0);
+      const totalBasisPoints = checkedSumMinor(basisPoints);
       if (totalBasisPoints !== 10_000) return { allocations: {}, remainingMinor: null, remainingPercent: (10_000 - totalBasisPoints) / 100, totalValue: totalBasisPoints / 100, error: 'Percentages must total 100%.' };
       if (!safeAllocation(amountMinor, basisPoints)) return emptyPreview('These percentages are too large for a safe amount calculation.');
       const checked = checkedAllocations(selected, allocatePercentage(amountMinor, basisPoints), amountMinor);

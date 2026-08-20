@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
 import { currencyOptions, type ExpenseInput } from '../shared/schemas';
-import { formatMoney, parseMoney } from '../domain/money';
+import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
 import { ApiError, api, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, currentPayerSelection, normalizeSinglePayer, previewAllocation, settlementSuggestion, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
@@ -11,7 +11,7 @@ import { clearCachedData } from './idb';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
-const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.' : error instanceof Error ? error.message : 'Something went wrong';
+const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted">Loading…</p>; }
 function ErrorBox({ error }: { error: unknown }) { return <div className="error" role="alert">{errorText(error)}</div>; }
 function Empty({ children }: { children: ReactNode }) { return <div className="empty">{children}</div>; }
@@ -101,7 +101,7 @@ function GroupPage() {
     {!offlineView ? <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></div> : null}
     {Object.entries(balances).map(([currencyKey, balance]) => <section key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>)}
     <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => setAddingPerson((current) => !current)}>{addingPerson ? 'Cancel' : '+ Add'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson}><Field label="Name"><input required value={personName} onChange={(event) => setPersonName(event.target.value)} /></Field><Field label="Email (optional)"><input type="email" value={personEmail} onChange={(event) => setPersonEmail(event.target.value)} /></Field><Button type="submit">Add person</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small> · {member.email}</small> : null}</span>)}</div></section>
-    <section><h2>Recent expenses</h2>{expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} onRetry={() => { void retryOutboxItem(item.clientOperationId).catch(setError); }} onDiscard={() => { if (confirm('Discard this pending expense?')) void discardOutboxItem(item.clientOperationId).catch(setError); }} />)}{expenses.map((expense) => <Link className="row" to={`/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : <Empty>No expenses yet.</Empty>}</section>
+     <section><h2>Recent expenses</h2>{expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} onRetry={() => { void retryOutboxItem(item.clientOperationId).catch(setError); }} onDiscard={() => { if (confirm('Discard this pending expense?')) void discardOutboxItem(item.clientOperationId).catch(setError); }} />)}{expenses.map((expense) => <Link className="row" to={`/groups/${expense.groupId}/expenses/${expense.id}`} key={expense.id}><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></Link>)}</div> : <Empty>No expenses yet.</Empty>}</section>
     {settlements.length ? <section><h2>Recent settlements</h2><div className="list">{settlements.map((settlement) => <div className="row" key={settlement.id}><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></div>)}</div></section> : null}
   </Layout>;
 }
@@ -185,7 +185,7 @@ function ExpenseForm() {
       const cents = parseMoney(amount, currency);
       if (!selected.length) throw new Error('Select at least one participant.');
       const payers = payerRows.map((payer) => ({ person_id: payer.personId, amount_minor: parseMoney(payer.amount || '0', currency) }));
-      if (payers.reduce((sum, payer) => sum + payer.amount_minor, 0) !== cents) throw new Error('Payer amounts must equal the expense total.');
+       if (checkedSumMinor(payers.map((payer) => payer.amount_minor)) !== cents) throw new Error('Payer amounts must equal the expense total.');
       if (preview.error || preview.remainingMinor !== 0) throw new Error(preview.error || 'Split amounts must equal the expense total.');
       const input = { description: description.trim(), amount_minor: cents, currency, date, category: category.trim() || null, notes: notes || null, payers, splits: allocationSplits(selected, method, preview, allocationValues, existingSplitMetadata), version, client_operation_id: expenseId ? undefined : operation };
        if (expenseId) await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) });
@@ -218,14 +218,14 @@ function ExpenseForm() {
 
 function ExpenseDetail() {
   const online = useOnlineStatus();
-  const { expenseId = '' } = useParams();
+  const { id, expenseId = '' } = useParams();
   const nav = useNavigate();
   const [expense, setExpense] = useState<Expense>();
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [history, setHistory] = useState<Array<{ id: string; revision: number; createdAt: string }>>([]);
   const [error, setError] = useState<unknown>();
   const [offlineData, setOfflineData] = useState(false);
-  useEffect(() => { let active = true; getExpenseDetails(expenseId).then(async (result) => { const groupResult = await getGroup(result.expense.groupId); if (!active) return; setOfflineData(Boolean(groupResult.offline)); setExpense(result.expense); setHistory(result.history); setMembers(groupResult.members); }).catch((cause) => { if (cause instanceof ApiError && cause.networkFailure) setOfflineData(true); setError(cause); }); return () => { active = false; }; }, [expenseId]);
+  useEffect(() => { let active = true; getExpenseDetails(expenseId).then(async (result) => { const groupResult = await getGroup(result.expense.groupId); if (!active) return; if (!id) nav(`/groups/${result.expense.groupId}/expenses/${expenseId}`, { replace: true }); setOfflineData(Boolean(groupResult.offline)); setExpense(result.expense); setHistory(result.history); setMembers(groupResult.members); }).catch((cause) => { if (cause instanceof ApiError && cause.networkFailure) setOfflineData(true); setError(cause); }); return () => { active = false; }; }, [expenseId, id, nav]);
   if (error) return <Layout><ErrorBox error={error} /></Layout>;
   if (!expense) return <Layout><Loading /></Layout>;
   const remove = async () => { if (!confirm('Delete this expense?')) return; try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); nav(`/groups/${expense.groupId}`); } catch (cause) { setError(cause); } };
@@ -305,5 +305,5 @@ function Settings() {
 }
 
 export function App() {
-  return <Routes><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }

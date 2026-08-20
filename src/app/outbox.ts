@@ -75,7 +75,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
   } catch (error) {
     const apiError = timedOut ? new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true }) : error instanceof ApiError ? error : new ApiError('Unable to sync expense.', { networkFailure: true, code: 'NETWORK_ERROR' });
     const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
-    const status: OutboxStatus = apiError.status === 401 || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
+    const status: OutboxStatus = apiError.status === 401 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
     const updated = await updateOutboxIfOwned(claimed.clientOperationId, owner, { status, deliveryUncertain: ambiguous, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: errorDetails(apiError) });
     if (updated) updateSnapshot(updated); else await refreshOutbox();
     return status;
@@ -102,7 +102,7 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
       }
       await refreshOutbox();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
+      if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH')) {
         const identity = await readLastVerifiedIdentity();
         if (identity) await markAuthRequired(identity.userId, error);
       } else if (error instanceof ApiError && isRetryable(error)) {
