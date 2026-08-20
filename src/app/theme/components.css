@@ -243,6 +243,18 @@
   gap: var(--space-4);
 }
 
+.section-title {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+}
+
+.section-title > h2 {
+  min-width: 0;
+  flex: 1 1 12rem;
+  overflow-wrap: anywhere;
+}
+
 .reading-width {
   width: min(100%, var(--reading-max));
 }
@@ -272,9 +284,15 @@
 }
 
 .home-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, max-content));
+  justify-content: end;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
+}
+
+.home-actions > button {
+  width: 100%;
 }
 
 .activity-description {
@@ -392,6 +410,61 @@ section,
   padding: var(--space-4) var(--space-5);
   color: var(--color-ink);
   text-decoration: none;
+}
+
+.card__name {
+  flex: 1 1 10rem;
+}
+
+.card__balances {
+  display: grid;
+  min-width: 0;
+  max-width: min(58%, 15rem);
+  flex: 0 1 15rem;
+  gap: var(--space-1);
+  justify-items: end;
+  text-align: right;
+}
+
+.card__balance {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.card__balance-label,
+.card__balance-money {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.card__balance-label {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 750;
+}
+
+.card__balance-money {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.card__balance-money .money {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.card__balance--settled,
+.card__balance--unavailable {
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 750;
 }
 
 .card:hover {
@@ -1251,12 +1324,9 @@ form > button {
 
   .home-actions {
     width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: stretch;
   }
-
-  .home-actions > button {
-    flex: 1 1 10rem;
-  }
-
 }
 
 @media (min-width: 48rem) {

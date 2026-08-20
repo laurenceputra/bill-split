@@ -47,6 +47,13 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.install-action\s*\{[\s\S]*min-height: 2\.75rem;/);
   });
 
+  it('uses explicit action gaps and a predictable single-column mobile layout', () => {
+    expect(css).toMatch(/\.home-actions\s*\{[\s\S]*display: grid;[\s\S]*column-gap: var\(--space-3\);[\s\S]*row-gap: var\(--space-2\);/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
+    expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
+    expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
+  });
+
   it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
     expect(768).toBeGreaterThanOrEqual(48 * 16);
     expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);

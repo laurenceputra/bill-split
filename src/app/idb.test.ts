@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clearCachedData, DB_NAME, DB_VERSION, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -71,6 +71,19 @@ describe('user-scoped IndexedDB', () => {
     await saveExpenseDetails({ userId: 'user-a', expenseId: 'e-1', expense: { id: 'e-1', groupId: 'group-a', description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: timestamp, updatedAt: timestamp, version: 1, payers: [], splits: [] }, history: [], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].label).toBe('Lunch');
     expect((await readExpenseDetails('user-a', 'e-1'))?.expense.id).toBe('e-1');
+  });
+
+  it('persists home balance summaries without requiring an IndexedDB migration', async () => {
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '', balanceSummaries: [{ currency: 'EUR', netMinor: -250 }] }], cachedAt: 'summary-time' });
+    expect((await readGroups('user-a'))?.groups[0].balanceSummaries).toEqual([{ currency: 'EUR', netMinor: -250 }]);
+  });
+
+  it('expires persisted home groups without discarding offline summaries', async () => {
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '', balanceSummaries: [{ currency: 'USD', netMinor: 500 }] }], cachedAt: new Date().toISOString() });
+    await invalidateCachedGroups('user-a');
+    expect((await readGroups('user-a'))?.groups[0].balanceSummaries).toEqual([{ currency: 'USD', netMinor: 500 }]);
+    expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
+    expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
   it('normalizes legacy activity rows without entity fields during cache hydration', async () => {

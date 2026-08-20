@@ -21,6 +21,15 @@ class TriggerOverflowDb {
   prepare(sql: string) { return new TriggerOverflowStatement(sql); }
   async batch(_statements: unknown[]) { throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); }
 }
+class SummaryGroupsStatement extends Statement {
+  async all<T>() {
+    if (this.sql.includes('FROM groups g JOIN')) return { results: [{ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: '[{"currency":"USD","net_minor":500},{"currency":"EUR","net_minor":-250}]' }] as T[] };
+    return { results: [] as T[] };
+  }
+}
+class SummaryGroupsDb {
+  prepare(sql: string) { return new SummaryGroupsStatement(sql); }
+}
 const env = (extra: Record<string, unknown> = {}) => ({ ENVIRONMENT: 'development', DB: { prepare: (sql: string) => new Statement(sql) }, ASSETS: { fetch: () => new Response('asset') }, ...extra }) as any;
 const sameOriginHeaders = { Origin: 'https://split.example', 'Sec-Fetch-Site': 'same-origin' };
 
@@ -86,6 +95,11 @@ describe('worker boundary', () => {
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(response.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
+  });
+  it('returns authenticated user home balance summaries in the groups response', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new SummaryGroupsDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as any).groups[0].balanceSummaries).toEqual([{ currency: 'USD', netMinor: 500 }, { currency: 'EUR', netMinor: -250 }]);
   });
   it('preserves a valid request correlation ID', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com', 'X-Request-ID': 'test-request-1' } }), env(), {} as ExecutionContext);

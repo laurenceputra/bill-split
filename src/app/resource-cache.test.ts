@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
 
 afterEach(() => { resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
@@ -227,5 +227,16 @@ describe('resource cache', () => {
     expect(calls).toBe(1);
     expect(getResourceSnapshot<{ version: number }>(key, 'user-a').data?.version).toBe(2);
     expect(getResourceSnapshot(key, 'user-a').userId).toBe('user-a');
+  });
+
+  it('invalidates home summaries with expense and settlement mutations', async () => {
+    setResourceIdentity('user-a');
+    const keys = [resourceKeys.groups('user-a'), resourceKeys.expenses('user-a', 'group-1'), resourceKeys.settlements('user-a', 'group-1')];
+    [resourceKeys.groups('user-a'), resourceKeys.expenses('user-a', 'group-1'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.expenseChanged('group-1', 'expense-1', 'user-a');
+    expect(keys.every((key) => getResourceSnapshot(key, 'user-a').stale)).toBe(true);
+    [resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.settlementChanged('group-1', 'user-a');
+    expect([resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].every((key) => getResourceSnapshot(key, 'user-a').stale)).toBe(true);
   });
 });

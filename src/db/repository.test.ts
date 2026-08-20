@@ -170,6 +170,19 @@ class RevisionActivityStatement {
   }
 }
 
+class GroupSummaryDb {
+  sql = '';
+  args: unknown[] = [];
+  prepare(sql: string) { this.sql = sql; return this; }
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: JSON.stringify([{ currency: 'USD', net_minor: 500 }, { currency: 'EUR', net_minor: -250 }]) } as T;
+  }
+  async all<T>() {
+    return { results: [{ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: JSON.stringify([{ currency: 'USD', net_minor: 500 }, { currency: 'EUR', net_minor: -250 }]) }] as T[] };
+  }
+}
+
 describe('repository idempotency', () => {
   it('returns the original entity for a same-payload retry and rejects a mismatch', async () => {
     const repo = new Repository(new FakeDb() as never);
@@ -314,5 +327,47 @@ describe('repository activity mapping', () => {
     expect(db.sql).toContain("s.deleted_at IS NOT NULL AND s.version = r.revision + 1");
     expect(activity.map((item) => item.type)).toEqual(['expense_revision', 'expense_deleted']);
     expect(activity.map((item) => item.entityId)).toEqual(['expense-1', 'expense-1']);
+  });
+});
+
+describe('repository home balance summaries', () => {
+  it('aggregates the authenticated person, excludes deleted ledger rows, and applies top-two tie ordering in D1', async () => {
+    const db = new GroupSummaryDb();
+    const groups = await new Repository(db as never).groups('user-a');
+    expect(groups[0]).toMatchObject({ balanceSummaries: [{ currency: 'USD', netMinor: 500 }, { currency: 'EUR', netMinor: -250 }] });
+    expect(db.args).toEqual(['user-a']);
+    expect(db.sql).toContain('p.person_id');
+    expect(db.sql).toContain('s.person_id');
+    expect(db.sql).toContain('gm.user_id=?');
+    expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=e.group_id');
+    expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=s.group_id');
+    expect(db.sql).toContain('JOIN authorized_groups balance_member');
+    expect(db.sql).toContain('e.deleted_at IS NULL');
+    expect(db.sql).toContain('s.deleted_at IS NULL');
+    expect(db.sql).toContain('ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC)');
+    expect(db.sql).toContain('WHERE balance_rank <= 2');
+  });
+
+  it('scopes a single-group authorization and ledger query to the requested group', async () => {
+    const db = new GroupSummaryDb();
+    const group = await new Repository(db as never).group('group-1', 'user-a');
+    expect(group?.id).toBe('group-1');
+    expect(db.args).toEqual(['user-a', 'group-1', 'group-1']);
+    expect(db.sql).toContain('AND gm.group_id=?');
+    expect(db.sql).toContain('FROM groups g JOIN authorized_groups gm');
+    expect(db.sql).toContain('WHERE g.id=? AND g.deleted_at IS NULL');
+  });
+
+  it('omits malformed summaries instead of failing group authorization', async () => {
+    const db = new GroupSummaryDb();
+    db.first = async <T>() => ({ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', balance_summaries: '{bad json' } as T);
+    const group = await new Repository(db as never).group('group-1', 'user-a');
+    expect(group).toMatchObject({ id: 'group-1' });
+    expect(group?.balanceSummaries).toBeUndefined();
+  });
+
+  it('preserves database errors from the scoped group query', async () => {
+    const db = { prepare: () => { throw new Error('scoped query failed'); } };
+    await expect(new Repository(db as never).groups('user-a')).rejects.toThrow('scoped query failed');
   });
 });

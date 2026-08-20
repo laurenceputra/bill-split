@@ -1,6 +1,6 @@
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, Expense, Group, GroupMember, Settlement } from '../shared/types';
+import type { Activity, Expense, Group, GroupBalanceSummary, GroupMember, Settlement } from '../shared/types';
 import { checkedMinor } from '../shared/money';
 
 const now = () => new Date().toISOString();
@@ -18,20 +18,72 @@ const stableJson = (value: unknown): string => JSON.stringify(value, (_key, nest
 
 function mapGroup(row: Row | null): Group | null {
   if (!row) return null;
+  const balanceSummaries = row.balance_summaries == null ? undefined : (() => {
+    try {
+      const parsed = typeof row.balance_summaries === 'string' ? JSON.parse(row.balance_summaries) : row.balance_summaries;
+      if (!Array.isArray(parsed)) return undefined;
+      return parsed.map((item) => {
+        const value = item as { currency?: unknown; net_minor?: unknown };
+        return { currency: currency(value.currency), netMinor: minor(value.net_minor) } as GroupBalanceSummary;
+      });
+    } catch {
+      return undefined;
+    }
+  })();
   return {
     id: text(row.id), name: text(row.name), currency: currency(row.currency), createdAt: text(row.created_at), updatedAt: text(row.updated_at),
     ...(row.role ? { role: text(row.role) as Group['role'] } : {}),
     ...(row.member_count == null ? {} : { memberCount: number(row.member_count) }),
     ...(row.counterpart_name == null ? {} : { counterpartName: text(row.counterpart_name) }),
+    ...(balanceSummaries === undefined ? {} : { balanceSummaries }),
   };
 }
 
-const groupSelect = `SELECT g.*,gm.role,
+const groupSelect = (requestedGroup = false) => `WITH authorized_groups AS (
+    SELECT DISTINCT gm.group_id,gm.person_id,gm.role
+    FROM group_members gm JOIN groups authorized_group ON authorized_group.id=gm.group_id
+    WHERE gm.user_id=? AND gm.deleted_at IS NULL AND authorized_group.deleted_at IS NULL${requestedGroup ? ' AND gm.group_id=?' : ''}
+  ), scoped_groups AS (
+    SELECT DISTINCT group_id FROM authorized_groups
+  ), ledger AS (
+    SELECT e.group_id,e.currency,p.person_id,p.amount_minor AS net_minor
+    FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN payers p ON p.expense_id=e.id
+    WHERE e.deleted_at IS NULL
+    UNION ALL
+    SELECT e.group_id,e.currency,s.person_id,-s.amount_minor AS net_minor
+    FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN splits s ON s.expense_id=e.id
+    WHERE e.deleted_at IS NULL
+    UNION ALL
+    SELECT s.group_id,s.currency,s.from_person_id AS person_id,s.amount_minor AS net_minor
+    FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
+    WHERE s.deleted_at IS NULL
+    UNION ALL
+    SELECT s.group_id,s.currency,s.to_person_id AS person_id,-s.amount_minor AS net_minor
+    FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
+    WHERE s.deleted_at IS NULL
+  ), group_balances AS (
+    SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor
+    FROM ledger JOIN authorized_groups balance_member ON balance_member.group_id=ledger.group_id
+      AND balance_member.person_id=ledger.person_id
+    GROUP BY ledger.group_id,ledger.currency
+    HAVING SUM(ledger.net_minor) <> 0
+  ), ranked_balances AS (
+    SELECT group_id,currency,net_minor,
+      ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC) AS balance_rank
+    FROM group_balances
+  ), balance_json AS (
+    SELECT group_id,json_group_array(json_object('currency',currency,'net_minor',net_minor)) AS balance_summaries
+    FROM (SELECT group_id,currency,net_minor FROM ranked_balances WHERE balance_rank <= 2 ORDER BY group_id,balance_rank)
+    GROUP BY group_id
+  )
+  SELECT g.*,gm.role,
   (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
     WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
-    ORDER BY p.name LIMIT 1) AS counterpart_name
-  FROM groups g JOIN group_members gm ON gm.group_id=g.id`;
+     ORDER BY p.name LIMIT 1) AS counterpart_name,
+  COALESCE(balance_json.balance_summaries, '[]') AS balance_summaries
+  FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id
+  LEFT JOIN balance_json ON balance_json.group_id=g.id`;
 
 export class Repository {
   constructor(private readonly db: D1Database) {}
@@ -76,11 +128,11 @@ export class Repository {
   async me(email: string) { return this.user(email); }
 
   async groups(userId: string): Promise<Group[]> {
-    const rows = (await this.db.prepare(`${groupSelect} WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL ORDER BY g.created_at DESC`).bind(userId).all<Row>()).results;
+    const rows = (await this.db.prepare(`${groupSelect()} WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC`).bind(userId).all<Row>()).results;
     return rows.map((row) => mapGroup(row)!).filter(Boolean);
   }
   async group(groupId: string, userId: string): Promise<Group | null> {
-    return mapGroup(await this.db.prepare(`${groupSelect} WHERE g.id=? AND gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL`).bind(groupId, userId).first<Row>());
+    return mapGroup(await this.db.prepare(`${groupSelect(true)} WHERE g.id=? AND g.deleted_at IS NULL`).bind(userId, groupId, groupId).first<Row>());
   }
   async membership(groupId: string, userId: string): Promise<'owner' | 'member' | null> {
     const row = await this.db.prepare('SELECT role FROM group_members WHERE group_id=? AND user_id=? AND deleted_at IS NULL').bind(groupId, userId).first<Row>();

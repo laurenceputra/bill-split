@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
+import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
 import { getOutboxSnapshot, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
@@ -32,6 +32,12 @@ describe('durable expense outbox', () => {
     await flushOutbox();
     expect(seen[1].url).toContain('/groups/group-a/expenses');
     expect(await listOutbox('user-a')).toEqual([]);
+  });
+
+  it('expires the persisted home summary when an expense enters the outbox', async () => {
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: new Date().toISOString() });
+    await queue('invalidate-on-enqueue');
+    expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
   it('never falls back to cached identity when deciding who may receive a POST', async () => {

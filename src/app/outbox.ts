@@ -54,6 +54,7 @@ export async function enqueueExpense(input: { userId: string; groupId: string; p
   const item: ExpenseOutboxItem = { ...input, createdAt: now, updatedAt: now, status: 'pending', attempts: 0, deliveryUncertain: false };
   await saveOutboxItem(item);
   snapshot = [...snapshot.filter((existing) => existing.clientOperationId !== item.clientOperationId), item].sort((a, b) => a.createdAt.localeCompare(b.createdAt)); notify();
+  await invalidateForMutation.expenseChanged(item.groupId, undefined, item.userId);
   return item;
 }
 
@@ -74,7 +75,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
       return undefined;
     }
     await api(`/groups/${claimed.groupId}/expenses`, { method: 'POST', body: JSON.stringify(claimed.payload), signal: controller.signal, headers: { 'X-BillSplit-Expected-User-Id': claimed.userId } });
-    invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
+    await invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
     const removed = await removeOutboxIfOwned(claimed.clientOperationId, owner);
     if (removed) { snapshot = snapshot.filter((current) => current.clientOperationId !== claimed.clientOperationId); notify(); }
     else await refreshOutbox();
@@ -84,7 +85,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
     const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
     const status: OutboxStatus = apiError.status === 401 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
     const updated = await updateOutboxIfOwned(claimed.clientOperationId, owner, { status, deliveryUncertain: ambiguous, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: errorDetails(apiError) });
-    if (ambiguous) invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
+    if (ambiguous) await invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
     if (updated) updateSnapshot(updated); else await refreshOutbox();
     return status;
   } finally { clearTimeout(timer); }

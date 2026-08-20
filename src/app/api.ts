@@ -1,6 +1,6 @@
 import type { Activity, Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
-import { readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroups, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
-import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, seedResource, setResourceIdentity } from './resource-cache';
+import { readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroupsIfGenerationMatches, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, seedResource, setResourceIdentity } from './resource-cache';
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -61,7 +61,7 @@ export class ApiError extends Error {
 const devEmail = () => typeof localStorage === 'undefined' ? 'dev@example.com' : localStorage.getItem('dev-email') || 'dev@example.com';
 const isNetwork = (error: unknown): error is ApiError => error instanceof ApiError && error.networkFailure;
 const cacheRead = async <T>(read: () => Promise<T | undefined>) => { try { return await read(); } catch { return undefined; } };
-const cacheWrite = async (write: () => Promise<unknown>) => { try { await write(); } catch { /* Private cache is an enhancement, not a request failure. */ } };
+const cacheWrite = async <T>(write: () => Promise<T>) => { try { return await write(); } catch { /* Private cache is an enhancement, not a request failure. */ return undefined; } };
 
 export async function apiWithMeta<T>(path: string, init?: RequestInit): Promise<ApiResponse<T>> {
   const headers = new Headers(init?.headers);
@@ -166,11 +166,13 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
 
 export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ groups: Group[] }>> {
   const identity = await requireIdentityForCache(signal);
+  const requestGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
     const result = await apiWithMeta<{ groups: Group[] }>('/groups', { signal });
     assertResponseIdentity(result.userId, identity);
-    if (result.userId) { const responseUserId = result.userId; await cacheWrite(() => saveGroups({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() })); }
-    return result.data;
+    let persisted = true;
+    if (result.userId) { const responseUserId = result.userId; persisted = (await cacheWrite(() => saveGroupsIfGenerationMatches({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() }, requestGeneration))) !== false; }
+    return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroups(identity.user.id));
@@ -199,7 +201,7 @@ export async function getExpenses(id: string, signal?: AbortSignal): Promise<Cac
   try {
     const result = await apiWithMeta<{ expenses: Expense[] }>(`/groups/${id}/expenses`, { signal });
     assertResponseIdentity(result.userId, identity);
-    if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses })); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses)); if (reconciled && typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); }
+    if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses })); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
     return result.data;
   } catch (error) {
     if (!isNetwork(error) || !identity) throw error;

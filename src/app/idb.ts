@@ -2,7 +2,7 @@ import type { Activity, Balances, Expense, Group, GroupMember, Settlement } from
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -37,6 +37,11 @@ export interface ResourceFreshness {
   resource: string;
   resourceKey: string;
   fetchedAt: string;
+}
+
+export interface MutationGeneration {
+  userId: string;
+  generation: number;
 }
 
 export interface CachedActivity {
@@ -125,6 +130,7 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('groups')) database.createObjectStore('groups', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('groupSnapshots')) database.createObjectStore('groupSnapshots', { keyPath: ['userId', 'groupId'] });
       if (!database.objectStoreNames.contains('resourceFreshness')) database.createObjectStore('resourceFreshness', { keyPath: ['userId', 'resourceKey'] });
+      if (!database.objectStoreNames.contains('mutationGenerations')) database.createObjectStore('mutationGenerations', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('activity')) database.createObjectStore('activity', { keyPath: ['userId', 'groupId'] });
       if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('expenseOutbox')) {
@@ -173,6 +179,52 @@ export const saveGroups = async (value: CachedGroups) => {
   });
 };
 export const readGroups = (userId: string) => transaction<CachedGroups>('groups', 'readonly', (tx) => tx.objectStore('groups').get(userId));
+
+export const readMutationGeneration = async (userId: string) => (await transaction<MutationGeneration>('mutationGenerations', 'readonly', (tx) => tx.objectStore('mutationGenerations').get(userId)))?.generation ?? 0;
+
+/** Save a groups response only if no mutation was committed since the request started. */
+export async function saveGroupsIfGenerationMatches(value: CachedGroups, generation: number) {
+  const db = await open();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(['groups', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
+    const generations = tx.objectStore('mutationGenerations');
+    const current = generations.get(value.userId);
+    let saved = false;
+    current.onsuccess = () => {
+      if (((current.result as MutationGeneration | undefined)?.generation ?? 0) !== generation) return;
+      tx.objectStore('groups').put(value);
+      tx.objectStore('resourceFreshness').put({ userId: value.userId, resource: 'groups', resourceKey: 'groups', fetchedAt: value.cachedAt });
+      saved = true;
+    };
+    tx.oncomplete = () => { db.close(); resolve(saved); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
+
+/** Keep the home snapshot available offline, but make it immediately stale online. */
+export async function invalidateCachedGroups(userId: string) {
+  const staleAt = new Date(0).toISOString();
+  const db = await open();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(['groups', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
+    const generations = tx.objectStore('mutationGenerations');
+    const current = generations.get(userId);
+    current.onsuccess = () => {
+      const nextGeneration = ((current.result as MutationGeneration | undefined)?.generation ?? 0) + 1;
+      generations.put({ userId, generation: nextGeneration });
+      const groups = tx.objectStore('groups');
+      const cached = groups.get(userId);
+      cached.onsuccess = () => {
+        if (cached.result) groups.put({ ...(cached.result as CachedGroups), cachedAt: staleAt });
+      };
+      tx.objectStore('resourceFreshness').put({ userId, resource: 'groups', resourceKey: 'groups', fetchedAt: staleAt });
+    };
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
 
 export async function updateGroupSnapshot(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }) {
   const db = await open();

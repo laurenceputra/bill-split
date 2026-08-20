@@ -2,7 +2,8 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, api, clearAuthRequired, getActivity, getAuthState, getConnectionState, getExpenses, getGroups, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readGroups, saveGroups, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readGroups, readResourceFreshness, saveGroups, saveVerifiedIdentity } from './idb';
+import { invalidateForMutation } from './resource-cache';
 
 const json = (body: unknown, status = 200, userId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}) } });
 
@@ -101,6 +102,43 @@ describe('frontend API errors and cache fallback', () => {
     await expect(getGroups()).rejects.toMatchObject({ networkFailure: true });
   });
 
+  it('persists user-scoped home balance summaries and leaves legacy rows unavailable', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+      ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')
+      : json({ groups: [
+        { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '', balanceSummaries: [{ currency: 'USD', netMinor: 500 }] },
+        { id: 'legacy', name: 'Legacy', currency: 'EUR', createdAt: '', updatedAt: '' },
+      ] }, 200, 'user-a')));
+    const result = await getGroups();
+    expect(result.groups[0].balanceSummaries).toEqual([{ currency: 'USD', netMinor: 500 }]);
+    expect(result.groups[1].balanceSummaries).toBeUndefined();
+    expect((await readGroups('user-a'))?.groups[0].balanceSummaries).toEqual([{ currency: 'USD', netMinor: 500 }]);
+  });
+
+  it('does not let an in-flight groups response undo a persisted mutation invalidation', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'old', name: 'Old', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: 'old' });
+    let resolveGroups!: (response: Response) => void;
+    let groupsStarted!: () => void;
+    const started = new Promise<void>((resolve) => { groupsStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a');
+      groupsStarted();
+      return new Promise<Response>((resolve) => { resolveGroups = resolve; });
+    }));
+
+    const request = getGroups();
+    await started;
+    await invalidateForMutation.expenseChanged('group-a', undefined, 'user-a');
+    resolveGroups(json({ groups: [{ id: 'stale', name: 'Stale', currency: 'USD', createdAt: '', updatedAt: '' }] }, 200, 'user-a'));
+
+    await expect(request).resolves.toMatchObject({ groups: [{ id: 'stale' }], stale: true });
+    expect((await readGroups('user-a'))?.groups[0].id).toBe('old');
+    expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
+    expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
+  });
+
   it('does not label a resource with cached identity after a transient /me failure', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     await saveGroups({ userId: 'user-a', groups: [{ id: 'old', name: 'Old', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: 'old' });
@@ -120,10 +158,13 @@ describe('frontend API errors and cache fallback', () => {
 
   it('reconciles a server expense carrying the normalized operation id', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: new Date().toISOString() });
     await enqueueExpense({ userId: 'user-a', groupId: 'group-a', clientOperationId: 'op-1', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: 'op-1' }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' } });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me') ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a') : json({ expenses: [{ id: 'server', groupId: 'group-a', createdBy: 'user-a', clientOperationId: 'op-1' }] }, 200, 'user-a')));
     await getExpenses('group-a');
     expect(await listOutbox('user-a')).toEqual([]);
+    expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
+    expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
   it('does not hammer identity after an auth failure blocks the gate', async () => {

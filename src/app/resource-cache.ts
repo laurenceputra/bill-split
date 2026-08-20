@@ -1,4 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
+import { invalidateCachedGroups } from './idb';
 
 /** The shortest freshness window used by the application. */
 export const MIN_RESOURCE_FRESHNESS_MS = 30_000;
@@ -149,7 +150,7 @@ export function useResource<T>(key: ResourceKey, userId: string | undefined, loa
     }
     if (resource.hydrationPromise) return;
     const due = snapshot.fetchedAt !== undefined && !isResourceFresh(snapshot, resource.ttl);
-    if (snapshot.status !== 'auth-blocked' && (snapshot.status === 'idle' || (due || snapshot.stale) && !snapshot.revalidating && !snapshot.error && !snapshot.offline)) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
+    if (snapshot.status !== 'auth-blocked' && (snapshot.status === 'idle' || (due || snapshot.stale) && !snapshot.revalidating && !snapshot.error && (!snapshot.offline || online()))) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
   }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource.ttl]);
   return snapshot;
 }
@@ -252,7 +253,7 @@ function foregroundRefresh(identityCheck = false) {
     if (!identity || identity.snapshot.status !== 'ready' || identity.snapshot.error) return;
     for (const [key, resource] of entries) {
     if (key === 'identity' || resource.visible <= 0 || resource.snapshot.status === 'auth-blocked') continue;
-    if (resource.forcePending || (resource.snapshot.fetchedAt !== undefined && now() - resource.snapshot.fetchedAt >= resource.ttl) || (resource.snapshot.stale && !resource.snapshot.offline) || resource.snapshot.status === 'idle' || resource.snapshot.status === 'error') void revalidate(key, resource.snapshot.userId, resource.forcePending || { reason: 'focus' });
+    if (resource.forcePending || (resource.snapshot.fetchedAt !== undefined && now() - resource.snapshot.fetchedAt >= resource.ttl) || (resource.snapshot.stale && (!resource.snapshot.offline || online())) || resource.snapshot.status === 'idle' || resource.snapshot.status === 'error') void revalidate(key, resource.snapshot.userId, resource.forcePending || { reason: 'focus' });
     }
   };
   if (identityDue && identity?.visible) void revalidate('identity', 'identity', { reason: identityCheck ? 'identity-check' : 'focus' }).finally(refreshPrivate); else if (!identityDue) refreshPrivate();
@@ -300,11 +301,14 @@ export const resourceCache = Object.freeze({
   invalidateMany: invalidateResources,
   clear: clearResourceCache,
 });
+const invalidatePersistedGroups = async (userId: string) => {
+  try { await invalidateCachedGroups(userId); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
+};
 export const invalidateForMutation = {
-  groupCreated: (userId?: string) => userId && invalidateResource(resourceKeys.groups(userId), userId),
-  groupChanged: (groupId: string, userId?: string) => userId && invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId),
-  expenseChanged: (groupId: string, expenseId?: string, userId?: string) => userId && invalidateResources([resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId),
-  settlementChanged: (groupId: string, userId?: string) => userId && invalidateResources([resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId),
+  groupCreated: async (userId?: string) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedGroups(userId); },
+  groupChanged: async (groupId: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedGroups(userId); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedGroups(userId); },
+  settlementChanged: async (groupId: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId); await invalidatePersistedGroups(userId); },
 };
 
 initializeForegroundCoordinator();
