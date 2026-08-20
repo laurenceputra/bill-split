@@ -115,4 +115,17 @@ describe('frontend API errors and cache fallback', () => {
     await getExpenses('group-a');
     expect(await listOutbox('user-a')).toEqual([]);
   });
+
+  it('does not hammer identity after an auth failure blocks the gate', async () => {
+    clearAuthRequired();
+    let meCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) { meCalls += 1; return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }
+      return json({ groups: [] });
+    }));
+    await expect(getGroups()).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    await expect(getGroups()).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    expect(meCalls).toBe(1);
+    clearAuthRequired();
+  });
 });

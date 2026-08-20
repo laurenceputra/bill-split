@@ -1,5 +1,6 @@
 import type { Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
-import { readGroupSnapshot, readGroups, readLastVerifiedIdentity, reconcileOutboxItems, saveGroups, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroups, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, seedResource, setResourceIdentity } from './resource-cache';
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -10,14 +11,17 @@ export type ConnectionState = { reconnectRequired: boolean };
 
 let authState: AuthState = { required: false };
 let connectionState: ConnectionState = { reconnectRequired: false };
+let verifiedIdentity: CurrentUser | undefined;
 const authListeners = new Set<() => void>();
 const connectionListeners = new Set<() => void>();
 export const getAuthState = () => authState;
 export const subscribeAuthState = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
 export const getConnectionState = () => connectionState;
 export const subscribeConnectionState = (listener: () => void) => { connectionListeners.add(listener); return () => connectionListeners.delete(listener); };
-export const clearAuthRequired = () => { if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
+export const clearAuthRequired = () => { allowIdentityVerification(); if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
+  verifiedIdentity = undefined;
+  blockResourceIdentity(new ApiError('Authentication is required before private data can be refreshed.', { code }));
   authState = { required: true, code };
   authListeners.forEach((listener) => listener());
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-auth-required', { detail: { code } }));
@@ -66,7 +70,8 @@ export async function apiWithMeta<T>(path: string, init?: RequestInit): Promise<
   if (import.meta.env.DEV) headers.set('X-Dev-Email', devEmail());
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...init, headers }); }
-  catch {
+  catch (error) {
+    if (init?.signal?.aborted) throw error;
     const reconnectRequired = typeof navigator !== 'undefined' && navigator.onLine !== false;
     if (reconnectRequired) signalReconnectRequired();
     throw new ApiError(reconnectRequired ? 'Connection failed while online. Reconnect or check your session.' : 'Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired });
@@ -112,40 +117,58 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> { ret
 
 async function identityForCache() { return cacheRead(readLastVerifiedIdentity); }
 type CacheIdentity = { user: CurrentUser; authoritative: boolean };
-async function requireIdentityForCache(): Promise<CacheIdentity | undefined> {
+async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdentity | undefined> {
+  const identitySnapshot = getResourceSnapshot('identity');
+  if (identitySnapshot.status === 'auth-blocked') throw new ApiError('Your secure session needs attention before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
+  if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && verifiedIdentity) return { user: verifiedIdentity, authoritative: true };
   const cached = await identityForCache();
   // An online request must re-check the server identity before attaching data
   // to a user-scoped cache. Offline, the last verified profile is intentional.
   if (typeof navigator !== 'undefined' && navigator.onLine === false && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false };
   try {
-    const current = await getMe();
+    const current = await getMe({ signal });
     return { user: { id: current.id, email: current.email, personId: current.personId }, authoritative: current.authoritative === true };
-  } catch {
-    return cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false } : undefined;
+  } catch (error) {
+    if (!isNetwork(error)) throw error;
+    const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false;
+    return trustedOffline && cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false } : undefined;
   }
 }
 const offline = <T extends object>(value: T): CachedResult<T> => ({ ...value, offline: true, stale: true });
+const assertResponseIdentity = (responseUserId: string | undefined, identity: CacheIdentity | undefined) => {
+  if (responseUserId && identity && responseUserId !== identity.user.id) {
+    signalAuthRequired('IDENTITY_MISMATCH');
+    throw new ApiError('The verified identity changed; cached data was not used.', { status: 401, code: 'IDENTITY_MISMATCH' });
+  }
+};
 
-export async function getMe(options: { networkOnly?: boolean } = {}): Promise<CachedResult<CurrentUser>> {
+export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal } = {}): Promise<CachedResult<CurrentUser>> {
   try {
-    const result = await apiWithMeta<CurrentUser>('/me');
+    const result = await apiWithMeta<CurrentUser>('/me', { signal: options.signal });
     const user = result.data;
+    if (result.userId && result.userId !== user.id) { signalAuthRequired('IDENTITY_MISMATCH'); throw new ApiError('The verified identity changed; sign in again before retrying.', { status: 401, code: 'IDENTITY_MISMATCH' }); }
     await cacheWrite(() => saveVerifiedIdentity({ userId: user.id, email: user.email, personId: user.personId, verifiedAt: new Date().toISOString() }));
+    verifiedIdentity = user;
+    setResourceIdentity(user.id);
+    seedResource('identity', '', user, Date.now());
     clearAuthRequired();
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-authenticated', { detail: { userId: user.id } }));
     return { ...user, authoritative: true };
   } catch (error) {
+    if (options.signal?.aborted) throw error;
     if (!isNetwork(error)) throw error;
     const cached = await identityForCache();
-    if (!options.networkOnly && cached) return { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
+    const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false;
+    if (!options.networkOnly && trustedOffline && cached) return { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
     throw error;
   }
 }
 
-export async function getGroups(): Promise<CachedResult<{ groups: Group[] }>> {
-  const identity = await requireIdentityForCache();
+export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ groups: Group[] }>> {
+  const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ groups: Group[] }>('/groups');
+    const result = await apiWithMeta<{ groups: Group[] }>('/groups', { signal });
+    assertResponseIdentity(result.userId, identity);
     if (result.userId) { const responseUserId = result.userId; await cacheWrite(() => saveGroups({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() })); }
     return result.data;
   } catch (error) {
@@ -156,10 +179,11 @@ export async function getGroups(): Promise<CachedResult<{ groups: Group[] }>> {
   }
 }
 
-export async function getGroup(id: string): Promise<CachedResult<{ group: Group; members: GroupMember[] }>> {
-  const identity = await requireIdentityForCache();
+export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[] }>> {
+  const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ group: Group; members: GroupMember[] }>(`/groups/${id}`);
+    const result = await apiWithMeta<{ group: Group; members: GroupMember[] }>(`/groups/${id}`, { signal });
+    assertResponseIdentity(result.userId, identity);
     if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { group: result.data.group, members: result.data.members }));
     return result.data;
   } catch (error) {
@@ -170,10 +194,11 @@ export async function getGroup(id: string): Promise<CachedResult<{ group: Group;
   }
 }
 
-export async function getExpenses(id: string): Promise<CachedResult<{ expenses: Expense[] }>> {
-  const identity = await requireIdentityForCache();
+export async function getExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<{ expenses: Expense[] }>> {
+  const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ expenses: Expense[] }>(`/groups/${id}/expenses`);
+    const result = await apiWithMeta<{ expenses: Expense[] }>(`/groups/${id}/expenses`, { signal });
+    assertResponseIdentity(result.userId, identity);
     if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses })); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses)); if (reconciled && typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); }
     return result.data;
   } catch (error) {
@@ -184,10 +209,11 @@ export async function getExpenses(id: string): Promise<CachedResult<{ expenses: 
   }
 }
 
-export async function getBalances(id: string): Promise<CachedResult<{ balances: Record<string, Balances> }>> {
-  const identity = await requireIdentityForCache();
+export async function getBalances(id: string, signal?: AbortSignal): Promise<CachedResult<{ balances: Record<string, Balances> }>> {
+  const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ balances: Record<string, Balances> }>(`/groups/${id}/balances`);
+    const result = await apiWithMeta<{ balances: Record<string, Balances> }>(`/groups/${id}/balances`, { signal });
+    assertResponseIdentity(result.userId, identity);
     if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { balances: result.data.balances }));
     return result.data;
   } catch (error) {
@@ -198,10 +224,11 @@ export async function getBalances(id: string): Promise<CachedResult<{ balances: 
   }
 }
 
-export async function getSettlements(id: string): Promise<CachedResult<{ settlements: Settlement[] }>> {
-  const identity = await requireIdentityForCache();
+export async function getSettlements(id: string, signal?: AbortSignal): Promise<CachedResult<{ settlements: Settlement[] }>> {
+  const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ settlements: Settlement[] }>(`/groups/${id}/settlements`);
+    const result = await apiWithMeta<{ settlements: Settlement[] }>(`/groups/${id}/settlements`, { signal });
+    assertResponseIdentity(result.userId, identity);
     if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { settlements: result.data.settlements }));
     return result.data;
   } catch (error) {
@@ -212,5 +239,70 @@ export async function getSettlements(id: string): Promise<CachedResult<{ settlem
   }
 }
 
-export const getExpense = (id: string) => api<{ expense: Expense }>(`/expenses/${id}`).then((result) => result.expense);
-export const getExpenseDetails = (id: string) => api<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/expenses/${id}`);
+export const getExpense = (id: string) => getExpenseDetails(id).then((result) => result.expense);
+export async function getExpenseDetails(id: string, signal?: AbortSignal): Promise<CachedResult<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>> {
+  const identity = await requireIdentityForCache(signal);
+  try {
+    const result = await apiWithMeta<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/expenses/${id}`, { signal });
+    assertResponseIdentity(result.userId, identity);
+    if (result.userId) await cacheWrite(() => saveExpenseDetails({ userId: result.userId!, expenseId: id, expense: result.data.expense, history: result.data.history, fetchedAt: new Date().toISOString() }));
+    return result.data;
+  } catch (error) {
+    if (!isNetwork(error) || !identity) throw error;
+    const cached = await cacheRead(() => readExpenseDetails(identity.user.id, id));
+    if (cached) return offline({ expense: cached.expense, history: cached.history });
+    throw error;
+  }
+}
+
+export async function getActivity(id: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>> {
+  const identity = await requireIdentityForCache(signal);
+  try {
+    const result = await apiWithMeta<{ activity: Array<{ type: string; id: string; label: string | null; createdAt: string }> }>(`/groups/${id}/activity`, { signal });
+    assertResponseIdentity(result.userId, identity);
+    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id, activity: result.data.activity, fetchedAt: new Date().toISOString() }));
+    return result.data;
+  } catch (error) {
+    if (!isNetwork(error) || !identity) throw error;
+    const cached = await cacheRead(() => readActivity(identity.user.id, id));
+    if (cached) return offline({ activity: cached.activity });
+    throw error;
+  }
+}
+
+export async function hydrateGroups(userId: string) {
+  const cached = await cacheRead(() => readGroups(userId));
+  return cached ? { data: { groups: cached.groups }, fetchedAt: cacheTimestamp(cached.cachedAt), offline: true } : undefined;
+}
+const cacheTimestamp = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
+export async function hydrateIdentity() {
+  if (typeof navigator !== 'undefined' && navigator.onLine !== false) return undefined;
+  const cached = await cacheRead(readLastVerifiedIdentity);
+  return cached ? { data: { id: cached.userId, email: cached.email, personId: cached.personId }, fetchedAt: cacheTimestamp(cached.verifiedAt), offline: true } : undefined;
+}
+export async function hydrateGroup(userId: string, id: string) {
+  const cached = await cacheRead(() => readGroupSnapshot(userId, id));
+  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
+}
+export async function hydrateExpenses(userId: string, id: string) {
+  const cached = await cacheRead(() => readGroupSnapshot(userId, id));
+  return cached?.expenses ? { data: { expenses: cached.expenses }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.expenses || cached.cachedAt), offline: true } : undefined;
+}
+export async function hydrateBalances(userId: string, id: string) {
+  const cached = await cacheRead(() => readGroupSnapshot(userId, id));
+  return cached?.balances ? { data: { balances: cached.balances }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.balances || cached.cachedAt), offline: true } : undefined;
+}
+export async function hydrateSettlements(userId: string, id: string) {
+  const cached = await cacheRead(() => readGroupSnapshot(userId, id));
+  return cached?.settlements ? { data: { settlements: cached.settlements }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.settlements || cached.cachedAt), offline: true } : undefined;
+}
+export async function hydrateActivity(userId: string, id: string) {
+  const cached = await cacheRead(() => readActivity(userId, id));
+  return cached ? { data: { activity: cached.activity }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
+}
+export async function hydrateExpenseDetails(userId: string, id: string) {
+  const cached = await cacheRead(() => readExpenseDetails(userId, id));
+  return cached ? { data: { expense: cached.expense, history: cached.history }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
+}
+
+if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => { verifiedIdentity = undefined; });

@@ -5,6 +5,7 @@ import {
   type ExpenseOutboxItem, type OutboxStatus,
 } from './idb';
 import type { ExpenseInput } from '../shared/schemas';
+import { invalidateForMutation } from './resource-cache';
 
 export type { ExpenseOutboxItem } from './idb';
 export const OUTBOX_LEASE_MS = 30_000;
@@ -60,6 +61,7 @@ const errorDetails = (error: ApiError) => ({ code: error.code, message: error.me
 const isRetryable = (error: ApiError) => error.networkFailure || error.code === 'NETWORK_TIMEOUT' || error.status === 408 || error.status === 429 || (error.status !== undefined && error.status >= 500);
 
 async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return undefined;
   const claimed = await claimOutboxItem(item.clientOperationId, owner, Date.now(), OUTBOX_LEASE_MS);
   if (!claimed) return undefined;
   updateSnapshot(claimed);
@@ -67,7 +69,12 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      await updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined });
+      return undefined;
+    }
     await api(`/groups/${claimed.groupId}/expenses`, { method: 'POST', body: JSON.stringify(claimed.payload), signal: controller.signal, headers: { 'X-BillSplit-Expected-User-Id': claimed.userId } });
+    invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
     const removed = await removeOutboxIfOwned(claimed.clientOperationId, owner);
     if (removed) { snapshot = snapshot.filter((current) => current.clientOperationId !== claimed.clientOperationId); notify(); }
     else await refreshOutbox();
@@ -77,6 +84,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
     const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
     const status: OutboxStatus = apiError.status === 401 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
     const updated = await updateOutboxIfOwned(claimed.clientOperationId, owner, { status, deliveryUncertain: ambiguous, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: errorDetails(apiError) });
+    if (ambiguous) invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId);
     if (updated) updateSnapshot(updated); else await refreshOutbox();
     return status;
   } finally { clearTimeout(timer); }
@@ -89,13 +97,16 @@ async function markAuthRequired(userId: string, error: ApiError) {
 }
 
 export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (flushPromise) { flushAgain = true; return flushPromise; }
   cancelScheduledRetry();
   flushPromise = (async () => {
     try {
       const identity = await getMe({ networkOnly: true });
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       const items = (await listOutbox(identity.id)).filter((item) => item.status === 'pending' || item.status === 'syncing');
       for (const item of items) {
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') break;
         const result = await syncItem(item, timeoutMs);
         if (result === 'auth-required') break;
         if (result === 'pending') { scheduleRetry(item.attempts + 1); break; }
@@ -155,8 +166,9 @@ export async function handleAuthenticatedUser(userId: string) {
 
 if (typeof window !== 'undefined') {
   void initializeOutbox();
-  window.addEventListener('online', () => void flushOutbox());
-  window.addEventListener('focus', () => void flushOutbox());
+  window.addEventListener('online', () => { if (document.visibilityState === 'visible') void flushOutbox(); });
+  window.addEventListener('focus', () => { if (document.visibilityState === 'visible') void flushOutbox(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void flushOutbox(); });
   window.addEventListener('billsplit-outbox-changed', () => void refreshOutbox());
   window.addEventListener('billsplit-cache-cleared', () => void refreshOutbox());
   window.addEventListener('billsplit-authenticated', (event) => { const userId = (event as CustomEvent<{ userId?: string }>).detail?.userId; if (userId) void handleAuthenticatedUser(userId); });

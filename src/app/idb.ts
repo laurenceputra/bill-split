@@ -2,7 +2,7 @@ import type { Balances, Expense, Group, GroupMember, Settlement } from '../share
 import type { ExpenseInput } from '../shared/schemas';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -29,6 +29,29 @@ export interface GroupSnapshot {
   balances?: Record<string, Balances>;
   settlements?: Settlement[];
   cachedAt: string;
+  cachedAtByResource?: Partial<Record<'group' | 'members' | 'expenses' | 'balances' | 'settlements', string>>;
+}
+
+export interface ResourceFreshness {
+  userId: string;
+  resource: string;
+  resourceKey: string;
+  fetchedAt: string;
+}
+
+export interface CachedActivity {
+  userId: string;
+  groupId: string;
+  activity: Array<{ type: string; id: string; label: string | null; createdAt: string }>;
+  fetchedAt: string;
+}
+
+export interface CachedExpenseDetails {
+  userId: string;
+  expenseId: string;
+  expense: Expense;
+  history: Array<{ id: string; revision: number; createdAt: string }>;
+  fetchedAt: string;
 }
 
 export interface ExpenseOutboxItem {
@@ -67,6 +90,9 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('identities')) database.createObjectStore('identities', { keyPath: 'key' });
       if (!database.objectStoreNames.contains('groups')) database.createObjectStore('groups', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('groupSnapshots')) database.createObjectStore('groupSnapshots', { keyPath: ['userId', 'groupId'] });
+      if (!database.objectStoreNames.contains('resourceFreshness')) database.createObjectStore('resourceFreshness', { keyPath: ['userId', 'resourceKey'] });
+      if (!database.objectStoreNames.contains('activity')) database.createObjectStore('activity', { keyPath: ['userId', 'groupId'] });
+      if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('expenseOutbox')) {
         const store = database.createObjectStore('expenseOutbox', { keyPath: 'clientOperationId' });
         store.createIndex('userId', 'userId', { unique: false });
@@ -106,19 +132,27 @@ export async function readRecent<T>(): Promise<T | undefined> {
 export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>) => transaction('identities', 'readwrite', (tx) => tx.objectStore('identities').put({ ...value, key: 'last' }));
 export const readLastVerifiedIdentity = () => transaction<VerifiedIdentity>('identities', 'readonly', (tx) => tx.objectStore('identities').get('last'));
 
-export const saveGroups = (value: CachedGroups) => transaction('groups', 'readwrite', (tx) => tx.objectStore('groups').put(value));
+export const saveGroups = async (value: CachedGroups) => {
+  await transaction(['groups', 'resourceFreshness'], 'readwrite', (tx) => {
+    tx.objectStore('groups').put(value);
+    tx.objectStore('resourceFreshness').put({ userId: value.userId, resource: 'groups', resourceKey: 'groups', fetchedAt: value.cachedAt });
+  });
+};
 export const readGroups = (userId: string) => transaction<CachedGroups>('groups', 'readonly', (tx) => tx.objectStore('groups').get(userId));
 
 export async function updateGroupSnapshot(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }) {
   const db = await open();
   return new Promise<GroupSnapshot>((resolve, reject) => {
-    const tx = db.transaction('groupSnapshots', 'readwrite');
+    const tx = db.transaction(['groupSnapshots', 'resourceFreshness'], 'readwrite');
     const store = tx.objectStore('groupSnapshots');
     const request = store.get([userId, groupId]);
     let next: GroupSnapshot;
     request.onsuccess = () => {
-      next = { ...(request.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: patch.cachedAt || new Date().toISOString() };
+      const resources = (['group', 'members', 'expenses', 'balances', 'settlements'] as const).filter((resource) => patch[resource] !== undefined);
+      const fetchedAt = patch.cachedAt || new Date().toISOString();
+      next = { ...(request.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(request.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } };
       store.put(next);
+      for (const resource of resources) tx.objectStore('resourceFreshness').put({ userId, resource, resourceKey: `group:${groupId}:${resource}`, fetchedAt });
     };
     tx.oncomplete = () => { db.close(); resolve(next); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -128,10 +162,19 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
 
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
 
+export const saveResourceFreshness = (value: ResourceFreshness) => transaction('resourceFreshness', 'readwrite', (tx) => tx.objectStore('resourceFreshness').put(value));
+export const readResourceFreshness = (userId: string, resourceKey: string) => transaction<ResourceFreshness>('resourceFreshness', 'readonly', (tx) => tx.objectStore('resourceFreshness').get([userId, resourceKey]));
+
+export const saveActivity = (value: CachedActivity) => transaction('activity', 'readwrite', (tx) => tx.objectStore('activity').put(value));
+export const readActivity = (userId: string, groupId: string) => transaction<CachedActivity>('activity', 'readonly', (tx) => tx.objectStore('activity').get([userId, groupId]));
+
+export const saveExpenseDetails = (value: CachedExpenseDetails) => transaction('expenseDetails', 'readwrite', (tx) => tx.objectStore('expenseDetails').put(value));
+export const readExpenseDetails = (userId: string, expenseId: string) => transaction<CachedExpenseDetails>('expenseDetails', 'readonly', (tx) => tx.objectStore('expenseDetails').get([userId, expenseId]));
+
 /** Remove private cached data without touching the durable expense outbox. */
 export async function clearCachedData() {
-  await transaction(['recent', 'identities', 'groups', 'groupSnapshots'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'activity', 'expenseDetails'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'activity', 'expenseDetails']) tx.objectStore(storeName).clear();
   });
 }
 

@@ -69,7 +69,6 @@ export function TopBar() {
 }
 
 export function BottomNav() {
-  const online = useOnlineStatus();
   const location = useLocation();
   const navigate = useNavigate();
   const context = getNavigationContext(location.pathname);
@@ -80,9 +79,9 @@ export function BottomNav() {
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={isGroups ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
-    {context.activityPath && online ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title={online ? 'Open a group to view activity' : 'Activity requires a connection'}><Icon name="activity" /><span>Activity</span></button>}
+     {context.activityPath ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title="Open a group to view activity"><Icon name="activity" /><span>Activity</span></button>}
     <button className="nav-item nav-item--add" type="button" onClick={onAdd}><Icon name="add" /><span>Add</span></button>
-    {context.groupId && !online ? <button className="nav-item" type="button" disabled title="Settlements require a connection"><Icon name="more" /><span>Settle</span></button> : <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>{context.groupId ? 'Settle' : 'More'}</span></Link>}
+     {context.groupId ? <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>Settle</span></Link> : <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>More</span></Link>}
   </nav>;
 }
 
