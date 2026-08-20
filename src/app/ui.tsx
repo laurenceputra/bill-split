@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { getNavigationContext } from './navigation';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
@@ -47,8 +47,8 @@ export function Surface({ children, className = '' }: { children: ReactNode; cla
   return <div className={`surface ${className}`.trim()}>{children}</div>;
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="field"><span>{label}</span>{children}</label>;
+export function Field({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) {
+  return <label className={`field ${className}`.trim()}><span>{label}</span>{children}</label>;
 }
 
 export function Money({ amountMinor, currency, tone, size = 'normal' }: { amountMinor: number; currency: string; tone?: 'positive' | 'debt'; size?: 'normal' | 'large' }) {
@@ -57,4 +57,33 @@ export function Money({ amountMinor, currency, tone, size = 'normal' }: { amount
 
 export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' }) {
   return <span className={`status status--${tone}`}>{children}</span>;
+}
+
+export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    previousFocus.current = document.activeElement as HTMLElement | null;
+    const focusable = dialogRef.current?.querySelector<HTMLElement>('button, input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    focusable?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCloseRef.current();
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const items = [...dialogRef.current.querySelectorAll<HTMLElement>('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter((item) => !item.hasAttribute('disabled'));
+      if (!items.length) return;
+      const first = items[0]; const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => { document.removeEventListener('keydown', onKeyDown); previousFocus.current?.focus(); };
+  }, []);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="modal-sheet" role="dialog" aria-modal="true" aria-labelledby="modal-title" ref={dialogRef}>
+      <div className="modal-header"><h2 id="modal-title">{title}</h2><Button type="button" variant="secondary" onClick={onClose} aria-label="Close">Close</Button></div>
+      {children}
+    </div>
+  </div>;
 }
