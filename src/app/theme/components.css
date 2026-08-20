@@ -87,7 +87,6 @@
 }
 
 .network-indicator,
-.install-help,
 .install-action {
   font-size: var(--text-xs);
   font-weight: 800;
@@ -97,7 +96,27 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: var(--space-2);
+}
+
+.install-slot {
+  display: flex;
+  width: 4.5rem;
+  min-width: 4.5rem;
+  min-height: 2rem;
+  flex: 0 0 4.5rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.install-slot > .install-control {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.install-placeholder {
+  display: block;
+  width: 100%;
+  min-height: 2rem;
 }
 
 .network-indicator {
@@ -117,15 +136,30 @@
 }
 
 .install-action {
+  width: 4.5rem;
   min-height: 2rem;
   padding: var(--space-1) var(--space-2);
 }
 
-.install-help {
-  max-width: 12rem;
-  overflow-wrap: anywhere;
-  color: var(--color-ink-muted);
-  text-align: right;
+.install-status {
+  max-width: 34rem;
+  margin: var(--space-3) 0 0;
+}
+
+.install-instructions {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding-left: 1.5rem;
+  color: var(--color-ink);
+}
+
+.install-instructions strong {
+  color: var(--color-primary-strong);
+}
+
+.install-instructions li {
+  padding-left: var(--space-1);
 }
 
 .top-bar__inner {
@@ -1109,9 +1143,6 @@ form > button {
     width: min(10rem, 30vw);
   }
 
-  .install-help {
-    max-width: 8rem;
-  }
 }
 
 @media (min-width: 48rem) {

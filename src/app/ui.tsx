@@ -1,12 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { getNavigationContext } from './navigation';
-import { consumeInstallPrompt, getInstallState, initializeInstallUX, subscribeInstall } from './install';
+import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
-const SERVER_INSTALL_STATE = Object.freeze({ installed: true, canPrompt: false, showIosHelp: false });
+const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
 
 function Icon({ name }: { name: IconName }) {
   if (name === 'add') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
@@ -48,8 +48,29 @@ function useOutbox() {
 export function InstallAction({ showStatus = false }: { showStatus?: boolean } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
-  if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : null;
-  return <div className="install-control"><button className="install-action" type="button" onClick={async () => { if (install.canPrompt) await consumeInstallPrompt(); else setShowHelp((value) => !value); }}>Install BillSplit</button>{(install.showIosHelp || showHelp) ? <span className="install-help">{install.showIosHelp ? <>Share <span aria-hidden="true">→</span> Add to Home Screen</> : 'Follow your browser instructions'}</span> : null}</div>;
+  if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : <span className="install-placeholder" aria-hidden="true" />;
+  if (install.mode === 'prompting') {
+    return showStatus
+      ? <p className="muted install-status" role="status">Opening the browser install prompt…</p>
+      : <div className="install-control"><button className="install-action" type="button" disabled aria-busy="true">Install</button></div>;
+  }
+  if (!shouldShowTopbarInstall(install)) {
+    if (!showStatus) return <span className="install-placeholder" aria-hidden="true" />;
+    const message = install.mode === 'dismissed'
+      ? 'Install prompt dismissed. Use your browser menu whenever you want to install BillSplit.'
+      : install.mode === 'accepted'
+        ? 'Installation was accepted. If BillSplit is not on your Home Screen, use your browser menu to finish installing it.'
+      : install.mode === 'error'
+        ? 'Native install could not be opened. Use your browser menu to install BillSplit.'
+        : 'Native install cannot be triggered here. Use your browser menu to install BillSplit.';
+    return <p className="muted install-status" role="status">{message}</p>;
+  }
+
+  const ios = install.mode === 'ios-manual';
+  return <>
+    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void consumeInstallPrompt(); else setShowHelp(true); }}>Install</button></div>
+    {ios && showHelp ? <Modal title="Install BillSplit" onClose={() => setShowHelp(false)}><p className="muted">Add BillSplit to your Home Screen for a faster, app-like experience.</p><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
+  </>;
 }
 
 function AuthBanner() {
@@ -65,7 +86,7 @@ export function TopBar() {
   const online = useOnlineStatus();
   const outbox = useOutbox();
   const unsynced = outbox.length;
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><InstallAction />{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {
