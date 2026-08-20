@@ -38,8 +38,9 @@
   --space-6: 1.5rem;
   --space-8: 2rem;
   --space-10: 2.5rem;
-  --content-max: 60rem;
-  --nav-height: 4.25rem;
+  --content-max: 74rem;
+  --reading-max: 42rem;
+  --nav-height: 4.5rem;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);

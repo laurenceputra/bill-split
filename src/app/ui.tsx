@@ -1,4 +1,4 @@
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, subscribeInstall } from './install';
@@ -65,23 +65,30 @@ export function TopBar() {
   const online = useOnlineStatus();
   const outbox = useOutbox();
   const unsynced = outbox.length;
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><InstallAction />{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><InstallAction />{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+}
+
+function DesktopNav() {
+  const location = useLocation();
+  const context = getNavigationContext(location.pathname);
+  return <nav className="desktop-nav" aria-label="Primary navigation">
+    <Link className="desktop-nav__item" to={context.primaryPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}>Groups</Link>
+    {context.activityPath ? <Link className="desktop-nav__item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}>Activity</Link> : null}
+    <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>{context.addLabel}</span></Link>
+    {context.groupId ? <Link className="desktop-nav__item" to={context.morePath} aria-current={context.activeSection === 'settle' ? 'page' : undefined}>Settle</Link> : null}
+    <Link className="desktop-nav__item" to="/settings" aria-current={context.activeSection === 'settings' ? 'page' : undefined}>Settings</Link>
+  </nav>;
 }
 
 export function BottomNav() {
   const location = useLocation();
-  const navigate = useNavigate();
   const context = getNavigationContext(location.pathname);
-  const onAdd = () => navigate(context.addPath || '/?new=1');
-  const isGroups = location.pathname === '/';
-  const isActivity = Boolean(context.activityPath && location.pathname === context.activityPath);
-  const isMore = location.pathname === context.morePath;
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
-    <Link className="nav-item" to={context.groupsPath} aria-current={isGroups ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
-     {context.activityPath ? <Link className="nav-item" to={context.activityPath} aria-current={isActivity ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title="Open a group to view activity"><Icon name="activity" /><span>Activity</span></button>}
-    <button className="nav-item nav-item--add" type="button" onClick={onAdd}><Icon name="add" /><span>Add</span></button>
-     {context.groupId ? <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>Settle</span></Link> : <Link className="nav-item" to={context.morePath} aria-current={isMore ? 'page' : undefined}><Icon name="more" /><span>More</span></Link>}
+    <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
+    {context.activityPath ? <Link className="nav-item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title="Open a group to view activity"><Icon name="activity" /><span>Activity</span></button>}
+    <Link className="nav-item nav-item--add" to={context.addPath} aria-label={context.addLabel} aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
+    {context.groupId ? <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settle' ? 'page' : undefined}><Icon name="more" /><span>Settle</span></Link> : <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>}
   </nav>;
 }
 
