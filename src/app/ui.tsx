@@ -50,14 +50,14 @@ function useOutbox() {
 export function InstallAction({ showStatus = false }: { showStatus?: boolean } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
-  if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : <span className="install-placeholder" aria-hidden="true" />;
+  if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : null;
   if (install.mode === 'prompting') {
     return showStatus
       ? <p className="muted install-status" role="status">Opening the browser install prompt…</p>
       : <div className="install-control"><button className="install-action" type="button" disabled aria-busy="true">Install</button></div>;
   }
   if (!shouldShowTopbarInstall(install)) {
-    if (!showStatus) return <span className="install-placeholder" aria-hidden="true" />;
+    if (!showStatus) return null;
     const message = install.mode === 'dismissed'
       ? 'Install prompt dismissed. Use your browser menu whenever you want to install BillSplit.'
       : install.mode === 'accepted'

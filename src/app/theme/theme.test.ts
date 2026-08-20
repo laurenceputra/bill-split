@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
+const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
@@ -17,5 +18,40 @@ describe('responsive navigation layout contract', () => {
   it('reserves mobile navigation space and removes that reservation on desktop', () => {
     expect(css).toContain('padding: var(--space-6) max(var(--space-4), var(--safe-right)) calc(var(--space-4) + var(--nav-height) + var(--space-2) + var(--safe-bottom)) max(var(--space-4), var(--safe-left));');
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.app-main\s*\{[\s\S]*padding-bottom: var\(--space-10\);[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
+  });
+
+  it('removes the install reservation globally when InstallAction renders no child', () => {
+    const emptyRule = /\.install-slot:empty\s*\{\s*display: none;\s*\}/;
+    const baseRuleIndex = css.indexOf('.install-slot {');
+    const emptyRuleIndex = css.search(emptyRule);
+    const mobileRulesIndex = css.indexOf('@media (max-width: 30rem)');
+
+    expect(css).toMatch(emptyRule);
+    expect(baseRuleIndex).toBeGreaterThanOrEqual(0);
+    expect(emptyRuleIndex).toBeGreaterThan(baseRuleIndex);
+    expect(emptyRuleIndex).toBeGreaterThanOrEqual(0);
+    expect(emptyRuleIndex).toBeLessThan(mobileRulesIndex);
+    // :empty is more specific than the mobile .install-slot display: contents
+    // override, so an empty slot stays removed at every viewport.
+    expect(css).toMatch(/\.install-slot\s*\{[\s\S]*width: 4\.5rem;[\s\S]*min-width: 4\.5rem;[\s\S]*flex: 0 0 4\.5rem;/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
+  });
+
+  it('keeps the mobile contracts at 320, 390, and 430 pixels', () => {
+    expect([320, 390, 430].every((viewport) => viewport >= 320 && viewport <= 30 * 16)).toBe(true);
+    expect(baseCss).toContain('html {\n  min-width: 320px;');
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
+    expect(css).toContain('.install-slot > .install-control {\n    width: auto;\n  }');
+    expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;/);
+    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*align-self: stretch;/);
+    expect(css).toMatch(/\.install-action\s*\{[\s\S]*min-height: 2\.75rem;/);
+  });
+
+  it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
+    expect(768).toBeGreaterThanOrEqual(48 * 16);
+    expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);
+    expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
   });
 });

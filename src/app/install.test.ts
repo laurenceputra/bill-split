@@ -46,7 +46,7 @@ describe('install helpers', () => {
     expect(getInstallState().mode).toBe('manual-browser');
     expect(getInstallState().canPrompt).toBe(false);
     expect(shouldShowTopbarInstall(getInstallState())).toBe(false);
-    expect(topbarInstallSlot(getInstallState())).toBe('placeholder');
+    expect(topbarInstallSlot(getInstallState())).toBe('none');
   });
 
   it('keeps stable snapshots and only notifies for real transitions', async () => {
@@ -87,7 +87,7 @@ describe('install helpers', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(getInstallState().mode).toBe('accepted');
     expect(getInstallState().installed).toBe(false);
-    expect(topbarInstallSlot(getInstallState())).toBe('placeholder');
+    expect(topbarInstallSlot(getInstallState())).toBe('none');
     await expect(consumeInstallPrompt()).resolves.toBe(false);
     expect(prompt).toHaveBeenCalledTimes(1);
 

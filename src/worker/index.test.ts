@@ -107,6 +107,14 @@ describe('worker boundary', () => {
     expect(response.headers.get('X-Frame-Options')).toBe('DENY');
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
   });
+  it('revalidates the manifest and service-worker script through the asset binding', async () => {
+    const assets = { fetch: () => new Response('asset', { headers: { 'Cache-Control': 'public, max-age=31536000' } }) };
+    for (const path of ['/manifest.webmanifest', '/sw.js']) {
+      const response = await worker.fetch(new Request(`https://split.example${path}`), env({ ASSETS: assets }), {} as ExecutionContext);
+      expect(response.headers.get('Cache-Control')).toBe('no-cache');
+      expect(response.headers.get('Pragma')).toBe('no-cache');
+    }
+  });
   it('rejects an outbox identity guard mismatch before the mutation route writes', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/expenses', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'X-BillSplit-Expected-User-Id': 'different-user', 'Content-Type': 'application/json' }, body: '{}' }), env(), {} as ExecutionContext);
     expect(response.status).toBe(401);

@@ -12,6 +12,7 @@ const jsonError = (c: any, status: number, code: string, message: string) => c.j
 const getRepo = (c: any) => c.get('repo') as Repository;
 export const MAX_API_BODY_BYTES = 64 * 1024;
 const CONTENT_SECURITY_POLICY = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'";
+const REVALIDATED_ASSETS = new Set(['/manifest.webmanifest', '/sw.js']);
 const requestIdFor = (request: Request) => {
   const supplied = request.headers.get('X-Request-ID');
   return supplied && /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : crypto.randomUUID();
@@ -171,5 +172,9 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
   const response = await env.ASSETS.fetch(request);
   const headers = new Headers(response.headers);
   setSecurityHeaders(headers, requestId, false);
+  if (REVALIDATED_ASSETS.has(url.pathname)) {
+    headers.set('Cache-Control', 'no-cache');
+    headers.set('Pragma', 'no-cache');
+  }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 } };

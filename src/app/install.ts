@@ -58,7 +58,7 @@ const updateSnapshot = () => {
 
 export const getInstallState = (): InstallState => snapshot;
 export const shouldShowTopbarInstall = (state: InstallState) => state.mode === 'native-prompt-available' || state.mode === 'ios-manual' || state.mode === 'prompting';
-export const topbarInstallSlot = (state: InstallState): 'cta' | 'placeholder' => shouldShowTopbarInstall(state) ? 'cta' : 'placeholder';
+export const topbarInstallSlot = (state: InstallState): 'cta' | 'none' => shouldShowTopbarInstall(state) ? 'cta' : 'none';
 
 export function initializeInstallUX() {
   if (typeof window === 'undefined') return () => undefined;
