@@ -41,6 +41,17 @@ INSERT INTO group_members (group_id, person_id, user_id, joined_at, role) VALUES
   ('00000000-0000-4000-8000-000000003003', '00000000-0000-4000-8000-000000002012', NULL, '2025-08-03T00:00:00.000Z', 'member'),
   ('00000000-0000-4000-8000-000000003003', '00000000-0000-4000-8000-000000002013', NULL, '2025-08-03T00:00:00.000Z', 'member');
 
+INSERT INTO scheduled_expenses (id, group_id, description, amount_minor, currency, start_date, end_date, frequency, interval_count, weekdays_json, timezone, status, blocked_reason, next_occurrence_date, created_by, created_at, updated_at, version, client_operation_id) VALUES
+  ('00000000-0000-4000-8000-000000007001', '00000000-0000-4000-8000-000000003002', 'Monthly apartment rent', 12000, 'USD', '2025-08-01', NULL, 'monthly', 1, '[]', 'America/New_York', 'active', NULL, '2025-09-01', '00000000-0000-4000-8000-000000001001', '2025-08-01T00:00:00.000Z', '2025-08-01T00:00:00.000Z', 1, NULL);
+
+INSERT INTO scheduled_payers (scheduled_expense_id, person_id, amount_minor) VALUES
+  ('00000000-0000-4000-8000-000000007001', '00000000-0000-4000-8000-000000002001', 12000);
+
+INSERT INTO scheduled_splits (scheduled_expense_id, person_id, amount_minor, metadata_json) VALUES
+  ('00000000-0000-4000-8000-000000007001', '00000000-0000-4000-8000-000000002001', 4000, '{"method":"equal"}'),
+  ('00000000-0000-4000-8000-000000007001', '00000000-0000-4000-8000-000000002003', 4000, '{"method":"equal"}'),
+  ('00000000-0000-4000-8000-000000007001', '00000000-0000-4000-8000-000000002004', 4000, '{"method":"equal"}');
+
 INSERT INTO expenses (id, group_id, description, amount_minor, currency, expense_date, category, notes, created_by, created_at, updated_at, client_operation_id, version) VALUES
   ('00000000-0000-4000-8000-000000004001', '00000000-0000-4000-8000-000000003002', 'Dinner by the canal (edited)', 8400, 'USD', '2025-08-10', 'Food', 'The original dinner description was edited to exercise the history view.', '00000000-0000-4000-8000-000000001001', '2025-08-10T19:00:00.000Z', '2025-08-10T19:30:00.000Z', NULL, 2),
   ('00000000-0000-4000-8000-000000004002', '00000000-0000-4000-8000-000000003002', 'Hotel near the station', 12345, 'EUR', '2025-08-11', 'Lodging', 'A second currency keeps balances and detail rows representative.', '00000000-0000-4000-8000-000000001001', '2025-08-11T20:00:00.000Z', '2025-08-11T20:00:00.000Z', NULL, 1),

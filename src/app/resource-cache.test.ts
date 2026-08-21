@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
 
-afterEach(() => { resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
+afterEach(() => { setResourceAuthLifecycleReady(true); resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
 describe('resource cache', () => {
   it('distinguishes cold loading, no-data errors, and cached data', () => {
@@ -129,6 +129,18 @@ describe('resource cache', () => {
     expect(calls).toBe(1);
   });
 
+  it('blocks focus revalidation until the auth lifecycle is confirmed', async () => {
+    const key = `test-auth-gated-focus-${crypto.randomUUID()}`;
+    let calls = 0;
+    configureResource(key, 'user-a', async () => { calls += 1; return 'server'; });
+    setResourceAuthLifecycleReady(false);
+    await revalidate(key, 'user-a', { reason: 'focus' });
+    expect(calls).toBe(0);
+    setResourceAuthLifecycleReady(true);
+    await revalidate(key, 'user-a', { reason: 'focus' });
+    expect(calls).toBe(1);
+  });
+
   it('hydrates an offline identity and waits for visibility before a cold request', async () => {
     vi.stubGlobal('navigator', { onLine: false });
     setResourceIdentity('offline-user');
@@ -238,5 +250,19 @@ describe('resource cache', () => {
     [resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].forEach((key) => seedResource(key, 'user-a', { cached: true }));
     await invalidateForMutation.settlementChanged('group-1', 'user-a');
     expect([resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].every((key) => getResourceSnapshot(key, 'user-a').stale)).toBe(true);
+  });
+
+  it('invalidates only schedule resources for schedule mutations', async () => {
+    setResourceIdentity('user-a');
+    const scheduleKey = resourceKeys.scheduledExpenses('user-a', 'group-1');
+    const detailKey = resourceKeys.scheduledExpense('user-a', 'schedule-1');
+    const balanceKey = resourceKeys.balances('user-a', 'group-1');
+    seedResource(scheduleKey, 'user-a', { scheduledExpenses: [] });
+    seedResource(detailKey, 'user-a', { scheduledExpense: { version: 1 } });
+    seedResource(balanceKey, 'user-a', { unchanged: true });
+    await invalidateForMutation.scheduledExpenseChanged('group-1', 'user-a', 'schedule-1');
+    expect(getResourceSnapshot(scheduleKey, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(detailKey, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(balanceKey, 'user-a').stale).toBe(false);
   });
 });

@@ -80,6 +80,32 @@ class OverflowStatement extends Statement {
   }
 }
 
+const scheduledRow = { id: '00000000-0000-0000-0000-000000000010', group_id: '00000000-0000-0000-0000-000000000009', description: 'Rent', amount_minor: 1000, currency: 'USD', start_date: '2026-01-01', end_date: null, frequency: 'monthly', interval_count: 1, weekdays_json: '[]', timezone: 'UTC', status: 'active', blocked_reason: null, next_occurrence_date: '2026-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1, client_operation_id: null };
+class ScheduledRouteDb {
+  batches: unknown[][] = [];
+  prepare(sql: string) { return new ScheduledRouteStatement(this, sql); }
+  async batch(statements: unknown[]) { this.batches.push(statements); return []; }
+}
+class ScheduledRouteStatement extends Statement {
+  constructor(private readonly db: ScheduledRouteDb, sql: string) { super(sql); }
+  async first<T>() {
+    if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
+    if (this.sql.includes('FROM people WHERE user_id')) return { id: 'person-1', name: 'Dev' } as T;
+    if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-0000-0000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner' } as T;
+    if (this.sql.includes('FROM groups WHERE')) return { id: '00000000-0000-0000-0000-000000000009' } as T;
+    if (this.sql.includes('FROM scheduled_occurrences')) return null;
+    if (this.sql.includes('FROM scheduled_expenses')) return scheduledRow as T;
+    return null;
+  }
+  async all<T>() {
+    if (this.sql.includes('FROM people p JOIN group_members')) return { results: [{ person_id: '00000000-0000-0000-0000-000000000001', name: 'Dev', email: null, joined_at: '', role: 'owner' }] as T[] };
+    if (this.sql.includes('FROM group_members')) return { results: [{ group_id: '00000000-0000-0000-0000-000000000009', person_id: '00000000-0000-0000-0000-000000000001' }] as T[] };
+    if (this.sql.includes('FROM scheduled_expenses')) return { results: [scheduledRow] as T[] };
+    return { results: [] as T[] };
+  }
+  async run() { return { meta: { changes: 1 } }; }
+}
+
 describe('worker boundary', () => {
   it('sanitizes bootstrap return paths', async () => {
     const { sanitizeReturnTo } = await import('./index');
@@ -242,5 +268,21 @@ describe('worker boundary', () => {
     const settlementResponse = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/settlements', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ from_person_id: '00000000-0000-4000-8000-000000000003', to_person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100, currency: 'USD', date: '2025-01-01' }) }), env({ DB: database }), {} as ExecutionContext);
     expect(settlementResponse.status).toBe(422);
     expect(await settlementResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+  });
+
+  it('creates and lists scheduled expenses through authenticated group routes', async () => {
+    const database = new ScheduledRouteDb();
+    const body = { description: 'Rent', amount_minor: 1000, currency: 'USD', start_date: '2026-01-01', frequency: 'monthly', interval: 1, weekdays: [], timezone: 'UTC', payers: [{ person_id: '00000000-0000-0000-0000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-0000-0000-000000000001', amount_minor: 1000 }] };
+    const create = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/scheduled-expenses', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), env({ DB: database }), {} as ExecutionContext);
+    expect(create.status).toBe(201);
+    const list = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/scheduled-expenses', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: database }), {} as ExecutionContext);
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({ scheduledExpenses: [{ frequency: 'monthly', timezone: 'UTC' }] });
+  });
+
+  it('runs the bounded scheduled handler on the unified Worker export', async () => {
+     const database = new ScheduledRouteDb();
+     await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: database }), {} as ExecutionContext);
+     expect(database.batches.some((batch) => batch.some((statement: any) => String(statement.sql ?? '').includes('INSERT INTO expenses')))).toBe(true);
   });
 });

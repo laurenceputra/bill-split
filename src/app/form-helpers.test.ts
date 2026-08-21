@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint } from './form-helpers';
 import type { Balances, GroupMember } from '../shared/types';
 
 const member = (personId: string, name = personId): GroupMember => ({ personId, name, joinedAt: '', role: 'member' });
@@ -66,6 +66,12 @@ describe('financial form presentation helpers', () => {
     expect(isExpenseConflict(409, undefined)).toBe(true);
     expect(isExpenseConflict(400, 'CONFLICT')).toBe(true);
     expect(isExpenseConflict(400, 'VALIDATION_ERROR')).toBe(false);
+  });
+
+  it('compares the scheduled record version while editing a schedule', () => {
+    expect(formServerVersion(true, undefined, 4)).toBe(4);
+    expect(hasNewerServerVersion(3, formServerVersion(true, undefined, 4), true)).toBe(true);
+    expect(formServerVersion(false, 4, 9)).toBe(4);
   });
 
   it('fingerprints settlement suggestions for safe refreshes', () => {

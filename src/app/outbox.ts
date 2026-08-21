@@ -1,4 +1,4 @@
-import { api, ApiError, getMe } from './api';
+import { api, ApiError, getAuthLifecycle } from './api';
 import {
   claimOutboxItem, discardOutboxIfIdle, listOutbox, markOutboxAuthRequired, readLastVerifiedIdentity, readOutboxItem,
   reactivateAuthRequired, recoverStaleSyncing, removeOutboxIfOwned, resetOutboxIfIdle, saveOutboxItem, updateOutboxIfOwned,
@@ -30,6 +30,7 @@ export const RETRY_BASE_DELAY_MS = 1_000;
 export const RETRY_MAX_DELAY_MS = 60_000;
 
 const notify = () => listeners.forEach((listener) => listener());
+const canFlush = () => getAuthLifecycle().status === 'authenticated' && (typeof navigator === 'undefined' || navigator.onLine !== false);
 export const retryDelay = (attempts: number) => Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * (2 ** Math.max(0, Math.min(attempts - 1, 6))));
 const scheduleRetry = (attempts: number) => {
   const delay = retryDelay(attempts);
@@ -121,17 +122,18 @@ async function markAuthRequired(userId: string, error: ApiError) {
 }
 
 export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
-  if (logoutQuiescing || getSessionLogoutInProgress()) return;
+   if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (flushPromise) { flushAgain = true; return flushPromise; }
   cancelScheduledRetry();
   flushPromise = (async () => {
     try {
-       if (logoutQuiescing || getSessionLogoutInProgress()) return;
-      const identity = await getMe({ networkOnly: true });
-       if (logoutQuiescing || getSessionLogoutInProgress()) return;
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      const items = (await listOutbox(identity.id)).filter((item) => item.status === 'pending' || item.status === 'syncing');
+       if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
+       const identity = await readLastVerifiedIdentity();
+       if (!identity) return;
+       if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
+       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+       const items = (await listOutbox(identity.userId)).filter((item) => item.status === 'pending' || item.status === 'syncing');
       for (const item of items) {
         if (logoutQuiescing || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) break;
         const result = await syncItem(item, timeoutMs);
@@ -191,6 +193,10 @@ export async function handleAuthenticatedUser(userId: string) {
   if (getSessionLogoutInProgress()) return;
   logoutQuiescing = false;
   const changed = await reactivateAuthRequired(userId);
+  // This is deliberately reached from the post-verification lifecycle event,
+  // not during module evaluation. It recovers stale leases and starts the
+  // first flush as soon as the authenticated identity is durable.
+  await initializeOutbox();
   await refreshOutbox();
   return changed ? flushOutbox() : undefined;
 }
@@ -212,7 +218,6 @@ registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
 if (typeof window !== 'undefined') {
-  void initializeOutbox();
   window.addEventListener('online', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });

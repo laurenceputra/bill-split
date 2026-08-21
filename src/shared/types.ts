@@ -2,6 +2,9 @@ import type { supportedCurrencies } from './schemas';
 
 export type Currency = typeof supportedCurrencies[number];
 export type SplitMethod = 'equal' | 'exact' | 'percentage' | 'shares';
+export type RecurrenceFrequency = 'daily' | 'weekly' | 'monthly' | 'yearly';
+export type ScheduledExpenseStatus = 'active' | 'paused' | 'cancelled' | 'blocked' | 'completed';
+export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface Person { id: string; name: string; email?: string | null; createdAt: string }
 export interface GroupBalanceSummary { currency: Currency; netMinor: number }
@@ -13,6 +16,13 @@ export interface Expense {
   id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
   date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
   updatedAt: string; deletedAt?: string | null; version: number; clientOperationId?: string | null; payers: Payer[]; splits: Split[]
+}
+export interface ScheduledExpense {
+  id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
+  startDate: string; endDate?: string | null; frequency: RecurrenceFrequency; interval: number;
+  weekdays: Weekday[]; timezone: string; status: ScheduledExpenseStatus; blockedReason?: string | null;
+  nextOccurrenceDate?: string | null; createdBy: string; createdAt: string; updatedAt: string; version: number;
+  clientOperationId?: string | null; payers: Payer[]; splits: Split[];
 }
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }
