@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
 const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
@@ -52,6 +53,14 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
     expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
+  });
+
+  it('spaces closed People chips without adding a second open-form gap', () => {
+    const peopleSection = appSource.match(/<section><div className="section-title">[\s\S]*?<div className="chips">[\s\S]*?<\/section>/)?.[0] ?? '';
+
+    expect(css).toMatch(/\.section-title\s*\+\s*\.chips\s*\{\s*margin-top: var\(--space-3\);\s*\}/);
+    expect(peopleSection).toMatch(/<div className="section-title">[\s\S]*\{!offlineView && addingPerson && <form/);
+    expect(peopleSection).toMatch(/<\/form>\}<div className="chips">/);
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {

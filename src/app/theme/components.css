@@ -255,6 +255,10 @@
   overflow-wrap: anywhere;
 }
 
+.section-title + .chips {
+  margin-top: var(--space-3);
+}
+
 .reading-width {
   width: min(100%, var(--reading-max));
 }
