@@ -1,9 +1,10 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { authBootstrapUrl, getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
+import { getAuthState, getConnectionState, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -26,7 +27,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 }
 
 export function PublicShell({ children, returnTo = '/' }: { children: ReactNode; returnTo?: string }) {
-  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><a className="public-sign-in" href={authBootstrapUrl(returnTo)}>Sign in</a></header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
+  const safeReturnTo = sanitizeReturnTo(returnTo);
+  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span></header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useOnlineStatus() {
@@ -85,7 +87,8 @@ function AuthBanner() {
   const reconnect = useReconnectRequired();
   if (!auth.required && !reconnect.reconnectRequired) return null;
   const message = auth.required ? 'Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.' : 'The connection failed while you are online. Reconnect or check your session; queued expenses remain on this device.';
-  return <div className="auth-banner" role="alert"><span>{message}</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(authBootstrapUrl(`${window.location.pathname}${window.location.search}${window.location.hash}`)); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
+  const returnTo = sanitizeReturnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+  return <div className="auth-banner" role="alert"><span>{message}</span>{online ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Reconnect</button></SignInButton> : <button type="button" disabled>Reconnect when online</button>}</div>;
 }
 
 export function TopBar() {

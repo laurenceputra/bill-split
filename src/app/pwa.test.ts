@@ -20,7 +20,7 @@ describe('standalone PWA contract', () => {
   });
 
   it('updates the shell cache and registers the worker before the load event', () => {
-    expect(serviceWorker).toContain("const CACHE = 'bill-split-shell-v8';");
+    expect(serviceWorker).toContain("const CACHE = 'bill-split-shell-v9';");
     expect(main).toContain("register('/sw.js', { updateViaCache: 'none' })");
     expect(main).not.toContain("addEventListener('load'");
     expect(main).toContain("typeof navigator === 'undefined'");

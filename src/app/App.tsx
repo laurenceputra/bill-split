@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { SignInButton, SignUpButton, useAuth, useClerk } from '@clerk/react';
 import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
 import { currencyOptions, type ExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
-import { ApiError, api, authBootstrapUrl, getActivity, getAuthLifecycle, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, initializeAuthLifecycle, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+import { ApiError, api, getActivity, getAuthLifecycle, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDevelopmentAuthBypass, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, markSignedOut, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
@@ -18,17 +19,24 @@ const operationId = () => crypto.randomUUID();
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
 
-function PublicLanding() {
+function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
   const location = useLocation();
+  const { signOut } = useClerk();
+  const [retryingSignOut, setRetryingSignOut] = useState(false);
   const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  const retrySignOut = async () => {
+    setRetryingSignOut(true);
+    try { await signOut({ redirectUrl: '/' }); }
+    catch (cause) { recoverAfterClerkSignOutFailure(cause); setRetryingSignOut(false); }
+  };
   return <PublicShell returnTo={returnTo}>
     <div className="landing-page">
-      <section className="landing-hero" aria-labelledby="landing-title">
-        <div className="landing-hero__copy"><p className="eyebrow">Private shared expenses</p><h1 id="landing-title">Know who paid. Know what is still owed.</h1><p className="landing-lede">BillSplit keeps shared expenses clear for friends, trips, and households—without making you do the math twice.</p><div className="landing-actions"><a className="button landing-primary" href={authBootstrapUrl(returnTo)}>Sign in securely</a><InstallAction label="Install BillSplit" /></div><p className="landing-privacy">Private by design · sign in with Cloudflare Access · no advertising</p></div>
+       <section className="landing-hero" aria-labelledby="landing-title">
+        <div className="landing-hero__copy"><p className="eyebrow">Private shared expenses</p><h1 id="landing-title">Know who paid. Know what is still owed.</h1><p className="landing-lede">BillSplit keeps shared expenses clear for friends, trips, and households—without making you do the math twice.</p><div className="landing-actions"><SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button className="button landing-primary" type="button">Sign in securely</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={returnTo}><button className="button button--secondary" type="button">Create account</button></SignUpButton><InstallAction label="Install BillSplit" /></div><p className="landing-privacy">Private by design · email verification codes · no advertising</p></div>
         <div className="ledger-preview" aria-hidden="true"><div className="ledger-preview__top"><span>Weekend away</span><span>USD</span></div><div className="ledger-preview__row"><span>Alex paid dinner</span><strong>$84.00</strong></div><div className="ledger-preview__row"><span>Sam owes Alex</span><strong className="ledger-preview__positive">$28.00</strong></div><div className="ledger-preview__line" /><div className="ledger-preview__total"><span>Still owed</span><strong>$28.00</strong></div></div>
       </section>
       <section className="landing-proof" aria-label="Why BillSplit"><div><strong>Clear ledgers</strong><span>See payments, splits, and balances together.</span></div><div><strong>Less chasing</strong><span>Know the next fair payment at a glance.</span></div><div><strong>Works offline</strong><span>Capture a new expense when signal drops.</span></div></section>
-      <section className="landing-note"><h2>Private, even when offline</h2><p>Your signed-in browser may keep recent group data and queued expenses locally for trusted-device offline use. Access tokens are never stored, and syncing still requires Cloudflare Access. Clear everything from Settings before handing off a device.</p></section>
+       {logoutError ? <div className="error" role="alert"><strong>Logout needs another try.</strong> <span>{errorText(logoutError)}</span> <Button type="button" variant="secondary" disabled={retryingSignOut} onClick={() => void retrySignOut}>{retryingSignOut ? 'Retrying…' : 'Retry logout'}</Button></div> : null}<section className="landing-note"><h2>Private, even when offline</h2><p>Your signed-in browser may keep recent group data and queued expenses locally for trusted-device offline use. Clerk session tokens are never stored by BillSplit, and syncing still requires an active Clerk session. Clear everything from Settings before handing off a device.</p></section>
     </div>
   </PublicShell>;
 }
@@ -131,7 +139,7 @@ function Home() {
 
   return <Layout>
     <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Friends &amp; groups</h1></div><div className="home-actions"><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'friend' ? undefined : 'friend'); }}>+ Add friend</Button><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'group' ? undefined : 'group'); }} variant="secondary">New group</Button></div></div>
-      {formMode === 'friend' && <Surface><h2>Add friend</h2><p className="muted">Use the exact email your friend uses to sign in through Cloudflare Access to link them to this shared group ledger. Cloudflare Access verifies and asserts their identity; it does not grant access. Leave it blank for a ledger-only friend; no email means they cannot log in to this ledger.</p><form onSubmit={createFriend} aria-describedby={createError ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-friend-error' : undefined} value={friendName} onChange={(event) => { setCreateError(undefined); setFriendName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={friendEmail} onChange={(event) => { setCreateError(undefined); setFriendEmail(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={friendCurrency} onChange={(value) => { setCreateError(undefined); setFriendCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-friend-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Adding…' : 'Add friend'}</Button></form></Surface>}
+      {formMode === 'friend' && <Surface><h2>Add friend</h2><p className="muted">Use the exact email your friend uses to sign in with Clerk to link them to this shared group ledger. Clerk verifies and asserts their identity; it does not grant group access. Leave it blank for a ledger-only friend; no email means they cannot log in to this ledger.</p><form onSubmit={createFriend} aria-describedby={createError ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-friend-error' : undefined} value={friendName} onChange={(event) => { setCreateError(undefined); setFriendName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={friendEmail} onChange={(event) => { setCreateError(undefined); setFriendEmail(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={friendCurrency} onChange={(value) => { setCreateError(undefined); setFriendCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-friend-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Adding…' : 'Add friend'}</Button></form></Surface>}
      {formMode === 'group' && <Surface><h2>New group</h2><p className="muted">Create a group for three or more people, then add friends from the group page.</p><form onSubmit={createGroup} aria-describedby={createError ? 'create-group-error' : undefined}><Field label="Group name"><input id="group-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-group-error' : undefined} value={name} onChange={(event) => { setCreateError(undefined); setName(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={(value) => { setCreateError(undefined); setCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-group-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Creating…' : 'Create group'}</Button></form></Surface>}
      {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Friend and group creation require a connection; Add Expense remains available from cached groups.</p> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
      {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong className="card__name">{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</strong><div className="card__balances">{groupBalanceDisplays(group.balanceSummaries, group.currency).map((display, index) => display.kind === 'balance' ? <span className="card__balance" key={`${display.currency}-${index}`}><span className="card__balance-label">{display.label}</span><span className="card__balance-money"><Money amountMinor={display.amountMinor} currency={display.currency} tone={display.label === 'You are owed' ? 'positive' : 'debt'} /><small>{display.currency}</small></span></span> : <span className={`card__balance card__balance--${display.kind}`} key={`${display.label}-${index}`}><span className="card__balance-label">{display.label}</span><small>{display.currency}</small></span>)}</div></Link>)}</div> : <Empty>No groups yet. Add a friend or create a group to get started.</Empty>}</> : null}
@@ -463,6 +471,7 @@ function Settings() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState<unknown>();
   const [logoutError, setLogoutError] = useState<unknown>();
+  const { signOut } = useClerk();
   useEffect(() => {
     let active = true;
     const unsubscribe = subscribeOutbox(() => setOutbox(getOutboxSnapshot()));
@@ -486,7 +495,12 @@ function Settings() {
     setClearing(true); setError(undefined); setLogoutError(undefined);
     try {
       await clearEverythingForLogout();
-      window.location.assign('/cdn-cgi/access/logout');
+      try {
+        await signOut({ redirectUrl: '/' });
+      } catch (cause) {
+        recoverAfterClerkSignOutFailure(cause);
+        throw cause;
+      }
     } catch (cause) { setLogoutError(cause); setClearing(false); }
   };
 
@@ -494,9 +508,9 @@ function Settings() {
     <div className="page-title"><div><p className="eyebrow">More</p><h1>Settings</h1></div></div>
     <section><h2>Device</h2><p className="muted" role="status">{online ? 'Online' : 'Offline'} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
     <section><h2>Pending expenses</h2>{outbox.length ? <div className="list">{outbox.map((item) => <div className="row" key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><strong>{item.display.currency} {(item.display.amountMinor / 100).toFixed(2)}</strong></div>)}</div> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</section>
-    <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores an Access token, and replay still requires Cloudflare Access. Only use this on a device you trust.</p></section>
+     <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores a Clerk token, and replay still requires an active Clerk session. Only use this on a device you trust.</p></section>
      <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
-      <section><h2>Account</h2><p className="muted">Log out through Cloudflare Access. BillSplit does not handle or disclose your Access tokens. Logging out clears all local account data and pending expenses.</p>{logoutError ? <div className="error" id="logout-error" role="alert" aria-live="assertive"><strong>Logout was not completed.</strong> <span>{errorText(logoutError)}</span></div> : null}<Button variant="danger" disabled={!outboxReady || clearing} onClick={() => void logout}>{outboxReady ? clearing ? 'Clearing local data…' : 'Log out' : 'Checking pending expenses…'}</Button></section>
+       <section><h2>Account</h2><p className="muted">Logging out clears all local account data and pending expenses before Clerk ends the session.</p>{logoutError ? <div className="error" id="logout-error" role="alert" aria-live="assertive"><strong>Logout was not completed.</strong> <span>{errorText(logoutError)}</span></div> : null}<Button variant="danger" disabled={!outboxReady || clearing} onClick={() => void logout}>{outboxReady ? clearing ? 'Clearing local data…' : 'Log out' : 'Checking pending expenses…'}</Button></section>
    </Layout>;
 }
 
@@ -507,12 +521,47 @@ function PrivateRoutes() {
 
 export function App() {
   const location = useLocation();
+  const { isLoaded, isSignedIn, userId, sessionId } = useAuth();
   const auth = useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
   const logoutInProgress = useSyncExternalStore(subscribeSessionState, getSessionLogoutInProgress, () => false);
-  useEffect(() => { void initializeAuthLifecycle(); }, []);
+  const clerkSessionRef = useRef<string>();
+  const offlineStartedBeforeClerkRef = useRef(false);
+  const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+  useEffect(() => {
+    if (!shouldStartAuthCheck(online, isLoaded) && !isDevelopmentAuthBypass) return;
+    if (!isLoaded && !online) {
+      offlineStartedBeforeClerkRef.current = true;
+      void initializeAuthLifecycle();
+      return;
+    }
+    const sessionKey = userId && sessionId ? `${userId}:${sessionId}` : undefined;
+    const currentClerkUserId = typeof userId === 'string' ? userId : undefined;
+    const providerChangedAfterOfflineStart = offlineStartedBeforeClerkRef.current;
+    const providerTransitionPending = providerChangedAfterOfflineStart && auth.status === 'checking';
+    if (!providerTransitionPending) offlineStartedBeforeClerkRef.current = false;
+    const sessionChanged = isMeaningfulClerkSessionTransition(clerkSessionRef.current, sessionKey);
+    const clerkUserIdHydrated = isTrustedOfflineClerkUserIdHydrated();
+    const cachedOfflineClerkUserId = providerChangedAfterOfflineStart && clerkUserIdHydrated ? getTrustedOfflineClerkUserId() : undefined;
+    const offlineAccountChanged = shouldRevokeForOfflineClerkUser(providerChangedAfterOfflineStart, isSignedIn === true, currentClerkUserId, cachedOfflineClerkUserId, clerkUserIdHydrated);
+    const sessionTransition = sessionChanged || offlineAccountChanged;
+    if (online && sessionTransition) resetForClerkSessionChange();
+    else if (!online && sessionTransition) revokeForClerkSessionChange();
+    if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
+    if ((isSignedIn || !online || isDevelopmentAuthBypass) && !(sessionTransition && !online)) void initializeAuthLifecycle({ ...(shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
+    else {
+      clerkSessionRef.current = undefined;
+      markSignedOut();
+    }
+  }, [auth.status, isLoaded, isSignedIn, online, sessionId, userId]);
+  useEffect(() => {
+    if (!isSignedIn && !isDevelopmentAuthBypass && auth.status !== 'trusted-offline') return;
+    const retry = () => { if (navigator.onLine !== false) void initializeAuthLifecycle({ networkOnly: auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+  }, [auth.status, isSignedIn, userId]);
   const returnTo = `${location.pathname}${location.search}${location.hash}`;
   if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
   if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
-  if (auth.status === 'unauthenticated') return <PublicLanding />;
+  if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} />;
   return <PrivateRoutes />;
 }

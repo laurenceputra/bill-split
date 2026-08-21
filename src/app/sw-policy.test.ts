@@ -12,15 +12,15 @@ describe('service-worker shell policy', () => {
     const base = { ok: true, redirected: false, responseUrl: 'https://split.test/index.html', expectedOrigin: 'https://split.test', expectedPath: '/index.html', contentType: 'text/html', cacheControl: 'public' };
     expect(isSafeFinalResponse(base, /text\/html/)).toBe(true);
     expect(isSafeFinalResponse({ ...base, redirected: true }, /text\/html/)).toBe(false);
-    expect(isSafeFinalResponse({ ...base, contentType: 'text/html', responseUrl: 'https://split.test/cdn-cgi/access/login' }, /text\/html/)).toBe(false);
+    expect(isSafeFinalResponse({ ...base, contentType: 'text/html', responseUrl: 'https://split.test/sign-in' }, /text\/html/)).toBe(false);
      expect(isSafeFinalResponse({ ...base, cacheControl: 'private' }, /text\/html/)).toBe(false);
   });
 
-  it('accepts a normal deep-link shell response but never an Access document', () => {
+  it('accepts a normal deep-link shell response but never an auth document', () => {
     const html = '<div id="root"></div><script src="/assets/app-123.js"></script>';
     const base = { ok: true, redirected: false, responseUrl: 'https://split.test/groups/g-1', expectedOrigin: 'https://split.test', requestedPath: '/groups/g-1', contentType: 'text/html', cacheControl: 'public' };
     expect(isSafeShellNavigation(base, html)).toBe(true);
-    expect(isSafeShellNavigation({ ...base, responseUrl: 'https://split.test/cdn-cgi/access/login' }, html)).toBe(false);
+    expect(isSafeShellNavigation({ ...base, responseUrl: 'https://split.test/sign-up' }, html)).toBe(false);
     expect(isSafeShellNavigation({ ...base, contentType: 'application/json' }, html)).toBe(false);
      expect(isSafeShellNavigation({ ...base, cacheControl: 'no-store' }, html)).toBe(false);
   });

@@ -17,7 +17,9 @@ migrations_dir = "migrations"
 
 [vars]
 ENVIRONMENT = "production"
-# Set ACCESS_TEAM_DOMAIN and ACCESS_AUD as dashboard/secret vars in production.
+# Configure CLERK_PUBLISHABLE_KEY, CLERK_JWT_KEY, and
+# CLERK_AUTHORIZED_PARTIES as production Worker variables; set the required
+# CLERK_SECRET_KEY as an encrypted secret with `wrangler secret put`.
 # R2 is optional: add an [[r2_buckets]] binding named RECEIPTS when enabled.
 
 [[routes]]

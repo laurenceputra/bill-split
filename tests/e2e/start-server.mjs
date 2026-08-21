@@ -9,13 +9,17 @@ const wrangler = path.join(root, 'node_modules', '.bin', process.platform === 'w
 runPersistDirSelfCheck();
 const persistTo = await verifySafePersistDir(configuredPersistDir());
 
-const run = (command, args) => {
-  const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: 'inherit' });
+const run = (command, args, env = process.env) => {
+  const result = spawnSync(command, args, { cwd: root, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 };
 
-run(npm, ['run', 'build']);
+// The browser audit supplies X-Dev-Email at the context boundary. This
+// build-only hint lets the app start its normal /api/me lifecycle without a
+// real Clerk browser session; the Worker accepts the header only for the
+// exact development environment.
+run(npm, ['run', 'build'], { ...process.env, VITE_DEV_AUTH_BYPASS: 'true' });
 run(process.execPath, ['tests/e2e/prepare-db.mjs']);
 
 const server = spawn(wrangler, [

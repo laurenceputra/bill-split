@@ -1,11 +1,11 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, authBootstrapUrl, clearAuthRequired, clearEverythingForLogout, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, initializeAuthLifecycle, sanitizeReturnTo, subscribeAuthState } from './api';
+import { ApiError, api, clearAuthRequired, clearEverythingForLogout, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readExpenseDetails, readGroups, readResourceFreshness, saveGroups, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readResourceFreshness, saveGroups, saveLastVerifiedClerkUserId, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
-import { adoptSessionGeneration, captureSessionGeneration } from './session';
-import { releaseMutationBarrier } from './mutation-quiescence';
+import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
+import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
 
 const json = (body: unknown, status = 200, userId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}) } });
 
@@ -15,6 +15,28 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('allows trusted offline startup before Clerk has loaded but gates online startup', () => {
+    expect(shouldStartAuthCheck(false, false)).toBe(true);
+    expect(shouldStartAuthCheck(false, true)).toBe(true);
+    expect(shouldStartAuthCheck(true, false)).toBe(false);
+    expect(shouldStartAuthCheck(true, true)).toBe(true);
+  });
+  it('does not treat Clerk provider loading as a session transition during trusted offline startup', () => {
+    expect(isMeaningfulClerkSessionTransition(undefined, 'user-a:session-a')).toBe(false);
+    expect(isMeaningfulClerkSessionTransition('user-a:session-a', 'user-a:session-a')).toBe(false);
+    expect(isMeaningfulClerkSessionTransition('user-a:session-a', 'user-b:session-b')).toBe(true);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-a', 'clerk-a')).toBe(false);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', 'clerk-a')).toBe(true);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-a', undefined)).toBe(true);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', undefined, false)).toBe(false);
+    expect(shouldReverifyTrustedOffline(false, true, true, 'trusted-offline')).toBe(false);
+    expect(shouldReverifyTrustedOffline(true, true, true, 'trusted-offline')).toBe(true);
+  });
+  it('does not revoke a fast Clerk load while last Clerk ID hydration is pending', () => {
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', undefined, false)).toBe(false);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', undefined, true)).toBe(true);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', 'clerk-fast', true)).toBe(false);
+  });
   it('caches the typed activity payload without losing entity context', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
@@ -40,7 +62,7 @@ describe('frontend API errors and cache fallback', () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(['plain text', 'Access HTML'])('treats %s 401 responses as auth-required', async (kind) => {
+  it.each(['plain text', 'Clerk HTML'])('treats %s 401 responses as auth-required', async (kind) => {
     clearAuthRequired();
     vi.stubGlobal('fetch', vi.fn(async () => new Response(kind === 'plain text' ? 'Unauthorized' : '<html><body>Sign in</body></html>', { status: 401, headers: { 'Content-Type': kind === 'plain text' ? 'text/plain' : 'text/html' } })));
     await expect(api('/me')).rejects.toMatchObject({ status: 401 });
@@ -50,7 +72,7 @@ describe('frontend API errors and cache fallback', () => {
 
   it('treats a redirected API response as auth-required', async () => {
     clearAuthRequired();
-    const response = Object.defineProperties(new Response('<html>login</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }), { redirected: { value: true }, url: { value: 'https://split.test/cdn-cgi/access/login' } });
+    const response = Object.defineProperties(new Response('<html>login</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }), { redirected: { value: true }, url: { value: 'https://split.test/sign-in' } });
     vi.stubGlobal('fetch', vi.fn(async () => response));
     await expect(api('/groups')).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
     expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
@@ -182,21 +204,81 @@ describe('frontend API errors and cache fallback', () => {
     clearAuthRequired();
   });
 
-  it('keeps bootstrap destinations relative and rejects protected paths', () => {
+  it('keeps Clerk destinations relative and rejects protected paths', () => {
     expect(sanitizeReturnTo('/groups/g-1?tab=activity#ledger')).toBe('/groups/g-1?tab=activity#ledger');
     expect(sanitizeReturnTo('https://evil.test/')).toBe('/');
     expect(sanitizeReturnTo('/api/me')).toBe('/');
-    expect(authBootstrapUrl('/groups/g-1')).toBe('/api/auth/bootstrap?return_to=%2Fgroups%2Fg-1');
   });
 
   it('publishes the authenticated lifecycle only after a verified identity response', async () => {
     await clearEverythingForLogout(false);
     clearAuthRequired();
     vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-auth', email: 'auth@example.com', personId: 'person-auth' }, 200, 'user-auth')));
-    await initializeAuthLifecycle();
+    await initializeAuthLifecycle({ clerkUserId: 'clerk-auth' });
     expect(getAuthLifecycle()).toEqual({ status: 'authenticated' });
+    expect(await readLastVerifiedClerkUserId()).toMatchObject({ clerkUserId: 'clerk-auth' });
     await clearEverythingForLogout(false);
     expect(getAuthLifecycle().status).toBe('unauthenticated');
+  });
+
+  it('does not persist a Clerk user ID when /api/me is not verified', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401)));
+    await expect(initializeAuthLifecycle({ clerkUserId: 'clerk-unverified' })).resolves.toMatchObject({ status: 'unauthenticated' });
+    expect(await readLastVerifiedClerkUserId()).toBeUndefined();
+    expect(getTrustedOfflineClerkUserId()).toBeUndefined();
+  });
+
+  it('preserves trusted offline state until connectivity returns, then supports explicit revalidation', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    await saveVerifiedIdentity({ userId: 'offline-user', email: 'offline@example.com', personId: 'offline-person', verifiedAt: new Date().toISOString() });
+    await saveLastVerifiedClerkUserId('clerk-a');
+    vi.stubGlobal('navigator', { onLine: false });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline'); }));
+    await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'trusted-offline' });
+    expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(getTrustedOfflineClerkUserId()).toBe('clerk-a');
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-a', getTrustedOfflineClerkUserId())).toBe(false);
+    expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', getTrustedOfflineClerkUserId())).toBe(true);
+    revokeForClerkSessionChange();
+    expect(getAuthLifecycle().status).toBe('unauthenticated');
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'offline-user', email: 'offline@example.com', personId: 'offline-person' }, 200, 'offline-user')));
+    await expect(initializeAuthLifecycle({ networkOnly: true })).resolves.toMatchObject({ status: 'authenticated' });
+    await clearEverythingForLogout(false);
+    expect(await readLastVerifiedClerkUserId()).toBeUndefined();
+    expect(getTrustedOfflineClerkUserId()).toBeUndefined();
+  });
+
+  it('releases a failed Clerk sign-out barrier without rolling back the protected generation', async () => {
+    await clearEverythingForLogout(false);
+    expect(getSessionLogoutInProgress()).toBe(true);
+    expect(isMutationBarrierActive()).toBe(true);
+    const before = captureSessionGeneration();
+    recoverAfterClerkSignOutFailure();
+    expect(getSessionLogoutInProgress()).toBe(false);
+    expect(isMutationBarrierActive()).toBe(false);
+    expect(captureSessionGeneration()).toBe(before);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'retry-user', email: 'retry@example.com', personId: 'retry-person' }, 200, 'retry-user')));
+    await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'authenticated' });
+    await clearEverythingForLogout(false);
+  });
+
+  it('invalidates prior identity memory before re-verifying a changed Clerk session', async () => {
+    await clearEverythingForLogout(false);
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')));
+    await initializeAuthLifecycle();
+    resetForClerkSessionChange();
+    expect(getAuthLifecycle().status).toBe('checking');
+    expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-b', email: 'b@example.com', personId: 'person-b' }, 200, 'user-b')));
+    await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'authenticated' });
+    await clearEverythingForLogout(false);
   });
 
   it('rejects delayed groups, activity, and detail responses after logout before any cache write', async () => {
@@ -221,14 +303,14 @@ describe('frontend API errors and cache fallback', () => {
     expect(await readExpenseDetails('race-user', 'expense-race')).toBeUndefined();
   });
 
-  it('revokes private memory on an Access 403 and does not fall back to cached data', async () => {
+  it('revokes private memory on a Clerk 403 and does not fall back to cached data', async () => {
     await clearEverythingForLogout(false);
     clearAuthRequired();
     await saveVerifiedIdentity({ userId: 'revoked-user', email: 'revoked@example.com', personId: 'revoked-person', verifiedAt: new Date().toISOString() });
     seedResource('groups:revoked-user', 'revoked-user', { groups: [{ id: 'cached-group', name: 'Cached', currency: 'USD', createdAt: '', updatedAt: '' }] });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
       ? json({ id: 'revoked-user', email: 'revoked@example.com', personId: 'revoked-person' }, 200, 'revoked-user')
-      : json({ error: { code: 'ACCESS_DENIED', message: 'Access denied' } }, 403)));
+       : json({ error: { code: 'CLERK_FORBIDDEN', message: 'Clerk denied the session' } }, 403)));
     await expect(getGroups()).rejects.toMatchObject({ status: 403, code: 'AUTH_REQUIRED' });
     expect(getResourceSnapshot('groups:revoked-user', 'revoked-user').data).toBeUndefined();
     await expect(getGroups()).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });

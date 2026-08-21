@@ -3,7 +3,7 @@ import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 5;
+export const DB_VERSION = 6;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -12,6 +12,13 @@ export interface VerifiedIdentity {
   userId: string;
   email: string;
   personId: string;
+  verifiedAt: string;
+}
+
+/** The Clerk identity is deliberately separate from the internal D1 user ID. */
+export interface VerifiedClerkIdentity {
+  key: 'last';
+  clerkUserId: string;
   verifiedAt: string;
 }
 
@@ -147,6 +154,7 @@ function open(): Promise<IDBDatabase> {
       // Keep this store and its legacy key intact. Older builds wrote `form` here.
       if (!database.objectStoreNames.contains('recent')) database.createObjectStore('recent');
       if (!database.objectStoreNames.contains('identities')) database.createObjectStore('identities', { keyPath: 'key' });
+      if (!database.objectStoreNames.contains('clerkIdentities')) database.createObjectStore('clerkIdentities', { keyPath: 'key' });
       if (!database.objectStoreNames.contains('groups')) database.createObjectStore('groups', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('groupSnapshots')) database.createObjectStore('groupSnapshots', { keyPath: ['userId', 'groupId'] });
       if (!database.objectStoreNames.contains('resourceFreshness')) database.createObjectStore('resourceFreshness', { keyPath: ['userId', 'resourceKey'] });
@@ -195,6 +203,11 @@ export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>, gener
   return transaction('identities', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('identities').put({ ...value, key: 'last' }); });
 };
 export const readLastVerifiedIdentity = () => transaction<VerifiedIdentity>('identities', 'readonly', (tx) => tx.objectStore('identities').get('last'));
+export const saveLastVerifiedClerkUserId = (clerkUserId: string, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('clerkIdentities', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('clerkIdentities').put({ key: 'last', clerkUserId, verifiedAt: new Date().toISOString() }); });
+};
+export const readLastVerifiedClerkUserId = () => transaction<VerifiedClerkIdentity>('clerkIdentities', 'readonly', (tx) => tx.objectStore('clerkIdentities').get('last'));
 
 export const saveGroups = async (value: CachedGroups, generation = captureSessionGeneration()) => {
   assertSessionGeneration(generation);
@@ -302,15 +315,15 @@ export const readExpenseDetails = (userId: string, expenseId: string) => transac
 
 /** Remove private cached data without touching the durable expense outbox. */
 export async function clearCachedData() {
-  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails']) tx.objectStore(storeName).clear();
   });
 }
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox']) tx.objectStore(storeName).clear();
   });
 }
 

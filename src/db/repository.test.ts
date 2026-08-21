@@ -131,6 +131,63 @@ class FriendIdempotencyStatement {
   }
 }
 
+class ClerkIdentityDb {
+  users: Array<Record<string, unknown>> = [];
+  people: Array<Record<string, unknown>> = [];
+  members: Array<Record<string, unknown>> = [];
+  raceLinkClerkId: string | undefined;
+  prepare(sql: string) { return new ClerkIdentityStatement(this, sql); }
+  async batch(statements: ClerkIdentityStatement[]) {
+    for (const statement of statements) {
+      if (this.raceLinkClerkId && statement.sql.includes('UPDATE users SET clerk_user_id')) {
+        const user = this.users.find((row) => row.id === statement.args[2]);
+        if (user) user.clerk_user_id = this.raceLinkClerkId;
+        this.raceLinkClerkId = undefined;
+      } else statement.execute();
+    }
+    return [];
+  }
+}
+class ClerkIdentityStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: ClerkIdentityDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('FROM users WHERE clerk_user_id')) return (this.db.users.find((row) => row.clerk_user_id === this.args[0]) ?? null) as T | null;
+    if (this.sql.includes('FROM users WHERE lower(email)')) return (this.db.users.find((row) => String(row.email).toLowerCase() === this.args[0]) ?? null) as T | null;
+    if (this.sql.includes('FROM users WHERE id=')) return (this.db.users.find((row) => row.id === this.args[0]) ?? null) as T | null;
+    if (this.sql.includes('FROM people WHERE user_id=')) return (this.db.people.find((row) => row.user_id === this.args[0] && row.deleted_at == null) ?? null) as T | null;
+    if (this.sql.includes('FROM people WHERE lower(email)')) return (this.db.people.find((row) => String(row.email).toLowerCase() === this.args[0] && row.deleted_at == null) ?? null) as T | null;
+    return null;
+  }
+  async run() { this.execute(); return {}; }
+  execute() {
+    if (this.sql.includes('UPDATE users SET clerk_user_id')) {
+      const [clerkId, updatedAt, id] = this.args;
+      const user = this.db.users.find((row) => row.id === id && row.clerk_user_id == null);
+      if (user) { user.clerk_user_id = clerkId; user.updated_at = updatedAt; }
+    }
+    if (this.sql.includes('INSERT INTO users(')) {
+      const [id, email, clerkId, createdAt, updatedAt] = this.args;
+      if (this.db.users.some((row) => row.email === email || (clerkId != null && row.clerk_user_id === clerkId))) throw new Error('UNIQUE constraint failed: users');
+      this.db.users.push({ id, email, clerk_user_id: clerkId, created_at: createdAt, updated_at: updatedAt });
+    }
+    if (this.sql.includes('INSERT INTO people(')) {
+      const [id, name, email, userId, createdAt] = this.args;
+      this.db.people.push({ id, name, email, user_id: userId, created_at: createdAt, deleted_at: null });
+    }
+    if (this.sql.includes('UPDATE people SET user_id=')) {
+      const [userId, personId] = this.args;
+      const person = this.db.people.find((row) => row.id === personId && row.user_id == null);
+      if (person) person.user_id = userId;
+    }
+    if (this.sql.includes('UPDATE group_members SET user_id=')) {
+      const [userId, personId] = this.args;
+      for (const member of this.db.members.filter((row) => row.person_id === personId && row.user_id == null)) member.user_id = userId;
+    }
+  }
+}
+
 class ActivityDb {
   sql = '';
   prepare(sql: string) { this.sql = sql; return new ActivityStatement(sql); }
@@ -388,5 +445,61 @@ describe('repository home balance summaries', () => {
   it('preserves database errors from the scoped group query', async () => {
     const db = { prepare: () => { throw new Error('scoped query failed'); } };
     await expect(new Repository(db as never).groups('user-a')).rejects.toThrow('scoped query failed');
+  });
+});
+
+describe('repository Clerk identity linking', () => {
+  it('links an existing D1 user and preserves its person and membership IDs', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'legacy-user', email: 'person@example.com', clerk_user_id: null });
+    db.people.push({ id: 'legacy-person', name: 'Person', email: 'person@example.com', user_id: 'legacy-user', deleted_at: null });
+    db.members.push({ group_id: 'group-1', person_id: 'legacy-person', user_id: null });
+    const identity = await new Repository(db as never).userForClerk('user_123', 'PERSON@example.com');
+    expect(identity.user.id).toBe('legacy-user');
+    expect(identity.person.id).toBe('legacy-person');
+    expect(db.users[0].clerk_user_id).toBe('user_123');
+    expect(db.members[0].user_id).toBe('legacy-user');
+  });
+
+  it('creates a new app user and person when the verified email is new', async () => {
+    const db = new ClerkIdentityDb();
+    const identity = await new Repository(db as never).userForClerk('user_new', 'new@example.com');
+    expect(identity.user.email).toBe('new@example.com');
+    expect(identity.user.clerk_user_id).toBe('user_new');
+    expect(identity.person.user_id).toBe(identity.user.id);
+  });
+
+  it('fails closed for an email already linked to another Clerk ID', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'linked-user', email: 'person@example.com', clerk_user_id: 'user_existing' });
+    await expect(new Repository(db as never).userForClerk('user_other', 'person@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    expect(db.users[0].clerk_user_id).toBe('user_existing');
+  });
+
+  it('resolves a linked user by Clerk ID and retains the canonical D1 email after an email change', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'stable-user', email: 'old@example.com', clerk_user_id: 'user_stable' });
+    db.people.push({ id: 'stable-person', name: 'Stable', email: 'old@example.com', user_id: 'stable-user', deleted_at: null });
+    const identity = await new Repository(db as never).userForClerk('user_stable', 'new@example.com');
+    expect(identity.user.id).toBe('stable-user');
+    expect(identity.user.email).toBe('old@example.com');
+    expect(db.users).toHaveLength(1);
+  });
+
+  it('self-heals a Clerk mapping left behind before person creation completed', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'interrupted-user', email: 'interrupted@example.com', clerk_user_id: 'user_interrupted' });
+    const identity = await new Repository(db as never).userForClerk('user_interrupted', 'interrupted@example.com');
+    expect(identity.user.id).toBe('interrupted-user');
+    expect(identity.person.user_id).toBe('interrupted-user');
+    expect(db.people).toHaveLength(1);
+  });
+
+  it('fails closed when a concurrent first link wins and never reassigns it', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'raced-user', email: 'raced@example.com', clerk_user_id: null });
+    db.raceLinkClerkId = 'winner_clerk_id';
+    await expect(new Repository(db as never).userForClerk('loser_clerk_id', 'raced@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    expect(db.users[0].clerk_user_id).toBe('winner_clerk_id');
   });
 });

@@ -1,8 +1,8 @@
 import type { Activity, Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
-import { clearAllPrivateData, normalizeActivity, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveExpenseDetails, saveGroupsIfGenerationMatches, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, normalizeActivity, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveVerifiedIdentity, saveExpenseDetails, updateGroupSnapshot } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
-import { captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
+import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
 
 export type CurrentUser = { id: string; email: string; personId: string };
@@ -14,9 +14,18 @@ export type ConnectionState = { reconnectRequired: boolean };
 export type AuthLifecycleStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'trusted-offline';
 export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown };
 
+export class ClerkSignOutFailure extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ClerkSignOutFailure';
+  }
+}
+
 let authState: AuthState = { required: false };
 let connectionState: ConnectionState = { reconnectRequired: false };
 let verifiedIdentity: CurrentUser | undefined;
+let verifiedClerkUserId: string | undefined;
+let clerkUserIdHydrated = false;
 let authLifecycle: AuthLifecycle = { status: 'checking' };
 let authLifecycleRequest: Promise<AuthLifecycle> | undefined;
 let identityRequest: Promise<CachedResult<CurrentUser>> | undefined;
@@ -24,6 +33,11 @@ let authBlocked = false;
 let authInvalidationGeneration = 0;
 const authListeners = new Set<() => void>();
 const connectionListeners = new Set<() => void>();
+/** Build-time-only flag used by the local E2E harness; the Worker still gates it on ENVIRONMENT=development. */
+export const isDevelopmentAuthBypass = import.meta.env.DEV || import.meta.env.VITE_DEV_AUTH_BYPASS === 'true';
+export const isMeaningfulClerkSessionTransition = (previousSessionKey: string | undefined, currentSessionKey: string | undefined) => Boolean(previousSessionKey && currentSessionKey && previousSessionKey !== currentSessionKey);
+export const shouldRevokeForOfflineClerkUser = (providerChanged: boolean, signedIn: boolean, currentClerkUserId: string | undefined, lastVerifiedClerkUserId: string | undefined, hydrated = true) => hydrated && providerChanged && signedIn && Boolean(currentClerkUserId) && currentClerkUserId !== lastVerifiedClerkUserId;
+export const shouldReverifyTrustedOffline = (online: boolean, clerkLoaded: boolean, signedIn: boolean, status: AuthLifecycleStatus) => online && clerkLoaded && signedIn && status === 'trusted-offline';
 export const getAuthState = () => authState;
 export const subscribeAuthState = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
 export const getConnectionState = () => connectionState;
@@ -42,6 +56,22 @@ const signalAuthRequired = (code: AuthRequiredCode) => {
   authListeners.forEach((listener) => listener());
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-auth-required', { detail: { code } }));
 };
+/** Clerk is authoritative for the signed-out state; avoid racing /api/me during provider startup. */
+export const markSignedOut = () => {
+  if (authLifecycle.status === 'unauthenticated' && authState.required) return;
+  signalAuthRequired('AUTH_REQUIRED');
+};
+/** Invalidate all prior private memory before rechecking a changed Clerk session. */
+export const resetForClerkSessionChange = () => {
+  identityRequest = undefined;
+  authLifecycleRequest = undefined;
+  signalAuthRequired('AUTH_REQUIRED');
+  setAuthLifecycle({ status: 'checking' });
+};
+/** Revoke private UI immediately for an offline account change; reverification waits for connectivity. */
+export const revokeForClerkSessionChange = () => signalAuthRequired('IDENTITY_MISMATCH');
+export const getTrustedOfflineClerkUserId = () => verifiedClerkUserId;
+export const isTrustedOfflineClerkUserIdHydrated = () => clerkUserIdHydrated;
 const signalReconnectRequired = () => {
   if (connectionState.reconnectRequired) return;
   connectionState = { reconnectRequired: true };
@@ -54,18 +84,18 @@ const clearReconnectRequired = () => {
   connectionListeners.forEach((listener) => listener());
 };
 
-/** Build the only URL used for top-level Access sign-in/reconnection. */
-export const authBootstrapUrl = (returnTo: string) => `/api/auth/bootstrap?return_to=${encodeURIComponent(sanitizeReturnTo(returnTo))}`;
-
-/** Keep the post-Access destination on this public shell and out of API paths. */
+/** Keep Clerk's post-auth destination on this public shell and out of API paths. */
 export function sanitizeReturnTo(value: unknown): string {
   if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return '/';
   try {
     const url = new URL(value, 'https://billsplit.invalid');
-    if (url.origin !== 'https://billsplit.invalid' || /^(?:\/api(?:\/|$)|\/cdn-cgi(?:\/|$)|\/access(?:\/|$))/i.test(url.pathname)) return '/';
+    if (url.origin !== 'https://billsplit.invalid' || /^(?:\/api(?:\/|$)|\/cdn-cgi(?:\/|$)|\/sign-in(?:\/|$)|\/sign-up(?:\/|$))/i.test(url.pathname)) return '/';
     return `${url.pathname}${url.search}${url.hash}` || '/';
   } catch { return '/'; }
 }
+
+/** Offline cold starts may use the trusted cache before Clerk's browser SDK has loaded. */
+export const shouldStartAuthCheck = (online: boolean, clerkLoaded: boolean) => !online || clerkLoaded;
 
 export class ApiError extends Error {
   readonly status?: number;
@@ -112,7 +142,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
   headers.set('X-Requested-With', 'XMLHttpRequest');
-  if (import.meta.env.DEV) headers.set('X-Dev-Email', devEmail());
+  if (import.meta.env.DEV && !headers.has('X-Dev-Email')) headers.set('X-Dev-Email', devEmail());
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin' }); }
   catch (error) {
@@ -123,9 +153,8 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   }
 
   const finalUrl = (() => { try { return new URL(response.url); } catch { return undefined; } })();
-  const accessOrLoginFinalUrl = finalUrl && (finalUrl.pathname.startsWith('/cdn-cgi/access/') || finalUrl.pathname.startsWith('/access/') || /(?:^|\/)login(?:\/|$)/i.test(finalUrl.pathname));
   const contentType = response.headers.get('content-type') || '';
-  const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected || Boolean(accessOrLoginFinalUrl);
+  const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected;
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
   if (response.status === 204) {
     if (authResponse) throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
@@ -139,8 +168,8 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   try { body = JSON.parse(bodyText) as { error?: { code?: string; message?: string } } | T; } catch { /* handled as an auth/session response below */ }
   const responseCode = body && typeof body === 'object' && 'error' in body ? (body as { error?: { code?: string } }).error?.code : undefined;
   // 403 is auth revocation unless the API has explicitly identified an
-  // application-level permission error. Cloudflare Access commonly returns an
-  // HTML 403, while OWNER_REQUIRED/ORIGIN_FORBIDDEN are meaningful API errors.
+  // application-level permission error. OWNER_REQUIRED/ORIGIN_FORBIDDEN are
+  // meaningful API errors.
   const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN';
   if (authResponse || accessDenied) {
     signalAuthRequired(accessDenied ? 'AUTH_REQUIRED' : 'AUTH_REQUIRED');
@@ -172,6 +201,11 @@ export function apiWithMeta<T>(path: string, init?: RequestInit): Promise<ApiRes
 export async function api<T>(path: string, init?: RequestInit): Promise<T> { return (await apiWithMeta<T>(path, init)).data; }
 
 async function identityForCache() { return cacheRead(readLastVerifiedIdentity); }
+async function clerkIdentityForCache() {
+  const identity = await cacheRead(readLastVerifiedClerkUserId);
+  clerkUserIdHydrated = true;
+  return identity;
+}
 type CacheIdentity = { user: CurrentUser; authoritative: boolean };
 async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdentity | undefined> {
   const identitySnapshot = getResourceSnapshot('identity');
@@ -198,7 +232,7 @@ const assertResponseIdentity = (responseUserId: string | undefined, identity: Ca
   }
 };
 
-export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal } = {}): Promise<CachedResult<CurrentUser>> {
+export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string } = {}): Promise<CachedResult<CurrentUser>> {
   if (identityRequest) return identityRequest;
   if ((isMutationBarrierActive() || getSessionLogoutInProgress()) && (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline')) throw new ApiError('Logout is in progress. Try again after signing in.', { status: 401, code: 'AUTH_REQUIRED' });
   const generation = captureSessionGeneration();
@@ -212,9 +246,11 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       if (result.userId && result.userId !== user.id) { signalAuthRequired('IDENTITY_MISMATCH'); throw new ApiError('The verified identity changed; sign in again before retrying.', { status: 401, code: 'IDENTITY_MISMATCH' }); }
        assertRequestGeneration(generation);
        await cacheWrite(() => saveVerifiedIdentity({ userId: user.id, email: user.email, personId: user.personId, verifiedAt: new Date().toISOString() }, generation));
+       if (options.clerkUserId) await cacheWrite(() => saveLastVerifiedClerkUserId(options.clerkUserId!, generation));
        assertRequestGeneration(generation);
        if (getSessionLogoutInProgress()) clearSessionLogout(generation);
        verifiedIdentity = user;
+       if (options.clerkUserId) { verifiedClerkUserId = options.clerkUserId; clerkUserIdHydrated = true; }
       setResourceIdentity(user.id);
       seedResource('identity', '', user, Date.now(), { offline: false });
        clearAuthRequired();
@@ -225,7 +261,9 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
     } catch (error) {
       if (options.signal?.aborted) throw error;
       if (!isNetwork(error)) throw error;
-      const cached = await identityForCache();
+       const cached = await identityForCache();
+       const cachedClerkIdentity = await clerkIdentityForCache();
+       if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
       const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false;
         if (!options.networkOnly && !getSessionLogoutInProgress() && authGeneration === authInvalidationGeneration && !authBlocked && trustedOffline && cached && isSessionGenerationCurrent(generation)) {
         const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
@@ -239,17 +277,36 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
   try { return await identityRequest; } finally { identityRequest = undefined; }
 }
 
-export async function initializeAuthLifecycle(): Promise<AuthLifecycle> {
+export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string } = {}): Promise<AuthLifecycle> {
   if (authLifecycleRequest) return authLifecycleRequest;
-  if (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') return authLifecycle;
+  const forceReverify = options.networkOnly === true;
+  if ((authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') && !forceReverify) return authLifecycle;
   setAuthLifecycle({ status: 'checking' });
-  authLifecycleRequest = getMe().then(() => authLifecycle).catch((error) => {
+  const request = getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId }).then(() => authLifecycle).catch((error) => {
     if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH')) setAuthLifecycle({ status: 'unauthenticated' });
     else setAuthLifecycle({ status: 'unauthenticated', error });
     return authLifecycle;
-  }).finally(() => { authLifecycleRequest = undefined; });
+  }).finally(() => { if (authLifecycleRequest === request) authLifecycleRequest = undefined; });
+  authLifecycleRequest = request;
   return authLifecycleRequest;
 }
+
+/**
+ * A failed Clerk sign-out must not strand the durable logout barrier. The
+ * generation remains advanced, so responses from the old session stay stale;
+ * only the barrier is released so the user can retry sign-in or sign-out.
+ */
+export const recoverAfterClerkSignOutFailure = (cause?: unknown) => {
+  const generation = getSessionGeneration();
+  clearSessionLogout(generation);
+  releaseMutationBarrier(generation);
+  resumeOutboxAfterFailedLogout();
+  authBlocked = true;
+  authState = { required: true, code: 'AUTH_REQUIRED' };
+  const message = cause instanceof Error ? cause.message : 'Clerk sign-out could not be completed';
+  setAuthLifecycle({ status: 'unauthenticated', error: new ClerkSignOutFailure(message) });
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-signout-retryable'));
+};
 
 export async function clearEverythingForLogout(broadcast = true, receivedGeneration?: number) {
   const generation = receivedGeneration ?? startSessionLogout(broadcast);
@@ -274,6 +331,8 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
     throw error;
   }
   verifiedIdentity = undefined;
+  verifiedClerkUserId = undefined;
+  clerkUserIdHydrated = true;
   authBlocked = true;
   authInvalidationGeneration += 1;
   identityRequest = undefined;
@@ -450,5 +509,5 @@ export async function hydrateExpenseDetails(userId: string, id: string) {
   return cached ? { data: { expense: cached.expense, history: cached.history }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
 }
 
-if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => { verifiedIdentity = undefined; });
+if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => { verifiedIdentity = undefined; verifiedClerkUserId = undefined; clerkUserIdHydrated = true; });
 subscribeSessionLogout((generation) => { void clearEverythingForLogout(false, generation); });

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -17,7 +17,7 @@ describe('user-scoped IndexedDB', () => {
     await saveVerifiedIdentity(user('user-a'));
     expect(await readRecent<{ choice: string }>()).toEqual({ choice: 'USD' });
     const upgraded = indexedDB.open(DB_NAME, DB_VERSION);
-    await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
+    await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); expect(upgraded.result.objectStoreNames.contains('clerkIdentities')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
   });
 
   it('migrates a version three database without losing an outbox row', async () => {
@@ -63,12 +63,14 @@ describe('user-scoped IndexedDB', () => {
 
   it('clears the identity and outbox together for destructive logout', async () => {
     await saveVerifiedIdentity(user('user-a'));
+    await saveLastVerifiedClerkUserId('clerk-user-a');
     await saveOutboxItem(expense('delete-me'));
     await invalidateCachedGroups('user-a');
     await clearAllPrivateData();
     expect(await readGroups('user-a')).toBeUndefined();
     expect(await readMutationGeneration('user-a')).toBe(0);
     expect(await listOutbox('user-a')).toEqual([]);
+    expect(await readLastVerifiedClerkUserId()).toBeUndefined();
   });
 
   it('preserves resource-specific freshness and persists activity and details', async () => {

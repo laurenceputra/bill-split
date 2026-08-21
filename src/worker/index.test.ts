@@ -87,19 +87,12 @@ describe('worker boundary', () => {
     expect(sanitizeReturnTo('https://evil.test/steal')).toBe('/');
     expect(sanitizeReturnTo('//evil.test/steal')).toBe('/');
     expect(sanitizeReturnTo('/api/me')).toBe('/');
-    expect(sanitizeReturnTo('/cdn-cgi/access/login')).toBe('/');
+    expect(sanitizeReturnTo('/cdn-cgi/internal/login')).toBe('/');
   });
-  it('parses one or multiple Access audience tags for jose', async () => {
-    const { parseAccessAudience } = await import('./index');
-    expect(parseAccessAudience('audience-one')).toBe('audience-one');
-    expect(parseAccessAudience('audience-one, audience-two')).toEqual(['audience-one', 'audience-two']);
-  });
-  it('protects bootstrap and redirects to a sanitized app path without exposing tokens', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/auth/bootstrap?return_to=%2Fgroups%2Fg-1%3Ftab%3Dactivity%23ledger', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
-    expect(response.status).toBe(302);
-    expect(response.headers.get('Location')).toBe('/groups/g-1?tab=activity#ledger');
-    expect(response.headers.get('Cache-Control')).toBe('no-store');
-    expect(await response.text()).not.toContain('token');
+  it('parses the explicit Clerk authorized-party allowlist', async () => {
+    const { parseAuthorizedParties } = await import('./index');
+    expect(parseAuthorizedParties('https://billsplit.laurenceputra.com')).toEqual(['https://billsplit.laurenceputra.com']);
+    expect(parseAuthorizedParties(' https://one.example, ,https://two.example ')).toEqual(['https://one.example', 'https://two.example']);
   });
   it('rejects API requests without verified production auth', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/me'), env({ ENVIRONMENT: 'production' }), {} as ExecutionContext);
@@ -137,9 +130,36 @@ describe('worker boundary', () => {
   });
   it('adds security headers to static responses', async () => {
     const response = await worker.fetch(new Request('https://split.example/'), env(), {} as ExecutionContext);
-    expect(response.headers.get('Content-Security-Policy')).toContain("script-src 'self'");
+    expect(response.status).toBe(200);
+    const csp = response.headers.get('Content-Security-Policy') || '';
+    const directives = Object.fromEntries(csp.split(';').map((directive) => { const [name, ...values] = directive.trim().split(/\s+/); return [name, values]; }));
+    expect(directives['script-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://challenges.cloudflare.com', 'https://*.protect.clerk.com']));
+    expect(directives['connect-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://*.protect.clerk.com']));
+    expect(directives['img-src']).toEqual(expect.arrayContaining(['\'self\'', 'data:', 'https://img.clerk.com']));
+    expect(directives['frame-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://challenges.cloudflare.com', 'https://*.protect.clerk.com']));
+    expect(directives['worker-src']).toEqual(expect.arrayContaining(['\'self\'', 'blob:']));
+    expect(directives['script-src']).not.toContain('https:');
+    expect(directives['connect-src']).not.toContain('https:');
+    expect(directives['script-src']).not.toContain("'unsafe-eval'");
     expect(response.headers.get('X-Frame-Options')).toBe('DENY');
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
+  });
+  it('derives the production FAPI host from the encoded publishable key only', async () => {
+    const publishableKey = 'pk_live_YmlsbHNwbGl0LmxhdXJlbmNlcHV0cmEuY29tJA';
+    const response = await worker.fetch(new Request('https://split.example/'), env({ CLERK_PUBLISHABLE_KEY: publishableKey }), {} as ExecutionContext);
+    const csp = response.headers.get('Content-Security-Policy') || '';
+    expect(csp).toContain('https://billsplit.laurenceputra.com');
+    expect(csp).not.toContain('https://evil.example');
+    expect(csp).not.toContain('https://split.example');
+  });
+  it('fails closed for absent or malformed publishable keys without breaking same-origin assets', async () => {
+    const { buildContentSecurityPolicy, clerkFrontendApiOrigin } = await import('./index');
+    expect(clerkFrontendApiOrigin()).toBeUndefined();
+    expect(clerkFrontendApiOrigin('not-a-publishable-key')).toBeUndefined();
+    expect(buildContentSecurityPolicy('not-a-publishable-key')).toContain("default-src 'self'");
+    expect(buildContentSecurityPolicy('not-a-publishable-key')).not.toContain('https://evil.example');
+    const response = await worker.fetch(new Request('https://split.example/'), env({ CLERK_PUBLISHABLE_KEY: 'not-a-publishable-key' }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
   });
   it('revalidates the manifest and service-worker script through the asset binding', async () => {
     const assets = { fetch: () => new Response('asset', { headers: { 'Cache-Control': 'public, max-age=31536000' } }) };
@@ -159,15 +179,15 @@ describe('worker boundary', () => {
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_FORBIDDEN' } });
   });
-  it('does not treat the Access-forwarded assertion as a CSRF bypass', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { 'Cf-Access-Jwt-Assertion': 'not-a-browser-bypass', 'Content-Type': 'application/json' }, body: '{}' }), env(), {} as ExecutionContext);
+  it('does not treat an auth header as a CSRF bypass', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { 'X-Unknown-Auth': 'not-a-browser-bypass', 'Content-Type': 'application/json' }, body: '{}' }), env(), {} as ExecutionContext);
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_FORBIDDEN' } });
   });
-  it('allows the explicit bearer non-browser path to reach authentication', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { Authorization: 'Bearer not-a-valid-token', 'Content-Type': 'application/json' }, body: '{}' }), env({ ENVIRONMENT: 'production', ACCESS_TEAM_DOMAIN: 'team.example.com', ACCESS_AUD: 'aud' }), {} as ExecutionContext);
+  it('allows an explicit bearer non-browser path to reach Clerk authentication', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { Authorization: 'Bearer not-a-valid-token', 'Content-Type': 'application/json' }, body: '{}' }), env({ ENVIRONMENT: 'production', CLERK_PUBLISHABLE_KEY: 'pk_test_invalid', CLERK_SECRET_KEY: 'sk_test_fixture', CLERK_JWT_KEY: 'invalid', CLERK_AUTHORIZED_PARTIES: 'https://split.example' }), {} as ExecutionContext);
     expect(response.status).toBe(401);
-    expect(await response.json()).toMatchObject({ error: { code: 'AUTH_INVALID' } });
+    expect(await response.json()).toMatchObject({ error: { code: expect.stringMatching(/^AUTH_(?:REQUIRED|INVALID)$/) } });
   });
   it('does not allow a local identity to access a group it is not a member of', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
@@ -184,10 +204,15 @@ describe('worker boundary', () => {
     expect(response.status).toBe(401);
     expect(((await response.json()) as any).error.code).toBe('AUTH_REQUIRED');
   });
-  it('accepts the standard Access assertion header path before JWT verification', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'Cf-Access-Jwt-Assertion': 'not-a-valid-jwt' } }), env({ ENVIRONMENT: 'production', ACCESS_TEAM_DOMAIN: 'team.example.com', ACCESS_AUD: 'aud' }), {} as ExecutionContext);
+  it('rejects an invalid Clerk session before repository access', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { Authorization: 'Bearer not-a-valid-token' } }), env({ ENVIRONMENT: 'production', CLERK_PUBLISHABLE_KEY: 'pk_test_invalid', CLERK_SECRET_KEY: 'sk_test_fixture', CLERK_JWT_KEY: 'invalid', CLERK_AUTHORIZED_PARTIES: 'https://split.example' }), {} as ExecutionContext);
     expect(response.status).toBe(401);
     expect(((await response.json()) as any).error.code).toBe('AUTH_INVALID');
+  });
+  it('reports a missing Clerk secret as configuration rather than an invalid session', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { Authorization: 'Bearer not-a-valid-token' } }), env({ ENVIRONMENT: 'production', CLERK_PUBLISHABLE_KEY: 'pk_test_invalid', CLERK_JWT_KEY: 'invalid', CLERK_AUTHORIZED_PARTIES: 'https://split.example' }), {} as ExecutionContext);
+    expect(response.status).toBe(401);
+    expect(((await response.json()) as any).error.code).toBe('AUTH_REQUIRED');
   });
   it('enforces owner-only group administration', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Renamed', currency: 'USD' }) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);

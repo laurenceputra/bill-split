@@ -8,7 +8,7 @@ const uid = () => crypto.randomUUID();
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND', message: string) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT', message: string) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -96,12 +96,7 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
-  async user(rawEmail: string) {
-    const email = rawEmail.trim().toLowerCase();
-    const t = now();
-    await this.db.prepare('INSERT OR IGNORE INTO users(id,email,created_at,updated_at) VALUES(?,?,?,?)').bind(uid(), email, t, t).run();
-    const user = await this.db.prepare('SELECT * FROM users WHERE email=?').bind(email).first<Row>();
-    if (!user) throw new RepositoryError('DATABASE_ERROR', 'Unable to create user');
+  private async personForUser(user: Row, email: string, t = now()) {
     let person = await this.db.prepare('SELECT * FROM people WHERE user_id=? AND deleted_at IS NULL').bind(user.id).first<Row>();
     if (!person) {
       const candidate = await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(email).first<Row>();
@@ -133,7 +128,62 @@ export class Repository {
     await this.db.prepare('UPDATE group_members SET user_id=? WHERE person_id=? AND user_id IS NULL').bind(user.id, person.id).run();
     return { user, person };
   }
+
+  async user(rawEmail: string) {
+    const email = rawEmail.trim().toLowerCase();
+    const t = now();
+    await this.db.prepare('INSERT OR IGNORE INTO users(id,email,created_at,updated_at) VALUES(?,?,?,?)').bind(uid(), email, t, t).run();
+    const user = await this.db.prepare('SELECT * FROM users WHERE email=?').bind(email).first<Row>();
+    if (!user) throw new RepositoryError('DATABASE_ERROR', 'Unable to create user');
+    return this.personForUser(user, email, t);
+  }
   async me(email: string) { return this.user(email); }
+
+  /**
+   * Resolve a verified Clerk session without changing the application's
+   * existing user/person IDs. The Clerk ID is authoritative after the first
+   * successful link; the email is used only for that initial link.
+   */
+  async userForClerk(clerkUserId: string, rawEmail: string) {
+    const clerkId = clerkUserId.trim();
+    const email = rawEmail.trim().toLowerCase();
+    if (!clerkId || !email) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The verified Clerk identity could not be linked safely');
+
+    const mapped = await this.db.prepare('SELECT * FROM users WHERE clerk_user_id=?').bind(clerkId).first<Row>();
+    if (mapped) return this.personForUser(mapped, text(mapped.email).toLowerCase());
+
+    const byEmail = await this.db.prepare('SELECT * FROM users WHERE lower(email)=?').bind(email).first<Row>();
+    if (byEmail?.clerk_user_id != null && String(byEmail.clerk_user_id) !== clerkId) {
+      throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This email is already linked to another Clerk identity');
+    }
+
+    const t = now();
+    if (byEmail) {
+      try {
+        // D1 batches are atomic. The conditional predicate makes a concurrent
+        // first-link loser observable when the mapping is read back below.
+        await this.db.batch([this.db.prepare('UPDATE users SET clerk_user_id=?,updated_at=? WHERE id=? AND clerk_user_id IS NULL').bind(clerkId, t, byEmail.id)]);
+      } catch (error) {
+        if (!Repository.isUnique(error)) throw error;
+      }
+      const linked = await this.db.prepare('SELECT * FROM users WHERE id=?').bind(byEmail.id).first<Row>();
+      if (!linked || String(linked.clerk_user_id) !== clerkId) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The existing email mapping changed; the Clerk identity was not linked');
+      return this.personForUser(linked, text(linked.email).toLowerCase(), t);
+    }
+
+    const id = uid();
+    try {
+      await this.db.batch([this.db.prepare('INSERT INTO users(id,email,clerk_user_id,created_at,updated_at) VALUES(?,?,?,?,?)').bind(id, email, clerkId, t, t)]);
+    } catch (error) {
+      if (!Repository.isUnique(error)) throw error;
+      const winner = await this.db.prepare('SELECT * FROM users WHERE clerk_user_id=?').bind(clerkId).first<Row>();
+      if (winner) return this.personForUser(winner, text(winner.email).toLowerCase(), t);
+      throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The email mapping changed; the Clerk identity was not linked');
+    }
+    const created = await this.db.prepare('SELECT * FROM users WHERE id=?').bind(id).first<Row>();
+    if (!created || String(created.clerk_user_id) !== clerkId) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The Clerk identity was not linked safely');
+    return this.personForUser(created, email, t);
+  }
 
   async groups(userId: string): Promise<Group[]> {
     const rows = (await this.db.prepare(`${groupSelect()} WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC`).bind(userId).all<Row>()).results;

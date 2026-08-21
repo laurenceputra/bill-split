@@ -21,9 +21,11 @@
     "db:seed": "wrangler d1 execute bill-split --local --file=./seed/seed.sql"
   },
   "dependencies": {
+    "@clerk/backend": "^3.16.10",
+    "@clerk/react": "^6.14.5",
+    "@clerk/shared": "^4.29.3",
     "@hono/zod-validator": "^0.4.3",
     "hono": "^4.7.2",
-    "jose": "^6.0.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.6.2",

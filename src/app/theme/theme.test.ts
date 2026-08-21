@@ -78,7 +78,7 @@ describe('responsive navigation layout contract', () => {
 
   it('keeps the public landing separate from the private shell', () => {
     expect(appSource).toContain('<PublicShell returnTo={returnTo}>');
-    expect(appSource).toContain('if (auth.status === \'unauthenticated\') return <PublicLanding />;');
+    expect(appSource).toContain("if (auth.status === 'unauthenticated') return <PublicLanding");
     expect(css).toMatch(/\.public-shell\s*\{[\s\S]*min-height: 100vh;/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.landing-primary,[\s\S]*width: 100%;/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);

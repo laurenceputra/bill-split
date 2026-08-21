@@ -106,7 +106,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
     if (logoutQuiescing) return undefined;
     const apiError = timedOut ? new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true }) : error instanceof ApiError ? error : new ApiError('Unable to sync expense.', { networkFailure: true, code: 'NETWORK_ERROR' });
     const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
-     const status: OutboxStatus = apiError.status === 401 || apiError.status === 403 || apiError.code === 'ACCESS_DENIED' || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
+      const status: OutboxStatus = apiError.status === 401 || apiError.status === 403 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' || apiError.code === 'AUTH_IDENTITY_CONFLICT' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
      const updated = await updateOutboxIfOwned(claimed.clientOperationId, owner, { status, deliveryUncertain: ambiguous, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: errorDetails(apiError) }, Date.now(), generation);
      if (ambiguous) await invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId, generation);
     if (updated) updateSnapshot(updated); else await refreshOutbox();
@@ -140,7 +140,7 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
       }
       await refreshOutbox();
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'ACCESS_DENIED' || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH')) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH' || error.code === 'AUTH_IDENTITY_CONFLICT')) {
         const identity = await readLastVerifiedIdentity();
         if (identity) await markAuthRequired(identity.userId, error);
       } else if (error instanceof ApiError && isRetryable(error)) {

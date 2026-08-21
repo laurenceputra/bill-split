@@ -137,7 +137,7 @@ function finishSessionLogout(broadcast: boolean, expectedGeneration: number) {
 /** Clear the barrier only after a fresh, authoritative /api/me response. */
 export const clearSessionLogout = (expectedGeneration = getSessionGeneration(), broadcast = true) => finishSessionLogout(broadcast, expectedGeneration);
 
-/** Roll back a started logout when local destructive cleanup failed before Access navigation. */
+/** Roll back a started logout when local destructive cleanup failed before Clerk navigation. */
 export const rollbackSessionLogout = (expectedGeneration: number, broadcast = true) => {
   const cleared = finishSessionLogout(false, expectedGeneration);
   if (cleared && broadcast) post({ type: 'logout-rollback', generation: expectedGeneration });
