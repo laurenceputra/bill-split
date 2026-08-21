@@ -90,6 +90,15 @@ describe('responsive navigation layout contract', () => {
     expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
   });
 
+  it('keeps the public sign-in transparent despite the global button background', () => {
+    const signInRule = css.match(/\.public-sign-in\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(signInRule).toContain('background: transparent;');
+    expect(signInRule).toContain('color: var(--color-primary-strong);');
+    expect(css).toMatch(/\.public-sign-in:hover\s*\{[\s\S]*background: var\(--color-primary-soft\);/);
+    expect(css).toMatch(/\.button,\s*button\s*\{[\s\S]*background: var\(--color-primary\);/);
+  });
+
   it('keeps proof items free of decorative borders and offset padding', () => {
     const proofItemRule = css.match(/\.landing-proof > div\s*\{([^}]*)\}/)?.[1] ?? '';
 
