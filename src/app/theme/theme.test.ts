@@ -8,6 +8,7 @@ const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
 const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
 const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
@@ -90,13 +91,20 @@ describe('responsive navigation layout contract', () => {
     expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
   });
 
-  it('keeps the public sign-in transparent despite the global button background', () => {
+  it('gives both public sign-in buttons the primary treatment and keeps focus visible', () => {
     const signInRule = css.match(/\.public-sign-in\s*\{([^}]*)\}/)?.[1] ?? '';
+    const signInHoverRule = css.match(/\.public-sign-in:hover\s*\{([^}]*)\}/)?.[1] ?? '';
 
-    expect(signInRule).toContain('background: transparent;');
-    expect(signInRule).toContain('color: var(--color-primary-strong);');
-    expect(css).toMatch(/\.public-sign-in:hover\s*\{[\s\S]*background: var\(--color-primary-soft\);/);
+    expect(signInRule).toContain('background: var(--color-primary);');
+    expect(signInRule).toContain('color: var(--color-on-primary);');
+    expect(signInHoverRule).toContain('background: var(--color-primary-strong);');
+    expect(signInHoverRule).toContain('color: var(--color-on-primary);');
     expect(css).toMatch(/\.button,\s*button\s*\{[\s\S]*background: var\(--color-primary\);/);
+    expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
+    expect(appSource).toContain('className="button landing-primary public-sign-in"');
+    expect(appSource).toContain('>Sign up</button>');
+    expect(uiSource).toContain('className="public-sign-in"');
+    expect(uiSource).toContain('>Sign up</button>');
   });
 
   it('keeps proof items free of decorative borders and offset padding', () => {
