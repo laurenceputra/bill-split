@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { SignInButton, SignUpButton, useAuth, useClerk } from '@clerk/react';
-import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
-import { currencyOptions, type ExpenseInput } from '../shared/schemas';
+import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Weekday } from '../shared/types';
+import { currencyOptions, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
-import { ApiError, api, getActivity, getAuthLifecycle, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDevelopmentAuthBypass, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, markSignedOut, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
+import { ApiError, api, changeScheduledExpenseStatus, createScheduledExpense, getActivity, getAuthLifecycle, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getScheduledExpense, getScheduledExpenses, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, updateScheduledExpense, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isDevelopmentAuthBypass, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, markSignedOut, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
@@ -13,6 +13,8 @@ import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalid
 import { groupBalanceDisplays } from './group-balance';
 import { activityDetailPath, expenseDetailPath } from './navigation';
 import { captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
+import { browserTimezone, previewScheduleDates, scheduleSummary, weekdayLabels } from './scheduled-expense';
+import { localDateForTimeZone } from '../domain/recurrence';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -152,7 +154,8 @@ function GroupPage() {
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const userId = me.data?.id || 'pending';
   const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(userId, id), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
-  const expensesResource = useResource<{ expenses: Expense[] }>(resourceKeys.expenses(userId, id), me.data?.id, (signal) => getExpenses(id, signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateExpenses(me.data!.id, id) : undefined);
+   const expensesResource = useResource<{ expenses: Expense[] }>(resourceKeys.expenses(userId, id), me.data?.id, (signal) => getExpenses(id, signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateExpenses(me.data!.id, id) : undefined);
+   const scheduledResource = useResource<{ scheduledExpenses: ScheduledExpense[] }>(resourceKeys.scheduledExpenses(userId, id), me.data?.id, (signal) => getScheduledExpenses(id, signal), RESOURCE_FRESHNESS.scheduledExpenses);
   const balancesResource = useResource<{ balances: Record<string, Balances> }>(resourceKeys.balances(userId, id), me.data?.id, (signal) => getBalances(id, signal), RESOURCE_FRESHNESS.balances, me.data?.id ? () => hydrateBalances(me.data!.id, id) : undefined);
   const settlementsResource = useResource<{ settlements: Settlement[] }>(resourceKeys.settlements(userId, id), me.data?.id, (signal) => getSettlements(id, signal), RESOURCE_FRESHNESS.settlements, me.data?.id ? () => hydrateSettlements(me.data!.id, id) : undefined);
   const group = groupResource.data?.group;
@@ -169,9 +172,9 @@ function GroupPage() {
   const [addPersonError, setAddPersonError] = useState<unknown>();
   const [pending, setPending] = useState<ExpenseOutboxItem[]>([]);
   const error = groupResource.error || me.error;
-  const offline = Boolean(groupResource.offline || expensesResource.offline || balancesResource.offline || settlementsResource.offline || me.offline);
-  const refreshing = [groupResource, expensesResource, balancesResource, settlementsResource].some((resource) => resource.revalidating);
-  const partialErrors = [groupResource, expensesResource, balancesResource, settlementsResource].filter((resource) => resource.error);
+   const offline = Boolean(groupResource.offline || expensesResource.offline || balancesResource.offline || settlementsResource.offline || me.offline);
+   const refreshing = [groupResource, expensesResource, balancesResource, settlementsResource, scheduledResource].some((resource) => resource.revalidating);
+   const partialErrors = [groupResource, expensesResource, balancesResource, settlementsResource, scheduledResource].filter((resource) => resource.error);
   useEffect(() => { setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id)); }, [id, currentUserId]);
   useEffect(() => { const unsubscribe = subscribeOutbox(() => setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id))); return () => { unsubscribe(); }; }, [id, currentUserId]);
 
@@ -193,15 +196,16 @@ function GroupPage() {
 
    return <Layout>
      <Link to="/" className="back">← Groups</Link>
-     <div className="page-title"><div><p className="eyebrow">{group.currency} group</p><h1>{group.name}</h1></div><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div>
+      <div className="page-title"><div><p className="eyebrow">{group.currency} group</p><h1>{group.name}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}/scheduled-expense/new`}>+ Schedule expense</Link><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link></div></div>
        {offlineView ? <p className="offline-banner" role="status">Offline · stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection.</p> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
         <div className="actions"><Link to={`/groups/${id}/settle`}>Settle up</Link><Link to={`/groups/${id}/activity`}>Activity</Link>{!offlineView ? <><a href={`/api/groups/${id}/export.csv`}>CSV export</a><a href={`/api/groups/${id}/export.json`}>JSON export</a></> : null}</div>
       <div className="group-overview-grid">
            <section className="stack stack--content"><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
           <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => { setAddPersonError(undefined); setAddingPerson((current) => !current); }}>{addingPerson ? 'Cancel' : '+ Add friend'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson} aria-describedby={addPersonError ? 'add-person-error' : undefined}><Field label="Friend name"><input id="person-name" required aria-invalid={Boolean(addPersonError)} aria-describedby={addPersonError ? 'add-person-error' : undefined} value={personName} onChange={(event) => { setAddPersonError(undefined); setPersonName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="person-email" className="email" type="email" value={personEmail} onChange={(event) => { setAddPersonError(undefined); setPersonEmail(event.target.value); }} /></Field>{addPersonError ? <ErrorBox error={addPersonError} id="add-person-error" /> : null}<Button disabled={addingPersonSubmitting} type="submit">{addingPersonSubmitting ? 'Adding…' : 'Add friend'}</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small className="email"> · {member.email}</small> : null}</span>)}</div></section>
      </div>
-     <div className="group-ledger">
-          <section><h2>Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses yet.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => { const path = expenseDetailPath(expense.groupId, expense.id); const content = <><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></>; return path ? <Link className="row" to={path} key={expense.id}>{content}</Link> : <div className="row" key={expense.id}>{content}</div>; })}</div> : null}</section>
+         <div className="group-ledger">
+           <ScheduleList groupId={id} schedules={scheduledResource.data?.scheduledExpenses || []} resource={scheduledResource} online={!offlineView} userId={currentUserId} />
+           <section><h2>Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses yet.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => { const path = expenseDetailPath(expense.groupId, expense.id); const content = <><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></>; return path ? <Link className="row" to={path} key={expense.id}>{content}</Link> : <div className="row" key={expense.id}>{content}</div>; })}</div> : null}</section>
          <section><h2>Recent settlements</h2>{!me.error || settlementsResource.data !== undefined ? <ResourceNotice resource={settlementsResource} label="settlements" retry={retryFor(resourceKeys.settlements(userId, id), me.data?.id)} /> : null}{settlementsResource.data !== undefined && settlements.length ? <div className="list">{settlements.map((settlement) => <div className="row" key={settlement.id}><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></div>)}</div> : settlementsResource.data !== undefined ? <Empty>No settlements yet.</Empty> : null}</section>
      </div>
    </Layout>;
@@ -218,18 +222,39 @@ function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
   return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} /><Button disabled={syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button><Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
 }
 
+function ScheduleStatus({ status }: { status: ScheduledExpenseStatus }) {
+  const tone = status === 'active' ? 'positive' : 'debt';
+  return <Status tone={tone}>{status[0].toUpperCase() + status.slice(1)}</Status>;
+}
+
+function ScheduleList({ groupId, schedules, resource, online, userId }: { groupId: string; schedules: ScheduledExpense[]; resource: ResourceSnapshot<{ scheduledExpenses: ScheduledExpense[] }>; online: boolean; userId: string }) {
+  const [busyId, setBusyId] = useState<string>();
+  const [error, setError] = useState<unknown>();
+  const updateStatus = async (schedule: ScheduledExpense, action: 'pause' | 'resume' | 'cancel') => {
+    if (action === 'cancel' && !confirm(`Cancel “${schedule.description}”? Future occurrences will not be generated.`)) return;
+    setBusyId(schedule.id); setError(undefined);
+     try { await changeScheduledExpenseStatus(schedule.id, action, schedule.version); await invalidateForMutation.scheduledExpenseChanged(groupId, userId, schedule.id); }
+    catch (cause) { setError(cause); }
+    finally { setBusyId(undefined); }
+  };
+  return <section aria-labelledby="scheduled-expenses-heading"><div className="section-title"><h2 id="scheduled-expenses-heading">Scheduled expenses</h2><span className="muted">Online-only</span></div>{resource.data === undefined ? <ResourceNotice resource={resource} label="scheduled expenses" retry={retryFor(resourceKeys.scheduledExpenses(userId, groupId), userId)} /> : schedules.length ? <div className="list">{schedules.map((schedule) => <div className="row schedule-row" key={schedule.id}><span><strong>{schedule.description}</strong><small>{scheduleSummary(schedule.frequency, schedule.interval, schedule.weekdays)} · {schedule.timezone}</small><small>{schedule.nextOccurrenceDate ? `Next occurrence ${schedule.nextOccurrenceDate}` : 'No future occurrences'}</small><small><ScheduleStatus status={schedule.status} />{schedule.blockedReason ? ` ${schedule.blockedReason}` : null}</small></span><div className="schedule-row__actions"><Money amountMinor={schedule.amountMinor} currency={schedule.currency} /><Link className="button button--secondary" to={`/groups/${groupId}/scheduled-expense/${schedule.id}`}>Edit</Link>{schedule.status === 'active' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'pause')}>Pause</Button> : schedule.status === 'paused' || schedule.status === 'blocked' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'resume')}>Resume</Button> : null}{schedule.status !== 'cancelled' ? <Button type="button" variant="danger" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'cancel')}>Cancel</Button> : null}</div></div>)}</div> : <Empty>No recurring expenses yet.</Empty>}{error ? <ErrorBox error={error} id="scheduled-expense-mutation-error" /> : null}{!online ? <p className="cache-status">Schedule management requires a connection. Existing schedules are not stored for offline use.</p> : null}</section>;
+}
+
 type PayerRow = { personId: string; amount: string };
 type ExpenseErrorTarget = 'description' | 'amount' | 'participants' | 'payers' | 'allocation' | 'form';
 type ExpenseFormError = { error: unknown; target: ExpenseErrorTarget };
 
 function ExpenseForm() {
   const online = useOnlineStatus();
-  const { id = '', expenseId } = useParams();
+  const { id = '', expenseId, scheduledExpenseId } = useParams();
+  const location = useLocation();
+  const scheduleMode = location.pathname.includes('/scheduled-expense');
   const nav = useNavigate();
   const meResource = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const formUserId = meResource.data?.id || 'pending';
   const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(formUserId, id), meResource.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, meResource.data?.id ? () => hydrateGroup(meResource.data!.id, id) : undefined);
   const detailResource = useResource<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(resourceKeys.expenseDetail(formUserId, expenseId || 'new'), meResource.data?.id, async (signal) => expenseId ? getExpenseDetails(expenseId, signal) : { expense: undefined as unknown as Expense, history: [] }, RESOURCE_FRESHNESS.expenseDetail, expenseId && meResource.data?.id ? () => hydrateExpenseDetails(meResource.data!.id, expenseId) : undefined);
+  const scheduleResource = useResource<{ scheduledExpense: ScheduledExpense }>(resourceKeys.scheduledExpense(formUserId, scheduledExpenseId || 'new'), meResource.data?.id, async (signal) => scheduledExpenseId ? getScheduledExpense(scheduledExpenseId, signal) : { scheduledExpense: undefined as unknown as ScheduledExpense }, RESOURCE_FRESHNESS.scheduledExpenses);
   const group = groupResource.data?.group;
   const members = groupResource.data?.members || [];
   const currentPersonId = meResource.data?.personId || '';
@@ -237,7 +262,12 @@ function ExpenseForm() {
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState<Currency>('USD');
-  const [date, setDate] = useState(today());
+   const [date, setDate] = useState(() => localDateForTimeZone(new Date(), browserTimezone()));
+  const [endDate, setEndDate] = useState('');
+  const [frequency, setFrequency] = useState<RecurrenceFrequency>('monthly');
+  const [interval, setInterval] = useState('1');
+  const [weekdays, setWeekdays] = useState<Weekday[]>([]);
+  const [timezone, setTimezone] = useState(browserTimezone);
   const [category, setCategory] = useState('');
   const [notes, setNotes] = useState('');
   const [method, setMethod] = useState<SplitMethod>('equal');
@@ -253,7 +283,7 @@ function ExpenseForm() {
   const [dirty, setDirty] = useState(false);
   const [updatedElsewhere, setUpdatedElsewhere] = useState(false);
   const [formReady, setFormReady] = useState(false);
-  const routeKey = `${formUserId}:${id}:${expenseId || 'new'}`;
+  const routeKey = `${formUserId}:${id}:${scheduleMode ? `schedule:${scheduledExpenseId || 'new'}` : `expense:${expenseId || 'new'}`}`;
   const initializedRoute = useRef<string | undefined>(undefined);
   const initializedVersion = useRef<number | undefined>(undefined);
   const markDirty = () => { setDirty(true); setFormError(undefined); };
@@ -271,41 +301,45 @@ function ExpenseForm() {
   useEffect(() => {
     const groupResult = groupResource.data;
     const me = meResource.data;
-    const expense = detailResource.data?.expense;
-    if (!groupResult || !me || (expenseId && !expense)) return;
+     const expense = detailResource.data?.expense;
+     const schedule = scheduleResource.data?.scheduledExpense;
+     if (!groupResult || !me || (expenseId && !expense) || (scheduledExpenseId && !schedule)) return;
 
-    if (initializedRoute.current === routeKey) {
-      if (expense?.version === initializedVersion.current || (!expense && initializedVersion.current === undefined)) return;
-      if (dirty) {
-        if (hasNewerServerVersion(initializedVersion.current, expense?.version, true)) setUpdatedElsewhere(true);
-        return;
-      }
+     const serverVersion = formServerVersion(scheduleMode, expense?.version, schedule?.version);
+     if (initializedRoute.current === routeKey) {
+        if (serverVersion === initializedVersion.current || (!expense && !schedule && initializedVersion.current === undefined)) return;
+       if (dirty) {
+         if (hasNewerServerVersion(initializedVersion.current, serverVersion, true)) setUpdatedElsewhere(true);
+         return;
+       }
       initializedRoute.current = undefined;
     }
 
-    const loadedMethod = expense?.splits[0]?.metadata?.method;
+     const loadedMethod = (expense || schedule)?.splits[0]?.metadata?.method;
     const nextMethod: SplitMethod = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal';
-    setCurrency(expense?.currency ?? groupResult.group.currency);
-    if (expense) {
-      setDescription(expense.description); setAmount(moneyInput(expense.amountMinor)); setDate(expense.date); setCategory(expense.category || ''); setNotes(expense.notes || ''); setMethod(nextMethod); setSelected(expense.splits.map((split) => split.personId)); setAllocationValues(allocationStateFromSplits(expense.splits, nextMethod)); setExistingSplitMetadata(allocationMetadataByPerson(expense.splits)); setVersion(expense.version); setPayerRows(expense.payers.map((payer) => ({ personId: payer.personId, amount: moneyInput(payer.amountMinor) })));
-    } else {
+     setCurrency(expense?.currency ?? schedule?.currency ?? groupResult.group.currency);
+     if (expense || schedule) {
+       const record = expense || schedule!;
+       setDescription(record.description); setAmount(moneyInput(record.amountMinor)); setDate('date' in record ? record.date : record.startDate); setCategory('category' in record ? record.category || '' : ''); setNotes('notes' in record ? record.notes || '' : ''); setMethod(nextMethod); setSelected(record.splits.map((split) => split.personId)); setAllocationValues(allocationStateFromSplits(record.splits, nextMethod)); setExistingSplitMetadata(allocationMetadataByPerson(record.splits)); setVersion(record.version); setPayerRows(record.payers.map((payer) => ({ personId: payer.personId, amount: moneyInput(payer.amountMinor) })));
+       if ('startDate' in record) { setEndDate(record.endDate || ''); setFrequency(record.frequency); setInterval(String(record.interval)); setWeekdays(record.weekdays); setTimezone(record.timezone); }
+     } else {
       const payer = currentPayerSelection(me.personId, groupResult.members);
-      setDescription(''); setAmount(''); setDate(today()); setCategory(''); setNotes(''); setMethod('equal'); setAllocationValues({}); setExistingSplitMetadata({}); setVersion(undefined); setSelected(groupResult.members.map((member) => member.personId)); setPayerRows(payer ? [{ personId: payer, amount: '' }] : []);
+       const defaultTimezone = browserTimezone(); setDescription(''); setAmount(''); setDate(scheduleMode ? localDateForTimeZone(new Date(), defaultTimezone) : today()); setEndDate(''); setFrequency('monthly'); setInterval('1'); setWeekdays([]); setTimezone(defaultTimezone); setCategory(''); setNotes(''); setMethod('equal'); setAllocationValues({}); setExistingSplitMetadata({}); setVersion(undefined); setSelected(groupResult.members.map((member) => member.personId)); setPayerRows(payer ? [{ personId: payer, amount: '' }] : []);
     }
     initializedRoute.current = routeKey;
-    initializedVersion.current = expense?.version;
+     initializedVersion.current = expense?.version ?? schedule?.version;
     setDirty(false);
     setUpdatedElsewhere(false);
     setFormReady(true);
-  }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey]);
+   }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey, scheduleMode, scheduleResource.data, scheduledExpenseId]);
 
-  const resourceError = meResource.error || groupResource.error || (expenseId && detailResource.error);
+   const resourceError = meResource.error || groupResource.error || (expenseId && detailResource.error) || (scheduledExpenseId && scheduleResource.error);
   const routeReady = initializedRoute.current === routeKey && formReady;
-  if (resourceError && !(group && routeReady)) return <Layout><ErrorBox error={resourceError} onRetry={retryFor(expenseId ? resourceKeys.expenseDetail(formUserId, expenseId) : resourceKeys.group(formUserId, id), meResource.data?.id, Boolean(meResource.error))} id="expense-resource-error" /></Layout>;
+   if (resourceError && !(group && routeReady)) return <Layout><ErrorBox error={resourceError} onRetry={retryFor(expenseId ? resourceKeys.expenseDetail(formUserId, expenseId) : scheduledExpenseId ? resourceKeys.scheduledExpense(formUserId, scheduledExpenseId) : resourceKeys.group(formUserId, id), meResource.data?.id, Boolean(meResource.error))} id="expense-resource-error" /></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
   if (!routeReady) return <Layout><Loading /></Layout>;
   const offlineData = Boolean(groupResource.offline || meResource.offline || detailResource.offline);
-  const editUnavailable = Boolean(expenseId) && (!online || offlineData);
+   const editUnavailable = scheduleMode ? !online : Boolean(expenseId) && (!online || offlineData);
   const amountMinor = (() => { try { return parseMoney(amount, currency); } catch { return 0; } })();
   const preview = previewAllocation(amountMinor, selected, method, allocationValues, currency);
   const isYou = (personId: string) => personId === currentPersonId;
@@ -317,7 +351,9 @@ function ExpenseForm() {
   const resetToServer = () => { setDirty(false); setUpdatedElsewhere(false); setFormError(undefined); };
   const payerIsFullTotal = payerRows.length === 1 && amount.trim() !== '' && amountMinor > 0 && (() => { try { return parseMoney(payerRows[0].amount, currency) === amountMinor; } catch { return false; } })();
   const payerSummary = payerRows.length === 1 ? `Paid by ${isYou(payerRows[0].personId) ? 'You' : nameOf(members, payerRows[0].personId)}` : payerRows.length ? `Paid by ${payerRows.length} people` : 'Choose who paid';
-  const payerSummaryDetail = payerRows.length === 1 ? (payerIsFullTotal ? 'Entire total' : 'Amount needs review') : payerRows.length ? 'Configure exact amounts' : 'Choose a payer';
+   const payerSummaryDetail = payerRows.length === 1 ? (payerIsFullTotal ? 'Entire total' : 'Amount needs review') : payerRows.length ? 'Configure exact amounts' : 'Choose a payer';
+   const scheduleDraft = { startDate: date, endDate: endDate || null, frequency, interval: Number(interval) || 1, weekdays };
+   const schedulePreview = scheduleMode ? (() => { try { return previewScheduleDates(scheduleDraft, localDateForTimeZone(new Date(), timezone.trim() || 'UTC'), 5); } catch { return previewScheduleDates(scheduleDraft, today(), 5); } })() : [];
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -338,37 +374,57 @@ function ExpenseForm() {
       target = 'allocation';
       if (preview.error || preview.remainingMinor !== 0) throw new Error(preview.error || 'Split amounts must equal the expense total.');
       target = 'form';
-      const input = { description: description.trim(), amount_minor: cents, currency, date, category: category.trim() || null, notes: notes || null, payers, splits: allocationSplits(selected, method, preview, allocationValues, existingSplitMetadata), version, client_operation_id: expenseId ? undefined : operation };
-       if (expenseId) { const generation = captureSessionGeneration(); await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); await invalidateForMutation.expenseChanged(id, expenseId, currentUserId, generation); }
-       else {
+       const splits = allocationSplits(selected, method, preview, allocationValues, existingSplitMetadata);
+       if (scheduleMode) {
+         target = 'form';
+         const scheduleInterval = Number(interval);
+         if (!Number.isSafeInteger(scheduleInterval) || scheduleInterval < 1 || scheduleInterval > 366) throw new Error('Enter an interval from 1 to 366.');
+         if (frequency === 'weekly' && !weekdays.length) throw new Error('Choose at least one weekday for a weekly schedule.');
+         if (frequency !== 'weekly' && weekdays.length) throw new Error('Weekdays are only used for weekly schedules.');
+         if (endDate && endDate < date) throw new Error('End date must not precede the start date.');
+         const scheduleInput: ScheduledExpenseInput = { description: description.trim(), amount_minor: cents, currency, start_date: date, end_date: endDate || null, frequency, interval: scheduleInterval, weekdays: frequency === 'weekly' ? weekdays : [], timezone: timezone.trim() || 'UTC', payers, splits, version, client_operation_id: scheduledExpenseId ? undefined : operation };
+          if (scheduledExpenseId) await updateScheduledExpense(scheduledExpenseId, scheduleInput);
+         else await createScheduledExpense(id, scheduleInput);
+         await invalidateForMutation.scheduledExpenseChanged(id, currentUserId, scheduledExpenseId);
+         nav(`/groups/${id}`);
+       } else {
+       const input = { description: description.trim(), amount_minor: cents, currency, date, category: category.trim() || null, notes: notes || null, payers, splits, version, client_operation_id: expenseId ? undefined : operation };
+        if (expenseId) { const generation = captureSessionGeneration(); await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); await invalidateForMutation.expenseChanged(id, expenseId, currentUserId, generation); }
+        else {
          const me = currentUserId ? { id: currentUserId } : await getMe();
          const payload = input as ExpenseInput;
          await enqueueExpense({ userId: me.id, groupId: id, payload, clientOperationId: operation, display: { description: payload.description, amountMinor: payload.amount_minor, currency: payload.currency, date: payload.date } });
           await flushOutbox();
         }
-       nav(`/groups/${id}`);
-     } catch (cause) {
-       if (expenseId && currentUserId && cause instanceof ApiError && isExpenseConflict(cause.status, cause.code)) {
+         nav(`/groups/${id}`);
+        }
+        } catch (cause) {
+        if (expenseId && currentUserId && cause instanceof ApiError && isExpenseConflict(cause.status, cause.code)) {
          const detailKey = resourceKeys.expenseDetail(currentUserId, expenseId);
          invalidateResource(detailKey, currentUserId, { revalidate: false });
-         void revalidate(detailKey, currentUserId, { force: true, reason: 'mutation' }).catch(() => undefined);
-       }
+          void revalidate(detailKey, currentUserId, { force: true, reason: 'mutation' }).catch(() => undefined);
+        }
+        if (scheduledExpenseId && currentUserId && cause instanceof ApiError && (cause.status === 409 || cause.code === 'CONFLICT')) {
+          const scheduleKey = resourceKeys.scheduledExpense(currentUserId, scheduledExpenseId);
+          invalidateResource(scheduleKey, currentUserId, { revalidate: false });
+          void revalidate(scheduleKey, currentUserId, { force: true, reason: 'mutation' }).catch(() => undefined);
+        }
         setSubmitting(false); setFormError({ error: cause, target });
       }
    };
 
   return <Layout>
-       <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{expenseId ? 'Edit expense' : 'New expense'}</p><h1>{expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{meResource.error ? <CachedIdentityNotice resource={meResource} id="expense-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group details" retry={retryFor(resourceKeys.group(formUserId, id), meResource.data?.id)} /> : null}{expenseId && detailResource.error ? <ResourceNotice resource={detailResource} label="expense form data" retry={retryFor(resourceKeys.expenseDetail(formUserId, expenseId), meResource.data?.id)} /> : null}
-       {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">Editing expenses is online-only. Reconnect before saving changes.</p> : null}<form className="expense-form reading-width" onSubmit={submit} aria-describedby={formError ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined}>
+        <div className="page-title expense-heading"><div><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><p className="eyebrow">{scheduleMode ? (scheduledExpenseId ? 'Edit scheduled expense' : 'New scheduled expense') : expenseId ? 'Edit expense' : 'New expense'}</p><h1>{scheduleMode ? (scheduledExpenseId ? 'Edit recurring expense' : 'Schedule an expense') : expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></div>{meResource.error ? <CachedIdentityNotice resource={meResource} id="expense-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group details" retry={retryFor(resourceKeys.group(formUserId, id), meResource.data?.id)} /> : null}{expenseId && detailResource.error ? <ResourceNotice resource={detailResource} label="expense form data" retry={retryFor(resourceKeys.expenseDetail(formUserId, expenseId), meResource.data?.id)} /> : null}{scheduledExpenseId && scheduleResource.error ? <ResourceNotice resource={scheduleResource} label="scheduled expense form data" retry={retryFor(resourceKeys.scheduledExpense(formUserId, scheduledExpenseId), meResource.data?.id)} /> : null}
+        {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">{scheduleMode ? 'Schedule management is online-only. Reconnect before saving changes.' : 'Editing expenses is online-only. Reconnect before saving changes.'}</p> : null}<form className="expense-form reading-width" onSubmit={submit} aria-describedby={formError ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined}>
          <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input id="expense-amount" className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" aria-invalid={formError?.target === 'amount'} aria-describedby={formError?.target === 'amount' ? 'expense-form-error' : undefined} placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
          <Field label="Description" className="field--compact"><input id="expense-description" required aria-invalid={formError?.target === 'description'} aria-describedby={formError?.target === 'description' ? 'expense-form-error' : undefined} placeholder="What was this for?" value={description} onChange={(event) => { markDirty(); setDescription(event.target.value); }} /></Field>
        <button className="summary-row" type="button" aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} onClick={() => setPayersOpen(true)}><span><span className="summary-row__label">{payerSummary}</span><small>{payerSummaryDetail}</small></span><strong>Change</strong></button>
        <fieldset aria-describedby={formError?.target === 'participants' ? 'expense-form-error' : undefined}><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} aria-invalid={formError?.target === 'participants'} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
        <div className="secondary-fields"><Field label="Split method" className="field--compact"><select value={method} onChange={(event) => { markDirty(); setMethod(event.target.value as SplitMethod); }}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
           {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input className={amountInputClass(allocationValues[member.personId] || '')} data-amount-length={amountInputLength(allocationValues[member.personId] || '')} required inputMode="decimal" aria-label={`${member.name} ${method} value`} aria-invalid={formError?.target === 'allocation' || Boolean(preview.error)} aria-describedby={formError?.target === 'allocation' ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" id="allocation-error" role="alert">{preview.error}</p> : null}</div>}
-          <div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="Category (optional)" className="field--compact"><input className="category" value={category} onChange={(event) => { markDirty(); setCategory(event.target.value); }} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea className="notes" rows={3} value={notes} onChange={(event) => { markDirty(); setNotes(event.target.value); }} /></Field>
+           {scheduleMode ? <><div className="form-row"><Field label="Start date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="End date (optional)" className="field--compact"><input type="date" value={endDate} min={date} onChange={(event) => { markDirty(); setEndDate(event.target.value); }} /></Field></div><div className="form-row"><Field label="Repeats" className="field--compact"><select value={frequency} onChange={(event) => { markDirty(); setFrequency(event.target.value as RecurrenceFrequency); if (event.target.value !== 'weekly') setWeekdays([]); }}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></Field><Field label="Every (interval)" className="field--compact"><input required type="number" min="1" max="366" value={interval} onChange={(event) => { markDirty(); setInterval(event.target.value); }} /></Field></div>{frequency === 'weekly' ? <fieldset><legend>On weekdays</legend><div className="weekday-list">{weekdayLabels.map((day) => <label className="checkbox-row" key={day.value}><input type="checkbox" checked={weekdays.includes(day.value)} onChange={() => { markDirty(); setWeekdays((current) => current.includes(day.value) ? current.filter((value) => value !== day.value) : [...current, day.value].sort((a, b) => a - b)); }} />{day.label}</label>)}</div></fieldset> : null}<Field label="Creator timezone (IANA)" className="field--compact"><input required value={timezone} onChange={(event) => { markDirty(); setTimezone(event.target.value); }} /><small className="muted">Defaults to this browser’s timezone. Dates are calendar dates in this timezone.</small></Field><div className="schedule-preview"><strong>Next dates</strong>{schedulePreview.length ? <ol>{schedulePreview.map((previewDate) => <li key={previewDate}>{previewDate}</li>)}</ol> : <p className="muted">No occurrences match these settings.</p>}</div><p className="muted">Only future occurrences use edits. Already generated expenses stay in the ledger; creating or changing a schedule never enters the expense outbox.</p></> : <><div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="Category (optional)" className="field--compact"><input className="category" value={category} onChange={(event) => { markDirty(); setCategory(event.target.value); }} /></Field></div><Field label="Notes (optional)" className="field--compact"><textarea className="notes" rows={3} value={notes} onChange={(event) => { markDirty(); setNotes(event.target.value); }} /></Field></>}
       </div>
-        {formError ? <ErrorBox error={formError.error} id="expense-form-error" /> : null}<Button className="full-width-button" disabled={submitting || editUnavailable} type="submit">{submitting ? 'Saving…' : expenseId ? 'Save changes' : 'Save expense'}</Button>
+         {formError ? <ErrorBox error={formError.error} id="expense-form-error" /> : null}<Button className="full-width-button" disabled={submitting || editUnavailable} type="submit">{submitting ? 'Saving…' : scheduleMode ? scheduledExpenseId ? 'Save schedule' : 'Create schedule' : expenseId ? 'Save changes' : 'Save expense'}</Button>
     </form>
        {payersOpen && <Modal title="Who paid?" description="Use one payer for a quick entry, or add people and enter exact amounts." onClose={() => setPayersOpen(false)}><div className="payer-list">{payerRows.map((payer, index) => <div className={`payer-row${payerRows.length > 1 ? ' payer-row--removable' : ''}`} key={`${payer.personId}-${index}`}><select aria-label={`Payer ${index + 1}: ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)}`} aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} value={payer.personId} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, personId: event.target.value } : row)); }}>{members.filter((member) => !payerRows.some((other, otherIndex) => other.personId === member.personId && otherIndex !== index)).map((member) => <option key={member.personId} value={member.personId}>{member.name}{isYou(member.personId) ? ' · You' : ''}</option>)}</select><input className={amountInputClass(payer.amount)} data-amount-length={amountInputLength(payer.amount)} required inputMode="decimal" aria-label={`Amount paid by ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} placeholder="Amount" value={payer.amount} onChange={(event) => { markDirty(); setPayerRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, amount: event.target.value } : row)); }} />{payerRows.length > 1 && <Button type="button" variant="secondary" aria-label={`Remove payer ${isYou(payer.personId) ? 'You' : nameOf(members, payer.personId)} (payer ${index + 1})`} onClick={() => removePayer(index)}>Remove</Button>}</div>)}</div><p className="allocation-summary" role="status">Payers total {formatMoney(payerRows.reduce((sum, payer) => { try { return sum + parseMoney(payer.amount || '0', currency); } catch { return sum; } }, 0), currency)} of {formatMoney(amountMinor, currency)}</p><Button className="full-width-button" type="button" variant="secondary" onClick={addPayer}>+ Add payer</Button><Button className="full-width-button" type="button" onClick={() => setPayersOpen(false)}>Done</Button></Modal>}
   </Layout>;
@@ -516,7 +572,7 @@ function Settings() {
 
 function PrivateRoutes() {
   const identityEpoch = useResourceIdentityEpoch();
-  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/:scheduledExpenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }
 
 export function App() {
@@ -547,8 +603,8 @@ export function App() {
     if (online && sessionTransition) resetForClerkSessionChange();
     else if (!online && sessionTransition) revokeForClerkSessionChange();
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
-    if ((isSignedIn || !online || isDevelopmentAuthBypass) && !(sessionTransition && !online)) void initializeAuthLifecycle({ ...(shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
-    else {
+    if ((isSignedIn === true || !online || isDevelopmentAuthBypass) && !(sessionTransition && !online)) void initializeAuthLifecycle({ ...(shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
+    else if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
       clerkSessionRef.current = undefined;
       markSignedOut();
     }

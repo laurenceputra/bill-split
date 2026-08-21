@@ -28,6 +28,11 @@ export function hasNewerServerVersion(initialVersion: number | undefined, server
   return dirty && initialVersion !== undefined && serverVersion !== undefined && serverVersion > initialVersion;
 }
 
+/** Select the version for the record currently being edited. */
+export function formServerVersion(scheduleMode: boolean, expenseVersion: number | undefined, scheduleVersion: number | undefined): number | undefined {
+  return scheduleMode ? scheduleVersion : expenseVersion;
+}
+
 export function isExpenseConflict(status: number | undefined, code: string | undefined): boolean {
   return status === 409 || code === 'CONFLICT';
 }

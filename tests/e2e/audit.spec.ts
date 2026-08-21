@@ -79,19 +79,21 @@ const apiPaths = {
   expenses: (id: string) => `/api/groups/${id}/expenses`,
   balances: (id: string) => `/api/groups/${id}/balances`,
   settlements: (id: string) => `/api/groups/${id}/settlements`,
+  scheduledExpenses: (id: string) => `/api/groups/${id}/scheduled-expenses`,
   expense: (id: string) => `/api/expenses/${id}`,
   activity: (id: string) => `/api/groups/${id}/activity`,
 };
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups];
-const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.expenses(id), apiPaths.balances(id), apiPaths.settlements(id)];
+const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.expenses(id), apiPaths.balances(id), apiPaths.settlements(id), apiPaths.scheduledExpenses(id)];
 const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
   { name: 'empty-home', path: '/', auth: EMPTY_EMAIL, context: 'Home / empty groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'No groups yet', apiPaths: privateHomeApis } },
-  { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Recent expenses', apiPaths: groupApis(ids.rich) } },
+  { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'GroupPage / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent expenses', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
+  { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/scheduled-expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / recurring expense setup fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Next dates', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with history fixture', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'activity', path: `/groups/${ids.rich}/activity`, auth: DEV_EMAIL, context: 'Activity / expense and settlement history fixture', expected: { mode: 'normal', heading: 'Activity', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.activity(ids.rich)] } },

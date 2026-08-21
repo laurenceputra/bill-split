@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { checkedSumMinor } from './money';
+import type { Weekday } from './types';
 
 export const id = z.string().uuid();
 export const supportedCurrencies = ['USD', 'EUR', 'GBP', 'AUD', 'CAD', 'NZD', 'SGD', 'HKD', 'CHF', 'CNY', 'INR'] as const;
@@ -22,10 +23,28 @@ export const expenseInput = z.object({
   payers: z.array(payerInput).min(1).max(100), splits: z.array(splitInput).min(1).max(100), client_operation_id: z.string().trim().min(1).max(100).optional()
 });
 export const settlementInput = z.object({ from_person_id: id, to_person_id: id, amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency, date, note: z.string().max(500).optional().nullable(), version: z.number().int().positive().optional(), client_operation_id: z.string().trim().min(1).max(100).optional() });
+export const timezone = z.string().trim().min(1).max(64).refine((value) => {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(); return true; } catch { return false; }
+}, 'Timezone must be a valid IANA timezone');
+export const recurrenceFrequency = z.enum(['daily', 'weekly', 'monthly', 'yearly']);
+const weekday = z.number().int().min(0).max(6) as z.ZodType<Weekday>;
+export const scheduledExpenseInput = z.object({
+  description: z.string().trim().min(1).max(240), amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency,
+  start_date: date, end_date: date.optional().nullable(), frequency: recurrenceFrequency, interval: z.number().int().positive().max(366),
+  weekdays: z.array(weekday).max(7).default([]), timezone, version: z.number().int().positive().optional(),
+  payers: z.array(payerInput).min(1).max(100), splits: z.array(splitInput).min(1).max(100), client_operation_id: z.string().trim().min(1).max(100).optional(),
+}).superRefine((value, context) => {
+  if (value.end_date && value.end_date < value.start_date) context.addIssue({ code: z.ZodIssueCode.custom, path: ['end_date'], message: 'End date must not precede start date' });
+  if (value.weekdays.some((day, index) => value.weekdays.indexOf(day) !== index)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['weekdays'], message: 'Weekdays must be unique' });
+  if (value.frequency === 'weekly' && value.weekdays.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['weekdays'], message: 'Weekly schedules require at least one weekday' });
+  if (value.frequency !== 'weekly' && value.weekdays.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['weekdays'], message: 'Weekdays are only valid for weekly schedules' });
+});
+export const scheduledExpenseStatusInput = z.object({ version: z.number().int().positive() });
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
 export type FriendInput = z.infer<typeof friendInput>;
+export type ScheduledExpenseInput = z.infer<typeof scheduledExpenseInput>;
 
 export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));

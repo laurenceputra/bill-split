@@ -1,6 +1,7 @@
-import type { Activity, Expense, Group, GroupMember, Settlement, Balances } from '../shared/types';
+import type { Activity, Expense, Group, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
+import type { ScheduledExpenseInput } from '../shared/schemas';
 import { clearAllPrivateData, normalizeActivity, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveVerifiedIdentity, saveExpenseDetails, updateGroupSnapshot } from './idb';
-import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceIdentity } from './resource-cache';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
@@ -44,7 +45,7 @@ export const getConnectionState = () => connectionState;
 export const subscribeConnectionState = (listener: () => void) => { connectionListeners.add(listener); return () => connectionListeners.delete(listener); };
 export const getAuthLifecycle = () => authLifecycle;
 export const subscribeAuthLifecycle = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
-const setAuthLifecycle = (next: AuthLifecycle) => { if (authLifecycle.status === next.status && authLifecycle.error === next.error) return; authLifecycle = next; authListeners.forEach((listener) => listener()); };
+const setAuthLifecycle = (next: AuthLifecycle) => { if (authLifecycle.status === next.status && authLifecycle.error === next.error) return; authLifecycle = next; setResourceAuthLifecycleReady(next.status === 'authenticated' || next.status === 'trusted-offline'); authListeners.forEach((listener) => listener()); };
 export const clearAuthRequired = () => { authBlocked = false; allowIdentityVerification(); if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
   verifiedIdentity = undefined;
@@ -96,6 +97,8 @@ export function sanitizeReturnTo(value: unknown): string {
 
 /** Offline cold starts may use the trusted cache before Clerk's browser SDK has loaded. */
 export const shouldStartAuthCheck = (online: boolean, clerkLoaded: boolean) => !online || clerkLoaded;
+/** Clerk must have finished restoring before a false value is a signed-out decision. */
+export const isDefinitivelySignedOut = (clerkLoaded: boolean, signedIn: boolean | undefined) => clerkLoaded && signedIn === false;
 
 export class ApiError extends Error {
   readonly status?: number;
@@ -432,6 +435,36 @@ export async function getSettlements(id: string, signal?: AbortSignal): Promise<
     if (cached?.settlements) return offline({ settlements: cached.settlements });
     throw error;
   }
+}
+
+/** Schedules are intentionally online-only; unlike new expenses they never enter the outbox. */
+export async function getScheduledExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<{ scheduledExpenses: ScheduledExpense[] }>> {
+  const pageSize = 100;
+  const scheduledExpenses: ScheduledExpense[] = [];
+  let offset = 0;
+  while (true) {
+    const result = await apiWithMeta<{ scheduledExpenses: ScheduledExpense[] }>(`/groups/${id}/scheduled-expenses?limit=${pageSize}&offset=${offset}`, { signal });
+    scheduledExpenses.push(...result.data.scheduledExpenses);
+    if (result.data.scheduledExpenses.length < pageSize) return { ...result.data, scheduledExpenses };
+    offset += pageSize;
+  }
+}
+
+export async function getScheduledExpense(id: string, signal?: AbortSignal): Promise<CachedResult<{ scheduledExpense: ScheduledExpense }>> {
+  const result = await apiWithMeta<{ scheduledExpense: ScheduledExpense }>(`/scheduled-expenses/${id}`, { signal });
+  return result.data;
+}
+
+export async function createScheduledExpense(groupId: string, input: ScheduledExpenseInput) {
+  return api<{ scheduledExpense: ScheduledExpense }>(`/groups/${groupId}/scheduled-expenses`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function updateScheduledExpense(id: string, input: ScheduledExpenseInput) {
+  return api<{ scheduledExpense: ScheduledExpense }>(`/scheduled-expenses/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export async function changeScheduledExpenseStatus(id: string, action: 'pause' | 'resume' | 'cancel', version: number) {
+  return api<{ scheduledExpense: ScheduledExpense }>(`/scheduled-expenses/${id}/${action}`, { method: 'POST', body: JSON.stringify({ version }) });
 }
 
 export const getExpense = (id: string) => getExpenseDetails(id).then((result) => result.expense);

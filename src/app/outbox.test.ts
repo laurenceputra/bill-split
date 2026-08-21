@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
 import { getOutboxSnapshot, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
-import { clearEverythingForLogout } from './api';
+import { clearEverythingForLogout, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -11,6 +11,8 @@ beforeEach(async () => {
   vi.restoreAllMocks();
   await new Promise<void>((resolve, reject) => { const request = indexedDB.deleteDatabase(DB_NAME); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); request.onblocked = () => resolve(); });
   await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+  vi.stubGlobal('fetch', vi.fn(async () => response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' })));
+  await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
 });
 afterEach(() => { cancelScheduledRetry(); vi.useRealTimers(); });
 
@@ -19,6 +21,16 @@ async function queue(id: string) {
 }
 
 describe('durable expense outbox', () => {
+  it('does not flush before the authenticated /api/me lifecycle completes', async () => {
+    await queue('auth-gated');
+    resetForClerkSessionChange();
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { calls.push(String(request)); return response({ expense: { id: 'should-not-send' } }, 201); }));
+    await flushOutbox();
+    expect(calls).toEqual([]);
+    expect(await readOutboxItem('auth-gated')).toMatchObject({ status: 'pending' });
+  });
+
   it('persists before sending and removes only after success, replaying the exact operation', async () => {
     const seen: Request[] = [];
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
@@ -31,7 +43,7 @@ describe('durable expense outbox', () => {
     }));
     await queue('operation-1');
     await flushOutbox();
-    expect(seen[1].url).toContain('/groups/group-a/expenses');
+    expect(seen[0].url).toContain('/groups/group-a/expenses');
     expect(await listOutbox('user-a')).toEqual([]);
   });
 
@@ -42,8 +54,9 @@ describe('durable expense outbox', () => {
   });
 
   it('never falls back to cached identity when deciding who may receive a POST', async () => {
+    await clearCachedData();
     const calls: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { const url = String(request); calls.push(url); throw new TypeError('temporary identity failure'); }));
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { calls.push(String(request)); throw new TypeError('unexpected send'); }));
     await queue('no-cached-send');
     await flushOutbox();
     expect(calls.filter((url) => url.includes('/expenses'))).toEqual([]);
@@ -79,6 +92,7 @@ describe('durable expense outbox', () => {
     await queue('auth'); await flushOutbox();
     expect((await listOutbox('user-a'))[0].status).toBe('auth-required');
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({ error: { code: 'INVALID_MEMBER', message: 'Bad member' } }, 400); }));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
     await retryOutboxItem('auth');
     expect((await listOutbox('user-a'))[0].status).toBe('failed');
   });
@@ -145,6 +159,17 @@ describe('durable expense outbox', () => {
     const item = await queue('signed-in');
     await saveOutboxItem({ ...item, status: 'auth-required', lastError: { code: 'AUTH_REQUIRED', message: 'Sign in', status: 401 } });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({ expense: { id: 'server-id' } }, 201); }));
+    await handleAuthenticatedUser('user-a');
+    expect(await listOutbox('user-a')).toEqual([]);
+  });
+
+  it('starts the first outbox flush from confirmed authentication and recovers an expired lease', async () => {
+    const item = await queue('startup-flush');
+    await saveOutboxItem({ ...item, status: 'syncing', leaseOwner: 'old-tab', leaseExpiresAt: Date.now() - 1 });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request);
+      return actual.url.endsWith('/api/me') ? response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }) : response({ expense: { id: 'startup-server-id' } }, 201);
+    }));
     await handleAuthenticatedUser('user-a');
     expect(await listOutbox('user-a')).toEqual([]);
   });

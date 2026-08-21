@@ -11,6 +11,7 @@ export const RESOURCE_FRESHNESS = Object.freeze({
   expenses: 30_000,
   balances: 30_000,
   settlements: 30_000,
+  scheduledExpenses: 30_000,
   activity: 30_000,
   expenseDetail: 30_000,
   expenseHistory: 30_000,
@@ -44,6 +45,9 @@ let visible = typeof document === 'undefined' || document.visibilityState === 'v
 let coordinatorInstalled = false;
 let coordinatorTimer: ReturnType<typeof setTimeout> | undefined;
 let coordinatorIdentityCheck = false;
+// A browser foreground refresh must wait for Clerk and /api/me. Node tests
+// have no provider, so direct cache tests retain their existing behavior.
+let authLifecycleReady = typeof window === 'undefined';
 
 const now = () => Date.now();
 const online = () => typeof navigator === 'undefined' || navigator.onLine !== false;
@@ -92,6 +96,7 @@ export function allowIdentityVerification() {
   identity.snapshot = stable({ ...identity.snapshot, status: 'idle', loading: false, revalidating: false, stale: false, error: undefined });
   notify(identity);
 }
+export function setResourceAuthLifecycleReady(ready: boolean) { authLifecycleReady = ready; }
 export const getResourceIdentity = () => activeUserId;
 export const getResourceIdentityEpoch = () => identityEpoch;
 export function useResourceIdentityEpoch() { return useSyncExternalStore(subscribeResourceIdentity, getResourceIdentityEpoch, () => 0); }
@@ -203,6 +208,7 @@ export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
 
 export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '', options: RevalidateOptions = {}): Promise<T | undefined> {
   const resource = entry<T>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
+  if (!authLifecycleReady && (options.reason === 'focus' || options.reason === 'online' || options.reason === 'visibility' || options.reason === 'identity-check')) return resource.snapshot.data;
   if (!resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
   if (!online() && resource.snapshot.data !== undefined) return resource.snapshot.data;
@@ -248,7 +254,7 @@ export function trackVisibleResource(key: ResourceKey, userId = activeUserId || 
 }
 
 function foregroundRefresh(identityCheck = false) {
-  if (!isVisible() || !online()) return;
+  if (!authLifecycleReady || !isVisible() || !online()) return;
   const identity = entries.get('identity');
   const identityDue = identity && identity.snapshot.status !== 'auth-blocked' && (identityCheck || !isResourceFresh(identity.snapshot, identity.ttl) || identity.snapshot.stale || identity.snapshot.status === 'idle');
   const refreshPrivate = () => {
@@ -289,6 +295,8 @@ export const resourceKeys = Object.freeze({
   expenses: (userId: string, groupId: string) => resourceKey('expenses', `${userId}:${groupId}`),
   balances: (userId: string, groupId: string) => resourceKey('balances', `${userId}:${groupId}`),
   settlements: (userId: string, groupId: string) => resourceKey('settlements', `${userId}:${groupId}`),
+  scheduledExpenses: (userId: string, groupId: string) => resourceKey('scheduled-expenses', `${userId}:${groupId}`),
+  scheduledExpense: (userId: string, scheduleId: string) => resourceKey('scheduled-expense', `${userId}:${scheduleId}`),
   activity: (userId: string, groupId: string) => resourceKey('activity', `${userId}:${groupId}`),
   expenseDetail: (userId: string, expenseId: string) => resourceKey('expense-detail', `${userId}:${expenseId}`),
 });
@@ -311,6 +319,7 @@ export const invalidateForMutation = {
   groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
   expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedGroups(userId, generation); },
   settlementChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
+  scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); },
 };
 
 initializeForegroundCoordinator();

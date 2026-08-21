@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { assertFinancialInput, date, expenseInput, friendInput, groupInput, personInput, settlementInput } from '../shared/schemas';
+import { assertFinancialInput, date, expenseInput, friendInput, groupInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput } from '../shared/schemas';
 import { calculateNet, simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError } from '../db/repository';
 import { BalanceOverflowError, checkedAddMinor } from '../shared/money';
@@ -148,6 +148,13 @@ async function authorizedGroup(c: any, groupId: string): Promise<{ repo: Reposit
   if (!group) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
   return { repo, auth, group, role: group.role === 'owner' ? 'owner' : 'member' };
 }
+async function authorizedScheduled(c: any, scheduledId: string): Promise<{ repo: Repository; auth: { id: string; email: string; personId: string }; scheduled: NonNullable<Awaited<ReturnType<Repository['scheduledExpense']>>> } | Response> {
+  const repo = getRepo(c), scheduled = await repo.scheduledExpense(scheduledId);
+  if (!scheduled) return jsonError(c, 404, 'SCHEDULED_EXPENSE_NOT_FOUND', 'Scheduled expense not found');
+  const group = await repo.group(scheduled.groupId, c.get('auth').id);
+  if (!group) return jsonError(c, 404, 'SCHEDULED_EXPENSE_NOT_FOUND', 'Scheduled expense not found');
+  return { repo, auth: c.get('auth'), scheduled };
+}
 const ownerOnly = (c: any, x: { role: 'owner' | 'member' }) => x.role === 'owner' ? null : jsonError(c, 403, 'OWNER_REQUIRED', 'Only group owners can perform this action');
 async function validPeople(repo: Repository, groupId: string, ids: string[]) { const members = await repo.members(groupId); const allowed = new Set(members.map((m) => m.personId)); return ids.every((id) => allowed.has(id)); }
 function page(value: string | undefined, fallback: number, max: number) { if (value === undefined) return fallback; const n = Number(value); return Number.isSafeInteger(n) && n >= 0 ? Math.min(n, max) : -1; }
@@ -173,7 +180,29 @@ api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (
 api.get('/api/groups/:groupId/people', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ people: await x.repo.members(c.req.param('groupId')) }); });
 
 api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 50, 100); const offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); } catch { return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } return c.json({ expenses: await x.repo.expenses(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, offset }) }); });
-  api.post('/api/groups/:groupId/expenses', zValidator('json', expenseInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'); try { assertFinancialInput(input); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); } try { if (!(await validPeople(x.repo, c.req.param('groupId'), [...input.payers, ...input.splits].map((p) => p.person_id))) ) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member'); return c.json({ expense: await x.repo.createExpense(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/scheduled-expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 100, 100); const offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); return c.json({ scheduledExpenses: await x.repo.scheduledExpenses(c.req.param('groupId'), { limit, offset }) }); });
+api.post('/api/groups/:groupId/scheduled-expenses', zValidator('json', scheduledExpenseInput), async (c) => {
+  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
+  const input = c.req.valid('json');
+  try { assertFinancialInput({ ...input, date: input.start_date }); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); }
+  if (!(await validPeople(x.repo, c.req.param('groupId'), [...input.payers, ...input.splits].map((person) => person.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member');
+  try { return c.json({ scheduledExpense: await x.repo.createScheduledExpense(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); }
+});
+api.post('/api/groups/:groupId/expenses', zValidator('json', expenseInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'); try { assertFinancialInput(input); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); } try { if (!(await validPeople(x.repo, c.req.param('groupId'), [...input.payers, ...input.splits].map((p) => p.person_id))) ) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member'); return c.json({ expense: await x.repo.createExpense(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
+api.put('/api/scheduled-expenses/:scheduledExpenseId', zValidator('json', scheduledExpenseInput), async (c) => {
+  const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x;
+  const input = c.req.valid('json');
+  try { assertFinancialInput({ ...input, date: input.start_date }); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); }
+  if (!(await validPeople(x.repo, x.scheduled.groupId, [...input.payers, ...input.splits].map((person) => person.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member');
+  try { return c.json({ scheduledExpense: await x.repo.updateScheduledExpense(c.req.param('scheduledExpenseId'), x.auth.id, input) }); } catch (error) { return repositoryError(c, error); }
+});
+api.get('/api/scheduled-expenses/:scheduledExpenseId', async (c) => { const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x; return c.json({ scheduledExpense: x.scheduled }); });
+for (const [action, method] of [['pause', 'pauseScheduledExpense'], ['resume', 'resumeScheduledExpense'], ['cancel', 'cancelScheduledExpense'] ] as const) {
+  api.post(`/api/scheduled-expenses/:scheduledExpenseId/${action}`, zValidator('json', scheduledExpenseStatusInput), async (c) => {
+    const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x;
+    try { const result = await x.repo[method](c.req.param('scheduledExpenseId'), c.req.valid('json').version); return c.json({ scheduledExpense: result }); } catch (error) { return repositoryError(c, error); }
+  });
+}
   api.get('/api/expenses/:expenseId', async (c) => { const expense = await getRepo(c).expense(c.req.param('expenseId')); if (!expense) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, expense.groupId); if (x instanceof Response) return x; return c.json({ expense, history: await x.repo.revisions('expense', c.req.param('expenseId')) }); });
   api.put('/api/expenses/:expenseId', zValidator('json', expenseInput), async (c) => { const old = await getRepo(c).expense(c.req.param('expenseId')); if (!old) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, old.groupId); if (x instanceof Response) return x; const input = c.req.valid('json'); try { assertFinancialInput(input); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); } try { if (input.version === undefined) return jsonError(c, 409, 'CONFLICT', 'The loaded record version is required'); if (!(await validPeople(x.repo, old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member'); const expense = await x.repo.updateExpense(c.req.param('expenseId'), x.auth.id, input); if (!expense) return jsonError(c, 409, 'CONFLICT', 'The record was deleted by another request'); return c.json({ expense }); } catch (error) { return repositoryError(c, error); } });
 api.delete('/api/expenses/:expenseId', async (c) => { const old = await getRepo(c).expense(c.req.param('expenseId')); if (!old) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, old.groupId); if (x instanceof Response) return x; const version = page(c.req.query('version'), -1, Number.MAX_SAFE_INTEGER); if (version < 1) return jsonError(c, 400, 'INVALID_VERSION', 'A positive record version is required'); try { await x.repo.deleteExpense(c.req.param('expenseId'), x.auth.id, version); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
@@ -216,4 +245,9 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
     headers.set('Pragma', 'no-cache');
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}, async scheduled(controller: ScheduledController, env: Env['Bindings'], _ctx: ExecutionContext) {
+  // Cron is deliberately bounded in the repository so a long-outage catch-up
+  // cannot consume the entire invocation. A later tick resumes from the
+  // template's next occurrence cursor.
+  await new Repository(env.DB).generateDueScheduledExpenses(new Date(controller.scheduledTime));
 } };

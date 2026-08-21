@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, clearAuthRequired, clearEverythingForLogout, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
+import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readResourceFreshness, saveGroups, saveLastVerifiedClerkUserId, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
@@ -20,6 +20,11 @@ describe('frontend API errors and cache fallback', () => {
     expect(shouldStartAuthCheck(false, true)).toBe(true);
     expect(shouldStartAuthCheck(true, false)).toBe(false);
     expect(shouldStartAuthCheck(true, true)).toBe(true);
+  });
+  it('keeps a restoring Clerk session on the checking shell instead of showing login', () => {
+    expect(isDefinitivelySignedOut(false, false)).toBe(false);
+    expect(isDefinitivelySignedOut(true, undefined)).toBe(false);
+    expect(isDefinitivelySignedOut(true, false)).toBe(true);
   });
   it('does not treat Clerk provider loading as a session transition during trusted offline startup', () => {
     expect(isMeaningfulClerkSessionTransition(undefined, 'user-a:session-a')).toBe(false);
@@ -45,6 +50,39 @@ describe('frontend API errors and cache fallback', () => {
     const result = await getActivity('group-a');
     expect(result.activity[0]).toMatchObject({ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', entityActive: true, amountMinor: 1250 });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].entityId).toBe('expense-1');
+  });
+
+  it('uses scheduled expense routes online without entering the expense outbox', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    const calls: Array<{ path: string; method: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(request), 'https://billsplit.test').pathname;
+      calls.push({ path, method: init?.method || 'GET' });
+      if (path === '/api/me') return json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a');
+      if (path.endsWith('/scheduled-expenses')) return json({ scheduledExpenses: [] }, 200, 'user-a');
+      return json({ scheduledExpense: { id: 'schedule-1', version: 2 } }, 200, 'user-a');
+    }));
+    await expect(getScheduledExpenses('group-a')).resolves.toEqual({ scheduledExpenses: [] });
+    await createScheduledExpense('group-a', { description: 'Rent', amount_minor: 100, currency: 'USD', start_date: '2026-01-01', end_date: null, frequency: 'monthly', interval: 1, weekdays: [], timezone: 'UTC', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: 'schedule-1' });
+    await changeScheduledExpenseStatus('schedule-1', 'pause', 1);
+    expect(calls.map((call) => [call.path, call.method])).toEqual([
+      ['/api/groups/group-a/scheduled-expenses', 'GET'],
+      ['/api/groups/group-a/scheduled-expenses', 'POST'], ['/api/scheduled-expenses/schedule-1/pause', 'POST'],
+    ]);
+  });
+
+  it('loads every scheduled-expense page beyond the D1-sized API page', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      calls.push(url.search);
+      const offset = Number(url.searchParams.get('offset') || 0);
+      const count = offset === 0 ? 100 : 2;
+      return json({ scheduledExpenses: Array.from({ length: count }, (_, index) => ({ id: `schedule-${offset + index}` })) }, 200, 'user-a');
+    }));
+    const result = await getScheduledExpenses('group-a');
+    expect(result.scheduledExpenses).toHaveLength(102);
+    expect(calls).toEqual(['?limit=100&offset=0', '?limit=100&offset=100']);
   });
 
   it('marks API calls as AJAX requests and publishes auth-required state', async () => {

@@ -22,6 +22,9 @@ ENVIRONMENT = "production"
 # CLERK_SECRET_KEY as an encrypted secret with `wrangler secret put`.
 # R2 is optional: add an [[r2_buckets]] binding named RECEIPTS when enabled.
 
+[triggers]
+crons = ["*/15 * * * *"]
+
 [[routes]]
 pattern = "billsplit.laurenceputra.com"
 custom_domain = true

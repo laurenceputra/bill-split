@@ -9,6 +9,7 @@ const html = read('../../index.html');
 const manifest = JSON.parse(read('../../public/manifest.webmanifest')) as Record<string, unknown>;
 const serviceWorker = read('../../public/sw.js');
 const main = read('./main.tsx');
+const outbox = read('./outbox.ts');
 
 describe('standalone PWA contract', () => {
   it('keeps standalone manifest behavior and includes iOS install metadata', () => {
@@ -24,5 +25,13 @@ describe('standalone PWA contract', () => {
     expect(main).toContain("register('/sw.js', { updateViaCache: 'none' })");
     expect(main).not.toContain("addEventListener('load'");
     expect(main).toContain("typeof navigator === 'undefined'");
+  });
+
+  it('does not start authenticated work at outbox import time and gates focus flushes', () => {
+    expect(outbox).not.toContain("if (typeof window !== 'undefined') {\n  void initializeOutbox();");
+    expect(outbox).toContain("getAuthLifecycle().status === 'authenticated'");
+    expect(outbox).toContain("window.addEventListener('focus'");
+    expect(outbox).toContain("window.addEventListener('billsplit-authenticated'");
+    expect(outbox).toContain('handleAuthenticatedUser(userId)');
   });
 });
