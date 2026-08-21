@@ -9,6 +9,10 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:audit": "playwright test tests/e2e/audit.spec.ts",
+    "e2e:prepare": "node tests/e2e/prepare-db.mjs",
+    "e2e:server": "node tests/e2e/start-server.mjs",
     "deploy": "npm run build && wrangler deploy --env=\"\"",
     "deploy:dry-run": "npm run build && wrangler deploy --env=\"\" --dry-run",
     "cf:types": "wrangler types",
@@ -27,6 +31,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250821.0",
+    "@playwright/test": "^1.62.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.4.1",

@@ -39,6 +39,11 @@
   --space-8: 2rem;
   --space-10: 2.5rem;
   --space-12: 3rem;
+  --flow-tight: var(--space-2);
+  --flow-content: var(--space-3);
+  --flow-section: var(--space-5);
+  --surface-padding: var(--space-4);
+  --surface-padding-wide: var(--space-5);
   --content-max: 74rem;
   --reading-max: 42rem;
   --nav-height: 4.5rem;

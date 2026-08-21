@@ -454,6 +454,40 @@
   width: min(100%, var(--reading-max));
 }
 
+section.reading-width {
+  display: grid;
+  gap: var(--flow-content);
+}
+
+section.reading-width > :where(h1, h2, h3, h4, p) {
+  margin: 0;
+}
+
+main.app-main > h1 {
+  margin-bottom: var(--flow-content);
+}
+
+.stack {
+  display: grid;
+  gap: var(--flow-content);
+}
+
+.stack--tight {
+  gap: var(--flow-tight);
+}
+
+.stack--content {
+  gap: var(--flow-content);
+}
+
+.stack--section {
+  gap: var(--flow-section);
+}
+
+.stack > :where(h1, h2, h3, h4, p) {
+  margin: 0;
+}
+
 .group-overview-grid,
 .group-ledger {
   min-width: 0;
@@ -681,7 +715,7 @@ section,
 .surface,
 .empty {
   margin: var(--space-4) 0;
-  padding: var(--space-4);
+  padding: var(--surface-padding);
 }
 
 .empty {
@@ -893,6 +927,19 @@ form > button {
   color: var(--color-primary-strong);
   font-size: var(--text-sm);
   font-weight: 750;
+}
+
+@media (max-width: 55.999rem) {
+  .brand {
+    display: inline-flex;
+    min-height: 2.75rem;
+    align-items: center;
+  }
+
+  .actions > a:not(.button) {
+    min-width: 2.75rem;
+    justify-content: center;
+  }
 }
 
 .chips {
@@ -1552,7 +1599,7 @@ form > button {
   .surface,
   .empty {
     margin: var(--space-5) 0;
-    padding: var(--space-5);
+    padding: var(--surface-padding-wide);
   }
 
   .nav-item {

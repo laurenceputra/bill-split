@@ -14,6 +14,27 @@ npm test
 npm run build
 ```
 
+For the reusable Playwright browser audit (production client build plus a
+local Worker and isolated D1 fixture), run:
+
+```sh
+npm run test:e2e:audit
+```
+
+The harness uses Chromium from the preinstalled `/ms-playwright` cache, starts
+`wrangler dev --env dev --local` on port `8788`, and persists its temporary D1
+state under `/tmp/bill-split-playwright-d1` (the harness rejects any
+`BILLSPLIT_E2E_PERSIST_DIR` outside a direct `/tmp/bill-split-playwright-*`
+child and refuses to remove symlinks or non-directories). It runs migrations and
+`tests/e2e/fixture.sql` locally only; it never uses `--remote`. Full-page
+screenshots, Playwright attachments, and JSON findings are written under the
+ignored `test-results/` and `playwright-report/` directories. Geometry findings
+are collected before the audit fails: critical and major findings fail the test
+after screenshots and reports are written, while minor project-policy findings
+remain non-failing. The report separates validated
+route/fixture coverage from actual violations; touch-target findings are the
+project policy at mobile/tablet widths, not universal standards claims.
+
 For an end-to-end Worker with local D1 and static assets:
 
 ```sh
@@ -22,7 +43,7 @@ npm run db:seed
 npx wrangler dev
 ```
 
-Production defaults to `ENVIRONMENT=production` and has no development bypass. For local Worker development use the named Wrangler environment (`npx wrangler dev --env dev`) or explicitly provide `ENVIRONMENT=development`; only that exact value enables the local `X-Dev-Email` helper. The browser adds this helper only in a Vite development build. Production uses same-origin requests and naturally relies on the Cloudflare Access session; it does not manually provide a bearer token. The Worker verifies `Cf-Access-Jwt-Assertion` (case-insensitive through the Headers API), with an `Authorization: Bearer` token accepted as a compatibility fallback.
+Production defaults to `ENVIRONMENT=production` and has no development bypass. For local Worker development use the named Wrangler environment (`npx wrangler dev --env dev`) or explicitly provide `ENVIRONMENT=development`; only that exact value enables the local `X-Dev-Email` helper. The browser adds this helper only in a Vite development build. The `env.dev` D1 binding in `wrangler.toml` uses a clearly non-production placeholder UUID: local Wrangler creates isolated D1 state under the E2E `--persist-to` directory, while an accidental deploy of the dev environment cannot bind the production database. Keep `env.dev` local-only and do not replace that placeholder with a real resource ID. Production uses same-origin requests and naturally relies on the Cloudflare Access session; it does not manually provide a bearer token. The Worker verifies `Cf-Access-Jwt-Assertion` (case-insensitive through the Headers API), with an `Authorization: Bearer` token accepted as a compatibility fallback.
 
 ## Cloudflare setup and deployment
 

@@ -26,6 +26,16 @@ custom_domain = true
 
 [env.dev]
 name = "bill-split-dev"
+
+[[env.dev.d1_databases]]
+binding = "DB"
+# This is deliberately not the production database ID. Local Wrangler D1 uses
+# the binding name and --persist-to directory for E2E data; the placeholder
+# keeps an accidental `wrangler deploy --env dev` from targeting production.
+database_name = "bill-split"
+database_id = "00000000-0000-4000-8000-000000000001"
+migrations_dir = "migrations"
+
 [env.dev.vars]
 ENVIRONMENT = "development"
 # Local development only. Do not use this environment for a public hostname.
