@@ -84,6 +84,21 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);
   });
 
+  it('keeps public sign-up hover readable and reduces landing-page whitespace', () => {
+    expect(css).toMatch(/\.public-sign-up:hover\s*\{[\s\S]*background: var\(--color-secondary-hover\);[\s\S]*color: var\(--color-primary-strong\);/);
+    expect(css).toMatch(/\.public-main\s*\{\s*padding-top: clamp\(var\(--space-8\), 5vw, var\(--space-12\)\);/);
+    expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
+  });
+
+  it('keeps proof items free of decorative borders and offset padding', () => {
+    const proofItemRule = css.match(/\.landing-proof > div\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(proofItemRule).toContain('display: grid;');
+    expect(proofItemRule).toContain('gap: var(--space-1);');
+    expect(proofItemRule).not.toContain('border-top');
+    expect(proofItemRule).not.toContain('padding-top');
+  });
+
   it('defines every spacing token referenced by the authored stylesheets', () => {
     const references = [...`${css}\n${baseCss}`.matchAll(/var\(--(space-\d+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].every((token) => new RegExp(`--${token}\\s*:`).test(tokensCss))).toBe(true);

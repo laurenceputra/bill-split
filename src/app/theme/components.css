@@ -57,8 +57,13 @@
   font-weight: 800;
 }
 
+.public-sign-up:hover {
+  background: var(--color-secondary-hover);
+  color: var(--color-primary-strong);
+}
+
 .public-main {
-  padding-top: clamp(3rem, 10vw, 8rem);
+  padding-top: clamp(var(--space-8), 5vw, var(--space-12));
 }
 
 .public-status {
@@ -185,8 +190,6 @@
 .landing-proof > div {
   display: grid;
   gap: var(--space-1);
-  border-top: 1px solid var(--color-border);
-  padding-top: var(--space-3);
 }
 
 .landing-proof strong {
