@@ -103,9 +103,8 @@ function DesktopNav() {
   const context = getNavigationContext(location.pathname);
   return <nav className="desktop-nav" aria-label="Primary navigation">
     <Link className="desktop-nav__item" to={context.primaryPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}>Groups</Link>
-    {context.activityPath ? <Link className="desktop-nav__item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}>Activity</Link> : null}
-    <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>{context.addLabel}</span></Link>
-    {context.groupId ? <Link className="desktop-nav__item" to={context.morePath} aria-current={context.activeSection === 'settle' ? 'page' : undefined}>Settle</Link> : null}
+     <Link className="desktop-nav__item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}>Activity</Link>
+     <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>Add expense</span></Link>
     <Link className="desktop-nav__item" to="/settings" aria-current={context.activeSection === 'settings' ? 'page' : undefined}>Settings</Link>
   </nav>;
 }
@@ -116,9 +115,9 @@ export function BottomNav() {
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
-    {context.activityPath ? <Link className="nav-item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link> : <button className="nav-item" type="button" disabled title="Open a group to view activity"><Icon name="activity" /><span>Activity</span></button>}
-    <Link className="nav-item nav-item--add" to={context.addPath} aria-label={context.addLabel} aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
-    {context.groupId ? <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settle' ? 'page' : undefined}><Icon name="more" /><span>Settle</span></Link> : <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>}
+     <Link className="nav-item" to={context.activityPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>Activity</span></Link>
+     <Link className="nav-item nav-item--add" to={context.addPath} aria-label="Add expense" aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
+     <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>
   </nav>;
 }
 

@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readResourceFreshness, saveGroups, saveLastVerifiedClerkUserId, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
 import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
 import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
@@ -50,6 +50,21 @@ describe('frontend API errors and cache fallback', () => {
     const result = await getActivity('group-a');
     expect(result.activity[0]).toMatchObject({ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', entityActive: true, amountMinor: 1250 });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].entityId).toBe('expense-1');
+  });
+
+  it('does not display deleted activity or inactive cached revisions from an API response', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+      ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')
+      : json({ activity: [
+        { type: 'expense', id: 'expense-1', entityId: 'expense-1', entityActive: true, label: 'Current' },
+        { type: 'expense_deleted', id: 'deleted-1', entityId: 'expense-1', entityActive: false, label: 'Deleted' },
+        { type: 'expense_revision', id: 'revision-deleted', entityId: 'expense-1', entityActive: false, label: 'Old edit' },
+      ] }, 200, 'user-a')));
+
+    const result = await getActivity('group-a');
+    expect(result.activity.map((item) => item.id)).toEqual(['expense-1']);
+    expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => item.id)).toEqual(['expense-1']);
   });
 
   it('uses scheduled expense routes online without entering the expense outbox', async () => {
@@ -201,6 +216,27 @@ describe('frontend API errors and cache fallback', () => {
     expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
+  it('removes persisted global activity and categories after an expense mutation', async () => {
+    await saveGroups({ userId: 'user-a', groups: [], cachedAt: new Date().toISOString() });
+    await saveActivity({ userId: 'user-a', groupId: 'all', activity: [], fetchedAt: new Date().toISOString() });
+    await saveCategories({ userId: 'user-a', categories: ['Dining'], fetchedAt: new Date().toISOString() });
+
+    await invalidateForMutation.expenseChanged('group-a', 'expense-a', 'user-a');
+
+    expect(await readActivity('user-a', 'all')).toBeUndefined();
+    expect(await readCategories('user-a')).toBeUndefined();
+  });
+
+  it('invalidates in-memory and persisted categories after a scheduled-expense mutation', async () => {
+    await saveCategories({ userId: 'user-a', categories: ['Custom rent'], fetchedAt: new Date().toISOString() });
+    seedResource('categories:user-a', 'user-a', { categories: ['Custom rent'] });
+
+    await invalidateForMutation.scheduledExpenseChanged('group-a', 'user-a', 'schedule-a');
+
+    expect(getResourceSnapshot('categories:user-a', 'user-a').stale).toBe(true);
+    expect(await readCategories('user-a')).toBeUndefined();
+  });
+
   it('does not label a resource with cached identity after a transient /me failure', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     await saveGroups({ userId: 'user-a', groups: [{ id: 'old', name: 'Old', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: 'old' });
@@ -267,6 +303,40 @@ describe('frontend API errors and cache fallback', () => {
     await expect(initializeAuthLifecycle({ clerkUserId: 'clerk-unverified' })).resolves.toMatchObject({ status: 'unauthenticated' });
     expect(await readLastVerifiedClerkUserId()).toBeUndefined();
     expect(getTrustedOfflineClerkUserId()).toBeUndefined();
+  });
+
+  it('only uses a timed-out identity cache when the persisted Clerk ID matches', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    await saveVerifiedIdentity({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', verifiedAt: new Date().toISOString() });
+    await saveLastVerifiedClerkUserId('clerk-a');
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')), { once: true });
+    })));
+
+    await expect(initializeAuthLifecycle({ clerkUserId: 'clerk-a', startupFallbackMs: 1 })).resolves.toMatchObject({ status: 'trusted-offline' });
+    expect(getResourceSnapshot('identity').data).toMatchObject({ id: 'cached-user' });
+  });
+
+  it.each([
+    { label: 'a mismatching Clerk ID', clerkUserId: 'clerk-b' },
+    { label: 'an absent persisted Clerk association', clerkUserId: 'clerk-a', omitPersistedClerkId: true },
+    { label: 'an absent current Clerk ID', clerkUserId: undefined },
+  ])('does not use cached identity after timeout with $label', async ({ clerkUserId, omitPersistedClerkId }) => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    await saveVerifiedIdentity({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', verifiedAt: new Date().toISOString() });
+    if (!omitPersistedClerkId && clerkUserId !== undefined) await saveLastVerifiedClerkUserId('clerk-a');
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')), { once: true });
+    })));
+
+    await expect(initializeAuthLifecycle({ ...(clerkUserId === undefined ? {} : { clerkUserId }), startupFallbackMs: 1 })).resolves.toMatchObject({ status: 'unauthenticated' });
+    expect(getResourceSnapshot('identity').data).toBeUndefined();
   });
 
   it('preserves trusted offline state until connectivity returns, then supports explicit revalidation', async () => {

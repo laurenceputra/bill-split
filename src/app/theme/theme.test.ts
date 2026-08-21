@@ -72,8 +72,10 @@ describe('responsive navigation layout contract', () => {
   it('keeps recurrence opt-in clear and preview dates separated', () => {
     expect(appSource).toContain('id="repeat-expense"');
     expect(appSource).toContain('<span>Repeat this expense</span>');
-    expect(appSource).toContain('Category and notes are saved only for one-time expenses');
-    expect(appSource).toContain('disabled aria-describedby="one-time-only-details-help"');
+    expect(appSource).toContain('Categories are saved with expenses. Notes are saved for one-time expenses only');
+    expect(appSource).toContain('showNotes={false}');
+    expect(appSource).toContain('Categories are saved with scheduled expenses. Notes are available for one-time expenses only');
+    expect(appSource).toContain('aria-describedby="one-time-only-details-help"');
     expect(css).toMatch(/\.one-time-only-details\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-3\);/);
     expect(css).toMatch(/\.schedule-preview ol\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
     expect(appSource).toContain('scheduleContinuationText(endDate, schedulePreview)');

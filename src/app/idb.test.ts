@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -98,6 +98,21 @@ describe('user-scoped IndexedDB', () => {
     expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
+  it('deletes persisted activity and category caches when a mutation invalidates them', async () => {
+    const timestamp = new Date().toISOString();
+    await saveGroups({ userId: 'user-a', groups: [], cachedAt: timestamp });
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [], fetchedAt: timestamp });
+    await saveActivity({ userId: 'user-a', groupId: 'all', activity: [], fetchedAt: timestamp });
+    await saveCategories({ userId: 'user-a', categories: ['Dining'], fetchedAt: timestamp });
+
+    await invalidateCachedGroups('user-a', undefined, { activity: true, categories: true });
+
+    expect(await readActivity('user-a', 'group-a')).toBeUndefined();
+    expect(await readActivity('user-a', 'all')).toBeUndefined();
+    expect(await readCategories('user-a')).toBeUndefined();
+    expect(await readMutationGeneration('user-a')).toBe(1);
+  });
+
   it('normalizes legacy activity rows without entity fields during cache hydration', async () => {
     const timestamp = new Date().toISOString();
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'legacy-event', label: 'Old lunch', createdAt: timestamp } as never], fetchedAt: timestamp });
@@ -108,7 +123,7 @@ describe('user-scoped IndexedDB', () => {
     expect(hydrated?.fetchedAt).toBe(0);
   });
 
-  it('normalizes active flags while keeping deleted and settlement activity non-linkable', async () => {
+  it('normalizes active flags while filtering deleted activity and keeping settlements non-linkable', async () => {
     const timestamp = new Date().toISOString();
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [
       { type: 'expense', id: 'expense-1', entityId: 'expense-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Current', createdAt: timestamp },
@@ -119,8 +134,28 @@ describe('user-scoped IndexedDB', () => {
       { type: 'expense_revision', id: 'revision-unknown', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Unknown', createdAt: timestamp } as never,
     ], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => [item.entityId, item.entityActive])).toEqual([
-      ['expense-1', true], ['expense-1', true], ['expense-2', false], ['expense-2', false], ['settlement-1', false], ['', false],
+      ['expense-1', true], ['expense-1', true], ['settlement-1', false], ['', undefined],
     ]);
+  });
+
+  it('removes deleted activity and inactive revisions while upgrading an older cache', async () => {
+    const old = indexedDB.open(DB_NAME, 7);
+    await new Promise<void>((resolve, reject) => {
+      old.onupgradeneeded = () => old.result.createObjectStore('activity', { keyPath: ['userId', 'groupId'] });
+      old.onsuccess = () => {
+        const tx = old.result.transaction('activity', 'readwrite');
+        tx.objectStore('activity').put({ userId: 'user-a', groupId: 'group-a', fetchedAt: 'legacy', activity: [
+          { type: 'expense', id: 'expense-1', entityId: 'expense-1', entityActive: true },
+          { type: 'expense_deleted', id: 'deleted-1', entityId: 'expense-1' },
+          { type: 'expense_revision', id: 'revision-deleted', entityId: 'expense-1', entityActive: false },
+        ] });
+        tx.oncomplete = () => { old.result.close(); resolve(); };
+        tx.onerror = () => reject(tx.error);
+      };
+      old.onerror = () => reject(old.error);
+    });
+
+    expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => item.id)).toEqual(['expense-1']);
   });
 
   it('never guesses a revision ID as an expense ID in a legacy cache', async () => {

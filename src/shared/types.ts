@@ -19,6 +19,7 @@ export interface Expense {
 }
 export interface ScheduledExpense {
   id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
+  category?: string | null;
   startDate: string; endDate?: string | null; frequency: RecurrenceFrequency; interval: number;
   weekdays: Weekday[]; timezone: string; status: ScheduledExpenseStatus; blockedReason?: string | null;
   nextOccurrenceDate?: string | null; createdBy: string; createdAt: string; updatedAt: string; version: number;
@@ -40,6 +41,8 @@ export interface ActivityBase {
   transactionDate: string;
   label: string | null;
   createdAt: string;
+  groupId?: string;
+  groupName?: string;
 }
 export type Activity =
   | (ActivityBase & { type: 'expense' | 'expense_revision' | 'expense_deleted'; fromName?: null; toName?: null })

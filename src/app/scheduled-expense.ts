@@ -13,6 +13,29 @@ export const browserTimezone = () => {
   catch { return 'UTC'; }
 };
 
+export function timezoneOptions(): string[] {
+  try {
+    const values = (Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+    if (values) return ['UTC', ...values('timeZone').filter((zone) => zone !== 'UTC')];
+  } catch { /* Older browsers use the curated fallback below. */ }
+  return ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Kolkata', 'Asia/Tokyo', 'Australia/Sydney'];
+}
+
+export function timezoneOffsetLabel(timeZone: string, at = new Date()): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(at);
+    const value = parts.find((part) => part.type === 'timeZoneName')?.value || 'GMT';
+    const match = value.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if (!match) return 'UTC+00:00';
+    const minutes = Number(match[2]) * 60 + Number(match[3] || 0);
+    return `UTC${match[1]}${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+  } catch { return 'UTC'; }
+}
+
+export function timezoneLabel(timeZone: string, at = new Date()) {
+  return `${timeZone} (${timezoneOffsetLabel(timeZone, at)})`;
+}
+
 export function previewScheduleDates(schedule: Pick<ScheduledExpense, 'startDate' | 'endDate' | 'frequency' | 'interval' | 'weekdays'>, fromDate = schedule.startDate, count = 3): string[] {
   const definition = recurrenceDefinition(schedule);
   const dates: string[] = [];

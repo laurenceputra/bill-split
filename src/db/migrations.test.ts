@@ -22,6 +22,7 @@ const scheduledClaimsSql = readFileSync(new URL('../../migrations/0007_scheduled
 const scheduledCompletionSql = readFileSync(new URL('../../migrations/0008_scheduled_expense_completion.sql', moduleUrl), 'utf8');
 const scheduledCursorSql = readFileSync(new URL('../../migrations/0009_scheduled_generation_cursor.sql', moduleUrl), 'utf8');
 const generatedOperationSql = readFileSync(new URL('../../migrations/0010_generated_expense_operation_namespace.sql', moduleUrl), 'utf8');
+const scheduledCategorySql = readFileSync(new URL('../../migrations/0011_scheduled_expense_category.sql', moduleUrl), 'utf8');
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -78,6 +79,12 @@ describe('generated expense operation namespace migration', () => {
   });
 });
 
+describe('scheduled category migration', () => {
+  it('adds the optional category stored on schedule templates', () => {
+    expect(scheduledCategorySql).toMatch(/ALTER TABLE scheduled_expenses ADD COLUMN category TEXT/i);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -125,7 +132,7 @@ describe('scheduled completion migration integration', () => {
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
       expect(query('PRAGMA foreign_key_check;')).toEqual([]);
-      await cp(join(root, 'migrations', '0008_scheduled_expense_completion.sql'), join(migrationsDir, '0008_scheduled_expense_completion.sql'));
+      await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -134,6 +141,8 @@ describe('scheduled completion migration integration', () => {
       expect(query('PRAGMA foreign_key_check;')).toEqual([]);
       expect(query('PRAGMA foreign_key_list(scheduled_payers);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
       expect(query('PRAGMA foreign_key_list(scheduled_occurrences);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
+      expect(query('PRAGMA table_info(scheduled_expenses);')).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'category' })]));
+      expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
 
       const invalidChild = spawnSync(wrangler, ['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES('missing-schedule','person-1',1);", '--yes'], { cwd: tempRoot, encoding: 'utf8' });
       expect(invalidChild.status).not.toBe(0);

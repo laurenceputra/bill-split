@@ -220,6 +220,11 @@ describe('worker boundary', () => {
     expect(response.status).toBe(404);
     expect(((await response.json()) as any).error.code).toBe('GROUP_NOT_FOUND');
   });
+  it('does not leak global activity for an unauthorized group filter', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/activity?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(((await response.json()) as any).error.code).toBe('GROUP_NOT_FOUND');
+  });
   it('allows an active group member through the group authorization lookup', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
     expect(response.status).toBe(200);

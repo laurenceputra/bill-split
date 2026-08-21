@@ -1,6 +1,6 @@
 import type { Activity, Expense, Group, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
 import type { ScheduledExpenseInput } from '../shared/schemas';
-import { clearAllPrivateData, normalizeActivity, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveVerifiedIdentity, saveExpenseDetails, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveVerifiedIdentity, saveExpenseDetails, updateGroupSnapshot } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
@@ -209,6 +209,7 @@ async function clerkIdentityForCache() {
   clerkUserIdHydrated = true;
   return identity;
 }
+const cachedClerkIdentityMatches = (requestedClerkUserId: string | undefined, cachedClerkIdentity: Awaited<ReturnType<typeof clerkIdentityForCache>>) => requestedClerkUserId === undefined || (typeof cachedClerkIdentity?.clerkUserId === 'string' && cachedClerkIdentity.clerkUserId.trim().length > 0 && cachedClerkIdentity.clerkUserId === requestedClerkUserId);
 type CacheIdentity = { user: CurrentUser; authoritative: boolean };
 async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdentity | undefined> {
   const identitySnapshot = getResourceSnapshot('identity');
@@ -235,14 +236,18 @@ const assertResponseIdentity = (responseUserId: string | undefined, identity: Ca
   }
 };
 
-export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string } = {}): Promise<CachedResult<CurrentUser>> {
+export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string; startupFallbackMs?: number } = {}): Promise<CachedResult<CurrentUser>> {
   if (identityRequest) return identityRequest;
   if ((isMutationBarrierActive() || getSessionLogoutInProgress()) && (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline')) throw new ApiError('Logout is in progress. Try again after signing in.', { status: 401, code: 'AUTH_REQUIRED' });
   const generation = captureSessionGeneration();
   const authGeneration = authInvalidationGeneration;
   identityRequest = (async () => {
+    let startupTimedOut = false;
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    const startupController = options.startupFallbackMs && !options.signal ? new AbortController() : undefined;
+    if (startupController) startupTimer = setTimeout(() => { startupTimedOut = true; startupController.abort(); }, options.startupFallbackMs);
     try {
-      const result = await apiWithMeta<CurrentUser>('/me', { signal: options.signal });
+      const result = await apiWithMeta<CurrentUser>('/me', { signal: options.signal || startupController?.signal });
        if (authGeneration !== authInvalidationGeneration) throw new ApiError('Authentication is required before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
        assertRequestGeneration(generation);
       const user = result.data;
@@ -262,13 +267,22 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-authenticated', { detail: { userId: user.id } }));
       return { ...user, authoritative: true };
     } catch (error) {
-      if (options.signal?.aborted) throw error;
-      if (!isNetwork(error)) throw error;
+       if (startupTimer) clearTimeout(startupTimer);
+       if (options.signal?.aborted) throw error;
+       if (!isNetwork(error) && !startupTimedOut) throw error;
        const cached = await identityForCache();
-       const cachedClerkIdentity = await clerkIdentityForCache();
-       if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
-      const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false;
-        if (!options.networkOnly && !getSessionLogoutInProgress() && authGeneration === authInvalidationGeneration && !authBlocked && trustedOffline && cached && isSessionGenerationCurrent(generation)) {
+        const cachedClerkIdentity = await clerkIdentityForCache();
+        if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
+        const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false || startupTimedOut;
+        if (startupTimedOut && (options.networkOnly || !options.startupFallbackMs)) throw error;
+        // A timed-out online startup is only safe to satisfy from the private
+        // cache when Clerk has identified the same account. Without a current
+        // Clerk ID, ordinary navigator.offline startup remains supported, but
+        // a timeout must not briefly display the previous user's identity.
+        const offlineCacheAllowed = options.clerkUserId !== undefined
+          ? cachedClerkIdentityMatches(options.clerkUserId, cachedClerkIdentity)
+          : !startupTimedOut && (typeof navigator === 'undefined' || navigator.onLine === false);
+         if (!options.networkOnly && !getSessionLogoutInProgress() && authGeneration === authInvalidationGeneration && !authBlocked && trustedOffline && offlineCacheAllowed && cached && isSessionGenerationCurrent(generation)) {
         const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
         seedResource('identity', '', result, Date.now(), { offline: true });
         setAuthLifecycle({ status: 'trusted-offline' });
@@ -276,16 +290,36 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       }
       throw error;
     }
+    finally { if (startupTimer) clearTimeout(startupTimer); }
   })();
   try { return await identityRequest; } finally { identityRequest = undefined; }
 }
 
-export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string } = {}): Promise<AuthLifecycle> {
+export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number } = {}): Promise<AuthLifecycle> {
   if (authLifecycleRequest) return authLifecycleRequest;
   const forceReverify = options.networkOnly === true;
-  if ((authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') && !forceReverify) return authLifecycle;
+  const requestedClerkIdentityMatches = options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId;
+  if ((authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') && !forceReverify && requestedClerkIdentityMatches) return authLifecycle;
   setAuthLifecycle({ status: 'checking' });
-  const request = getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId }).then(() => authLifecycle).catch((error) => {
+  const request = (async () => {
+    // Do not make an offline cold relaunch wait for Clerk or a doomed network
+    // request. This identity was persisted only after a verified /api/me
+    // response, and the outbox remains gated on the authenticated lifecycle.
+    if (!forceReverify && typeof navigator !== 'undefined' && navigator.onLine === false && !authBlocked && !getSessionLogoutInProgress()) {
+       const cached = await identityForCache();
+       const cachedClerkIdentity = await clerkIdentityForCache();
+       if (cached && cachedClerkIdentityMatches(options.clerkUserId, cachedClerkIdentity)) {
+         if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
+        const user = { id: cached.userId, email: cached.email, personId: cached.personId };
+        verifiedIdentity = user;
+        setResourceIdentity(user.id);
+        seedResource('identity', '', { ...offline(user), authoritative: false }, Date.now(), { offline: true });
+        setAuthLifecycle({ status: 'trusted-offline' });
+        return authLifecycle;
+      }
+    }
+    return getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, startupFallbackMs: options.startupFallbackMs });
+  })().then(() => authLifecycle).catch((error) => {
     if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH')) setAuthLifecycle({ status: 'unauthenticated' });
     else setAuthLifecycle({ status: 'unauthenticated', error });
     return authLifecycle;
@@ -485,20 +519,39 @@ export async function getExpenseDetails(id: string, signal?: AbortSignal): Promi
   }
 }
 
-export async function getActivity(id: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Activity[] }>> {
+export async function getActivity(id?: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Activity[] }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ activity: Activity[] }>(`/groups/${id}/activity`, { signal });
+    const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
+    const result = await apiWithMeta<{ activity: Activity[] }>(id ? `/activity?group=${encodeURIComponent(id)}` : '/activity', { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     const data = { activity: normalizeActivity(result.data.activity) };
-    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id, activity: data.activity, fetchedAt: new Date().toISOString() }, generation));
+    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id || 'all', activity: data.activity, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
     return data;
   } catch (error) {
     assertRequestGeneration(generation);
     if (!isNetwork(error) || !identity) throw error;
-    const cached = await cacheRead(() => readActivity(identity.user.id, id));
+    const cached = await cacheRead(() => readActivity(identity.user.id, id || 'all'));
     if (cached) return offline({ activity: cached.activity });
+    throw error;
+  }
+}
+
+export async function getCategories(signal?: AbortSignal): Promise<CachedResult<{ categories: string[] }>> {
+  const generation = captureSessionGeneration();
+  const identity = await requireIdentityForCache(signal);
+  try {
+    const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
+    const result = await apiWithMeta<{ categories: string[] }>('/categories', { signal });
+    assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
+    if (result.userId) await cacheWrite(() => saveCategories({ userId: result.userId!, categories: result.data.categories, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
+    return result.data;
+  } catch (error) {
+    assertRequestGeneration(generation);
+    if (!isNetwork(error) || !identity) throw error;
+    const cached = await cacheRead(() => readCategories(identity.user.id));
+    if (cached) return offline({ categories: cached.categories });
     throw error;
   }
 }
@@ -509,7 +562,6 @@ export async function hydrateGroups(userId: string) {
 }
 const cacheTimestamp = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
 export async function hydrateIdentity() {
-  if (typeof navigator !== 'undefined' && navigator.onLine !== false) return undefined;
   const cached = await cacheRead(readLastVerifiedIdentity);
   return cached ? { data: { id: cached.userId, email: cached.email, personId: cached.personId }, fetchedAt: cacheTimestamp(cached.verifiedAt), offline: true } : undefined;
 }
@@ -536,6 +588,10 @@ export async function hydrateActivity(userId: string, id: string) {
   // online tab revalidates without discarding the offline-safe presentation.
   const hasUnknownEligibility = cached?.activity.some((item) => item.entityActive === undefined) === true;
   return cached ? { data: { activity: cached.activity }, fetchedAt: hasUnknownEligibility ? 0 : cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
+}
+export async function hydrateCategories(userId: string) {
+  const cached = await cacheRead(() => readCategories(userId));
+  return cached ? { data: { categories: cached.categories }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
 }
 export async function hydrateExpenseDetails(userId: string, id: string) {
   const cached = await cacheRead(() => readExpenseDetails(userId, id));

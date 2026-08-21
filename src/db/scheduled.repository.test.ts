@@ -17,7 +17,7 @@ class ScheduledStatement {
     if (this.sql.includes('FROM scheduled_expenses')) return {
       id: 'scheduled-1', group_id: 'group-1', description: 'Rent', amount_minor: 1000, currency: 'USD', start_date: '2026-01-31', end_date: null,
       frequency: 'monthly', interval_count: 1, weekdays_json: '[]', timezone: 'America/New_York', status: 'active', next_occurrence_date: '2026-01-31',
-      created_by: 'user-1', created_at: '', updated_at: '', version: 1, client_operation_id: null,
+       created_by: 'user-1', created_at: '', updated_at: '', version: 1, client_operation_id: null, category: 'Custom rent',
     } as T;
     return null;
   }
@@ -232,7 +232,7 @@ class CronStatusInterleavedStatement {
 }
 
 const input: ScheduledExpenseInput = {
-  description: 'Rent', amount_minor: 1000, currency: 'USD', start_date: '2026-01-31', end_date: null,
+  description: 'Rent', amount_minor: 1000, currency: 'USD', category: 'Custom rent', start_date: '2026-01-31', end_date: null,
   frequency: 'monthly', interval: 1, weekdays: [], timezone: 'America/New_York',
   payers: [{ person_id: '00000000-0000-0000-0000-000000000001', amount_minor: 1000 }],
   splits: [{ person_id: '00000000-0000-0000-0000-000000000001', amount_minor: 1000 }], client_operation_id: 'rent-template',
@@ -242,7 +242,7 @@ describe('scheduled expense repository', () => {
   it('persists the timezone, recurrence cursor, children, and a retry claim', async () => {
     const db = new ScheduledDb();
     const result = await new Repository(db as never).createScheduledExpense('group-1', 'user-1', input);
-    expect(result).toMatchObject({ id: 'scheduled-1', timezone: 'America/New_York', frequency: 'monthly', interval: 1 });
+     expect(result).toMatchObject({ id: 'scheduled-1', timezone: 'America/New_York', frequency: 'monthly', interval: 1, category: 'Custom rent' });
     expect(db.batches).toHaveLength(1);
     expect(db.batches[0]).toEqual(expect.arrayContaining([
       expect.stringContaining('INSERT INTO scheduled_expenses'),

@@ -252,6 +252,33 @@ class GroupAuthorizationDb {
   }
 }
 
+class GlobalActivityDb {
+  sql = '';
+  args: unknown[] = [];
+  prepare(sql: string) { this.sql = sql; return this; }
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async all<T>() {
+    const selectedGroup = this.args.length === 2 ? this.args[1] : undefined;
+    const rows = [
+      { type: 'expense', id: 'expense-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Lunch', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
+      { type: 'settlement', id: 'settlement-allowed', entity_id: 'settlement-allowed', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Paid', amount_minor: 50, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02' },
+      { type: 'expense_revision', id: 'revision-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Edited lunch', amount_minor: 125, currency: 'USD', transaction_date: '2026-01-03', created_at: '2026-01-03' },
+      { type: 'expense_deleted', id: 'deleted-expense', entity_id: 'expense-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Deleted', amount_minor: 75, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-04', deleted: true },
+      { type: 'settlement_revision', id: 'deleted-settlement-revision', entity_id: 'settlement-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Old payment', amount_minor: 25, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-05', deleted: true },
+      { type: 'expense', id: 'expense-other', entity_id: 'expense-other', entity_active: 1, group_id: 'group-other', group_name: 'Other', label: 'Secret', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
+    ];
+    return { results: rows.filter((row) => !row.deleted && row.group_id === 'group-allowed' && (!selectedGroup || row.group_id === selectedGroup)) as T[] };
+  }
+}
+
+class CategoriesDb {
+  sql = '';
+  args: unknown[] = [];
+  prepare(sql: string) { this.sql = sql; return this; }
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async all<T>() { return { results: [{ category: 'Custom rent' }, { category: 'Dining' }] as T[] }; }
+}
+
 describe('repository idempotency', () => {
   it('returns the original entity for a same-payload retry and rejects a mismatch', async () => {
     const repo = new Repository(new FakeDb() as never);
@@ -391,7 +418,7 @@ describe('repository activity mapping', () => {
     expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
   });
 
-  it('marks only the revision immediately before deletion as deleted', async () => {
+  it('does not expose revisions from deleted transactions', async () => {
     const db = new RevisionActivityDb();
     const activity = await new Repository(db as never).activity('group-1');
     // D1 evaluates this against the current version and deleted_at. Earlier
@@ -400,8 +427,34 @@ describe('repository activity mapping', () => {
     expect(db.sql).toContain("s.deleted_at IS NOT NULL AND s.version = r.revision + 1");
     expect(db.sql).toContain("r.entity_type='expense' AND e.deleted_at IS NULL");
     expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
-    expect(activity.map((item) => item.type)).toEqual(['expense_revision', 'expense_deleted']);
-    expect(activity.map((item) => item.entityId)).toEqual(['expense-1', 'expense-1']);
+    expect(activity.map((item) => item.type)).toEqual(['expense_revision']);
+    expect(activity.map((item) => item.entityId)).toEqual(['expense-1']);
+  });
+
+  it('scopes global activity to the authenticated user and optional authorized group', async () => {
+    const db = new GlobalActivityDb();
+    const repo = new Repository(db as never);
+    await expect(repo.globalActivity('user-a')).resolves.toMatchObject([
+      { type: 'expense', groupId: 'group-allowed', label: 'Lunch' },
+      { type: 'settlement', groupId: 'group-allowed', label: 'Paid' },
+      { type: 'expense_revision', groupId: 'group-allowed', label: 'Edited lunch' },
+    ]);
+    await expect(repo.globalActivity('user-a', 'group-other')).resolves.toEqual([]);
+    expect(db.sql).toContain('gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL');
+    expect(db.sql).toContain('e.deleted_at IS NULL');
+    expect(db.sql).toContain('s.deleted_at IS NULL');
+    expect(db.sql).toContain("WHERE (r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL)");
+  });
+});
+
+describe('repository categories', () => {
+  it('includes custom categories from active authorized schedules as well as expenses', async () => {
+    const db = new CategoriesDb();
+    await expect(new Repository(db as never).categories('user-a')).resolves.toEqual(['Custom rent', 'Dining']);
+    expect(db.args).toEqual(['user-a', 'user-a']);
+    expect(db.sql).toContain('FROM scheduled_expenses se');
+    expect(db.sql).toContain('gm.user_id=?');
+    expect(db.sql).toContain('g.deleted_at IS NULL');
   });
 });
 

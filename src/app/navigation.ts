@@ -33,7 +33,7 @@ export type NavigationContext = {
   /** The route-specific destination, when one exists. */
   contextualPath?: string;
   groupsPath: string;
-  activityPath?: string;
+  activityPath: string;
   addPath: string;
   morePath: string;
 };
@@ -79,6 +79,8 @@ export function getNavigationContext(pathname: string): NavigationContext {
   let route: NavigationRoute = 'unknown';
   if (path === HOME_PATH || path === '') route = 'home';
   else if (path === '/settings') route = 'settings';
+  else if (path === '/activity') route = 'activity';
+  else if (path === '/expense/new') route = 'new-expense';
   else if (group && segments.length === 2) route = 'group-overview';
   else if (group && segments[2] === 'activity' && segments.length === 3) route = 'activity';
   else if (group && segments[2] === 'settle' && segments.length === 3) route = 'settle';
@@ -107,13 +109,13 @@ export function getNavigationContext(pathname: string): NavigationContext {
     ...(groupId ? { groupId, group } : {}),
     activeSection,
     ...(group ? { groupContext: group } : {}),
-    addAction: hasGroup ? 'new-expense' : 'add-friend',
-    addLabel: hasGroup ? 'Add expense' : 'Add friend',
-    primaryPath: group?.overviewPath || HOME_PATH,
+    addAction: 'new-expense',
+    addLabel: 'Add expense',
+    primaryPath: HOME_PATH,
     contextualPath,
     groupsPath: HOME_PATH,
-    activityPath: group?.activityPath,
-    addPath: group?.addPath || '/?friend=1',
-    morePath: group?.settlePath || '/settings',
+    activityPath: '/activity',
+    addPath: '/expense/new',
+    morePath: '/settings',
   };
 }

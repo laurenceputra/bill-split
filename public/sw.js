@@ -1,4 +1,4 @@
-const CACHE = 'bill-split-shell-v9';
+const CACHE = 'bill-split-shell-v10';
 const SHELL_FILES = ['/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
 const MAX_ASSETS = 80;
 const assetPattern = /^\/assets\/[a-zA-Z0-9._-]+\.(?:js|css|svg|png|webp|woff2?)$/;
@@ -52,10 +52,12 @@ async function refreshCompleteShell(navigationResponse, requestedPath) {
 }
 
 async function installCompleteShell() {
-  const indexResponse = await fetch(new Request('/index.html', { cache: 'no-store' }));
-  const html = await indexResponse.clone().text();
-  if (!validShellHtml(indexResponse, html)) throw new Error('The current app shell is not safe to cache.');
-  await refreshCompleteShell(indexResponse, '/index.html');
+  // ASSETS can canonicalize /index.html to /. Fetch the canonical navigation
+  // URL so a strict redirect check cannot strand a newly installed worker.
+  const shellResponse = await fetch(new Request('/', { cache: 'no-store' }));
+  const html = await shellResponse.clone().text();
+  if (!validShellHtml(shellResponse, html, '/')) throw new Error('The current app shell is not safe to cache.');
+  await refreshCompleteShell(shellResponse, '/');
 }
 
 self.addEventListener('install', (event) => event.waitUntil(installCompleteShell().then(() => self.skipWaiting())));
@@ -67,9 +69,12 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || isPrivatePath(url.pathname)) return;
   if (event.request.mode === 'navigate') {
-    const networkResponse = fetch(event.request);
-    event.waitUntil(networkResponse.then((response) => refreshCompleteShell(response, url.pathname)).catch(() => undefined));
-    event.respondWith(networkResponse.catch(() => caches.match(event.request).then((response) => response || caches.match('/index.html') || caches.match('/'))));
+    const cachedNavigation = caches.match(event.request).then((response) => response || caches.match('/') || caches.match('/index.html'));
+    const refresh = fetch(event.request).then((response) => refreshCompleteShell(response, url.pathname)).catch(() => undefined);
+    // Cached app HTML is returned immediately on a warm or cold offline
+    // navigation. Revalidation is deliberately independent of the response.
+    event.waitUntil(refresh);
+    event.respondWith(cachedNavigation.then((cached) => cached || fetch(event.request).catch(() => caches.match('/') || caches.match('/index.html'))));
     return;
   }
   if (!isAllowedAsset(url)) return;

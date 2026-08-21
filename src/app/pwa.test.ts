@@ -21,7 +21,9 @@ describe('standalone PWA contract', () => {
   });
 
   it('updates the shell cache and registers the worker before the load event', () => {
-    expect(serviceWorker).toContain("const CACHE = 'bill-split-shell-v9';");
+    expect(serviceWorker).toContain("const CACHE = 'bill-split-shell-v10';");
+    expect(serviceWorker).toContain("fetch(new Request('/', { cache: 'no-store' }))");
+    expect(serviceWorker).toContain('const cachedNavigation = caches.match(event.request)');
     expect(main).toContain("register('/sw.js', { updateViaCache: 'none' })");
     expect(main).not.toContain("addEventListener('load'");
     expect(main).toContain("typeof navigator === 'undefined'");

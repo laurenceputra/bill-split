@@ -30,6 +30,7 @@ export const recurrenceFrequency = z.enum(['daily', 'weekly', 'monthly', 'yearly
 const weekday = z.number().int().min(0).max(6) as z.ZodType<Weekday>;
 export const scheduledExpenseInput = z.object({
   description: z.string().trim().min(1).max(240), amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency,
+  category: z.string().trim().max(80).optional().nullable(),
   start_date: date, end_date: date.optional().nullable(), frequency: recurrenceFrequency, interval: z.number().int().positive().max(366),
   weekdays: z.array(weekday).max(7).default([]), timezone, version: z.number().int().positive().optional(),
   payers: z.array(payerInput).min(1).max(100), splits: z.array(splitInput).min(1).max(100), client_operation_id: z.string().trim().min(1).max(100).optional(),

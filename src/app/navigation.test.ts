@@ -30,13 +30,13 @@ describe('activityDetailPath', () => {
 });
 
 describe('getNavigationContext', () => {
-  it('classifies the home route and makes Add mean add friend', () => {
+  it('classifies the home route with fixed global destinations', () => {
     expect(getNavigationContext('/')).toMatchObject({
       route: 'home',
       activeSection: 'groups',
-      addAction: 'add-friend',
-      addLabel: 'Add friend',
-      addPath: '/?friend=1',
+      addAction: 'new-expense',
+      addLabel: 'Add expense',
+      addPath: '/expense/new',
       primaryPath: '/',
       morePath: '/settings',
     });
@@ -51,10 +51,10 @@ describe('getNavigationContext', () => {
       addAction: 'new-expense',
       addLabel: 'Add expense',
       groupsPath: '/',
-      activityPath: '/groups/group-123/activity',
-      addPath: '/groups/group-123/expense/new',
-      morePath: '/groups/group-123/settle',
-      primaryPath: '/groups/group-123',
+      activityPath: '/activity',
+      addPath: '/expense/new',
+      morePath: '/settings',
+      primaryPath: '/',
       contextualPath: '/groups/group-123/activity',
     });
     expect(context.group).toEqual({
@@ -82,7 +82,7 @@ describe('getNavigationContext', () => {
       route: 'legacy-expense-detail',
       activeSection: 'groups',
       primaryPath: '/',
-      addPath: '/?friend=1',
+      addPath: '/expense/new',
     });
     expect(getNavigationContext('/expenses/expense-1').groupId).toBeUndefined();
   });

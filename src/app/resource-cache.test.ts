@@ -256,13 +256,16 @@ describe('resource cache', () => {
     setResourceIdentity('user-a');
     const scheduleKey = resourceKeys.scheduledExpenses('user-a', 'group-1');
     const detailKey = resourceKeys.scheduledExpense('user-a', 'schedule-1');
+    const categoriesKey = resourceKeys.categories('user-a');
     const balanceKey = resourceKeys.balances('user-a', 'group-1');
     seedResource(scheduleKey, 'user-a', { scheduledExpenses: [] });
     seedResource(detailKey, 'user-a', { scheduledExpense: { version: 1 } });
+    seedResource(categoriesKey, 'user-a', { categories: ['Custom rent'] });
     seedResource(balanceKey, 'user-a', { unchanged: true });
     await invalidateForMutation.scheduledExpenseChanged('group-1', 'user-a', 'schedule-1');
     expect(getResourceSnapshot(scheduleKey, 'user-a').stale).toBe(true);
     expect(getResourceSnapshot(detailKey, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(categoriesKey, 'user-a').stale).toBe(true);
     expect(getResourceSnapshot(balanceKey, 'user-a').stale).toBe(false);
   });
 });

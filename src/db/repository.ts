@@ -331,7 +331,7 @@ export class Repository {
     let weekdays: ScheduledExpense['weekdays'] = [];
     try { const parsed = JSON.parse(text(row.weekdays_json)); if (Array.isArray(parsed)) weekdays = parsed as ScheduledExpense['weekdays']; } catch { /* retain the safe empty default */ }
     return {
-      id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
+      id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency), category: row.category == null ? null : text(row.category),
       startDate: text(row.start_date), endDate: row.end_date == null ? null : text(row.end_date), frequency: text(row.frequency) as ScheduledExpense['frequency'], interval: number(row.interval_count),
       weekdays, timezone: text(row.timezone), status: text(row.status) as ScheduledExpenseStatus, blockedReason: row.blocked_reason == null ? null : text(row.blocked_reason),
       nextOccurrenceDate: row.next_occurrence_date == null ? null : text(row.next_occurrence_date), createdBy: text(row.created_by), createdAt: text(row.created_at), updatedAt: text(row.updated_at),
@@ -393,7 +393,7 @@ export class Repository {
     const status = next ? 'active' : 'completed';
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare('INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) VALUES(?,?,?,?,?,?,?)').bind('scheduled.create', userId, groupId, input.client_operation_id, hash, id, t)] : []),
-      this.db.prepare('INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)').bind(id, groupId, input.description, input.amount_minor, input.currency, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null),
+      this.db.prepare('INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)').bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null),
       ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES(?,?,?)').bind(id, payer.person_id, payer.amount_minor)),
       ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) VALUES(?,?,?,?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null)),
     ];
@@ -423,6 +423,7 @@ export class Repository {
       this.db.prepare('DELETE FROM scheduled_splits WHERE scheduled_expense_id=? AND EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, id, version, claimId),
       ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, payer.person_id, payer.amount_minor, id, version, claimId)),
       ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null, id, version, claimId)),
+      this.db.prepare('UPDATE scheduled_expenses SET category=? WHERE id=? AND version=? AND generation_claim_id=?').bind(input.category ?? null, id, version, claimId),
       this.db.prepare('UPDATE scheduled_expenses SET generation_claim_id=NULL WHERE id=? AND version=? AND generation_claim_id=?').bind(id, version, claimId),
     ]);
     const parentChanges = Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes);
@@ -491,7 +492,7 @@ export class Repository {
       // user-controlled expense idempotency namespace. A generated
       // client_operation_id would let an ordinary API request collide with
       // this batch's UNIQUE(created_by, client_operation_id) constraint.
-      guarded('INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1', [id, template.groupId, expense.description, expense.amount_minor, expense.currency, expense.date, null, null, template.createdBy, timestamp, timestamp, null]),
+       guarded('INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1', [id, template.groupId, expense.description, expense.amount_minor, expense.currency, expense.date, expense.category ?? null, null, template.createdBy, timestamp, timestamp, null]),
       guarded('INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\') FROM json_each(?)', [id, JSON.stringify(expense.payers)]),
       guarded('INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\'),json_extract(value, \'$.metadata\') FROM json_each(?)', [id, JSON.stringify(expense.splits)]),
       guarded('INSERT INTO scheduled_occurrences(scheduled_expense_id,occurrence_date,expense_id,created_at) SELECT ?,?,?,?', [template.id, occurrenceDate, id, timestamp]),
@@ -779,16 +780,50 @@ export class Repository {
       LEFT JOIN settlements s ON r.entity_type='settlement' AND s.id=r.entity_id
       LEFT JOIN people p_from ON p_from.id=json_extract(r.snapshot_json,'$.fromPersonId')
       LEFT JOIN people p_to ON p_to.id=json_extract(r.snapshot_json,'$.toPersonId')
-      WHERE (e.group_id=? OR s.group_id=?)
+       WHERE (e.group_id=? OR s.group_id=?) AND ((r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL))
       ORDER BY created_at DESC LIMIT 100
     `).bind(groupId, groupId, groupId, groupId).all<Row>()).results;
-    return rows.map((row) => ({
+     return rows.filter((row) => !text(row.type).endsWith('_deleted')).map((row) => ({
       type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
       amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency),
       transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
       ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}),
       createdAt: text(row.created_at),
     })) as Activity[];
+  }
+  async globalActivity(userId: string, groupId?: string) {
+    const rows = (await this.db.prepare(`
+      SELECT activity.*,g.name AS group_name FROM (
+        SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.group_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
+        FROM expenses e WHERE e.deleted_at IS NULL
+        UNION ALL
+        SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
+        FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
+        UNION ALL
+        SELECT CASE WHEN (r.entity_type='expense' AND e.deleted_at IS NOT NULL AND e.version=r.revision+1) OR (r.entity_type='settlement' AND s.deleted_at IS NOT NULL AND s.version=r.revision+1) THEN r.entity_type||'_deleted' ELSE r.entity_type||'_revision' END,
+          r.id,r.entity_id,CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END,
+          COALESCE(e.group_id,s.group_id),CASE WHEN r.entity_type='expense' THEN json_extract(r.snapshot_json,'$.description') ELSE json_extract(r.snapshot_json,'$.note') END,
+          json_extract(r.snapshot_json,'$.amountMinor'),json_extract(r.snapshot_json,'$.currency'),json_extract(r.snapshot_json,'$.date'),p_from.name,p_to.name,r.created_at
+        FROM revisions r LEFT JOIN expenses e ON r.entity_type='expense' AND e.id=r.entity_id LEFT JOIN settlements s ON r.entity_type='settlement' AND s.id=r.entity_id
+        LEFT JOIN people p_from ON p_from.id=json_extract(r.snapshot_json,'$.fromPersonId') LEFT JOIN people p_to ON p_to.id=json_extract(r.snapshot_json,'$.toPersonId')
+        WHERE (r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL)
+      ) activity JOIN groups g ON g.id=activity.group_id JOIN group_members gm ON gm.group_id=g.id
+      WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL${groupId ? ' AND activity.group_id=?' : ''}
+      ORDER BY activity.created_at DESC LIMIT 100
+    `).bind(...(groupId ? [userId, groupId] : [userId])).all<Row>()).results;
+    return rows.filter((row) => !text(row.type).endsWith('_deleted')).map((row) => ({ type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
+      groupId: text(row.group_id), groupName: text(row.group_name), amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency), transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
+      ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}), createdAt: text(row.created_at) })) as Activity[];
+  }
+  async categories(userId: string) {
+    const rows = (await this.db.prepare(`SELECT DISTINCT category FROM (
+      SELECT e.category FROM expenses e JOIN group_members gm ON gm.group_id=e.group_id JOIN groups g ON g.id=e.group_id
+        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL AND e.deleted_at IS NULL
+      UNION ALL
+      SELECT se.category FROM scheduled_expenses se JOIN group_members gm ON gm.group_id=se.group_id JOIN groups g ON g.id=se.group_id
+        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL
+    ) WHERE category IS NOT NULL AND trim(category)<>'' ORDER BY lower(category),category`).bind(userId, userId).all<Row>()).results;
+    return rows.map((row) => text(row.category));
   }
   async allExport(userId: string) { const groups = await this.groups(userId); const out = []; for (const group of groups) { const [members, expenses, settlements] = await Promise.all([this.members(group.id), this.allExpenses(group.id), this.settlements(group.id)]); out.push({ ...group, members, expenses, settlements }); } return { version: 1, exportedAt: now(), groups: out }; }
   async groupExport(groupId: string) { const g = mapGroup(await this.db.prepare('SELECT * FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>()); const [members, expenses, settlements] = await Promise.all([this.members(groupId), this.allExpenses(groupId), this.settlements(groupId)]); return { version: 1, exportedAt: now(), group: g, members, expenses, settlements }; }

@@ -81,7 +81,7 @@ const apiPaths = {
   settlements: (id: string) => `/api/groups/${id}/settlements`,
   scheduledExpenses: (id: string) => `/api/groups/${id}/scheduled-expenses`,
   expense: (id: string) => `/api/expenses/${id}`,
-  activity: (id: string) => `/api/groups/${id}/activity`,
+  activity: (_id: string) => '/api/activity',
 };
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups];
@@ -96,7 +96,7 @@ const scenarios: Scenario[] = [
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with history fixture', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
-  { name: 'activity', path: `/groups/${ids.rich}/activity`, auth: DEV_EMAIL, context: 'Activity / expense and settlement history fixture', expected: { mode: 'normal', heading: 'Activity', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.activity(ids.rich)] } },
+  { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'Global activity / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'Activity', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.activity(ids.rich)] } },
   { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Trusted-device offline access', apiPaths: [apiPaths.me] } },
 ];
 

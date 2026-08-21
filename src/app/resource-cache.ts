@@ -298,6 +298,7 @@ export const resourceKeys = Object.freeze({
   scheduledExpenses: (userId: string, groupId: string) => resourceKey('scheduled-expenses', `${userId}:${groupId}`),
   scheduledExpense: (userId: string, scheduleId: string) => resourceKey('scheduled-expense', `${userId}:${scheduleId}`),
   activity: (userId: string, groupId: string) => resourceKey('activity', `${userId}:${groupId}`),
+  categories: (userId: string) => resourceKey('categories', userId),
   expenseDetail: (userId: string, expenseId: string) => resourceKey('expense-detail', `${userId}:${expenseId}`),
 });
 export const useCachedResource = useResource;
@@ -311,15 +312,15 @@ export const resourceCache = Object.freeze({
   invalidateMany: invalidateResources,
   clear: clearResourceCache,
 });
-const invalidatePersistedGroups = async (userId: string, generation = captureSessionGeneration()) => {
-  try { await invalidateCachedGroups(userId, generation); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
+const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean } = {}) => {
+  try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 };
 export const invalidateForMutation = {
-  groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedGroups(userId, generation); },
-  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedGroups(userId, generation); },
-  settlementChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
-  scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); },
+  groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
+  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
+  settlementChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all')], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), resourceKeys.categories(userId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { categories: true, groups: false }); },
 };
 
 initializeForegroundCoordinator();
