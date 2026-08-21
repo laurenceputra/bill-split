@@ -13,12 +13,25 @@ export const browserTimezone = () => {
   catch { return 'UTC'; }
 };
 
-export function timezoneOptions(): string[] {
+const fallbackTimezones = ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Kolkata', 'Asia/Tokyo', 'Australia/Sydney'];
+export const otherTimezoneValue = '__other_iana_timezone__';
+
+/** Return selectable IANA IDs, retaining the browser and current form values. */
+export function timezoneOptions(additionalTimeZones: readonly string[] = [], browserTimeZone = browserTimezone()): string[] {
+  let options: string[] = fallbackTimezones;
   try {
-    const values = (Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
-    if (values) return ['UTC', ...values('timeZone').filter((zone) => zone !== 'UTC')];
+    const supportedValuesOf = (Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+    if (supportedValuesOf) options = ['UTC', ...supportedValuesOf('timeZone').filter((zone) => zone !== 'UTC')];
   } catch { /* Older browsers use the curated fallback below. */ }
-  return ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Kolkata', 'Asia/Tokyo', 'Australia/Sydney'];
+  return [...new Set(['UTC', browserTimeZone, ...options, ...additionalTimeZones].filter((zone) => zone.trim()))];
+}
+
+export function timezoneSelectValue(timeZone: string, options: readonly string[], custom = false): string {
+  return custom || !options.includes(timeZone) ? otherTimezoneValue : timeZone;
+}
+
+export function timezoneValueFromSelection(selection: string, customTimeZone: string): string {
+  return selection === otherTimezoneValue ? customTimeZone : selection;
 }
 
 export function timezoneOffsetLabel(timeZone: string, at = new Date()): string {

@@ -8,6 +8,7 @@ const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
 const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
 const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.meta.url), 'utf8');
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
@@ -67,6 +68,26 @@ describe('responsive navigation layout contract', () => {
 
   it('keeps activity row focus visible inside clipped lists', () => {
     expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
+  });
+
+  it('keeps the activity filter separated from the result list at every responsive size', () => {
+    expect(css).toMatch(/\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-4\);/);
+    expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-5\);/);
+    expect(appSource).toContain('className="activity-filter reading-width"');
+  });
+
+  it('uses a native timezone select and preserves boundary recovery actions', () => {
+    expect(appSource).toContain('<select id="creator-timezone"');
+    expect(appSource).not.toContain('<datalist id="timezone-options">');
+    expect(appSource).toContain('timezoneLabel(zone, timezoneLabelDate)');
+    expect(appSource).toContain('value={timezoneSelectValue}');
+    expect(appSource).toContain('value={zone}');
+    expect(appSource).toContain('Other IANA timezone…');
+    expect(appSource).toContain('id="custom-timezone"');
+    expect(appSource).toContain('scheduledExpenseInput.parse');
+    expect(errorBoundarySource).toContain('>Reload</button>');
+    expect(errorBoundarySource).toContain('href="/">Return to Groups</a>');
+    expect(errorBoundarySource).not.toContain('clearCachedData');
   });
 
   it('keeps recurrence opt-in clear and preview dates separated', () => {

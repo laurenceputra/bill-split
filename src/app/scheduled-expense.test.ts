@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { browserTimezone, formatScheduleDate, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOffsetLabel, timezoneOptions } from './scheduled-expense';
+import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOffsetLabel, timezoneOptions, timezoneSelectValue, timezoneValueFromSelection } from './scheduled-expense';
 
 describe('scheduled expense UI helpers', () => {
   it('previews weekly dates using the selected weekdays', () => {
@@ -35,5 +35,29 @@ describe('scheduled expense UI helpers', () => {
     expect(timezoneOffsetLabel('Asia/Kolkata', date)).toBe('UTC+05:30');
     expect(timezoneLabel('Asia/Kolkata', date)).toContain('Asia/Kolkata (UTC+05:30)');
     expect(timezoneOptions()).toContain('UTC');
+  });
+
+  it('keeps the browser and current schedule timezone selectable on modern browsers', () => {
+    const options = timezoneOptions(['Pacific/Apia'], 'Browser/Only');
+    expect(options).toEqual(expect.arrayContaining(['Browser/Only', 'Pacific/Apia']));
+    expect(timezoneLabel('Pacific/Apia', new Date('2026-01-05T00:00:00Z'))).toMatch(/^Pacific\/Apia \(UTC[+-]/);
+  });
+
+  it('falls back to a curated list when supportedValuesOf is unavailable', () => {
+    const intl = Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] };
+    const original = intl.supportedValuesOf;
+    Object.defineProperty(Intl, 'supportedValuesOf', { configurable: true, value: undefined });
+    try {
+      expect(timezoneOptions([], 'Browser/Only')).toEqual(expect.arrayContaining(['UTC', 'America/New_York', 'Browser/Only']));
+    } finally {
+      Object.defineProperty(Intl, 'supportedValuesOf', { configurable: true, value: original });
+    }
+  });
+
+  it('keeps an unavailable current zone visible through the custom timezone option', () => {
+    expect(timezoneSelectValue('Pacific/Apia', ['UTC', 'America/New_York'])).toBe(otherTimezoneValue);
+    expect(timezoneSelectValue('Pacific/Apia', ['UTC', 'America/New_York'], true)).toBe(otherTimezoneValue);
+    expect(timezoneValueFromSelection(otherTimezoneValue, 'Pacific/Apia')).toBe('Pacific/Apia');
+    expect(timezoneValueFromSelection('UTC', 'Pacific/Apia')).toBe('UTC');
   });
 });

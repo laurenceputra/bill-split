@@ -249,6 +249,13 @@
   padding: var(--space-6);
 }
 
+.app-error-boundary__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
 .top-bar {
   position: sticky;
   z-index: 5;
@@ -552,6 +559,10 @@ main.app-main > h1 {
 
 .activity-description {
   overflow-wrap: anywhere;
+}
+
+.activity-filter {
+  margin-bottom: var(--space-4);
 }
 
 .page-title h1 {
@@ -1702,6 +1713,10 @@ form > button {
 
   .cards {
     grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  }
+
+  .activity-filter {
+    margin-bottom: var(--space-5);
   }
 
   .form-row {

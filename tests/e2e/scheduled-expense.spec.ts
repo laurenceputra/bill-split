@@ -4,6 +4,24 @@ const groupId = '00000000-0000-4000-8000-000000003002';
 const expenseId = '00000000-0000-4000-8000-000000004001';
 const scheduledExpenseId = '00000000-0000-4000-8000-000000007001';
 
+test('global new expense survives a direct reload and re-entry after leaving the route', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${BASE_URL}/expense/new`, { waitUntil: 'networkidle' });
+    await expect(page.getByRole('heading', { name: 'Add expense' })).toBeVisible();
+    await expect(page.getByLabel('Expense group')).toBeVisible();
+    await page.reload({ waitUntil: 'networkidle' });
+    await expect(page.getByRole('heading', { name: 'Add expense' })).toBeVisible();
+    await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+    await expect(page.getByRole('heading', { name: 'Friends & groups' })).toBeVisible();
+    await page.goto(`${BASE_URL}/expense/new`, { waitUntil: 'networkidle' });
+    await expect(page.getByRole('heading', { name: 'Add expense' })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test('ordinary expense creation starts one-time while recurring fields preserve entered details', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
   const page = await context.newPage();
@@ -19,6 +37,10 @@ test('ordinary expense creation starts one-time while recurring fields preserve 
 
     await page.getByLabel('Repeat this expense').check();
     await expect(page.getByRole('heading', { name: 'Schedule an expense' })).toBeVisible();
+    const timezone = page.getByLabel('Creator timezone');
+    await expect(timezone).not.toHaveValue('');
+    await expect(timezone.locator('option').first()).toContainText('UTC');
+    await expect(timezone.locator('option')).not.toHaveCount(0);
     await expect(page.locator('.schedule-preview ol li')).toHaveCount(3);
     await expect(page.getByText('It continues until you pause or cancel it.')).toBeVisible();
     await expect(page.getByText('Category and notes are saved only for one-time expenses.')).toBeVisible();

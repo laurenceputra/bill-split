@@ -16,6 +16,6 @@ export class AppErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorB
 
   render() {
     if (!this.state.hasError) return this.props.children;
-    return <main className="app-error-boundary" role="alert"><div className="app-error-boundary__card"><p className="eyebrow">BillSplit</p><h1>Something went wrong</h1><p className="muted">The app could not finish loading. Your local data and pending expenses were not cleared.</p><button type="button" onClick={() => window.location.reload()}>Reload</button></div></main>;
+    return <main className="app-error-boundary" role="alert"><div className="app-error-boundary__card"><p className="eyebrow">BillSplit</p><h1>Something went wrong</h1><p className="muted">The app could not finish loading. Your local data and pending expenses were not cleared.</p><div className="app-error-boundary__actions"><button type="button" onClick={() => window.location.reload()}>Reload</button><a className="button button--secondary" href="/">Return to Groups</a></div></div></main>;
   }
 }
