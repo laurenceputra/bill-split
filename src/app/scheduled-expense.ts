@@ -13,7 +13,7 @@ export const browserTimezone = () => {
   catch { return 'UTC'; }
 };
 
-export function previewScheduleDates(schedule: Pick<ScheduledExpense, 'startDate' | 'endDate' | 'frequency' | 'interval' | 'weekdays'>, fromDate = schedule.startDate, count = 5): string[] {
+export function previewScheduleDates(schedule: Pick<ScheduledExpense, 'startDate' | 'endDate' | 'frequency' | 'interval' | 'weekdays'>, fromDate = schedule.startDate, count = 3): string[] {
   const definition = recurrenceDefinition(schedule);
   const dates: string[] = [];
   let candidate = firstOccurrenceOnOrAfter(definition, fromDate);
@@ -23,6 +23,22 @@ export function previewScheduleDates(schedule: Pick<ScheduledExpense, 'startDate
     candidate = nextOccurrenceDate(definition, candidate);
   }
   return dates;
+}
+
+/** Format an ISO calendar date without allowing the browser timezone to shift it. */
+export function formatScheduleDate(value: string, locale?: string, timeZone = 'UTC') {
+  try {
+    return new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: 'numeric', timeZone }).format(new Date(`${value}T00:00:00Z`));
+  } catch {
+    return value;
+  }
+}
+
+export function scheduleContinuationText(endDate: string | null | undefined, shownDates: string[], locale?: string) {
+  if (!shownDates.length) return '';
+  if (!endDate) return 'It continues until you pause or cancel it.';
+  const formattedEndDate = formatScheduleDate(endDate, locale);
+  return shownDates.includes(endDate) ? `It ends on ${formattedEndDate}.` : `It continues through ${formattedEndDate}.`;
 }
 
 export function scheduleSummary(frequency: RecurrenceFrequency, interval: number, weekdays: Weekday[]) {

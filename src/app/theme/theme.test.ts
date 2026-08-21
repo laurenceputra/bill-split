@@ -69,6 +69,17 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
   });
 
+  it('keeps recurrence opt-in clear and preview dates separated', () => {
+    expect(appSource).toContain('id="repeat-expense"');
+    expect(appSource).toContain('<span>Repeat this expense</span>');
+    expect(appSource).toContain('Category and notes are saved only for one-time expenses');
+    expect(appSource).toContain('disabled aria-describedby="one-time-only-details-help"');
+    expect(css).toMatch(/\.one-time-only-details\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-3\);/);
+    expect(css).toMatch(/\.schedule-preview ol\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
+    expect(appSource).toContain('scheduleContinuationText(endDate, schedulePreview)');
+    expect(appSource).toContain('occurrences affect balances only when posted');
+  });
+
   it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
     expect(768).toBeGreaterThanOrEqual(48 * 16);
     expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);
