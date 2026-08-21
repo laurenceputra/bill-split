@@ -8,6 +8,19 @@ import { BalanceOverflowError, checkedAddMinor } from '../shared/money';
 
 type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string }; Variables: { auth: { id: string; email: string; personId: string }; repo: Repository; requestId: string } };
 const api = new Hono<Env>();
+const remoteJwksByTeamDomain = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+/** ACCESS_AUD accepts one tag or a comma-separated list during audience migration. jose wants a string for one tag and an array for multiple tags. */
+export function parseAccessAudience(value: string): string | string[] {
+  const audiences = value.split(',').map((audience) => audience.trim()).filter(Boolean);
+  return audiences.length <= 1 ? audiences[0] || '' : audiences;
+}
+const remoteJwks = (teamDomain: string) => {
+  const existing = remoteJwksByTeamDomain.get(teamDomain);
+  if (existing) return existing;
+  const created = createRemoteJWKSet(new URL(`https://${teamDomain}/cdn-cgi/access/certs`));
+  remoteJwksByTeamDomain.set(teamDomain, created);
+  return created;
+};
 const jsonError = (c: any, status: number, code: string, message: string) => c.json({ error: { code, message } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
 export const MAX_API_BODY_BYTES = 64 * 1024;
@@ -98,8 +111,8 @@ api.use('/api/*', async (c, next) => {
     const token = c.req.header('Cf-Access-Jwt-Assertion') ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '');
     if (!token) return jsonError(c, 401, 'AUTH_REQUIRED', 'A Cloudflare Access JWT is required');
     try {
-      const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
-      const verified = await jwtVerify(token, createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`)), { issuer, audience: env.ACCESS_AUD });
+       const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
+       const verified = await jwtVerify(token, remoteJwks(env.ACCESS_TEAM_DOMAIN), { issuer, audience: parseAccessAudience(env.ACCESS_AUD) });
       const claim = verified.payload.email ?? verified.payload.sub;
       if (typeof claim !== 'string' || !claim.includes('@')) return jsonError(c, 401, 'AUTH_INVALID', 'Verified identity has no usable email');
       email = claim.trim().toLowerCase();
@@ -123,7 +136,18 @@ const ownerOnly = (c: any, x: { role: 'owner' | 'member' }) => x.role === 'owner
 async function validPeople(repo: Repository, groupId: string, ids: string[]) { const members = await repo.members(groupId); const allowed = new Set(members.map((m) => m.personId)); return ids.every((id) => allowed.has(id)); }
 function page(value: string | undefined, fallback: number, max: number) { if (value === undefined) return fallback; const n = Number(value); return Number.isSafeInteger(n) && n >= 0 ? Math.min(n, max) : -1; }
 
+/** Return only a same-origin app path after the Access middleware succeeds. */
+export function sanitizeReturnTo(value: unknown): string {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return '/';
+  try {
+    const url = new URL(value, 'https://billsplit.invalid');
+    if (url.origin !== 'https://billsplit.invalid' || /^(?:\/api(?:\/|$)|\/cdn-cgi(?:\/|$)|\/access(?:\/|$))/i.test(url.pathname)) return '/';
+    return `${url.pathname}${url.search}${url.hash}` || '/';
+  } catch { return '/'; }
+}
+
 api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
+api.get('/api/auth/bootstrap', (c) => c.redirect(sanitizeReturnTo(c.req.query('return_to')), 302));
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });
@@ -168,7 +192,7 @@ api.onError((error, c) => { const balanceResponse = balanceError(c, error); if (
 export default { async fetch(request: Request, env: Env['Bindings'], ctx: ExecutionContext) {
   const requestId = requestIdFor(request);
   const url = new URL(request.url);
-  if (url.pathname.startsWith('/api')) return api.fetch(request, env, ctx);
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return api.fetch(request, env, ctx);
   const response = await env.ASSETS.fetch(request);
   const headers = new Headers(response.headers);
   setSecurityHeaders(headers, requestId, false);

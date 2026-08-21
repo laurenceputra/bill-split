@@ -1,21 +1,37 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Link, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, Settlement, SplitMethod } from '../shared/types';
 import { currencyOptions, type ExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
-import { ApiError, api, getActivity, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements } from './api';
+import { ApiError, api, authBootstrapUrl, getActivity, getAuthLifecycle, getBalances, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getSettlements, hydrateActivity, hydrateBalances, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, initializeAuthLifecycle, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
-import { Button, Field, InstallAction, Layout, Modal, Money, Status, Surface, useOnlineStatus } from './ui';
+import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 import { groupBalanceDisplays } from './group-balance';
 import { activityDetailPath, expenseDetailPath } from './navigation';
+import { captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
+
+function PublicLanding() {
+  const location = useLocation();
+  const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  return <PublicShell returnTo={returnTo}>
+    <div className="landing-page">
+      <section className="landing-hero" aria-labelledby="landing-title">
+        <div className="landing-hero__copy"><p className="eyebrow">Private shared expenses</p><h1 id="landing-title">Know who paid. Know what is still owed.</h1><p className="landing-lede">BillSplit keeps shared expenses clear for friends, trips, and households—without making you do the math twice.</p><div className="landing-actions"><a className="button landing-primary" href={authBootstrapUrl(returnTo)}>Sign in securely</a><InstallAction label="Install BillSplit" /></div><p className="landing-privacy">Private by design · sign in with Cloudflare Access · no advertising</p></div>
+        <div className="ledger-preview" aria-hidden="true"><div className="ledger-preview__top"><span>Weekend away</span><span>USD</span></div><div className="ledger-preview__row"><span>Alex paid dinner</span><strong>$84.00</strong></div><div className="ledger-preview__row"><span>Sam owes Alex</span><strong className="ledger-preview__positive">$28.00</strong></div><div className="ledger-preview__line" /><div className="ledger-preview__total"><span>Still owed</span><strong>$28.00</strong></div></div>
+      </section>
+      <section className="landing-proof" aria-label="Why BillSplit"><div><strong>Clear ledgers</strong><span>See payments, splits, and balances together.</span></div><div><strong>Less chasing</strong><span>Know the next fair payment at a glance.</span></div><div><strong>Works offline</strong><span>Capture a new expense when signal drops.</span></div></section>
+      <section className="landing-note"><h2>Private, even when offline</h2><p>Your signed-in browser may keep recent group data and queued expenses locally for trusted-device offline use. Access tokens are never stored, and syncing still requires Cloudflare Access. Clear everything from Settings before handing off a device.</p></section>
+    </div>
+  </PublicShell>;
+}
 function ErrorBox({ error, id = 'resource-error', onRetry, retryLabel = 'Try again' }: { error: unknown; id?: string; onRetry?: () => void; retryLabel?: string }) {
   return <div className="error" id={id} role="alert" aria-live="assertive"><span>{errorText(error)}</span>{onRetry ? <Button type="button" variant="secondary" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
 }
@@ -88,10 +104,11 @@ function Home() {
     setCreateError(undefined);
     submitLock.current = true;
     setSubmitting(true);
+    const generation = captureSessionGeneration();
     try {
       const result = await api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify({ name, currency }) });
       if (!result.group) throw new Error('The group was not created. Try again.');
-      await invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`);
+      await invalidateForMutation.groupCreated(me.data?.id, generation); nav(`/groups/${result.group.id}`);
     } catch (cause) { setCreateError(cause); }
     finally { submitLock.current = false; setSubmitting(false); }
   };
@@ -103,10 +120,11 @@ function Home() {
     setCreateError(undefined);
     submitLock.current = true;
     setSubmitting(true);
+    const generation = captureSessionGeneration();
     try {
       const result = await api<{ group: Group }>('/friends', { method: 'POST', body: JSON.stringify({ name: friendName, email: friendEmail.trim() || undefined, currency: friendCurrency, client_operation_id: friendOperation }) });
       if (!result.group) throw new Error('The friend group was not created. Try again.');
-      await invalidateForMutation.groupCreated(me.data?.id); nav(`/groups/${result.group.id}`);
+      await invalidateForMutation.groupCreated(me.data?.id, generation); nav(`/groups/${result.group.id}`);
     } catch (cause) { setCreateError(cause); }
     finally { submitLock.current = false; setSubmitting(false); }
   };
@@ -156,9 +174,10 @@ function GroupPage() {
     event.preventDefault();
      if (addingPersonSubmitting) return;
      if (!personName.trim()) { setAddPersonError(new Error('Enter a friend name.')); return; }
-    setAddPersonError(undefined);
-    setAddingPersonSubmitting(true);
-    try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); await invalidateForMutation.groupChanged(id, currentUserId); }
+     setAddPersonError(undefined);
+     setAddingPersonSubmitting(true);
+     const generation = captureSessionGeneration();
+     try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); await invalidateForMutation.groupChanged(id, currentUserId, generation); }
     catch (cause) { setAddPersonError(cause); }
     finally { setAddingPersonSubmitting(false); }
   };
@@ -312,7 +331,7 @@ function ExpenseForm() {
       if (preview.error || preview.remainingMinor !== 0) throw new Error(preview.error || 'Split amounts must equal the expense total.');
       target = 'form';
       const input = { description: description.trim(), amount_minor: cents, currency, date, category: category.trim() || null, notes: notes || null, payers, splits: allocationSplits(selected, method, preview, allocationValues, existingSplitMetadata), version, client_operation_id: expenseId ? undefined : operation };
-        if (expenseId) { await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); await invalidateForMutation.expenseChanged(id, expenseId, currentUserId); }
+       if (expenseId) { const generation = captureSessionGeneration(); await api(`/expenses/${expenseId}`, { method: 'PUT', body: JSON.stringify(input) }); await invalidateForMutation.expenseChanged(id, expenseId, currentUserId, generation); }
        else {
          const me = currentUserId ? { id: currentUserId } : await getMe();
          const payload = input as ExpenseInput;
@@ -364,7 +383,7 @@ function ExpenseDetail() {
   useEffect(() => { if (expense && !id) nav(`/groups/${expense.groupId}/expenses/${expenseId}`, { replace: true }); }, [expense, expenseId, id, nav]);
   if (!expense && error) return <Layout><ErrorBox error={error} onRetry={retryFor(resourceKeys.expenseDetail(me.data?.id || 'pending', expenseId), me.data?.id, Boolean(me.error))} id="expense-detail-error" /></Layout>;
   if (!expense) return <Layout><Loading /></Layout>;
-  const remove = async () => { if (!confirm('Delete this expense?')) return; setDeleteError(undefined); setDeleting(true); try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); await invalidateForMutation.expenseChanged(expense.groupId, expense.id, me.data?.id); nav(`/groups/${expense.groupId}`); } catch (cause) { setDeleteError(cause); } finally { setDeleting(false); } };
+  const remove = async () => { if (!confirm('Delete this expense?')) return; setDeleteError(undefined); setDeleting(true); const generation = captureSessionGeneration(); try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); await invalidateForMutation.expenseChanged(expense.groupId, expense.id, me.data?.id, generation); nav(`/groups/${expense.groupId}`); } catch (cause) { setDeleteError(cause); } finally { setDeleting(false); } };
    return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{expense.date}</p><h1>{expense.description}</h1></div><Money amountMinor={expense.amountMinor} currency={expense.currency} size="large" /></div>{me.error ? <CachedIdentityNotice resource={me} id="expense-detail-identity-error" /> : null}{!me.error || detailsResource.data !== undefined ? <ResourceNotice resource={detailsResource} label="expense details" retry={retryFor(resourceKeys.expenseDetail(me.data?.id || 'pending', expenseId), me.data?.id)} /> : null}{!me.error || groupResource.data !== undefined ? <ResourceNotice resource={groupResource} label="member names" retry={retryFor(resourceKeys.group(me.data?.id || 'pending', expense.groupId), me.data?.id)} /> : null}<section className="reading-width"><h2>Payers</h2><div className="list">{expense.payers.map((payer) => <div className="row" key={payer.personId}><span>{nameOf(members, payer.personId)}</span><Money amountMinor={payer.amountMinor} currency={expense.currency} /></div>)}</div><h2>Split</h2><div className="list">{expense.splits.map((split) => <div className="row" key={split.personId}><span>{nameOf(members, split.personId)}</span><Money amountMinor={split.amountMinor} currency={expense.currency} /></div>)}</div>{expense.category ? <p className="muted category">Category: {expense.category}</p> : null}{expense.notes ? <p className="muted notes">{expense.notes}</p> : null}</section>{online && !offlineData ? <div className="actions"><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><Button variant="danger" disabled={deleting} onClick={remove}>{deleting ? 'Deleting…' : 'Delete'}</Button>{deleteError ? <ErrorBox error={deleteError} id="expense-delete-error" /> : null}</div> : <p className="offline-banner" role="status">Editing and deleting expenses require a connection.</p>}<section className="reading-width"><h2>History</h2>{history.length ? <div className="list">{history.map((item) => <div className="row" key={item.id}><span>Revision {item.revision}</span><small>{item.createdAt}</small></div>)}</div> : <Empty>No edits yet.</Empty>}</section></Layout>;
 }
 
@@ -412,7 +431,7 @@ function Settle() {
   if (!group) return <Layout>{resourceError ? <ErrorBox error={resourceError} onRetry={retryFor(resourceError === balancesResource.error ? resourceKeys.balances(settleUserId, id) : resourceKeys.group(settleUserId, id), me.data?.id, Boolean(me.error))} id="settle-resource-error" /> : <Loading />}</Layout>;
    if (!online || offlineData) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{balancesResource.data ? 'Cached balance' : 'Balance unavailable'}</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="offline-banner" role="status">Settlements are online-only. Reconnect to submit; {balancesResource.data ? 'cached balances remain available.' : 'no verified cached balances are available on this device.'}</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} />{balancesResource.data ? Object.entries(balances).map(([currencyKey, balance]) => <section className="reading-width" key={currencyKey}><h2>Balances <small>({currencyKey})</small></h2>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}</span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</section>) : null}</Layout>;
     if (balancesResource.data === undefined) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Balance required</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}{!me.error ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /> : null}</Layout>;
-   const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operation }) }); await invalidateForMutation.settlementChanged(id, me.data?.id); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
+   const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); const generation = captureSessionGeneration(); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date: today(), client_operation_id: operation }) }); await invalidateForMutation.settlementChanged(id, me.data?.id, generation); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
       const resetSuggestion = () => { setCurrency(suggestion?.currency || group.currency); setFrom(fallbackFrom); setTo(fallbackTo); setAmount(suggestion ? moneyInput(suggestion.amountMinor) : ''); initializedRoute.current = settlementRouteKey; initializedSuggestion.current = suggestionFingerprint; setDirty(false); };
        return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{group.name}</span></Link><div className="page-title"><div><p className="eyebrow">{currentPersonId ? 'Suggested from your balance' : 'Payment'}</p><h1>Settle up</h1></div></div>{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="muted">Record a payment. Partial settlements are supported.</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /><form className="reading-width" onSubmit={submit} aria-describedby={error ? 'settlement-form-error' : undefined}><Field label="Who paid?"><select value={from} onChange={(event) => { setError(undefined); markDirty(); setFrom(event.target.value); }}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => { setError(undefined); markDirty(); setTo(event.target.value); }}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={(value) => { setError(undefined); markDirty(); setCurrency(value); }} /></Field><Field label={`Amount (${currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-invalid={Boolean(error)} value={amount} onChange={(event) => { setError(undefined); markDirty(); setAmount(event.target.value); }} /></Field>{dirty ? <Button className="full-width-button" type="button" variant="secondary" onClick={resetSuggestion}>Reset to current suggestion</Button> : null}{error ? <ErrorBox error={error} id="settlement-form-error" /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></Layout>;
 }
@@ -443,6 +462,7 @@ function Settings() {
   const [clearing, setClearing] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<unknown>();
+  const [logoutError, setLogoutError] = useState<unknown>();
   useEffect(() => {
     let active = true;
     const unsubscribe = subscribeOutbox(() => setOutbox(getOutboxSnapshot()));
@@ -461,9 +481,13 @@ function Settings() {
     finally { setClearing(false); }
   };
 
-  const logout = () => {
-    if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. Log out anyway? They will remain on this device but cannot sync until you reconnect.`)) return;
-    window.location.assign('/cdn-cgi/access/logout');
+  const logout = async () => {
+    if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. Logging out will permanently delete them from this device. Continue?`)) return;
+    setClearing(true); setError(undefined); setLogoutError(undefined);
+    try {
+      await clearEverythingForLogout();
+      window.location.assign('/cdn-cgi/access/logout');
+    } catch (cause) { setLogoutError(cause); setClearing(false); }
   };
 
   return <Layout>
@@ -471,12 +495,24 @@ function Settings() {
     <section><h2>Device</h2><p className="muted" role="status">{online ? 'Online' : 'Offline'} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
     <section><h2>Pending expenses</h2>{outbox.length ? <div className="list">{outbox.map((item) => <div className="row" key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><strong>{item.display.currency} {(item.display.amountMinor / 100).toFixed(2)}</strong></div>)}</div> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</section>
     <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores an Access token, and replay still requires Cloudflare Access. Only use this on a device you trust.</p></section>
-    <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
-    <section><h2>Account</h2><p className="muted">Log out through Cloudflare Access. BillSplit does not handle or disclose your Access tokens.</p><Button variant="danger" disabled={!outboxReady} onClick={logout}>{outboxReady ? 'Log out' : 'Checking pending expenses…'}</Button></section>
-  </Layout>;
+     <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
+      <section><h2>Account</h2><p className="muted">Log out through Cloudflare Access. BillSplit does not handle or disclose your Access tokens. Logging out clears all local account data and pending expenses.</p>{logoutError ? <div className="error" id="logout-error" role="alert" aria-live="assertive"><strong>Logout was not completed.</strong> <span>{errorText(logoutError)}</span></div> : null}<Button variant="danger" disabled={!outboxReady || clearing} onClick={() => void logout}>{outboxReady ? clearing ? 'Clearing local data…' : 'Log out' : 'Checking pending expenses…'}</Button></section>
+   </Layout>;
+}
+
+function PrivateRoutes() {
+  const identityEpoch = useResourceIdentityEpoch();
+  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }
 
 export function App() {
-  const identityEpoch = useResourceIdentityEpoch();
-  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/activity" element={<Activity />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  const location = useLocation();
+  const auth = useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
+  const logoutInProgress = useSyncExternalStore(subscribeSessionState, getSessionLogoutInProgress, () => false);
+  useEffect(() => { void initializeAuthLifecycle(); }, []);
+  const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
+  if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+  if (auth.status === 'unauthenticated') return <PublicLanding />;
+  return <PrivateRoutes />;
 }

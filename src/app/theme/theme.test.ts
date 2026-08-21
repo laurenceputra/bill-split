@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
 const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
+const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
@@ -73,5 +74,18 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
+  });
+
+  it('keeps the public landing separate from the private shell', () => {
+    expect(appSource).toContain('<PublicShell returnTo={returnTo}>');
+    expect(appSource).toContain('if (auth.status === \'unauthenticated\') return <PublicLanding />;');
+    expect(css).toMatch(/\.public-shell\s*\{[\s\S]*min-height: 100vh;/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.landing-primary,[\s\S]*width: 100%;/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);
+  });
+
+  it('defines every spacing token referenced by the authored stylesheets', () => {
+    const references = [...`${css}\n${baseCss}`.matchAll(/var\(--(space-\d+)\)/g)].map((match) => match[1]);
+    expect([...new Set(references)].every((token) => new RegExp(`--${token}\\s*:`).test(tokensCss))).toBe(true);
   });
 });

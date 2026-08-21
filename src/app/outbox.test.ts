@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
 import { getOutboxSnapshot, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import { clearEverythingForLogout } from './api';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -163,5 +164,36 @@ describe('durable expense outbox', () => {
       scheduledCallback?.();
       await Promise.resolve();
     } finally { restoreScheduler(); }
+  });
+
+  it('quiesces an in-flight sync during logout and does not restart it', async () => {
+    let expenseCalls = 0;
+    let abortObserved = false;
+    let resolveExpense!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+      if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return new Promise<Response>((resolve) => {
+        resolveExpense = resolve;
+        actual.signal?.addEventListener('abort', () => { abortObserved = true; });
+      });
+    }));
+    await queue('logout-in-flight');
+    const flush = flushOutbox();
+    await vi.waitFor(() => expect(expenseCalls).toBe(1));
+    const logout = clearEverythingForLogout(false);
+    await vi.waitFor(() => expect(abortObserved).toBe(true));
+    let logoutSettled = false;
+    void logout.finally(() => { logoutSettled = true; });
+    await Promise.resolve();
+    expect(logoutSettled).toBe(false);
+    resolveExpense(response({ expense: { id: 'committed-after-abort' } }, 201));
+    await logout;
+    await flush;
+    await flushOutbox();
+    expect(abortObserved).toBe(true);
+    expect(expenseCalls).toBe(1);
+    expect(await listOutbox('user-a')).toEqual([]);
   });
 });

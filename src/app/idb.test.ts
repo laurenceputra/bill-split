@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readExpenseDetails, readGroupSnapshot, readGroups, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveExpenseDetails, saveGroups, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -59,6 +59,16 @@ describe('user-scoped IndexedDB', () => {
     expect(await readRecent()).toBeUndefined();
     expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
     expect(await listOutbox('user-a')).toHaveLength(1);
+  });
+
+  it('clears the identity and outbox together for destructive logout', async () => {
+    await saveVerifiedIdentity(user('user-a'));
+    await saveOutboxItem(expense('delete-me'));
+    await invalidateCachedGroups('user-a');
+    await clearAllPrivateData();
+    expect(await readGroups('user-a')).toBeUndefined();
+    expect(await readMutationGeneration('user-a')).toBe(0);
+    expect(await listOutbox('user-a')).toEqual([]);
   });
 
   it('preserves resource-specific freshness and persists activity and details', async () => {

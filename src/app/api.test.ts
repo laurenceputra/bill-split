@@ -1,9 +1,11 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, clearAuthRequired, getActivity, getAuthState, getConnectionState, getExpenses, getGroups, subscribeAuthState } from './api';
+import { ApiError, api, authBootstrapUrl, clearAuthRequired, clearEverythingForLogout, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, initializeAuthLifecycle, sanitizeReturnTo, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readGroups, readResourceFreshness, saveGroups, saveVerifiedIdentity } from './idb';
-import { invalidateForMutation } from './resource-cache';
+import { DB_NAME, listOutbox, readActivity, readExpenseDetails, readGroups, readResourceFreshness, saveGroups, saveVerifiedIdentity } from './idb';
+import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
+import { adoptSessionGeneration, captureSessionGeneration } from './session';
+import { releaseMutationBarrier } from './mutation-quiescence';
 
 const json = (body: unknown, status = 200, userId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}) } });
 
@@ -28,7 +30,7 @@ describe('frontend API errors and cache fallback', () => {
     const authEvent = vi.fn();
     vi.stubGlobal('window', { dispatchEvent: authEvent });
     const unsubscribe = subscribeAuthState(listener);
-    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => { expect(new Headers(init?.headers).get('X-Requested-With')).toBe('XMLHttpRequest'); return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }));
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => { expect(new Headers(init?.headers).get('X-Requested-With')).toBe('XMLHttpRequest'); expect(init?.credentials).toBe('same-origin'); return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }));
     await expect(api('/me')).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' });
     expect(getAuthState()).toEqual({ required: true, code: 'AUTH_REQUIRED' });
     expect(listener).toHaveBeenCalled();
@@ -178,5 +180,92 @@ describe('frontend API errors and cache fallback', () => {
     await expect(getGroups()).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
     expect(meCalls).toBe(1);
     clearAuthRequired();
+  });
+
+  it('keeps bootstrap destinations relative and rejects protected paths', () => {
+    expect(sanitizeReturnTo('/groups/g-1?tab=activity#ledger')).toBe('/groups/g-1?tab=activity#ledger');
+    expect(sanitizeReturnTo('https://evil.test/')).toBe('/');
+    expect(sanitizeReturnTo('/api/me')).toBe('/');
+    expect(authBootstrapUrl('/groups/g-1')).toBe('/api/auth/bootstrap?return_to=%2Fgroups%2Fg-1');
+  });
+
+  it('publishes the authenticated lifecycle only after a verified identity response', async () => {
+    await clearEverythingForLogout(false);
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-auth', email: 'auth@example.com', personId: 'person-auth' }, 200, 'user-auth')));
+    await initializeAuthLifecycle();
+    expect(getAuthLifecycle()).toEqual({ status: 'authenticated' });
+    await clearEverythingForLogout(false);
+    expect(getAuthLifecycle().status).toBe('unauthenticated');
+  });
+
+  it('rejects delayed groups, activity, and detail responses after logout before any cache write', async () => {
+    await clearEverythingForLogout(false);
+    clearAuthRequired();
+    await saveVerifiedIdentity({ userId: 'race-user', email: 'race@example.com', personId: 'race-person', verifiedAt: new Date().toISOString() });
+    const resolvers = new Map<string, (response: Response) => void>();
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const path = String(request);
+      if (path.endsWith('/me')) return json({ id: 'race-user', email: 'race@example.com', personId: 'race-person' }, 200, 'race-user');
+      const key = path.includes('/activity') ? 'activity' : path.includes('/expenses/') ? 'detail' : 'groups';
+      return new Promise<Response>((resolve) => resolvers.set(key, resolve));
+    }));
+    const requests = [getGroups(), getActivity('group-race'), getExpenseDetails('expense-race')];
+    await vi.waitFor(() => expect(resolvers.size).toBe(3));
+    await clearEverythingForLogout(false);
+    for (const [key, resolve] of resolvers) resolve(key === 'groups' ? json({ groups: [] }, 200, 'race-user') : key === 'activity' ? json({ activity: [] }, 200, 'race-user') : json({ expense: {}, history: [] }, 200, 'race-user'));
+    const settled = await Promise.allSettled(requests);
+    expect(settled.every((result) => result.status === 'rejected')).toBe(true);
+    expect(await readGroups('race-user')).toBeUndefined();
+    expect(await readActivity('race-user', 'group-race')).toBeUndefined();
+    expect(await readExpenseDetails('race-user', 'expense-race')).toBeUndefined();
+  });
+
+  it('revokes private memory on an Access 403 and does not fall back to cached data', async () => {
+    await clearEverythingForLogout(false);
+    clearAuthRequired();
+    await saveVerifiedIdentity({ userId: 'revoked-user', email: 'revoked@example.com', personId: 'revoked-person', verifiedAt: new Date().toISOString() });
+    seedResource('groups:revoked-user', 'revoked-user', { groups: [{ id: 'cached-group', name: 'Cached', currency: 'USD', createdAt: '', updatedAt: '' }] });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+      ? json({ id: 'revoked-user', email: 'revoked@example.com', personId: 'revoked-person' }, 200, 'revoked-user')
+      : json({ error: { code: 'ACCESS_DENIED', message: 'Access denied' } }, 403)));
+    await expect(getGroups()).rejects.toMatchObject({ status: 403, code: 'AUTH_REQUIRED' });
+    expect(getResourceSnapshot('groups:revoked-user', 'revoked-user').data).toBeUndefined();
+    await expect(getGroups()).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+  });
+
+  it('waits for a foreground mutation to settle after abort before logout clears data', async () => {
+    clearAuthRequired();
+    let started!: () => void;
+    let resolveMutation!: (response: Response) => void;
+    let aborted = false;
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve) => {
+      resolveMutation = resolve;
+      started();
+      init?.signal?.addEventListener('abort', () => { aborted = true; });
+    })));
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    const mutation = api('/groups', { method: 'POST', signal: controller.signal, body: '{}' });
+    await startedPromise;
+    const logout = clearEverythingForLogout(false);
+    controller.abort();
+    await vi.waitFor(() => expect(aborted).toBe(true));
+    let logoutSettled = false;
+    void logout.finally(() => { logoutSettled = true; });
+    await Promise.resolve();
+    expect(logoutSettled).toBe(false);
+    resolveMutation(json({ group: { id: 'committed-after-abort' } }, 201));
+    await mutation;
+    await logout;
+  });
+
+  it('blocks a new mutation after a cross-tab logout barrier is adopted', async () => {
+    const fetch = vi.fn(async () => json({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+    adoptSessionGeneration(captureSessionGeneration() + 1);
+    await expect(api('/groups', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'LOGOUT_IN_PROGRESS' });
+    expect(fetch).not.toHaveBeenCalled();
+    releaseMutationBarrier();
   });
 });

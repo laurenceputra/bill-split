@@ -1,5 +1,6 @@
 import type { Activity, Balances, Expense, Group, GroupMember, Settlement } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
+import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 export const DB_NAME = 'bill-split-local';
 export const DB_VERSION = 5;
@@ -180,19 +181,25 @@ async function transaction<T>(stores: string | string[], mode: IDBTransactionMod
   });
 }
 
-export async function saveRecent(value: unknown) {
-  await transaction('recent', 'readwrite', (tx) => tx.objectStore('recent').put(value, 'form'));
+export async function saveRecent(value: unknown, generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
+  await transaction('recent', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('recent').put(value, 'form'); });
 }
 
 export async function readRecent<T>(): Promise<T | undefined> {
   return transaction<T>('recent', 'readonly', (tx) => tx.objectStore('recent').get('form'));
 }
 
-export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>) => transaction('identities', 'readwrite', (tx) => tx.objectStore('identities').put({ ...value, key: 'last' }));
+export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('identities', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('identities').put({ ...value, key: 'last' }); });
+};
 export const readLastVerifiedIdentity = () => transaction<VerifiedIdentity>('identities', 'readonly', (tx) => tx.objectStore('identities').get('last'));
 
-export const saveGroups = async (value: CachedGroups) => {
+export const saveGroups = async (value: CachedGroups, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
   await transaction(['groups', 'resourceFreshness'], 'readwrite', (tx) => {
+    if (!isSessionGenerationCurrent(generation)) return;
     tx.objectStore('groups').put(value);
     tx.objectStore('resourceFreshness').put({ userId: value.userId, resource: 'groups', resourceKey: 'groups', fetchedAt: value.cachedAt });
   });
@@ -202,7 +209,8 @@ export const readGroups = (userId: string) => transaction<CachedGroups>('groups'
 export const readMutationGeneration = async (userId: string) => (await transaction<MutationGeneration>('mutationGenerations', 'readonly', (tx) => tx.objectStore('mutationGenerations').get(userId)))?.generation ?? 0;
 
 /** Save a groups response only if no mutation was committed since the request started. */
-export async function saveGroupsIfGenerationMatches(value: CachedGroups, generation: number) {
+export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutationGeneration: number, generation = captureSessionGeneration()) {
+  if (!isSessionGenerationCurrent(generation)) return false;
   const db = await open();
   return new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction(['groups', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
@@ -210,7 +218,7 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, generat
     const current = generations.get(value.userId);
     let saved = false;
     current.onsuccess = () => {
-      if (((current.result as MutationGeneration | undefined)?.generation ?? 0) !== generation) return;
+      if (!isSessionGenerationCurrent(generation) || ((current.result as MutationGeneration | undefined)?.generation ?? 0) !== mutationGeneration) return;
       tx.objectStore('groups').put(value);
       tx.objectStore('resourceFreshness').put({ userId: value.userId, resource: 'groups', resourceKey: 'groups', fetchedAt: value.cachedAt });
       saved = true;
@@ -222,7 +230,8 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, generat
 }
 
 /** Keep the home snapshot available offline, but make it immediately stale online. */
-export async function invalidateCachedGroups(userId: string) {
+export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
   const staleAt = new Date(0).toISOString();
   const db = await open();
   await new Promise<void>((resolve, reject) => {
@@ -230,6 +239,7 @@ export async function invalidateCachedGroups(userId: string) {
     const generations = tx.objectStore('mutationGenerations');
     const current = generations.get(userId);
     current.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const nextGeneration = ((current.result as MutationGeneration | undefined)?.generation ?? 0) + 1;
       generations.put({ userId, generation: nextGeneration });
       const groups = tx.objectStore('groups');
@@ -245,7 +255,8 @@ export async function invalidateCachedGroups(userId: string) {
   });
 }
 
-export async function updateGroupSnapshot(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }) {
+export async function updateGroupSnapshot(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }, generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
   const db = await open();
   return new Promise<GroupSnapshot>((resolve, reject) => {
     const tx = db.transaction(['groupSnapshots', 'resourceFreshness'], 'readwrite');
@@ -253,6 +264,7 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
     const request = store.get([userId, groupId]);
     let next: GroupSnapshot;
     request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const resources = (['group', 'members', 'expenses', 'balances', 'settlements'] as const).filter((resource) => patch[resource] !== undefined);
       const fetchedAt = patch.cachedAt || new Date().toISOString();
       next = { ...(request.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(request.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } };
@@ -267,26 +279,45 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
 
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
 
-export const saveResourceFreshness = (value: ResourceFreshness) => transaction('resourceFreshness', 'readwrite', (tx) => tx.objectStore('resourceFreshness').put(value));
+export const saveResourceFreshness = (value: ResourceFreshness, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('resourceFreshness', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('resourceFreshness').put(value); });
+};
 export const readResourceFreshness = (userId: string, resourceKey: string) => transaction<ResourceFreshness>('resourceFreshness', 'readonly', (tx) => tx.objectStore('resourceFreshness').get([userId, resourceKey]));
 
-export const saveActivity = (value: CachedActivity) => transaction('activity', 'readwrite', (tx) => tx.objectStore('activity').put({ ...value, activity: normalizeActivity(value.activity) }));
+export const saveActivity = (value: CachedActivity, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('activity', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('activity').put({ ...value, activity: normalizeActivity(value.activity) }); });
+};
 export async function readActivity(userId: string, groupId: string) {
   const cached = await transaction<CachedActivity>('activity', 'readonly', (tx) => tx.objectStore('activity').get([userId, groupId]));
   return cached ? { ...cached, activity: normalizeActivity(cached.activity) } : undefined;
 }
 
-export const saveExpenseDetails = (value: CachedExpenseDetails) => transaction('expenseDetails', 'readwrite', (tx) => tx.objectStore('expenseDetails').put(value));
+export const saveExpenseDetails = (value: CachedExpenseDetails, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('expenseDetails', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('expenseDetails').put(value); });
+};
 export const readExpenseDetails = (userId: string, expenseId: string) => transaction<CachedExpenseDetails>('expenseDetails', 'readonly', (tx) => tx.objectStore('expenseDetails').get([userId, expenseId]));
 
 /** Remove private cached data without touching the durable expense outbox. */
 export async function clearCachedData() {
-  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'activity', 'expenseDetails'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'activity', 'expenseDetails']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails']) tx.objectStore(storeName).clear();
   });
 }
 
-export const saveOutboxItem = (item: ExpenseOutboxItem) => transaction('expenseOutbox', 'readwrite', (tx) => tx.objectStore('expenseOutbox').put(item));
+/** Remove every private record, including expenses waiting to sync. */
+export async function clearAllPrivateData() {
+  await transaction(['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'expenseOutbox']) tx.objectStore(storeName).clear();
+  });
+}
+
+export const saveOutboxItem = (item: ExpenseOutboxItem, generation = captureSessionGeneration()) => {
+  assertSessionGeneration(generation);
+  return transaction('expenseOutbox', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('expenseOutbox').put(item); });
+};
 export const readOutboxItem = (clientOperationId: string) => transaction<ExpenseOutboxItem>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').get(clientOperationId));
 
 export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> {
@@ -315,7 +346,8 @@ export async function recoverStaleSyncing() {
 }
 
 /** Atomically claims a pending or expired-syncing row for one browser tab. */
-export async function claimOutboxItem(clientOperationId: string, owner: string, now = Date.now(), leaseMs = 30_000): Promise<ExpenseOutboxItem | undefined> {
+export async function claimOutboxItem(clientOperationId: string, owner: string, now = Date.now(), leaseMs = 30_000, generation = captureSessionGeneration()): Promise<ExpenseOutboxItem | undefined> {
+  assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -323,6 +355,7 @@ export async function claimOutboxItem(clientOperationId: string, owner: string, 
     const request = store.get(clientOperationId);
     let claimed: ExpenseOutboxItem | undefined;
     request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const item = request.result as ExpenseOutboxItem | undefined;
       const claimable = item && (item.status === 'pending' || (item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)));
       if (!claimable) return;
@@ -335,7 +368,8 @@ export async function claimOutboxItem(clientOperationId: string, owner: string, 
   });
 }
 
-export async function updateOutboxIfOwned(clientOperationId: string, owner: string, patch: Partial<ExpenseOutboxItem>, now = Date.now()): Promise<ExpenseOutboxItem | undefined> {
+export async function updateOutboxIfOwned(clientOperationId: string, owner: string, patch: Partial<ExpenseOutboxItem>, now = Date.now(), generation = captureSessionGeneration()): Promise<ExpenseOutboxItem | undefined> {
+  assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -343,6 +377,7 @@ export async function updateOutboxIfOwned(clientOperationId: string, owner: stri
     const request = store.get(clientOperationId);
     let updated: ExpenseOutboxItem | undefined;
     request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const item = request.result as ExpenseOutboxItem | undefined;
       if (!item || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
       updated = { ...item, ...patch, updatedAt: new Date(now).toISOString() };
@@ -354,7 +389,8 @@ export async function updateOutboxIfOwned(clientOperationId: string, owner: stri
   });
 }
 
-export async function removeOutboxIfOwned(clientOperationId: string, owner: string, now = Date.now()): Promise<boolean> {
+export async function removeOutboxIfOwned(clientOperationId: string, owner: string, now = Date.now(), generation = captureSessionGeneration()): Promise<boolean> {
+  assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -362,6 +398,7 @@ export async function removeOutboxIfOwned(clientOperationId: string, owner: stri
     const request = store.get(clientOperationId);
     let removed = false;
     request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       const item = request.result as ExpenseOutboxItem | undefined;
       if (!item || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
       store.delete(clientOperationId); removed = true;
@@ -437,7 +474,8 @@ export async function markOutboxAuthRequired(userId: string, lastError: ExpenseO
   });
 }
 
-export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Expense[]) {
+export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Expense[], generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
   const operations = new Set(expenses.filter((expense) => expense.groupId === groupId && expense.createdBy === userId && expense.clientOperationId).map((expense) => expense.clientOperationId));
   if (!operations.size) return 0;
   const db = await open();
@@ -447,6 +485,7 @@ export async function reconcileOutboxItems(userId: string, groupId: string, expe
     const store = tx.objectStore('expenseOutbox');
     const request = store.getAll();
     request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
       for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.groupId === groupId && operations.has(item.clientOperationId)) { store.delete(item.clientOperationId); removed += 1; }
     };
     tx.oncomplete = () => { db.close(); resolve(); };

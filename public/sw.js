@@ -1,8 +1,8 @@
-const CACHE = 'bill-split-shell-v7';
+const CACHE = 'bill-split-shell-v8';
 const SHELL_FILES = ['/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
 const MAX_ASSETS = 80;
 const assetPattern = /^\/assets\/[a-zA-Z0-9._-]+\.(?:js|css|svg|png|webp|woff2?)$/;
-const isAccessPath = (pathname) => pathname.startsWith('/api') || pathname.startsWith('/cdn-cgi/') || pathname.startsWith('/access');
+const isAccessPath = (pathname) => pathname === '/api' || pathname.startsWith('/api/') || pathname === '/cdn-cgi' || pathname.startsWith('/cdn-cgi/') || pathname === '/access' || pathname.startsWith('/access/');
 const isAllowedAsset = (url) => url.origin === self.location.origin && !isAccessPath(url.pathname) && (SHELL_FILES.includes(url.pathname) || assetPattern.test(url.pathname));
 const cacheControlAllowsStorage = (response) => !/(?:^|,)\s*(?:private|no-store)(?:\s*(?:,|$)|=)/i.test(response.headers.get('cache-control') || '');
 const sameOriginFinal = (response, expectedPath) => response.ok && !response.redirected && (() => { try { const url = new URL(response.url); return url.origin === self.location.origin && (!expectedPath || url.pathname === expectedPath) && !isAccessPath(url.pathname); } catch { return false; } })();

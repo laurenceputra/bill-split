@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNod
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
+import { authBootstrapUrl, getAuthState, getConnectionState, subscribeAuthState, subscribeConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -23,6 +23,10 @@ export function Button({ children, variant = 'primary', className = '', ...props
 
 export function AppShell({ children }: { children: ReactNode }) {
   return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className="app-main" id="main-content" tabIndex={-1}>{children}</main><BottomNav /></div>;
+}
+
+export function PublicShell({ children, returnTo = '/' }: { children: ReactNode; returnTo?: string }) {
+  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><a className="public-sign-in" href={authBootstrapUrl(returnTo)}>Sign in</a></header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useOnlineStatus() {
@@ -47,14 +51,14 @@ function useOutbox() {
   return useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
 }
 
-export function InstallAction({ showStatus = false }: { showStatus?: boolean } = {}) {
+export function InstallAction({ showStatus = false, label = 'Install' }: { showStatus?: boolean; label?: string } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
   if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : null;
   if (install.mode === 'prompting') {
     return showStatus
       ? <p className="muted install-status" role="status">Opening the browser install prompt…</p>
-      : <div className="install-control"><button className="install-action" type="button" disabled aria-busy="true">Install</button></div>;
+      : <div className="install-control"><button className="install-action" type="button" disabled aria-busy="true">{label}</button></div>;
   }
   if (!shouldShowTopbarInstall(install)) {
     if (!showStatus) return null;
@@ -70,7 +74,7 @@ export function InstallAction({ showStatus = false }: { showStatus?: boolean } =
 
   const ios = install.mode === 'ios-manual';
   return <>
-    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void consumeInstallPrompt(); else setShowHelp(true); }}>Install</button></div>
+    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void consumeInstallPrompt(); else setShowHelp(true); }}>{label}</button></div>
     {ios && showHelp ? <Modal title="Install BillSplit" description="Add BillSplit to your Home Screen for a faster, app-like experience." onClose={() => setShowHelp(false)}><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
   </>;
 }
@@ -81,7 +85,7 @@ function AuthBanner() {
   const reconnect = useReconnectRequired();
   if (!auth.required && !reconnect.reconnectRequired) return null;
   const message = auth.required ? 'Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.' : 'The connection failed while you are online. Reconnect or check your session; queued expenses remain on this device.';
-  return <div className="auth-banner" role="alert"><span>{message}</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(window.location.href); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
+  return <div className="auth-banner" role="alert"><span>{message}</span><button type="button" disabled={!online} onClick={() => { if (online) window.location.assign(authBootstrapUrl(`${window.location.pathname}${window.location.search}${window.location.hash}`)); }}>{online ? 'Reconnect' : 'Reconnect when online'}</button></div>;
 }
 
 export function TopBar() {

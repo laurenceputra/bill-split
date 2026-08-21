@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { invalidateCachedGroups } from './idb';
+import { captureSessionGeneration } from './session';
 
 /** The shortest freshness window used by the application. */
 export const MIN_RESOURCE_FRESHNESS_MS = 30_000;
@@ -81,7 +82,8 @@ export function blockResourceIdentity(error: unknown) {
   clearResourceCache(undefined, 'identity');
   const identity = entry<unknown>('identity', 'identity', MIN_RESOURCE_FRESHNESS_MS);
   identity.controller?.abort(); identity.generation += 1; identity.promise = undefined; identity.hydrationPromise = undefined; identity.forcePending = undefined;
-  identity.snapshot = stable({ ...identity.snapshot, status: 'auth-blocked', loading: false, revalidating: false, stale: true, offline: false, error });
+  const { data: _revokedData, fetchedAt: _revokedFetchedAt, ...revokedIdentity } = identity.snapshot;
+  identity.snapshot = stable({ ...revokedIdentity, status: 'auth-blocked', loading: false, revalidating: false, stale: true, offline: false, error });
   notify(identity); identityListeners.forEach((listener) => listener());
 }
 export function allowIdentityVerification() {
@@ -301,14 +303,14 @@ export const resourceCache = Object.freeze({
   invalidateMany: invalidateResources,
   clear: clearResourceCache,
 });
-const invalidatePersistedGroups = async (userId: string) => {
-  try { await invalidateCachedGroups(userId); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
+const invalidatePersistedGroups = async (userId: string, generation = captureSessionGeneration()) => {
+  try { await invalidateCachedGroups(userId, generation); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 };
 export const invalidateForMutation = {
-  groupCreated: async (userId?: string) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedGroups(userId); },
-  groupChanged: async (groupId: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedGroups(userId); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedGroups(userId); },
-  settlementChanged: async (groupId: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId); await invalidatePersistedGroups(userId); },
+  groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedGroups(userId, generation); },
+  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedGroups(userId, generation); },
+  settlementChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId)], userId); await invalidatePersistedGroups(userId, generation); },
 };
 
 initializeForegroundCoordinator();

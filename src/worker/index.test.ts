@@ -81,6 +81,26 @@ class OverflowStatement extends Statement {
 }
 
 describe('worker boundary', () => {
+  it('sanitizes bootstrap return paths', async () => {
+    const { sanitizeReturnTo } = await import('./index');
+    expect(sanitizeReturnTo('/groups/g-1?tab=activity#ledger')).toBe('/groups/g-1?tab=activity#ledger');
+    expect(sanitizeReturnTo('https://evil.test/steal')).toBe('/');
+    expect(sanitizeReturnTo('//evil.test/steal')).toBe('/');
+    expect(sanitizeReturnTo('/api/me')).toBe('/');
+    expect(sanitizeReturnTo('/cdn-cgi/access/login')).toBe('/');
+  });
+  it('parses one or multiple Access audience tags for jose', async () => {
+    const { parseAccessAudience } = await import('./index');
+    expect(parseAccessAudience('audience-one')).toBe('audience-one');
+    expect(parseAccessAudience('audience-one, audience-two')).toEqual(['audience-one', 'audience-two']);
+  });
+  it('protects bootstrap and redirects to a sanitized app path without exposing tokens', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/auth/bootstrap?return_to=%2Fgroups%2Fg-1%3Ftab%3Dactivity%23ledger', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe('/groups/g-1?tab=activity#ledger');
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(await response.text()).not.toContain('token');
+  });
   it('rejects API requests without verified production auth', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/me'), env({ ENVIRONMENT: 'production' }), {} as ExecutionContext);
     expect(response.status).toBe(401);
