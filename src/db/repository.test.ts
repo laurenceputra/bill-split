@@ -555,7 +555,7 @@ describe('repository home balance summaries', () => {
     expect(db.sql).toContain('gm.user_id=?');
     expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=e.group_id');
     expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=s.group_id');
-    expect(db.sql).toContain('JOIN group_members balance_member');
+    expect(db.sql).toContain('JOIN authorized_groups balance_member');
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');
     expect(db.sql).toContain('ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC)');

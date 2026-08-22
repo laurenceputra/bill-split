@@ -112,9 +112,9 @@ const groupSelect = (requestedGroup = false) => `WITH authorized_groups AS (
      FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
      WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=s.group_id AND state.status='ready')
   ), group_balances AS (
-    SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor
-     FROM ledger JOIN group_members balance_member ON balance_member.group_id=ledger.group_id
-      AND balance_member.person_id=ledger.person_id
+     SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor
+      FROM ledger JOIN authorized_groups balance_member ON balance_member.group_id=ledger.group_id
+       AND balance_member.person_id=ledger.person_id
     GROUP BY ledger.group_id,ledger.currency
     HAVING SUM(ledger.net_minor) <> 0
   ), ranked_balances AS (
