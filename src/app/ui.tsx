@@ -26,9 +26,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className="app-main" id="main-content" tabIndex={-1}>{children}</main><BottomNav /></div>;
 }
 
-export function PublicShell({ children, returnTo = '/' }: { children: ReactNode; returnTo?: string }) {
+export function PublicShell({ children, returnTo = '/', showAuthActions = true }: { children: ReactNode; returnTo?: string; showAuthActions?: boolean }) {
   const safeReturnTo = sanitizeReturnTo(returnTo);
-  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span></header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
+  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link>{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useOnlineStatus() {

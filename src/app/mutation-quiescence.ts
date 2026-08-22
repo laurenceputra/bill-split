@@ -2,6 +2,7 @@ import { captureSessionGeneration, getSessionLogoutInProgress, isSessionGenerati
 
 /** All state-changing API requests share this lock; logout takes it exclusively. */
 export const MUTATION_LOCK_NAME = 'billsplit-api-mutations';
+export const MUTATION_QUIESCE_DEADLINE_MS = 750;
 
 export class MutationBlockedError extends Error {
   readonly code = 'LOGOUT_IN_PROGRESS';
@@ -69,9 +70,12 @@ export const runMutation = <T>(operation: () => Promise<T>) => {
  */
 export const withExclusiveMutationLock = async <T>(operation: () => Promise<T>) => {
   const lockManager = locks();
-  if (lockManager) return lockManager.request(MUTATION_LOCK_NAME, { mode: 'exclusive' }, operation);
-  await Promise.allSettled([...activeMutations]);
-  return operation();
+  const wait = lockManager
+    ? lockManager.request(MUTATION_LOCK_NAME, { mode: 'exclusive' }, operation)
+    : Promise.allSettled([...activeMutations]).then(operation);
+  void wait.catch(() => undefined);
+  const timeout = new Promise<undefined>((resolve) => setTimeout(resolve, MUTATION_QUIESCE_DEADLINE_MS));
+  return Promise.race([wait, timeout]) as Promise<T | undefined>;
 };
 
 subscribeSessionLogout((generation) => beginMutationBarrier(generation));

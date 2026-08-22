@@ -9,7 +9,7 @@ import { BalanceOverflowError, checkedAddMinor } from '../shared/money';
 import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthenticationError } from './clerk-auth';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string }; Variables: { auth: { id: string; email: string; personId: string }; repo: Repository; requestId: string } };
+type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string }; repo: Repository; requestId: string } };
 const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string) => c.json({ error: { code, message } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
@@ -105,7 +105,12 @@ api.use('/api/*', async (c, next) => {
   }
   await next();
   const auth = c.get('auth');
-  if (auth) c.res.headers.set('X-BillSplit-User-Id', auth.id);
+  if (auth) {
+    c.res.headers.set('X-BillSplit-User-Id', auth.id);
+    // This header is attached only to authenticated same-origin API
+    // responses. Static assets and non-API responses never receive it.
+    if (auth.clerkUserId && new URL(c.req.url).pathname === '/api/me') c.res.headers.set('X-BillSplit-Clerk-User-Id', auth.clerkUserId);
+  }
   setSecurityHeaders(c.res.headers, requestId, true);
 });
 api.use('/api/*', async (c, next) => {
@@ -131,7 +136,7 @@ api.use('/api/*', async (c, next) => {
     const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
     const identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
     const repo = new Repository(env.DB); const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
-    const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id) };
+     const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId };
     const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
     if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
     c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
@@ -169,7 +174,7 @@ export function sanitizeReturnTo(value: unknown): string {
   } catch { return '/'; }
 }
 
-api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
+api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });

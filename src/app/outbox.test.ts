@@ -1,18 +1,22 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
-import { getOutboxSnapshot, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import * as idb from './idb';
+import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
+import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
 import { clearEverythingForLogout, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
+import { clearSessionLogout } from './session';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
-const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'X-BillSplit-User-Id': 'user-a', 'X-BillSplit-Clerk-User-Id': 'clerk-a' } });
 
 beforeEach(async () => {
   vi.restoreAllMocks();
   await new Promise<void>((resolve, reject) => { const request = indexedDB.deleteDatabase(DB_NAME); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); request.onblocked = () => resolve(); });
+  clearSessionLogout();
   await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
   vi.stubGlobal('fetch', vi.fn(async () => response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' })));
-  await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
+     await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
+  await handleAuthenticatedUser('user-a');
 });
 afterEach(() => { cancelScheduledRetry(); vi.useRealTimers(); });
 
@@ -53,13 +57,13 @@ describe('durable expense outbox', () => {
     expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
-  it('never falls back to cached identity when deciding who may receive a POST', async () => {
+  it('uses the current authoritative session rather than a cleared cached identity for a POST', async () => {
     await clearCachedData();
     const calls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { calls.push(String(request)); throw new TypeError('unexpected send'); }));
     await queue('no-cached-send');
     await flushOutbox();
-    expect(calls.filter((url) => url.includes('/expenses'))).toEqual([]);
+    expect(calls.filter((url) => url.includes('/expenses'))).toHaveLength(1);
     expect((await readOutboxItem('no-cached-send'))?.status).toBe('pending');
   });
 
@@ -92,8 +96,8 @@ describe('durable expense outbox', () => {
     await queue('auth'); await flushOutbox();
     expect((await listOutbox('user-a'))[0].status).toBe('auth-required');
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({ error: { code: 'INVALID_MEMBER', message: 'Bad member' } }, 400); }));
-    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
-    await retryOutboxItem('auth');
+     await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
+     await retryOutboxItem('auth');
     expect((await listOutbox('user-a'))[0].status).toBe('failed');
   });
 
@@ -103,16 +107,31 @@ describe('durable expense outbox', () => {
     expect(await listOutbox('user-a')).toEqual([]);
   });
 
-  it('hides every user queue after shared cached identity is cleared', async () => {
+  it('keeps the current authoritative user queue visible after cached identity is cleared', async () => {
     await queue('shared-cache');
     await refreshOutbox();
     expect(getOutboxSnapshot().map((item) => item.clientOperationId)).toContain('shared-cache');
     await clearCachedData();
     await refreshOutbox();
-    expect(getOutboxSnapshot()).toEqual([]);
-    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
-    await refreshOutbox();
     expect(getOutboxSnapshot().map((item) => item.clientOperationId)).toContain('shared-cache');
+  });
+
+  it('does not expose or send account A rows after authenticated account B wins', async () => {
+    await queue('account-a-row');
+    resetForClerkSessionChange();
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const actual = new URL(String(request), 'https://test.local');
+      if (actual.pathname.endsWith('/api/me')) return new Response(JSON.stringify({ id: 'user-b', email: 'b@example.com', personId: 'person-b' }), { status: 200, headers: { 'Content-Type': 'application/json', 'X-BillSplit-User-Id': 'user-b', 'X-BillSplit-Clerk-User-Id': 'clerk-b' } });
+      expenseCalls += 1;
+      return response({ expense: { id: 'wrong-account' } }, 201);
+    }));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-b' });
+    await refreshOutbox();
+    expect(getOutboxSnapshot().some((item) => item.userId === 'user-a')).toBe(false);
+    await flushOutbox();
+    expect(expenseCalls).toBe(0);
+    expect(await readOutboxItem('account-a-row')).toMatchObject({ userId: 'user-a', status: 'pending' });
   });
 
   it('atomically leases an item and only recovers expired leases', async () => {
@@ -148,11 +167,65 @@ describe('durable expense outbox', () => {
     await expect(discardOutboxItem('uncertain')).rejects.toBeInstanceOf(OutboxDeliveryUncertainError);
   });
 
-  it('times out hung sends, releases the lease, and keeps the item retryable', async () => {
+  it('times out hung sends without releasing the delivery-uncertain lease', async () => {
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return new Promise<Response>((_resolve, reject) => actual.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))); }));
     await queue('timeout');
     await flushOutbox(10);
-    expect((await readOutboxItem('timeout'))).toMatchObject({ status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, lastError: { code: 'NETWORK_TIMEOUT' } });
+    expect((await readOutboxItem('timeout'))).toMatchObject({ status: 'syncing', deliveryUncertain: true, lastError: { code: 'NETWORK_TIMEOUT' } });
+    expect(await claimOutboxItem('timeout', 'second-tab')).toBeUndefined();
+  });
+
+  it('reconciles a claim which completes after the 500ms storage deadline and flushes it', async () => {
+    let releaseClaim!: () => void;
+    const realClaim = idb.claimOutboxItem;
+    vi.spyOn(idb, 'claimOutboxItem').mockImplementationOnce(async (...args) => {
+      const claimed = await realClaim(...args);
+      return new Promise((resolve) => { releaseClaim = () => resolve(claimed); });
+    });
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).includes('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return response({ expense: { id: 'late-claim-server-id' } }, 201);
+    }));
+    await queue('late-claim');
+    const flush = flushOutbox();
+    await new Promise<void>((resolve) => setTimeout(resolve, OUTBOX_IDB_DEADLINE_MS + 25));
+    await flush;
+    expect(await readOutboxItem('late-claim')).toMatchObject({ status: 'syncing', leaseOwner: expect.any(String) });
+
+    releaseClaim();
+    await vi.waitFor(async () => expect(await listOutbox('user-a')).toEqual([]));
+    expect(expenseCalls).toBe(1);
+  });
+
+  it('bounds logout quiescence when an aborted transport never settles', async () => {
+    let expenseCalls = 0;
+    let abortObserved = false;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+      if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      actual.signal?.addEventListener('abort', () => { abortObserved = true; });
+      return new Promise<Response>(() => undefined);
+    }));
+    await queue('never-settles');
+    const flush = flushOutbox(1_000);
+    await vi.waitFor(() => expect(expenseCalls).toBe(1));
+    const logout = clearEverythingForLogout(false);
+    await expect(Promise.race([logout, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('logout deadline exceeded')), 2_000))])).resolves.toBeUndefined();
+    expect(abortObserved).toBe(true);
+    await flush;
+  });
+
+  it('keeps an expired trust record queue visible and sends under the live verified session', async () => {
+    await saveOfflineTrust({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', clerkUserId: 'clerk-a', verifiedAt: new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString() });
+    await queue('expired-trust');
+    await refreshOutbox();
+    expect(getOutboxSnapshot().map((item) => item.clientOperationId)).toContain('expired-trust');
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/api/me') ? response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }) : response({ expense: { id: 'server-id' } }, 201)));
+    await flushOutbox();
+    expect(await readOutboxItem('expired-trust')).toBeUndefined();
   });
 
   it('reactivates auth-required rows after successful authentication and flushes them', async () => {
@@ -220,5 +293,25 @@ describe('durable expense outbox', () => {
     expect(abortObserved).toBe(true);
     expect(expenseCalls).toBe(1);
     expect(await listOutbox('user-a')).toEqual([]);
+  });
+
+  it('does not release an in-flight lease when auth downgrades before transport settles', async () => {
+    let started!: () => void;
+    let resolveExpense!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+      if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      started();
+      return new Promise<Response>((resolve) => { resolveExpense = resolve; });
+    }));
+    await queue('downgrade-lease');
+    const flush = flushOutbox();
+    await new Promise<void>((resolve) => { started = resolve; });
+    await vi.waitFor(async () => expect((await readOutboxItem('downgrade-lease'))?.status).toBe('syncing'));
+    resetForClerkSessionChange();
+    expect(await claimOutboxItem('downgrade-lease', 'second-tab', Date.now(), 30_000)).toBeUndefined();
+    resolveExpense(response({ expense: { id: 'late' } }, 201));
+    await flush;
+    expect((await claimOutboxItem('downgrade-lease', 'second-tab', Date.now(), 30_000))?.leaseOwner).toBe('second-tab');
   });
 });

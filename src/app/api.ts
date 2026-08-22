@@ -1,6 +1,6 @@
 import type { Activity, Expense, Group, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
 import type { ScheduledExpenseInput } from '../shared/schemas';
-import { clearAllPrivateData, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, reconcileOutboxItems, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveVerifiedIdentity, saveExpenseDetails, updateGroupSnapshot } from './idb';
+import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
@@ -8,11 +8,11 @@ import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, 
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
-export type ApiResponse<T> = { data: T; userId?: string };
+export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
 export type AuthState = { required: boolean; code?: AuthRequiredCode };
 export type ConnectionState = { reconnectRequired: boolean };
-export type AuthLifecycleStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'trusted-offline';
+export type AuthLifecycleStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'trusted-offline' | 'verification-unavailable';
 export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown };
 
 export class ClerkSignOutFailure extends Error {
@@ -28,10 +28,12 @@ let verifiedIdentity: CurrentUser | undefined;
 let verifiedClerkUserId: string | undefined;
 let clerkUserIdHydrated = false;
 let authLifecycle: AuthLifecycle = { status: 'checking' };
-let authLifecycleRequest: Promise<AuthLifecycle> | undefined;
-let identityRequest: Promise<CachedResult<CurrentUser>> | undefined;
+let authLifecycleRequest: { key: string; promise: Promise<AuthLifecycle> } | undefined;
+let identityRequest: { key: string; promise: Promise<CachedResult<CurrentUser>> } | undefined;
 let authBlocked = false;
 let authInvalidationGeneration = 0;
+let trustRevocationRequest: Promise<boolean> | undefined;
+let trustRevocationRequired = false;
 const authListeners = new Set<() => void>();
 const connectionListeners = new Set<() => void>();
 /** Build-time-only flag used by the local E2E harness; the Worker still gates it on ENVIRONMENT=development. */
@@ -46,32 +48,57 @@ export const subscribeConnectionState = (listener: () => void) => { connectionLi
 export const getAuthLifecycle = () => authLifecycle;
 export const subscribeAuthLifecycle = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
 const setAuthLifecycle = (next: AuthLifecycle) => { if (authLifecycle.status === next.status && authLifecycle.error === next.error) return; authLifecycle = next; setResourceAuthLifecycleReady(next.status === 'authenticated' || next.status === 'trusted-offline'); authListeners.forEach((listener) => listener()); };
+export const getAuthEpoch = () => authInvalidationGeneration;
+export const isAuthEpochCurrent = (epoch: number) => epoch === authInvalidationGeneration;
+const advanceAuthEpoch = () => { authInvalidationGeneration += 1; identityRequest = undefined; authLifecycleRequest = undefined; return authInvalidationGeneration; };
 export const clearAuthRequired = () => { authBlocked = false; allowIdentityVerification(); if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
   verifiedIdentity = undefined;
-  authInvalidationGeneration += 1;
+  advanceAuthEpoch();
   authBlocked = true;
   blockResourceIdentity(new ApiError('Authentication is required before private data can be refreshed.', { code }));
-  authState = { required: true, code };
-  setAuthLifecycle({ status: 'unauthenticated' });
+  if (code === 'IDENTITY_MISMATCH') {
+    requestTrustRevocation();
+    authState = { required: false };
+    setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('The verified account changed. Reconnect and retry verification.', { code }) });
+  } else {
+    authState = { required: true, code };
+    setAuthLifecycle({ status: 'unauthenticated' });
+  }
   authListeners.forEach((listener) => listener());
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-auth-required', { detail: { code } }));
 };
 /** Clerk is authoritative for the signed-out state; avoid racing /api/me during provider startup. */
 export const markSignedOut = () => {
+  requestTrustRevocation();
   if (authLifecycle.status === 'unauthenticated' && authState.required) return;
   signalAuthRequired('AUTH_REQUIRED');
 };
 /** Invalidate all prior private memory before rechecking a changed Clerk session. */
 export const resetForClerkSessionChange = () => {
-  identityRequest = undefined;
-  authLifecycleRequest = undefined;
-  signalAuthRequired('AUTH_REQUIRED');
+  requestTrustRevocation();
+  verifiedIdentity = undefined;
+  verifiedClerkUserId = undefined;
+  clerkUserIdHydrated = false;
+  advanceAuthEpoch();
+  authBlocked = true;
+  blockResourceIdentity(new ApiError('The account changed. Verify the current account before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }));
   setAuthLifecycle({ status: 'checking' });
 };
 /** Revoke private UI immediately for an offline account change; reverification waits for connectivity. */
-export const revokeForClerkSessionChange = () => signalAuthRequired('IDENTITY_MISMATCH');
+export const revokeForClerkSessionChange = () => {
+  requestTrustRevocation();
+  verifiedIdentity = undefined;
+  advanceAuthEpoch();
+  authBlocked = true;
+  blockResourceIdentity(new ApiError('Offline access is unavailable for the current account. Verify the account when connected.', { status: 401, code: 'IDENTITY_MISMATCH' }));
+  authState = { required: false };
+  setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('Verify the current account when connected.', { code: 'IDENTITY_MISMATCH' }) });
+  authListeners.forEach((listener) => listener());
+};
 export const getTrustedOfflineClerkUserId = () => verifiedClerkUserId;
+export const getVerifiedClerkUserId = () => verifiedClerkUserId;
+export const getVerifiedUserId = () => verifiedIdentity?.id;
 export const isTrustedOfflineClerkUserIdHydrated = () => clerkUserIdHydrated;
 const signalReconnectRequired = () => {
   if (connectionState.reconnectRequired) return;
@@ -95,8 +122,8 @@ export function sanitizeReturnTo(value: unknown): string {
   } catch { return '/'; }
 }
 
-/** Offline cold starts may use the trusted cache before Clerk's browser SDK has loaded. */
-export const shouldStartAuthCheck = (online: boolean, clerkLoaded: boolean) => !online || clerkLoaded;
+/** Bootstrap always starts; provider loading and network reachability are not deadlines. */
+export const shouldStartAuthCheck = (_online: boolean, _clerkLoaded: boolean) => true;
 /** Clerk must have finished restoring before a false value is a signed-out decision. */
 export const isDefinitivelySignedOut = (clerkLoaded: boolean, signedIn: boolean | undefined) => clerkLoaded && signedIn === false;
 
@@ -141,7 +168,7 @@ const assertRequestGeneration = (generation: number) => {
   if (!isSessionGenerationCurrent(generation)) throw new ApiError('The local session was cleared.', { status: 401, code: 'AUTH_REQUIRED' });
 };
 
-async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promise<ApiResponse<T>> {
+async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<ApiResponse<T>> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
   headers.set('X-Requested-With', 'XMLHttpRequest');
@@ -151,7 +178,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   catch (error) {
     if (init?.signal?.aborted) throw error;
     const reconnectRequired = typeof navigator !== 'undefined' && navigator.onLine !== false;
-    if (reconnectRequired) signalReconnectRequired();
+    if (reconnectRequired && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalReconnectRequired();
     throw new ApiError(reconnectRequired ? 'Connection failed while online. Reconnect or check your session.' : 'Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired });
   }
 
@@ -159,11 +186,19 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   const contentType = response.headers.get('content-type') || '';
   const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected;
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
+  const assertTransportEpoch = () => {
+    // A destructive logout deliberately waits for already-dispatched
+    // mutations to settle. Let that transport report its server result, while
+    // resource/session-generation guards prevent it from repopulating local
+    // private state. A response after a new lifecycle has started is rejected.
+    if (expectedAuthEpoch !== undefined && !isAuthEpochCurrent(expectedAuthEpoch) && !getSessionLogoutInProgress()) throw new ApiError('The authentication session changed before this response completed.', { status: 401, code: 'AUTH_REQUIRED' });
+  };
   if (response.status === 204) {
     if (authResponse) throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
     if (!response.ok) throw new ApiError(`Request failed (${response.status})`, { status: response.status });
+    assertTransportEpoch();
     clearReconnectRequired();
-    return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined };
+    return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
   }
 
   const bodyText = await response.clone().text();
@@ -175,57 +210,57 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit): Promis
   // meaningful API errors.
   const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN';
   if (authResponse || accessDenied) {
-    signalAuthRequired(accessDenied ? 'AUTH_REQUIRED' : 'AUTH_REQUIRED');
-    throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
+    // A request from an earlier Clerk epoch may finish after a new account has
+    // started. It must not downgrade the new session.
+    const authCode: AuthRequiredCode = responseCode === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
+    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) signalAuthRequired(authCode);
+    throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: authCode });
   }
   if (body === null || unexpectedFormat) {
     if (response.status >= 500) throw new ApiError(`Request failed (${response.status})`, { status: response.status, code: 'SERVER_ERROR' });
-    signalReconnectRequired();
+    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) signalReconnectRequired();
     throw new ApiError('The server returned an unexpected response. Reconnect and check your session before retrying.', { status: response.status, code: 'PROTOCOL_ERROR', reconnectRequired: true });
   }
   if (!response.ok) {
     const errorBody = body as { error?: { code?: string; message?: string } };
     const message = errorBody?.error?.message || `Request failed (${response.status})`;
     const code = errorBody?.error?.code;
-    if (response.status === 401 && (code === 'AUTH_INVALID' || code === 'IDENTITY_MISMATCH')) signalAuthRequired(code);
+    if (response.status === 401 && (code === 'AUTH_INVALID' || code === 'IDENTITY_MISMATCH') && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalAuthRequired(code);
     throw new ApiError(message, { status: response.status, code });
   }
-  clearReconnectRequired();
-  return { data: body as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined };
+  assertTransportEpoch();
+  if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired();
+  return { data: body as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
 }
 
-export function apiWithMeta<T>(path: string, init?: RequestInit): Promise<ApiResponse<T>> {
+export function apiWithMeta<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<ApiResponse<T>> {
+  // Capture the epoch before a mutation waits for the shared lock. A late
+  // response from that request must not affect a later Clerk lifecycle.
+  const requestEpoch = expectedAuthEpoch ?? getAuthEpoch();
   const method = (init?.method || 'GET').toUpperCase();
   return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
-    ? runMutation(() => apiWithMetaTransport<T>(path, init))
-    : apiWithMetaTransport<T>(path, init);
+    ? runMutation(() => apiWithMetaTransport<T>(path, init, requestEpoch))
+    : apiWithMetaTransport<T>(path, init, requestEpoch);
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> { return (await apiWithMeta<T>(path, init)).data; }
+export async function api<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<T> { return (await apiWithMeta<T>(path, init, expectedAuthEpoch)).data; }
 
-async function identityForCache() { return cacheRead(readLastVerifiedIdentity); }
-async function clerkIdentityForCache() {
-  const identity = await cacheRead(readLastVerifiedClerkUserId);
-  clerkUserIdHydrated = true;
-  return identity;
-}
-const cachedClerkIdentityMatches = (requestedClerkUserId: string | undefined, cachedClerkIdentity: Awaited<ReturnType<typeof clerkIdentityForCache>>) => requestedClerkUserId === undefined || (typeof cachedClerkIdentity?.clerkUserId === 'string' && cachedClerkIdentity.clerkUserId.trim().length > 0 && cachedClerkIdentity.clerkUserId === requestedClerkUserId);
+async function trustForCache() { return cacheRead(readOfflineTrust); }
+const cachedTrustMatches = (requestedClerkUserId: string | undefined, trust: OfflineTrustRecord | undefined) => requestedClerkUserId === undefined || Boolean(trust?.clerkUserId && trust.clerkUserId.trim().length > 0 && trust.clerkUserId === requestedClerkUserId);
 type CacheIdentity = { user: CurrentUser; authoritative: boolean };
 async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdentity | undefined> {
   const identitySnapshot = getResourceSnapshot('identity');
   if (identitySnapshot.status === 'auth-blocked') throw new ApiError('Your secure session needs attention before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
   if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && verifiedIdentity) return { user: verifiedIdentity, authoritative: true };
-  const cached = await identityForCache();
-  // An online request must re-check the server identity before attaching data
-  // to a user-scoped cache. Offline, the last verified profile is intentional.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false };
+  const cachedTrust = await trustForCache();
+  const cached = cachedTrust && isOfflineTrustUsable(cachedTrust) ? cachedTrust : undefined;
+  if (authLifecycle.status === 'trusted-offline' && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false };
   try {
     const current = await getMe({ signal });
     return { user: { id: current.id, email: current.email, personId: current.personId }, authoritative: current.authoritative === true };
   } catch (error) {
     if (!isNetwork(error)) throw error;
-    const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false;
-    return trustedOffline && cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false } : undefined;
+    return cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false } : undefined;
   }
 }
 const offline = <T extends object>(value: T): CachedResult<T> => ({ ...value, offline: true, stale: true });
@@ -236,96 +271,236 @@ const assertResponseIdentity = (responseUserId: string | undefined, identity: Ca
   }
 };
 
-export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string; startupFallbackMs?: number } = {}): Promise<CachedResult<CurrentUser>> {
-  if (identityRequest) return identityRequest;
+const AUTH_BOOTSTRAP_DEADLINE_MS = 2_500;
+const TRUST_READ_DEADLINE_MS = 500;
+const TRUST_WRITE_DEADLINE_MS = 500;
+const deadline = <T>(promise: Promise<T>, timeoutMs: number, timeout: () => T | Promise<T>) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((resolve, reject) => { timer = setTimeout(() => { try { Promise.resolve(timeout()).then(resolve, reject); } catch (error) { reject(error); } }, timeoutMs); });
+  return Promise.race([promise, timeoutPromise]).finally(() => { if (timer) clearTimeout(timer); });
+};
+
+type BoundedTrustRead = { record?: OfflineTrustRecord; timedOut: boolean };
+const boundedTrustRead = async (): Promise<BoundedTrustRead> => {
+  const read = trustForCache();
+  let timedOut = false;
+  // A browser can leave an IDB request pending forever after a version-change
+  // or abort. Do not await it; its eventual value is intentionally ignored.
+  void read.catch(() => undefined);
+  const record = await deadline(read, TRUST_READ_DEADLINE_MS, () => { timedOut = true; return undefined; });
+  return { record, timedOut };
+};
+
+const boundedTrustWrite = (write: Promise<boolean>) => {
+  void write.catch(() => undefined);
+  return deadline(write, TRUST_WRITE_DEADLINE_MS, () => false).catch(() => false);
+};
+
+const requestTrustRevocation = () => {
+  trustRevocationRequired = true;
+  if (trustRevocationRequest) return trustRevocationRequest;
+  const write = revokeOfflineTrust();
+  void write.catch(() => undefined);
+  const request = deadline(write, TRUST_WRITE_DEADLINE_MS, () => false).catch(() => false).then((result) => { if (result === true) trustRevocationRequired = false; return result === true; }).finally(() => {
+    if (trustRevocationRequest === request) trustRevocationRequest = undefined;
+  });
+  trustRevocationRequest = request;
+  return request;
+};
+
+const ensureTrustRevoked = async () => {
+  const request = requestTrustRevocation();
+  const revoked = await request;
+  if (revoked && !trustRevocationRequest) trustRevocationRequired = false;
+  return revoked && !trustRevocationRequest;
+};
+
+class StaleAuthInitializationError extends Error {
+  constructor() { super('The authentication lifecycle changed while it was being initialized.'); this.name = 'StaleAuthInitializationError'; }
+}
+const assertAuthEpoch = (epoch: number) => {
+  if (!isAuthEpochCurrent(epoch)) throw new StaleAuthInitializationError();
+};
+
+export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string; expectedUserId?: string; expectedAuthEpoch?: number; startupFallbackMs?: number } = {}): Promise<CachedResult<CurrentUser>> {
+  const authGeneration = options.expectedAuthEpoch ?? authInvalidationGeneration;
+  const key = `${authGeneration}:${options.clerkUserId || ''}:${options.networkOnly === true}:${options.signal ? 'signal' : 'shared'}`;
+  if (identityRequest && identityRequest.key === key) return identityRequest.promise;
   if ((isMutationBarrierActive() || getSessionLogoutInProgress()) && (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline')) throw new ApiError('Logout is in progress. Try again after signing in.', { status: 401, code: 'AUTH_REQUIRED' });
   const generation = captureSessionGeneration();
-  const authGeneration = authInvalidationGeneration;
-  identityRequest = (async () => {
-    let startupTimedOut = false;
-    let startupTimer: ReturnType<typeof setTimeout> | undefined;
-    const startupController = options.startupFallbackMs && !options.signal ? new AbortController() : undefined;
-    if (startupController) startupTimer = setTimeout(() => { startupTimedOut = true; startupController.abort(); }, options.startupFallbackMs);
+  const request = (async () => {
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort();
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+    const signal = controller.signal;
+    let transport: Promise<ApiResponse<CurrentUser>> | undefined;
+    // Capture the CAS token at the start of verification. A revoke in another
+    // tab must make the later save a no-op rather than resurrecting trust.
+    // Establish the durable fence before dispatching authoritative /me. A
+    // promise started before fetch is not enough: its read may complete after
+    // a concurrent revocation and accidentally authorize the stale response.
+    const expectedTrustRead = await boundedTrustRead();
     try {
-      const result = await apiWithMeta<CurrentUser>('/me', { signal: options.signal || startupController?.signal });
-       if (authGeneration !== authInvalidationGeneration) throw new ApiError('Authentication is required before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
-       assertRequestGeneration(generation);
+      transport = apiWithMeta<CurrentUser>('/me', { signal }, authGeneration);
+      const result = await deadline(transport, options.startupFallbackMs ?? AUTH_BOOTSTRAP_DEADLINE_MS, () => {
+        throw new ApiError('Verification is taking too long. Check your connection and retry.', { networkFailure: true, code: 'NETWORK_TIMEOUT' });
+      });
+      if (authGeneration !== authInvalidationGeneration) throw new ApiError('Authentication is required before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
+      assertRequestGeneration(generation);
       const user = result.data;
-      if (result.userId && result.userId !== user.id) { signalAuthRequired('IDENTITY_MISMATCH'); throw new ApiError('The verified identity changed; sign in again before retrying.', { status: 401, code: 'IDENTITY_MISMATCH' }); }
-       assertRequestGeneration(generation);
-       await cacheWrite(() => saveVerifiedIdentity({ userId: user.id, email: user.email, personId: user.personId, verifiedAt: new Date().toISOString() }, generation));
-       if (options.clerkUserId) await cacheWrite(() => saveLastVerifiedClerkUserId(options.clerkUserId!, generation));
-       assertRequestGeneration(generation);
-       if (getSessionLogoutInProgress()) clearSessionLogout(generation);
-       verifiedIdentity = user;
-       if (options.clerkUserId) { verifiedClerkUserId = options.clerkUserId; clerkUserIdHydrated = true; }
+      // /api/me carries both sides of the server-authenticated identity. A
+      // client supplied Clerk ID is never sufficient to create or refresh a
+      // trusted-device record.
+      if ((result.userId && result.userId !== user.id) || (options.expectedUserId && user.id !== options.expectedUserId)) {
+        if (authGeneration === authInvalidationGeneration) signalAuthRequired('IDENTITY_MISMATCH');
+        throw new ApiError('The verified identity changed; sign in again before retrying.', { status: 401, code: 'IDENTITY_MISMATCH' });
+      }
+      if (options.clerkUserId && result.clerkUserId !== options.clerkUserId) {
+        if (authGeneration === authInvalidationGeneration) signalAuthRequired('IDENTITY_MISMATCH');
+        throw new ApiError('The server could not prove the current Clerk identity.', { status: 401, code: 'IDENTITY_MISMATCH' });
+      }
+      assertRequestGeneration(generation);
+       // This is the sole trust write. A timeout or CAS miss is non-fatal to
+       // the authoritative session, but it grants no durable offline trust.
+       if (options.clerkUserId && result.clerkUserId === options.clerkUserId && result.userId === user.id && (!options.expectedUserId || options.expectedUserId === user.id)) {
+          if (!expectedTrustRead.timedOut) await boundedTrustWrite(saveOfflineTrust({ userId: user.id, email: user.email, personId: user.personId, clerkUserId: options.clerkUserId!, verifiedAt: new Date().toISOString() }, generation, () => authGeneration === authInvalidationGeneration, expectedTrustRead.record?.revision ?? 0));
+         if (authGeneration !== authInvalidationGeneration) throw new ApiError('The authentication session changed during verification.', { status: 401, code: 'AUTH_REQUIRED' });
+         verifiedClerkUserId = options.clerkUserId;
+         clerkUserIdHydrated = true;
+      }
+      assertRequestGeneration(generation);
+      if (getSessionLogoutInProgress()) clearSessionLogout(generation);
+      verifiedIdentity = user;
       setResourceIdentity(user.id);
       seedResource('identity', '', user, Date.now(), { offline: false });
-       clearAuthRequired();
-       releaseMutationBarrier();
+      clearAuthRequired();
+      releaseMutationBarrier();
       setAuthLifecycle({ status: 'authenticated' });
-      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-authenticated', { detail: { userId: user.id } }));
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-authenticated', { detail: { userId: user.id, authEpoch: authGeneration } }));
       return { ...user, authoritative: true };
     } catch (error) {
-       if (startupTimer) clearTimeout(startupTimer);
-       if (options.signal?.aborted) throw error;
-       if (!isNetwork(error) && !startupTimedOut) throw error;
-       const cached = await identityForCache();
-        const cachedClerkIdentity = await clerkIdentityForCache();
-        if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
-        const trustedOffline = typeof window === 'undefined' || typeof navigator === 'undefined' || navigator.onLine === false || startupTimedOut;
-        if (startupTimedOut && (options.networkOnly || !options.startupFallbackMs)) throw error;
-        // A timed-out online startup is only safe to satisfy from the private
-        // cache when Clerk has identified the same account. Without a current
-        // Clerk ID, ordinary navigator.offline startup remains supported, but
-        // a timeout must not briefly display the previous user's identity.
-        const offlineCacheAllowed = options.clerkUserId !== undefined
-          ? cachedClerkIdentityMatches(options.clerkUserId, cachedClerkIdentity)
-          : !startupTimedOut && (typeof navigator === 'undefined' || navigator.onLine === false);
-         if (!options.networkOnly && !getSessionLogoutInProgress() && authGeneration === authInvalidationGeneration && !authBlocked && trustedOffline && offlineCacheAllowed && cached && isSessionGenerationCurrent(generation)) {
+      if (options.signal?.aborted) throw error;
+      if (!isNetwork(error)) throw error;
+      const cachedRead = await boundedTrustRead();
+      const cached = cachedRead.timedOut ? undefined : cachedRead.record;
+      if (authGeneration !== authInvalidationGeneration || getSessionLogoutInProgress() || authBlocked || !isSessionGenerationCurrent(generation)) throw error;
+      const offlineCacheAllowed = cached && isOfflineTrustUsable(cached) && cachedTrustMatches(options.clerkUserId, cached);
+      if (offlineCacheAllowed) {
         const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
+        verifiedIdentity = { id: cached.userId, email: cached.email, personId: cached.personId };
+        verifiedClerkUserId = cached.clerkUserId;
+        clerkUserIdHydrated = true;
+        setResourceIdentity(cached.userId);
         seedResource('identity', '', result, Date.now(), { offline: true });
         setAuthLifecycle({ status: 'trusted-offline' });
         return result;
       }
       throw error;
+    } finally {
+      // Abort is cleanup only. The raced promise remains observed so a late
+      // completion cannot become an unhandled rejection or a state decision.
+      controller.abort();
+      options.signal?.removeEventListener('abort', onCallerAbort);
+      void transport?.catch(() => undefined);
     }
-    finally { if (startupTimer) clearTimeout(startupTimer); }
   })();
-  try { return await identityRequest; } finally { identityRequest = undefined; }
+  identityRequest = { key, promise: request };
+  try { return await request; } finally { if (identityRequest?.promise === request) identityRequest = undefined; }
 }
 
 export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number } = {}): Promise<AuthLifecycle> {
-  if (authLifecycleRequest) return authLifecycleRequest;
+  // This is deliberately captured before any await. Clerk transitions and
+  // revocation advance the epoch, invalidating every already-running init.
+  let authEpoch = getAuthEpoch();
+  const key = `${authEpoch}:${options.clerkUserId || ''}:${options.networkOnly === true}`;
+  if (authLifecycleRequest?.key === key) return authLifecycleRequest.promise;
   const forceReverify = options.networkOnly === true;
-  const requestedClerkIdentityMatches = options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId;
-  if ((authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') && !forceReverify && requestedClerkIdentityMatches) return authLifecycle;
-  setAuthLifecycle({ status: 'checking' });
+  const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  const currentSessionMatches = authLifecycle.status === 'authenticated' && verifiedIdentity && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId);
+  if ((authLifecycle.status === 'authenticated' || (authLifecycle.status === 'trusted-offline' && !browserOnline)) && !forceReverify && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId)) {
+    // An expired record must not block an already authoritative session from
+    // refreshing its durable trust record. IDB failure is non-fatal here: the
+    // live verified session and its outbox remain usable online.
+    const trustRead = await boundedTrustRead();
+    const trust = trustRead.timedOut ? undefined : trustRead.record;
+    assertAuthEpoch(authEpoch);
+    if (trust && isOfflineTrustUsable(trust)) return authLifecycle;
+    if (!options.clerkUserId || !verifiedIdentity) return authLifecycle;
+  }
+  assertAuthEpoch(authEpoch);
+  if (!currentSessionMatches) setAuthLifecycle({ status: 'checking' });
   const request = (async () => {
-    // Do not make an offline cold relaunch wait for Clerk or a doomed network
-    // request. This identity was persisted only after a verified /api/me
-    // response, and the outbox remains gated on the authenticated lifecycle.
-    if (!forceReverify && typeof navigator !== 'undefined' && navigator.onLine === false && !authBlocked && !getSessionLogoutInProgress()) {
-       const cached = await identityForCache();
-       const cachedClerkIdentity = await clerkIdentityForCache();
-       if (cached && cachedClerkIdentityMatches(options.clerkUserId, cachedClerkIdentity)) {
-         if (cachedClerkIdentity?.clerkUserId) verifiedClerkUserId = cachedClerkIdentity.clerkUserId;
-        const user = { id: cached.userId, email: cached.email, personId: cached.personId };
+    try {
+      let trustRead = await boundedTrustRead();
+      let trust = trustRead.timedOut ? undefined : trustRead.record;
+      assertAuthEpoch(authEpoch);
+      if (options.clerkUserId && trust?.state === 'active' && trust.clerkUserId !== options.clerkUserId) {
+        // Revoke before issuing /me for the new Clerk account. A stale old
+        // record can therefore never be used if that request is unavailable.
+        verifiedIdentity = undefined;
+        requestTrustRevocation();
+        authEpoch = advanceAuthEpoch();
+        if (!await ensureTrustRevoked()) {
+          setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('The previous account is still being cleared. Retry verification.', { code: 'IDENTITY_MISMATCH' }) });
+          return authLifecycle;
+        }
+        assertAuthEpoch(authEpoch);
+        trustRead = await boundedTrustRead();
+        trust = trustRead.timedOut ? undefined : trustRead.record;
+        assertAuthEpoch(authEpoch);
+      }
+      if (trustRevocationRequest || trustRevocationRequired) {
+        if (!await ensureTrustRevoked()) {
+          setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('Private data is still being cleared. Retry verification.', { code: 'IDENTITY_MISMATCH' }) });
+          return authLifecycle;
+        }
+        assertAuthEpoch(authEpoch);
+        // The read which preceded revocation is stale by definition. Never
+        // use it for offline activation after a session transition.
+        trustRead = await boundedTrustRead();
+        trust = trustRead.timedOut ? undefined : trustRead.record;
+        assertAuthEpoch(authEpoch);
+      }
+      // Online/unknown Clerk startup must first try the authoritative path.
+      // A complete, active record is only the bounded-unavailability fallback.
+      if (!browserOnline && !forceReverify && !getSessionLogoutInProgress() && !authBlocked && trust && isOfflineTrustUsable(trust) && cachedTrustMatches(options.clerkUserId, trust)) {
+        assertAuthEpoch(authEpoch);
+        const user = { id: trust.userId, email: trust.email, personId: trust.personId };
         verifiedIdentity = user;
+        verifiedClerkUserId = trust.clerkUserId;
+        clerkUserIdHydrated = true;
         setResourceIdentity(user.id);
         seedResource('identity', '', { ...offline(user), authoritative: false }, Date.now(), { offline: true });
         setAuthLifecycle({ status: 'trusted-offline' });
         return authLifecycle;
       }
+      const expectedUserId = currentSessionMatches ? verifiedIdentity?.id : undefined;
+      await getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, startupFallbackMs: options.startupFallbackMs });
+      assertAuthEpoch(authEpoch);
+      return authLifecycle;
+    } catch (error) {
+      // A stale init is intentionally silent. The newer lifecycle owns all
+      // visible state and resource decisions.
+      if (!isAuthEpochCurrent(authEpoch) || error instanceof StaleAuthInitializationError) return authLifecycle;
+      if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID')) {
+        assertAuthEpoch(authEpoch);
+        setAuthLifecycle({ status: 'unauthenticated' });
+      } else if (currentSessionMatches && isNetwork(error)) {
+        // Expiry blocks a fresh offline bootstrap, but never strands a live
+        // authoritative session or its queue while a refresh is unavailable.
+        assertAuthEpoch(authEpoch);
+      } else if (authLifecycle.status !== 'unauthenticated') {
+        assertAuthEpoch(authEpoch);
+        setAuthLifecycle({ status: 'verification-unavailable', error });
+      }
+      return authLifecycle;
     }
-    return getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, startupFallbackMs: options.startupFallbackMs });
-  })().then(() => authLifecycle).catch((error) => {
-    if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH')) setAuthLifecycle({ status: 'unauthenticated' });
-    else setAuthLifecycle({ status: 'unauthenticated', error });
-    return authLifecycle;
-  }).finally(() => { if (authLifecycleRequest === request) authLifecycleRequest = undefined; });
-  authLifecycleRequest = request;
-  return authLifecycleRequest;
+  })().finally(() => { if (authLifecycleRequest?.promise === request) authLifecycleRequest = undefined; });
+  authLifecycleRequest = { key, promise: request };
+  return request;
 }
 
 /**
@@ -348,16 +523,21 @@ export const recoverAfterClerkSignOutFailure = (cause?: unknown) => {
 export async function clearEverythingForLogout(broadcast = true, receivedGeneration?: number) {
   const generation = receivedGeneration ?? startSessionLogout(broadcast);
   if (receivedGeneration !== undefined && !isSessionGenerationCurrent(receivedGeneration)) return;
+  // Invalidate in-flight authentication immediately, before waiting for the
+  // outbox or IndexedDB cleanup. The final advance below also invalidates any
+  // work that somehow started during the destructive boundary.
+  advanceAuthEpoch();
   beginMutationBarrier(generation);
   try {
     // Publish the barrier first, then ask the outbox to abort as an
     // accelerator. The exclusive lock still owns the actual quiescence
     // boundary and waits for the transport promise to settle.
     const outboxQuiescence = quiesceOutboxForLogout();
-    await withExclusiveMutationLock(async () => {
-      await outboxQuiescence;
-      await clearAllPrivateData();
-    });
+    // The lock bounds already-dispatched mutations when possible. Cleanup is
+    // deliberately performed after the bounded wait as well, so a transport
+    // which ignores abort cannot strand local private rows.
+    await withExclusiveMutationLock(async () => { await outboxQuiescence; });
+    await clearAllPrivateData();
   } catch (error) {
     // Keep the current authenticated UI visible when storage is unavailable.
     // Release the lock barrier so retry is possible; the session generation
@@ -371,8 +551,7 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
   verifiedClerkUserId = undefined;
   clerkUserIdHydrated = true;
   authBlocked = true;
-  authInvalidationGeneration += 1;
-  identityRequest = undefined;
+  advanceAuthEpoch();
   resetResourceIdentity();
   authState = { required: true, code: 'AUTH_REQUIRED' };
   clearReconnectRequired();
@@ -422,11 +601,12 @@ export async function getGroup(id: string, signal?: AbortSignal): Promise<Cached
 
 export async function getExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<{ expenses: Expense[] }>> {
   const generation = captureSessionGeneration();
+  const authEpoch = getAuthEpoch();
   const identity = await requireIdentityForCache(signal);
   try {
     const result = await apiWithMeta<{ expenses: Expense[] }>(`/groups/${id}/expenses`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
+     if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
@@ -562,8 +742,8 @@ export async function hydrateGroups(userId: string) {
 }
 const cacheTimestamp = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
 export async function hydrateIdentity() {
-  const cached = await cacheRead(readLastVerifiedIdentity);
-  return cached ? { data: { id: cached.userId, email: cached.email, personId: cached.personId }, fetchedAt: cacheTimestamp(cached.verifiedAt), offline: true } : undefined;
+  const cached = await cacheRead(readOfflineTrust);
+  return cached && isOfflineTrustUsable(cached) ? { data: { id: cached.userId, email: cached.email, personId: cached.personId }, fetchedAt: cacheTimestamp(cached.verifiedAt), offline: true } : undefined;
 }
 export async function hydrateGroup(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));

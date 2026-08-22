@@ -1,13 +1,13 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
+import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
 import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
 import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
 
-const json = (body: unknown, status = 200, userId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}) } });
+const json = (body: unknown, status = 200, userId?: string, clerkUserId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}), ...(clerkUserId ? { 'X-BillSplit-Clerk-User-Id': clerkUserId } : {}) } });
 
 beforeEach(async () => {
   vi.restoreAllMocks();
@@ -18,7 +18,7 @@ describe('frontend API errors and cache fallback', () => {
   it('allows trusted offline startup before Clerk has loaded but gates online startup', () => {
     expect(shouldStartAuthCheck(false, false)).toBe(true);
     expect(shouldStartAuthCheck(false, true)).toBe(true);
-    expect(shouldStartAuthCheck(true, false)).toBe(false);
+    expect(shouldStartAuthCheck(true, false)).toBe(true);
     expect(shouldStartAuthCheck(true, true)).toBe(true);
   });
   it('keeps a restoring Clerk session on the checking shell instead of showing login', () => {
@@ -170,11 +170,11 @@ describe('frontend API errors and cache fallback', () => {
     expect(failure).toMatchObject({ code: 'NETWORK_ERROR', networkFailure: true, isNetworkError: true });
   });
 
-  it('reads only the last verified user’s groups when the network fails', async () => {
+  it('does not authorize groups from legacy split identity records when the network fails', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: new Date().toISOString() });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline'); }));
-    await expect(getGroups()).resolves.toMatchObject({ groups: [{ id: 'group-a' }], offline: true, stale: true });
+    await expect(getGroups()).rejects.toMatchObject({ networkFailure: true });
     await saveVerifiedIdentity({ userId: 'user-b', email: 'b@example.com', personId: 'person-b', verifiedAt: new Date().toISOString() });
     await expect(getGroups()).rejects.toMatchObject({ networkFailure: true });
   });
@@ -255,6 +255,9 @@ describe('frontend API errors and cache fallback', () => {
   });
 
   it('reconciles a server expense carrying the normalized operation id', async () => {
+    resetForClerkSessionChange();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a', 'clerk-a')));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: new Date().toISOString() });
     await enqueueExpense({ userId: 'user-a', groupId: 'group-a', clientOperationId: 'op-1', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: 'op-1' }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' } });
@@ -287,12 +290,62 @@ describe('frontend API errors and cache fallback', () => {
   it('publishes the authenticated lifecycle only after a verified identity response', async () => {
     await clearEverythingForLogout(false);
     clearAuthRequired();
-    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-auth', email: 'auth@example.com', personId: 'person-auth' }, 200, 'user-auth')));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-auth', email: 'auth@example.com', personId: 'person-auth' }, 200, 'user-auth', 'clerk-auth')));
     await initializeAuthLifecycle({ clerkUserId: 'clerk-auth' });
     expect(getAuthLifecycle()).toEqual({ status: 'authenticated' });
-    expect(await readLastVerifiedClerkUserId()).toMatchObject({ clerkUserId: 'clerk-auth' });
+    expect(await readOfflineTrust()).toMatchObject({ state: 'active', clerkUserId: 'clerk-auth', userId: 'user-auth' });
     await clearEverythingForLogout(false);
     expect(getAuthLifecycle().status).toBe('unauthenticated');
+  });
+
+  it('does not create trust from a client-only Clerk pairing', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-auth', email: 'auth@example.com', personId: 'person-auth' }, 200, 'user-auth')));
+    await expect(initializeAuthLifecycle({ clerkUserId: 'clerk-auth', startupFallbackMs: 10 })).resolves.toMatchObject({ status: 'verification-unavailable' });
+    expect(await readOfflineTrust()).not.toMatchObject({ state: 'active' });
+  });
+
+  it('lets a newer Clerk account win over a late completion from account A', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    let resolveA!: (value: Response) => void;
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Promise<Response>((resolve) => { resolveA = resolve; });
+      return json({ id: 'user-b', email: 'b@example.com', personId: 'person-b' }, 200, 'user-b', 'clerk-b');
+    }));
+    const initA = initializeAuthLifecycle({ clerkUserId: 'clerk-a', startupFallbackMs: 100 });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    resetForClerkSessionChange();
+    const initB = initializeAuthLifecycle({ clerkUserId: 'clerk-b', startupFallbackMs: 100 });
+    resolveA(json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a', 'clerk-a'));
+    await Promise.all([initA, initB]);
+    expect(getAuthLifecycle()).toMatchObject({ status: 'authenticated' });
+    expect((await readOfflineTrust())?.clerkUserId).toBe('clerk-b');
+    expect((await readOfflineTrust())?.userId).toBe('user-b');
+  });
+
+  it('ignores a late old-epoch 401 after the new account is authenticated', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    let resolveOld!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/api/me')) return json({ id: 'user-b', email: 'b@example.com', personId: 'person-b' }, 200, 'user-b', 'clerk-b');
+      return new Promise<Response>((resolve) => { resolveOld = resolve; });
+    }));
+    const oldEpoch = getAuthEpoch();
+    const oldRequest = api('/groups', undefined, oldEpoch);
+    resetForClerkSessionChange();
+    await initializeAuthLifecycle({ clerkUserId: 'clerk-b', startupFallbackMs: 100 });
+    resolveOld(json({ error: { code: 'AUTH_REQUIRED', message: 'old session' } }, 401));
+    await expect(oldRequest).rejects.toMatchObject({ status: 401 });
+    expect(getAuthLifecycle()).toMatchObject({ status: 'authenticated' });
+    expect(getAuthState().required).toBe(false);
   });
 
   it('does not persist a Clerk user ID when /api/me is not verified', async () => {
@@ -309,8 +362,7 @@ describe('frontend API errors and cache fallback', () => {
     await clearEverythingForLogout(false);
     clearSessionLogout();
     clearAuthRequired();
-    await saveVerifiedIdentity({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', verifiedAt: new Date().toISOString() });
-    await saveLastVerifiedClerkUserId('clerk-a');
+    await saveOfflineTrust({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', clerkUserId: 'clerk-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('navigator', { onLine: true });
     vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')), { once: true });
@@ -328,14 +380,13 @@ describe('frontend API errors and cache fallback', () => {
     await clearEverythingForLogout(false);
     clearSessionLogout();
     clearAuthRequired();
-    await saveVerifiedIdentity({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', verifiedAt: new Date().toISOString() });
-    if (!omitPersistedClerkId && clerkUserId !== undefined) await saveLastVerifiedClerkUserId('clerk-a');
+    if (!omitPersistedClerkId && clerkUserId !== undefined) await saveOfflineTrust({ userId: 'cached-user', email: 'cached@example.com', personId: 'cached-person', clerkUserId: 'clerk-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('navigator', { onLine: true });
     vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')), { once: true });
     })));
 
-    await expect(initializeAuthLifecycle({ ...(clerkUserId === undefined ? {} : { clerkUserId }), startupFallbackMs: 1 })).resolves.toMatchObject({ status: 'unauthenticated' });
+    await expect(initializeAuthLifecycle({ ...(clerkUserId === undefined ? {} : { clerkUserId }), startupFallbackMs: 1 })).resolves.toMatchObject({ status: 'verification-unavailable' });
     expect(getResourceSnapshot('identity').data).toBeUndefined();
   });
 
@@ -343,8 +394,7 @@ describe('frontend API errors and cache fallback', () => {
     await clearEverythingForLogout(false);
     clearSessionLogout();
     clearAuthRequired();
-    await saveVerifiedIdentity({ userId: 'offline-user', email: 'offline@example.com', personId: 'offline-person', verifiedAt: new Date().toISOString() });
-    await saveLastVerifiedClerkUserId('clerk-a');
+    await saveOfflineTrust({ userId: 'offline-user', email: 'offline@example.com', personId: 'offline-person', clerkUserId: 'clerk-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('navigator', { onLine: false });
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline'); }));
     await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'trusted-offline' });
@@ -353,7 +403,7 @@ describe('frontend API errors and cache fallback', () => {
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-a', getTrustedOfflineClerkUserId())).toBe(false);
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', getTrustedOfflineClerkUserId())).toBe(true);
     revokeForClerkSessionChange();
-    expect(getAuthLifecycle().status).toBe('unauthenticated');
+    expect(getAuthLifecycle().status).toBe('verification-unavailable');
     vi.stubGlobal('navigator', { onLine: true });
     vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'offline-user', email: 'offline@example.com', personId: 'offline-person' }, 200, 'offline-user')));
     await expect(initializeAuthLifecycle({ networkOnly: true })).resolves.toMatchObject({ status: 'authenticated' });
@@ -383,7 +433,7 @@ describe('frontend API errors and cache fallback', () => {
     await initializeAuthLifecycle();
     resetForClerkSessionChange();
     expect(getAuthLifecycle().status).toBe('checking');
-    expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+    expect(getAuthState()).toMatchObject({ required: false });
     vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-b', email: 'b@example.com', personId: 'person-b' }, 200, 'user-b')));
     await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'authenticated' });
     await clearEverythingForLogout(false);

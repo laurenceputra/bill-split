@@ -3,7 +3,7 @@ import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 8;
+export const DB_VERSION = 10;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -20,6 +20,39 @@ export interface VerifiedClerkIdentity {
   key: 'last';
   clerkUserId: string;
   verifiedAt: string;
+}
+
+/**
+ * The only record which can establish identity during an offline start.
+ * `identities` and `clerkIdentities` are retained as inert legacy stores so
+ * old databases can be cleared safely, but are never consulted for trust.
+ */
+export interface OfflineTrustRecord {
+  key: 'current';
+  state: 'active' | 'revoked';
+  /** Monotonic CAS token. Revocation always advances it. */
+  revision: number;
+  userId: string;
+  email: string;
+  personId: string;
+  clerkUserId: string;
+  verifiedAt: string;
+}
+
+export const OFFLINE_TRUST_KEY = 'current' as const;
+export const OFFLINE_TRUST_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+const normalizeOfflineTrust = (value: OfflineTrustRecord | undefined): OfflineTrustRecord | undefined => {
+  if (!value) return undefined;
+  const revision = Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : 0;
+  return { ...value, revision };
+};
+
+export function isOfflineTrustUsable(record: OfflineTrustRecord | undefined, now = Date.now()) {
+  if (!record || record.state !== 'active') return false;
+  if (![record.userId, record.email, record.personId, record.clerkUserId].every((value) => typeof value === 'string' && value.trim().length > 0)) return false;
+  const verifiedAt = Date.parse(record.verifiedAt);
+  return Number.isFinite(verifiedAt) && now < verifiedAt + OFFLINE_TRUST_MAX_AGE_MS;
 }
 
 export interface CachedGroups {
@@ -140,6 +173,15 @@ export interface ExpenseOutboxItem {
   leaseOwner?: string;
   leaseExpiresAt?: number;
   deliveryUncertain?: boolean;
+  /** Auth epoch which was current when this operation was queued. */
+  authEpoch?: number;
+}
+
+export interface OutboxOperationScope {
+  userId: string;
+  expectedAuthEpoch?: number;
+  /** Explicit user action may move an auth-required row to the current epoch. */
+  rebindAuthEpoch?: number;
 }
 
 export class IndexedDBUnavailableError extends Error {
@@ -161,6 +203,7 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('recent')) database.createObjectStore('recent');
       if (!database.objectStoreNames.contains('identities')) database.createObjectStore('identities', { keyPath: 'key' });
       if (!database.objectStoreNames.contains('clerkIdentities')) database.createObjectStore('clerkIdentities', { keyPath: 'key' });
+      if (!database.objectStoreNames.contains('offlineTrust')) database.createObjectStore('offlineTrust', { keyPath: 'key' });
       if (!database.objectStoreNames.contains('groups')) database.createObjectStore('groups', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('groupSnapshots')) database.createObjectStore('groupSnapshots', { keyPath: ['userId', 'groupId'] });
       if (!database.objectStoreNames.contains('resourceFreshness')) database.createObjectStore('resourceFreshness', { keyPath: ['userId', 'resourceKey'] });
@@ -169,10 +212,24 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('categories')) database.createObjectStore('categories', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('expenseOutbox')) {
-        const store = database.createObjectStore('expenseOutbox', { keyPath: 'clientOperationId' });
+        const store = database.createObjectStore('expenseOutbox', { keyPath: ['userId', 'clientOperationId'] });
         store.createIndex('userId', 'userId', { unique: false });
         store.createIndex('groupId', 'groupId', { unique: false });
         store.createIndex('status', 'status', { unique: false });
+      } else if (event.oldVersion < 10) {
+        // v9 keyed rows only by operation ID. That allowed an account B row to
+        // replace account A's row when a client operation ID was reused. Move
+        // the rows to the user-scoped key without dropping pending work.
+        const oldStore = request.transaction!.objectStore('expenseOutbox');
+        const rows = oldStore.getAll();
+        database.deleteObjectStore('expenseOutbox');
+        const store = database.createObjectStore('expenseOutbox', { keyPath: ['userId', 'clientOperationId'] });
+        store.createIndex('userId', 'userId', { unique: false });
+        store.createIndex('groupId', 'groupId', { unique: false });
+        store.createIndex('status', 'status', { unique: false });
+        rows.onsuccess = () => {
+          for (const row of rows.result as ExpenseOutboxItem[]) store.put(row);
+        };
       }
       if ((event as IDBVersionChangeEvent).oldVersion < 8 && database.objectStoreNames.contains('activity')) {
         const store = request.transaction?.objectStore('activity');
@@ -226,6 +283,54 @@ export const saveLastVerifiedClerkUserId = (clerkUserId: string, generation = ca
   return transaction('clerkIdentities', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('clerkIdentities').put({ key: 'last', clerkUserId, verifiedAt: new Date().toISOString() }); });
 };
 export const readLastVerifiedClerkUserId = () => transaction<VerifiedClerkIdentity>('clerkIdentities', 'readonly', (tx) => tx.objectStore('clerkIdentities').get('last'));
+
+/**
+ * Persist the complete trust tuple using the revision observed before /me.
+ * The read and conditional write are in one readwrite transaction, so a late
+ * authoritative response cannot resurrect trust revoked by another tab.
+ */
+export function saveOfflineTrust(value: Omit<OfflineTrustRecord, 'key' | 'state' | 'revision'>, generation = captureSessionGeneration(), allowed: () => boolean = () => true, expectedRevision = 0) {
+  assertSessionGeneration(generation);
+  return new Promise<boolean>((resolve, reject) => {
+    void open().then((db) => {
+      const tx = db.transaction('offlineTrust', 'readwrite');
+      const store = tx.objectStore('offlineTrust');
+      const current = store.get(OFFLINE_TRUST_KEY);
+      let saved = false;
+      current.onsuccess = () => {
+        const record = normalizeOfflineTrust(current.result as OfflineTrustRecord | undefined);
+        if (!isSessionGenerationCurrent(generation) || !allowed() || (record?.revision ?? 0) !== expectedRevision) return;
+         store.put({ ...value, key: OFFLINE_TRUST_KEY, state: 'active', revision: expectedRevision + 1 } satisfies OfflineTrustRecord);
+        saved = true;
+      };
+      tx.oncomplete = () => { db.close(); resolve(saved && allowed() && isSessionGenerationCurrent(generation)); };
+      tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+      tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    }).catch(reject);
+  });
+}
+
+export const readOfflineTrust = () => transaction<OfflineTrustRecord>('offlineTrust', 'readonly', (tx) => tx.objectStore('offlineTrust').get(OFFLINE_TRUST_KEY)).then(normalizeOfflineTrust);
+
+/** Revocation intentionally does not use the session-generation guard. */
+export function revokeOfflineTrust() {
+  return new Promise<boolean>((resolve, reject) => {
+    void (async () => {
+      const db = await open();
+      const tx = db.transaction('offlineTrust', 'readwrite');
+      const store = tx.objectStore('offlineTrust');
+      const current = store.get(OFFLINE_TRUST_KEY);
+      let nextRevision = 1;
+      current.onsuccess = () => {
+        nextRevision = (normalizeOfflineTrust(current.result as OfflineTrustRecord | undefined)?.revision ?? 0) + 1;
+        store.put({ key: OFFLINE_TRUST_KEY, state: 'revoked', revision: nextRevision, userId: '', email: '', personId: '', clerkUserId: '', verifiedAt: new Date().toISOString() } satisfies OfflineTrustRecord);
+      };
+      tx.oncomplete = () => { db.close(); resolve(true); };
+      tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+      tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    })().catch(reject);
+  });
+}
 
 export const saveGroups = async (value: CachedGroups, generation = captureSessionGeneration()) => {
   assertSessionGeneration(generation);
@@ -379,23 +484,34 @@ export const readCategories = (userId: string) => transaction<CachedCategories>(
 
 /** Remove private cached data without touching the durable expense outbox. */
 export async function clearCachedData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
   });
 }
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
   });
 }
 
-export const saveOutboxItem = (item: ExpenseOutboxItem, generation = captureSessionGeneration()) => {
+export const saveOutboxItem = async (item: ExpenseOutboxItem, generation = captureSessionGeneration(), expectedAuthEpoch?: number, allowed: () => boolean = () => true) => {
   assertSessionGeneration(generation);
-  return transaction('expenseOutbox', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('expenseOutbox').put(item); });
+  let saved = false;
+  await transaction('expenseOutbox', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation) && allowed() && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch)) { tx.objectStore('expenseOutbox').put({ ...item, authEpoch: item.authEpoch ?? 0 }); saved = true; } });
+  return saved;
 };
-export const readOutboxItem = (clientOperationId: string) => transaction<ExpenseOutboxItem>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').get(clientOperationId));
+export async function readOutboxItem(clientOperationId: string, scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
+  if (scope) {
+    const item = await transaction<ExpenseOutboxItem>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').get([scope.userId, clientOperationId]));
+    return item && (scope.expectedAuthEpoch === undefined || item.authEpoch === scope.expectedAuthEpoch) ? item : undefined;
+  }
+  // Compatibility for callers which predate user-scoped operation keys. New
+  // mutation paths always pass a scope and therefore cannot read another user.
+  const all = await transaction<ExpenseOutboxItem[]>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').getAll());
+  return (all || []).find((item) => item.clientOperationId === clientOperationId);
+}
 
 export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> {
   const all = await transaction<ExpenseOutboxItem[]>('expenseOutbox', 'readonly', (tx) => tx.objectStore('expenseOutbox').getAll());
@@ -404,7 +520,7 @@ export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> 
 
 export const deleteOutboxItem = (clientOperationId: string) => transaction('expenseOutbox', 'readwrite', (tx) => tx.objectStore('expenseOutbox').delete(clientOperationId));
 
-export async function recoverStaleSyncing() {
+export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: number) {
   const db = await open();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -412,8 +528,8 @@ export async function recoverStaleSyncing() {
     const request = store.getAll();
     request.onsuccess = () => {
       const now = Date.now();
-      for (const item of request.result as ExpenseOutboxItem[]) {
-        if (item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)) store.put({ ...item, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date().toISOString() });
+       for (const item of request.result as ExpenseOutboxItem[]) {
+         if ((!userId || item.userId === userId) && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch) && item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)) store.put({ ...item, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date().toISOString() });
       }
     };
     tx.oncomplete = () => { db.close(); resolve(); };
@@ -423,17 +539,18 @@ export async function recoverStaleSyncing() {
 }
 
 /** Atomically claims a pending or expired-syncing row for one browser tab. */
-export async function claimOutboxItem(clientOperationId: string, owner: string, now = Date.now(), leaseMs = 30_000, generation = captureSessionGeneration()): Promise<ExpenseOutboxItem | undefined> {
+export async function claimOutboxItem(clientOperationId: string, owner: string, now = Date.now(), leaseMs = 30_000, generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
-    const request = store.get(clientOperationId);
+     const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
     let claimed: ExpenseOutboxItem | undefined;
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      const item = request.result as ExpenseOutboxItem | undefined;
+       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+       if (scope && (!item || item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) return;
       const claimable = item && (item.status === 'pending' || (item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)));
       if (!claimable) return;
       claimed = { ...item, status: 'syncing', attempts: item.attempts + 1, leaseOwner: owner, leaseExpiresAt: now + leaseMs, updatedAt: new Date(now).toISOString(), lastError: undefined };
@@ -445,18 +562,18 @@ export async function claimOutboxItem(clientOperationId: string, owner: string, 
   });
 }
 
-export async function updateOutboxIfOwned(clientOperationId: string, owner: string, patch: Partial<ExpenseOutboxItem>, now = Date.now(), generation = captureSessionGeneration()): Promise<ExpenseOutboxItem | undefined> {
+export async function updateOutboxIfOwned(clientOperationId: string, owner: string, patch: Partial<ExpenseOutboxItem>, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
-    const request = store.get(clientOperationId);
+     const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
     let updated: ExpenseOutboxItem | undefined;
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      const item = request.result as ExpenseOutboxItem | undefined;
-      if (!item || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
+       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+       if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
       updated = { ...item, ...patch, updatedAt: new Date(now).toISOString() };
       store.put(updated);
     };
@@ -466,19 +583,41 @@ export async function updateOutboxIfOwned(clientOperationId: string, owner: stri
   });
 }
 
-export async function removeOutboxIfOwned(clientOperationId: string, owner: string, now = Date.now(), generation = captureSessionGeneration()): Promise<boolean> {
+/** Release a claim only when it is still the exact lease which was claimed. */
+export async function releaseOutboxClaimIfOwned(clientOperationId: string, owner: string, leaseExpiresAt: number, attempts: number, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
-    const request = store.get(clientOperationId);
+    const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
+    let released: ExpenseOutboxItem | undefined;
+    request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+      if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.status !== 'syncing' || item.leaseOwner !== owner || item.leaseExpiresAt !== leaseExpiresAt || item.attempts !== attempts || leaseExpiresAt <= now) return;
+      released = { ...item, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date(now).toISOString() };
+      store.put(released);
+    };
+    tx.oncomplete = () => { db.close(); resolve(released); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
+
+export async function removeOutboxIfOwned(clientOperationId: string, owner: string, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<boolean> {
+  assertSessionGeneration(generation);
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('expenseOutbox', 'readwrite');
+    const store = tx.objectStore('expenseOutbox');
+     const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
     let removed = false;
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      const item = request.result as ExpenseOutboxItem | undefined;
-      if (!item || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
-      store.delete(clientOperationId); removed = true;
+       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+       if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
+       store.delete([item.userId, item.clientOperationId]); removed = true;
     };
     tx.oncomplete = () => { db.close(); resolve(removed); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -486,17 +625,17 @@ export async function removeOutboxIfOwned(clientOperationId: string, owner: stri
   });
 }
 
-export async function discardOutboxIfIdle(clientOperationId: string, now = Date.now()): Promise<boolean> {
+export async function discardOutboxIfIdle(clientOperationId: string, now = Date.now(), scope?: OutboxOperationScope): Promise<boolean> {
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
-    const request = store.get(clientOperationId);
+     const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
     let removed = false;
     request.onsuccess = () => {
-      const item = request.result as ExpenseOutboxItem | undefined;
-      if (!item || item.deliveryUncertain || (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now)) return;
-      store.delete(clientOperationId); removed = true;
+       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+       if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.deliveryUncertain || (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now)) return;
+       store.delete([item.userId, item.clientOperationId]); removed = true;
     };
     tx.oncomplete = () => { db.close(); resolve(removed); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -504,17 +643,17 @@ export async function discardOutboxIfIdle(clientOperationId: string, now = Date.
   });
 }
 
-export async function resetOutboxIfIdle(clientOperationId: string, now = Date.now()): Promise<ExpenseOutboxItem | undefined> {
+export async function resetOutboxIfIdle(clientOperationId: string, now = Date.now(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   const db = await open();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
-    const request = store.get(clientOperationId);
+     const request = scope ? store.get([scope.userId, clientOperationId]) : store.getAll();
     let updated: ExpenseOutboxItem | undefined;
     request.onsuccess = () => {
-      const item = request.result as ExpenseOutboxItem | undefined;
-      if (!item || (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now)) return;
-      updated = { ...item, status: 'pending', deliveryUncertain: item.deliveryUncertain === true, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: undefined, updatedAt: new Date(now).toISOString() };
+       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
+       if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now)) return;
+       updated = { ...item, ...(scope?.rebindAuthEpoch === undefined ? {} : { authEpoch: scope.rebindAuthEpoch }), status: 'pending', deliveryUncertain: item.deliveryUncertain === true, leaseOwner: undefined, leaseExpiresAt: undefined, lastError: undefined, updatedAt: new Date(now).toISOString() };
       store.put(updated);
     };
     tx.oncomplete = () => { db.close(); resolve(updated); };
@@ -523,14 +662,14 @@ export async function resetOutboxIfIdle(clientOperationId: string, now = Date.no
   });
 }
 
-export async function reactivateAuthRequired(userId: string) {
+export async function reactivateAuthRequired(userId: string, allowed: () => boolean = () => true, authEpoch?: number) {
   const db = await open();
   let changed = 0;
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
     const request = store.getAll();
-    request.onsuccess = () => { for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.status === 'auth-required') { store.put({ ...item, status: 'pending', lastError: undefined, updatedAt: new Date().toISOString() }); changed += 1; } };
+     request.onsuccess = () => { if (!allowed()) return; for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.status === 'auth-required') { store.put({ ...item, authEpoch: authEpoch ?? item.authEpoch ?? 0, status: 'pending', lastError: undefined, updatedAt: new Date().toISOString() }); changed += 1; } };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -538,20 +677,20 @@ export async function reactivateAuthRequired(userId: string) {
   return changed;
 }
 
-export async function markOutboxAuthRequired(userId: string, lastError: ExpenseOutboxItem['lastError']) {
+export async function markOutboxAuthRequired(userId: string, lastError: ExpenseOutboxItem['lastError'], expectedAuthEpoch?: number) {
   const db = await open();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
     const request = store.getAll();
-    request.onsuccess = () => { for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.status === 'pending') store.put({ ...item, status: 'auth-required', lastError, updatedAt: new Date().toISOString() }); };
+     request.onsuccess = () => { for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.status === 'pending' && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch)) store.put({ ...item, status: 'auth-required', lastError, updatedAt: new Date().toISOString() }); };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
   });
 }
 
-export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Expense[], generation = captureSessionGeneration()) {
+export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Expense[], generation = captureSessionGeneration(), expectedAuthEpoch?: number) {
   assertSessionGeneration(generation);
   const operations = new Set(expenses.filter((expense) => expense.groupId === groupId && expense.createdBy === userId && expense.clientOperationId).map((expense) => expense.clientOperationId));
   if (!operations.size) return 0;
@@ -563,7 +702,7 @@ export async function reconcileOutboxItems(userId: string, groupId: string, expe
     const request = store.getAll();
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.groupId === groupId && operations.has(item.clientOperationId)) { store.delete(item.clientOperationId); removed += 1; }
+       for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.groupId === groupId && operations.has(item.clientOperationId) && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch)) { store.delete([item.userId, item.clientOperationId]); removed += 1; }
     };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };

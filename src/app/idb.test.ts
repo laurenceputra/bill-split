@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readRecent, readResourceFreshness, recoverStaleSyncing, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
 import { hydrateActivity } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -11,13 +11,55 @@ beforeEach(async () => {
 });
 
 describe('user-scoped IndexedDB', () => {
+  it('stores one atomic trust tuple and rejects split or torn records', async () => {
+    await saveVerifiedIdentity(user('legacy'));
+    await saveLastVerifiedClerkUserId('clerk-legacy');
+    expect(await readOfflineTrust()).toBeUndefined();
+    await saveOfflineTrust({ ...user('user-a'), clerkUserId: '' });
+    expect(isOfflineTrustUsable(await readOfflineTrust())).toBe(false);
+    await saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' }, undefined, undefined, (await readOfflineTrust())?.revision ?? 0);
+    expect(await readOfflineTrust()).toMatchObject({ state: 'active', userId: 'user-a', clerkUserId: 'clerk-a' });
+    await revokeOfflineTrust();
+    expect(isOfflineTrustUsable(await readOfflineTrust())).toBe(false);
+  });
+
+  it('expires trust exactly at thirty days', async () => {
+    const verifiedAt = new Date('2026-01-01T00:00:00.000Z').toISOString();
+    await saveOfflineTrust({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', clerkUserId: 'clerk-a', verifiedAt });
+    const record = await readOfflineTrust();
+    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + 30 * 24 * 60 * 60 * 1000 - 1)).toBe(true);
+    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + 30 * 24 * 60 * 60 * 1000)).toBe(false);
+  });
+
+  it('does not let a late active save resurrect trust after revocation', async () => {
+    await saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' });
+    const expectedRevision = (await readOfflineTrust())!.revision;
+    await revokeOfflineTrust();
+    const lateSave = saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' }, undefined, undefined, expectedRevision);
+    expect(await lateSave).toBe(false);
+    const revoked = await readOfflineTrust();
+    expect(revoked).toMatchObject({ state: 'revoked', revision: expectedRevision + 1 });
+    expect(isOfflineTrustUsable(revoked)).toBe(false);
+  });
+
+  it('allows only one concurrent active writer for a captured trust revision', async () => {
+    await saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' });
+    const expectedRevision = (await readOfflineTrust())!.revision;
+    const [first, second] = await Promise.all([
+      saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' }, undefined, undefined, expectedRevision),
+      saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' }, undefined, undefined, expectedRevision),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    expect((await readOfflineTrust())?.revision).toBe(expectedRevision + 1);
+  });
+
   it('upgrades without losing the legacy recent store', async () => {
     const old = indexedDB.open(DB_NAME, 1);
     await new Promise<void>((resolve, reject) => { old.onupgradeneeded = () => old.result.createObjectStore('recent'); old.onsuccess = () => { const tx = old.result.transaction('recent', 'readwrite'); tx.objectStore('recent').put({ choice: 'USD' }, 'form'); tx.oncomplete = () => { old.result.close(); resolve(); }; tx.onerror = () => reject(tx.error); }; old.onerror = () => reject(old.error); });
     await saveVerifiedIdentity(user('user-a'));
     expect(await readRecent<{ choice: string }>()).toEqual({ choice: 'USD' });
     const upgraded = indexedDB.open(DB_NAME, DB_VERSION);
-    await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); expect(upgraded.result.objectStoreNames.contains('clerkIdentities')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
+    await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); expect(upgraded.result.objectStoreNames.contains('clerkIdentities')).toBe(true); expect(upgraded.result.objectStoreNames.contains('offlineTrust')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
   });
 
   it('migrates a version three database without losing an outbox row', async () => {
@@ -41,6 +83,18 @@ describe('user-scoped IndexedDB', () => {
     await updateGroupSnapshot('user-b', 'group-b', { members: [] });
     expect((await readGroupSnapshot('user-a', 'group-b'))).toBeUndefined();
     expect((await readGroupSnapshot('user-b', 'group-b'))?.groupId).toBe('group-b');
+  });
+
+  it('keeps same operation IDs isolated by account and auth epoch', async () => {
+    await saveOutboxItem({ ...expense('same-operation', 'user-a'), authEpoch: 11, status: 'pending' });
+    await saveOutboxItem({ ...expense('same-operation', 'user-b'), authEpoch: 22, status: 'pending' });
+    expect((await listOutbox()).map((item) => item.userId)).toEqual(['user-a', 'user-b']);
+
+    expect(await claimOutboxItem('same-operation', 'tab-a', 1_000, 10_000, undefined, { userId: 'user-a', expectedAuthEpoch: 11 }))
+      .toMatchObject({ userId: 'user-a', leaseOwner: 'tab-a' });
+    expect(await removeOutboxIfOwned('same-operation', 'tab-a', 1_001, undefined, { userId: 'user-b', expectedAuthEpoch: 22 })).toBe(false);
+    expect(await removeOutboxIfOwned('same-operation', 'tab-a', 1_001, undefined, { userId: 'user-a', expectedAuthEpoch: 22 })).toBe(false);
+    expect((await listOutbox('user-b'))[0]).toMatchObject({ status: 'pending', userId: 'user-b' });
   });
 
   it('recovers stale syncing items without discarding them', async () => {

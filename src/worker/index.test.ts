@@ -129,11 +129,16 @@ describe('worker boundary', () => {
     const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(200);
     expect(response.headers.get('X-BillSplit-User-Id')).toBe('user-1');
+    expect(response.headers.get('X-BillSplit-Clerk-User-Id')).toBeNull();
     expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(response.headers.get('Pragma')).toBe('no-cache');
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(response.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
+  });
+  it('does not expose the Clerk proof header on static assets', async () => {
+    const response = await worker.fetch(new Request('https://split.example/'), env(), {} as ExecutionContext);
+    expect(response.headers.get('X-BillSplit-Clerk-User-Id')).toBeNull();
   });
   it('returns authenticated user home balance summaries in the groups response', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new SummaryGroupsDb() }), {} as ExecutionContext);

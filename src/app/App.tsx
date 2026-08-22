@@ -21,6 +21,10 @@ const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
+function VerificationUnavailable({ onRetry }: { onRetry: () => void }) {
+  const online = useOnlineStatus();
+  return <PublicShell showAuthActions={false}><div className="public-status" role="status" aria-live="polite"><h1>{online ? 'Verification is unavailable' : 'You are offline'}</h1><p className="muted">BillSplit could not verify this browser for private access. Reconnect or try again; the app will not treat an unverified account as signed out.</p><Button type="button" variant="secondary" onClick={onRetry}>Retry verification</Button></div></PublicShell>;
+}
 
 function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
   const location = useLocation();
@@ -637,19 +641,29 @@ export function App() {
   const logoutInProgress = useSyncExternalStore(subscribeSessionState, getSessionLogoutInProgress, () => false);
   const clerkSessionRef = useRef<string>();
   const offlineStartedBeforeClerkRef = useRef(false);
-  const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+  const previousOnlineRef = useRef<boolean>();
+  const previousClerkEvidenceRef = useRef<string>();
+  const online = useOnlineStatus();
   useEffect(() => {
+    // Start the bounded bootstrap even while Clerk is still restoring. A
+    // Provider loading and the browser connectivity hint are not auth deadlines.
+    // The old `!isLoaded && !online` branch intentionally no longer gates it.
     if (!shouldStartAuthCheck(online, isLoaded) && !isDevelopmentAuthBypass) return;
-    if (!isLoaded && !online) {
-      offlineStartedBeforeClerkRef.current = true;
-      void initializeAuthLifecycle();
-      return;
-    }
+    if (!isLoaded) offlineStartedBeforeClerkRef.current = true;
     const sessionKey = userId && sessionId ? `${userId}:${sessionId}` : undefined;
     const currentClerkUserId = typeof userId === 'string' ? userId : undefined;
+    const clerkEvidence = `${isLoaded}:${isSignedIn}:${currentClerkUserId || ''}:${sessionId || ''}`;
+    const connectivityChanged = previousOnlineRef.current !== undefined && previousOnlineRef.current !== online;
+    const clerkEvidenceChanged = previousClerkEvidenceRef.current !== undefined && previousClerkEvidenceRef.current !== clerkEvidence;
+    previousOnlineRef.current = online;
+    previousClerkEvidenceRef.current = clerkEvidence;
     const providerChangedAfterOfflineStart = offlineStartedBeforeClerkRef.current;
     const providerTransitionPending = providerChangedAfterOfflineStart && auth.status === 'checking';
     if (!providerTransitionPending) offlineStartedBeforeClerkRef.current = false;
+    // A failed verification is stable UI, not a reason to immediately start
+    // another request when the effect rerenders. Explicit retry and the
+    // evidence/connectivity listeners below are the retry edges.
+    if (auth.status === 'verification-unavailable' && !connectivityChanged && !clerkEvidenceChanged) return;
     const sessionChanged = isMeaningfulClerkSessionTransition(clerkSessionRef.current, sessionKey);
     const clerkUserIdHydrated = isTrustedOfflineClerkUserIdHydrated();
     const cachedOfflineClerkUserId = providerChangedAfterOfflineStart && clerkUserIdHydrated ? getTrustedOfflineClerkUserId() : undefined;
@@ -658,21 +672,28 @@ export function App() {
     if (online && sessionTransition) resetForClerkSessionChange();
     else if (!online && sessionTransition) revokeForClerkSessionChange();
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
-    if ((isSignedIn === true || !online || isDevelopmentAuthBypass) && !(sessionTransition && !online)) void initializeAuthLifecycle({ startupFallbackMs: isSignedIn === true && auth.status === 'checking' ? 2500 : undefined, ...(shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
-    else if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
+    if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
       clerkSessionRef.current = undefined;
       markSignedOut();
+      return;
     }
+    if (!(sessionTransition && !online)) void initializeAuthLifecycle({ startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connectivityChanged || clerkEvidenceChanged) && shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
   }, [auth.status, isLoaded, isSignedIn, online, sessionId, userId]);
   useEffect(() => {
-    if (!isSignedIn && !isDevelopmentAuthBypass && auth.status !== 'trusted-offline') return;
-    const retry = () => { if (navigator.onLine !== false) void initializeAuthLifecycle({ networkOnly: auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
+    if (isDefinitivelySignedOut(isLoaded === true, isSignedIn) && !isDevelopmentAuthBypass) return;
+    const retry = () => { void initializeAuthLifecycle({ networkOnly: auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
     window.addEventListener('online', retry);
-    return () => window.removeEventListener('online', retry);
-  }, [auth.status, isSignedIn, userId]);
+    window.addEventListener('focus', retry);
+    document.addEventListener('visibilitychange', retry);
+    return () => { window.removeEventListener('online', retry); window.removeEventListener('focus', retry); document.removeEventListener('visibilitychange', retry); };
+  }, [auth.status, isLoaded, isSignedIn, userId]);
   const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  const sessionTransitionPending = Boolean(clerkSessionRef.current && userId && sessionId && clerkSessionRef.current !== `${userId}:${sessionId}`);
+  const authoritativeClerkIdentityReady = isDevelopmentAuthBypass || !userId || getTrustedOfflineClerkUserId() === userId;
   if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
   if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} />;
+  if (auth.status === 'verification-unavailable') return <VerificationUnavailable onRetry={() => void initializeAuthLifecycle({ networkOnly: false, ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) })} />;
+  if (auth.status === 'authenticated' && (sessionTransitionPending || !authoritativeClerkIdentityReady)) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   return <PrivateRoutes />;
 }

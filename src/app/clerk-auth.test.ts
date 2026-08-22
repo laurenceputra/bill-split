@@ -38,6 +38,13 @@ describe('Clerk authentication boundary', () => {
     expect(api).toContain('shouldStartAuthCheck');
   });
 
+  it('blocks private resources and routes while an account transition is being verified', () => {
+    expect(api).toContain('blockResourceIdentity');
+    expect(app).toContain('sessionTransitionPending');
+    expect(app).toContain('authoritativeClerkIdentityReady');
+    expect(app).toContain('if (auth.status === \'authenticated\' && (sessionTransitionPending || !authoritativeClerkIdentityReady))');
+  });
+
   it('keeps the real-session bypass confined to the local E2E build and development Worker', () => {
     expect(api).toContain('VITE_DEV_AUTH_BYPASS');
     expect(e2eServer).toContain("VITE_DEV_AUTH_BYPASS: 'true'");
