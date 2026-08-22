@@ -368,11 +368,12 @@
   white-space: nowrap;
 }
 
+.network-indicator--connection-issue,
 .network-indicator--offline {
   color: var(--color-coral-ink);
 }
 
-.network-indicator--online {
+.network-indicator--connected {
   color: var(--color-mint-ink);
 }
 
@@ -840,6 +841,18 @@ form > button {
   padding: var(--space-3) var(--space-4);
 }
 
+.connection-banner--checking {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-muted);
+  color: var(--color-ink-muted);
+}
+
+.connection-banner--connection-issue {
+  border-color: var(--color-danger-border);
+  background: var(--color-coral);
+  color: var(--color-coral-ink);
+}
+
 .updated-elsewhere {
   display: flex;
   align-items: center;
@@ -873,6 +886,11 @@ form > button {
   font-size: var(--text-sm);
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.auth-banner--checking {
+  background: var(--color-surface-muted);
+  color: var(--color-ink-muted);
 }
 
 .auth-banner button {

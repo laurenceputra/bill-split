@@ -2,8 +2,8 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as idb from './idb';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
-import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
-import { clearEverythingForLogout, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
+import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import { clearEverythingForLogout, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 import { clearSessionLogout } from './session';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
@@ -74,6 +74,50 @@ describe('durable expense outbox', () => {
     await flushOutbox();
     expect(await readOutboxItem('online-network-failure')).toMatchObject({ status: 'pending' });
     expect((await readOutboxItem('online-network-failure'))?.status).not.toBe('failed');
+  });
+
+  it('reverifies and flushes after a connection issue without an online event', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    let expenseAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseAttempts += 1;
+      if (expenseAttempts === 1) throw new TypeError('connection reset');
+      return response({ expense: { id: 'recovered' } }, 201);
+    }));
+    await queue('reverify-without-event');
+    await flushOutbox();
+    expect((await readOutboxItem('reverify-without-event'))?.status).toBe('pending');
+
+    await recoverConnection();
+    expect(expenseAttempts).toBe(2);
+    expect(await readOutboxItem('reverify-without-event')).toBeUndefined();
+  });
+
+  it('reloads the durable queue after a failed probe and recovers on a later probe without an online event', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    await queue('failed-probe-recovery');
+    let probeAttempts = 0;
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = String(request);
+      calls.push(url);
+      if (url.endsWith('/api/me')) {
+        probeAttempts += 1;
+        if (probeAttempts === 1) throw new TypeError('probe unavailable');
+        return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      }
+      return response({ expense: { id: 'recovered-after-probe' } }, 201);
+    }));
+
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a', startupFallbackMs: 10 });
+    expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(calls.filter((url) => url.includes('/expenses'))).toEqual([]);
+
+    await recoverConnection();
+    expect(probeAttempts).toBe(2);
+    expect(calls.filter((url) => url.includes('/expenses'))).toHaveLength(1);
+    expect(await readOutboxItem('failed-probe-recovery')).toBeUndefined();
   });
 
   it('keeps an HTML 503 response pending instead of requiring auth', async () => {

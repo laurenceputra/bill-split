@@ -21,9 +21,11 @@ describe('standalone PWA contract', () => {
   });
 
   it('updates the shell cache and registers the worker before the load event', () => {
-    expect(serviceWorker).toContain("const CACHE = 'bill-split-shell-v10';");
-    expect(serviceWorker).toContain("fetch(new Request('/', { cache: 'no-store' }))");
-    expect(serviceWorker).toContain('const cachedNavigation = caches.match(event.request)');
+    expect(serviceWorker).toContain("const CACHE = '__BILLSPLIT_CACHE_VERSION__';");
+    expect(serviceWorker).toContain('const SHELL_FILES = __BILLSPLIT_SHELL_ASSETS__;');
+    expect(serviceWorker).toContain("requiredFetch(new Request('/', { cache: 'no-store' })");
+    expect(serviceWorker).toContain('const cachedNavigation = (async () =>');
+    for (const path of ["pathname === '/api'", "pathname === '/cdn-cgi'", "pathname === '/sign-in'", "pathname === '/sign-up'"]) expect(serviceWorker).toContain(path);
     expect(main).toContain("register('/sw.js', { updateViaCache: 'none' })");
     expect(main).not.toContain("addEventListener('load'");
     expect(main).toContain("typeof navigator === 'undefined'");

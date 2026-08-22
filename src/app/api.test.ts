@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthState } from './api';
+import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
@@ -136,6 +136,7 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{not-json', { status: 200, headers: { 'Content-Type': 'application/json' } })));
     await expect(api('/groups')).rejects.toMatchObject({ status: 200, code: 'PROTOCOL_ERROR', reconnectRequired: true });
     expect(getAuthState().required).toBe(false);
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
   });
 
   it('treats an HTML 2xx response as a protocol/session-check response', async () => {
@@ -151,7 +152,29 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('connection reset'); }));
     await expect(api('/groups')).rejects.toMatchObject({ networkFailure: true, reconnectRequired: true });
     expect(getAuthState().required).toBe(false);
-    expect(getConnectionState()).toEqual({ reconnectRequired: true });
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
+  });
+
+  it('distinguishes browser offline, transport issues, reachable auth errors, and success', async () => {
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: false });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline'); }));
+    await expect(api('/groups')).rejects.toMatchObject({ networkFailure: true, reconnectRequired: false });
+    expect(getConnectionState().status).toBe('offline');
+
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('reset'); }));
+    await expect(api('/groups')).rejects.toMatchObject({ networkFailure: true, reconnectRequired: true });
+    expect(getConnectionState().status).toBe('connection-issue');
+
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401)));
+    await expect(api('/groups')).rejects.toMatchObject({ status: 401 });
+    expect(getConnectionState().status).toBe('connected');
+    clearAuthRequired();
+
+    vi.stubGlobal('fetch', vi.fn(async () => json({ groups: [] })));
+    await expect(api('/groups')).resolves.toEqual({ groups: [] });
+    expect(getConnectionState().status).toBe('connected');
   });
 
   it('keeps an HTML 503 as a retryable server failure rather than auth-required', async () => {
@@ -159,6 +182,56 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<html><body>upstream unavailable</body></html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
     await expect(api('/groups')).rejects.toMatchObject({ status: 503, code: 'SERVER_ERROR', networkFailure: false });
     expect(getAuthState().required).toBe(false);
+  });
+
+  it('retains an authenticated lifecycle across a temporary 503', async () => {
+    resetForClerkSessionChange();
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'stable-user', email: 'stable@example.com', personId: 'stable-person' }, 200, 'stable-user', 'clerk-stable')));
+    await expect(initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-stable' })).resolves.toMatchObject({ status: 'authenticated' });
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>temporarily unavailable</html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
+    await expect(initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-stable' })).resolves.toMatchObject({ status: 'authenticated' });
+    expect(getAuthLifecycle()).toMatchObject({ status: 'authenticated' });
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
+    expect(getAuthState().required).toBe(false);
+    clearSessionLogout();
+  });
+
+  it('authoritatively revalidates an authenticated session entering checking and settles after a failed probe', async () => {
+    resetForClerkSessionChange();
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: true });
+    let meCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) {
+        meCalls += 1;
+        return json({ id: 'checking-user', email: 'checking@example.com', personId: 'checking-person' }, 200, 'checking-user', 'clerk-checking');
+      }
+      return json({ groups: [] }, 200, 'checking-user');
+    }));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-checking' });
+    expect(getAuthLifecycle().status).toBe('authenticated');
+
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) { meCalls += 1; throw new TypeError('probe unavailable'); }
+      return json({ groups: [] }, 200, 'checking-user');
+    }));
+    signalConnectionChecking();
+    await vi.waitFor(() => expect(getConnectionState().status).toBe('connection-issue'));
+    expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(getConnectionState().status).not.toBe('checking');
+
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) { meCalls += 1; return json({ id: 'checking-user', email: 'checking@example.com', personId: 'checking-person' }, 200, 'checking-user', 'clerk-checking'); }
+      return json({ groups: [] }, 200, 'checking-user');
+    }));
+    signalConnectionChecking();
+    await vi.waitFor(() => expect(getConnectionState().status).toBe('connected'));
+    expect(getAuthLifecycle().status).toBe('authenticated');
+    expect(meCalls).toBe(3);
   });
 
   it('retains stable server details and distinguishes network failures', async () => {
@@ -370,6 +443,7 @@ describe('frontend API errors and cache fallback', () => {
 
     await expect(initializeAuthLifecycle({ clerkUserId: 'clerk-a', startupFallbackMs: 1 })).resolves.toMatchObject({ status: 'trusted-offline' });
     expect(getResourceSnapshot('identity').data).toMatchObject({ id: 'cached-user' });
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
   });
 
   it.each([
@@ -399,6 +473,7 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline'); }));
     await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'trusted-offline' });
     expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(getConnectionState().status).toBe('offline');
     expect(getTrustedOfflineClerkUserId()).toBe('clerk-a');
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-a', getTrustedOfflineClerkUserId())).toBe(false);
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', getTrustedOfflineClerkUserId())).toBe(true);

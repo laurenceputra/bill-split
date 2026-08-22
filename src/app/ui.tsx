@@ -4,7 +4,7 @@ import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthState, getConnectionState, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState } from './api';
+import { getAuthState, getConnectionState, initializeAuthLifecycle, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState, type ConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -31,9 +31,21 @@ export function PublicShell({ children, returnTo = '/', showAuthActions = true }
   return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link>{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
-export function useOnlineStatus() {
-  return useSyncExternalStore((onChange) => { window.addEventListener('online', onChange); window.addEventListener('offline', onChange); return () => { window.removeEventListener('online', onChange); window.removeEventListener('offline', onChange); }; }, () => navigator.onLine, () => true);
+export function useConnectionState(): ConnectionState {
+  return useSyncExternalStore(subscribeConnectionState, getConnectionState, () => ({ status: 'checking' as const, reconnectRequired: false }));
 }
+
+/** Compatibility helper for controls: only a verified usable connection is online. */
+export function useOnlineStatus() {
+  return useConnectionState().status === 'connected';
+}
+
+export const connectionStatusLabel = (status: ConnectionState['status']) => ({
+  connected: 'Connected',
+  checking: 'Checking connection',
+  'connection-issue': 'Connection issue',
+  offline: 'Offline',
+}[status]);
 
 function useInstall() {
   useEffect(() => initializeInstallUX(), []);
@@ -42,10 +54,6 @@ function useInstall() {
 
 function useAuthRequired() {
   return useSyncExternalStore(subscribeAuthState, getAuthState, () => ({ required: false }));
-}
-
-function useReconnectRequired() {
-  return useSyncExternalStore(subscribeConnectionState, getConnectionState, () => ({ reconnectRequired: false }));
 }
 
 function useOutbox() {
@@ -82,20 +90,21 @@ export function InstallAction({ showStatus = false, label = 'Install' }: { showS
 }
 
 function AuthBanner() {
-  const online = useOnlineStatus();
+  const connection = useConnectionState();
   const auth = useAuthRequired();
-  const reconnect = useReconnectRequired();
-  if (!auth.required && !reconnect.reconnectRequired) return null;
-  const message = auth.required ? 'Your secure session has expired. Reconnect to continue syncing; queued expenses remain on this device.' : 'The connection failed while you are online. Reconnect or check your session; queued expenses remain on this device.';
+  if (!auth.required && connection.status !== 'connection-issue' && connection.status !== 'checking') return null;
+  const checking = !auth.required && connection.status === 'checking';
+  const message = auth.required ? 'Your secure session has expired. Sign in again to continue syncing; queued expenses remain on this device.' : checking ? 'Checking connection before resuming sync; queued expenses remain on this device.' : 'Connection issue. Retry to revalidate; queued expenses remain on this device.';
   const returnTo = sanitizeReturnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`);
-  return <div className="auth-banner" role="alert"><span>{message}</span>{online ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Reconnect</button></SignInButton> : <button type="button" disabled>Reconnect when online</button>}</div>;
+  const retry = () => { void initializeAuthLifecycle({ networkOnly: true }); };
+  return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 
 export function TopBar() {
-  const online = useOnlineStatus();
+  const connection = useConnectionState();
   const outbox = useOutbox();
   const unsynced = outbox.length;
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator ${online ? 'network-indicator--online' : 'network-indicator--offline'}`} role="status">{online ? 'Online' : 'Offline'}{unsynced ? ` · ${unsynced} pending` : ''}</span><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {

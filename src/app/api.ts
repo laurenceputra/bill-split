@@ -11,7 +11,8 @@ export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authorit
 export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
 export type AuthState = { required: boolean; code?: AuthRequiredCode };
-export type ConnectionState = { reconnectRequired: boolean };
+export type ConnectionStatus = 'checking' | 'connected' | 'connection-issue' | 'offline';
+export type ConnectionState = { status: ConnectionStatus; reconnectRequired: boolean };
 export type AuthLifecycleStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'trusted-offline' | 'verification-unavailable';
 export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown };
 
@@ -23,7 +24,8 @@ export class ClerkSignOutFailure extends Error {
 }
 
 let authState: AuthState = { required: false };
-let connectionState: ConnectionState = { reconnectRequired: false };
+let connectionState: ConnectionState = { status: typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'checking', reconnectRequired: false };
+let authoritativeConnection = false;
 let verifiedIdentity: CurrentUser | undefined;
 let verifiedClerkUserId: string | undefined;
 let clerkUserIdHydrated = false;
@@ -45,6 +47,9 @@ export const getAuthState = () => authState;
 export const subscribeAuthState = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
 export const getConnectionState = () => connectionState;
 export const subscribeConnectionState = (listener: () => void) => { connectionListeners.add(listener); return () => connectionListeners.delete(listener); };
+// A successful arbitrary API request proves transport reachability, but the
+// outbox may resume only after the current session has also passed /api/me.
+export const isUsableConnection = () => connectionState.status === 'connected' && authoritativeConnection;
 export const getAuthLifecycle = () => authLifecycle;
 export const subscribeAuthLifecycle = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
 const setAuthLifecycle = (next: AuthLifecycle) => { if (authLifecycle.status === next.status && authLifecycle.error === next.error) return; authLifecycle = next; setResourceAuthLifecycleReady(next.status === 'authenticated' || next.status === 'trusted-offline'); authListeners.forEach((listener) => listener()); };
@@ -100,17 +105,41 @@ export const getTrustedOfflineClerkUserId = () => verifiedClerkUserId;
 export const getVerifiedClerkUserId = () => verifiedClerkUserId;
 export const getVerifiedUserId = () => verifiedIdentity?.id;
 export const isTrustedOfflineClerkUserIdHydrated = () => clerkUserIdHydrated;
-const signalReconnectRequired = () => {
-  if (connectionState.reconnectRequired) return;
-  connectionState = { reconnectRequired: true };
+const setConnectionState = (status: ConnectionStatus, reconnectRequired = status === 'connection-issue') => {
+  if (connectionState.status === status && connectionState.reconnectRequired === reconnectRequired) return;
+  if (status !== 'connected') authoritativeConnection = false;
+  connectionState = { status, reconnectRequired };
   connectionListeners.forEach((listener) => listener());
-  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-reconnect-required'));
+  if (typeof window !== 'undefined') {
+    if (status === 'connection-issue') window.dispatchEvent(new CustomEvent('billsplit-reconnect-required'));
+    if (status === 'connected') window.dispatchEvent(new CustomEvent('billsplit-connection-restored'));
+  }
 };
-const clearReconnectRequired = () => {
-  if (!connectionState.reconnectRequired) return;
-  connectionState = { reconnectRequired: false };
-  connectionListeners.forEach((listener) => listener());
+const signalReconnectRequired = () => setConnectionState('connection-issue');
+const clearReconnectRequired = (authoritative = false) => {
+  if (authoritative) authoritativeConnection = true;
+  setConnectionState('connected', false);
 };
+const signalOffline = () => setConnectionState('offline', false);
+export const signalConnectionChecking = () => {
+  setConnectionState('checking', false);
+  // A browser `online` hint is not proof that the authenticated session is
+  // usable again. Start the authoritative check here as well as from the
+  // React lifecycle so embedded browsers which do not mount the private shell
+  // cannot leave an authenticated/trusted session on a stale trust-cache path.
+  if (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline') {
+    void initializeAuthLifecycle({ networkOnly: true, clerkUserId: verifiedClerkUserId, startupFallbackMs: 2_500 });
+  }
+};
+const isRetryableConnectionError = (error: unknown) => error instanceof ApiError && (
+  error.networkFailure || error.code === 'NETWORK_TIMEOUT' || error.code === 'PROTOCOL_ERROR' ||
+  error.status === 408 || error.status === 429 || (error.status !== undefined && error.status >= 500)
+);
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('offline', signalOffline);
+  window.addEventListener('online', signalConnectionChecking);
+}
 
 /** Keep Clerk's post-auth destination on this public shell and out of API paths. */
 export function sanitizeReturnTo(value: unknown): string {
@@ -177,15 +206,17 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   try { response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin' }); }
   catch (error) {
     if (init?.signal?.aborted) throw error;
-    const reconnectRequired = typeof navigator !== 'undefined' && navigator.onLine !== false;
-    if (reconnectRequired && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalReconnectRequired();
-    throw new ApiError(reconnectRequired ? 'Connection failed while online. Reconnect or check your session.' : 'Network connection unavailable.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired });
+    const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) browserOffline ? signalOffline() : signalReconnectRequired();
+    throw new ApiError(browserOffline ? 'Network connection unavailable.' : 'Connection issue. Retry when the connection is available.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired: !browserOffline });
   }
 
   const finalUrl = (() => { try { return new URL(response.url); } catch { return undefined; } })();
   const contentType = response.headers.get('content-type') || '';
   const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected;
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
+  const currentTransportEpoch = expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch);
+  const authoritativePath = path === '/me';
   const assertTransportEpoch = () => {
     // A destructive logout deliberately waits for already-dispatched
     // mutations to settle. Let that transport report its server result, while
@@ -194,10 +225,10 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     if (expectedAuthEpoch !== undefined && !isAuthEpochCurrent(expectedAuthEpoch) && !getSessionLogoutInProgress()) throw new ApiError('The authentication session changed before this response completed.', { status: 401, code: 'AUTH_REQUIRED' });
   };
   if (response.status === 204) {
-    if (authResponse) throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' });
-    if (!response.ok) throw new ApiError(`Request failed (${response.status})`, { status: response.status });
+    if (authResponse) { if (currentTransportEpoch) clearReconnectRequired(authoritativePath); throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' }); }
+    if (!response.ok) { if (currentTransportEpoch) { if (response.status >= 500) signalReconnectRequired(); else clearReconnectRequired(authoritativePath); } throw new ApiError(`Request failed (${response.status})`, { status: response.status }); }
     assertTransportEpoch();
-    clearReconnectRequired();
+    clearReconnectRequired(authoritativePath);
     return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
   }
 
@@ -210,6 +241,9 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   // meaningful API errors.
   const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN';
   if (authResponse || accessDenied) {
+    // Authentication responses are still authoritative evidence that the
+    // server was reached, even though they require a lifecycle transition.
+    if (currentTransportEpoch) clearReconnectRequired(authoritativePath);
     // A request from an earlier Clerk epoch may finish after a new account has
     // started. It must not downgrade the new session.
     const authCode: AuthRequiredCode = responseCode === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
@@ -217,11 +251,12 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: authCode });
   }
   if (body === null || unexpectedFormat) {
+    if (currentTransportEpoch) signalReconnectRequired();
     if (response.status >= 500) throw new ApiError(`Request failed (${response.status})`, { status: response.status, code: 'SERVER_ERROR' });
-    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) signalReconnectRequired();
     throw new ApiError('The server returned an unexpected response. Reconnect and check your session before retrying.', { status: response.status, code: 'PROTOCOL_ERROR', reconnectRequired: true });
   }
   if (!response.ok) {
+    if (currentTransportEpoch) { if (response.status >= 500) signalReconnectRequired(); else clearReconnectRequired(authoritativePath); }
     const errorBody = body as { error?: { code?: string; message?: string } };
     const message = errorBody?.error?.message || `Request failed (${response.status})`;
     const code = errorBody?.error?.code;
@@ -229,7 +264,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     throw new ApiError(message, { status: response.status, code });
   }
   assertTransportEpoch();
-  if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired();
+  if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired(authoritativePath);
   return { data: body as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
 }
 
@@ -384,11 +419,15 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
     } catch (error) {
       if (options.signal?.aborted) throw error;
       if (!isNetwork(error)) throw error;
+      // A timeout can win the bounded race before fetch itself rejects, so
+      // make the connection decision here as well as in the transport catch.
+      const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
       const cachedRead = await boundedTrustRead();
       const cached = cachedRead.timedOut ? undefined : cachedRead.record;
       if (authGeneration !== authInvalidationGeneration || getSessionLogoutInProgress() || authBlocked || !isSessionGenerationCurrent(generation)) throw error;
       const offlineCacheAllowed = cached && isOfflineTrustUsable(cached) && cachedTrustMatches(options.clerkUserId, cached);
       if (offlineCacheAllowed) {
+        if (browserOffline) signalOffline(); else signalReconnectRequired();
         const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
         verifiedIdentity = { id: cached.userId, email: cached.email, personId: cached.personId };
         verifiedClerkUserId = cached.clerkUserId;
@@ -398,6 +437,7 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
         setAuthLifecycle({ status: 'trusted-offline' });
         return result;
       }
+      if (browserOffline) signalOffline(); else signalReconnectRequired();
       throw error;
     } finally {
       // Abort is cleanup only. The raced promise remains observed so a late
@@ -417,8 +457,12 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
   let authEpoch = getAuthEpoch();
   const key = `${authEpoch}:${options.clerkUserId || ''}:${options.networkOnly === true}`;
   if (authLifecycleRequest?.key === key) return authLifecycleRequest.promise;
-  const forceReverify = options.networkOnly === true;
   const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+  // `checking` is entered by the online transition. It must never take the
+  // durable trust record fast path: only an authoritative /api/me response
+  // may resolve this probe back to connected/authenticated.
+  const forceReverify = options.networkOnly === true || (connectionState.status === 'checking' && browserOnline);
+  const previousUsableLifecycle = authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline' ? authLifecycle.status : undefined;
   const currentSessionMatches = authLifecycle.status === 'authenticated' && verifiedIdentity && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId);
   if ((authLifecycle.status === 'authenticated' || (authLifecycle.status === 'trusted-offline' && !browserOnline)) && !forceReverify && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId)) {
     // An expired record must not block an already authoritative session from
@@ -467,6 +511,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
       // Online/unknown Clerk startup must first try the authoritative path.
       // A complete, active record is only the bounded-unavailability fallback.
       if (!browserOnline && !forceReverify && !getSessionLogoutInProgress() && !authBlocked && trust && isOfflineTrustUsable(trust) && cachedTrustMatches(options.clerkUserId, trust)) {
+        signalOffline();
         assertAuthEpoch(authEpoch);
         const user = { id: trust.userId, email: trust.email, personId: trust.personId };
         verifiedIdentity = user;
@@ -488,10 +533,12 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
       if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID')) {
         assertAuthEpoch(authEpoch);
         setAuthLifecycle({ status: 'unauthenticated' });
-      } else if (currentSessionMatches && isNetwork(error)) {
+      } else if (isRetryableConnectionError(error) && (currentSessionMatches || previousUsableLifecycle)) {
         // Expiry blocks a fresh offline bootstrap, but never strands a live
         // authoritative session or its queue while a refresh is unavailable.
         assertAuthEpoch(authEpoch);
+        if (browserOnline) signalReconnectRequired(); else signalOffline();
+        if (previousUsableLifecycle && authLifecycle.status !== previousUsableLifecycle) setAuthLifecycle({ status: previousUsableLifecycle });
       } else if (authLifecycle.status !== 'unauthenticated') {
         assertAuthEpoch(authEpoch);
         setAuthLifecycle({ status: 'verification-unavailable', error });

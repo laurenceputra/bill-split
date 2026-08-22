@@ -6,7 +6,7 @@ import { currencyOptions, scheduledExpenseInput, type ExpenseInput, type Schedul
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
 import { ApiError, api, changeScheduledExpenseStatus, createScheduledExpense, getActivity, getAuthLifecycle, getBalances, getCategories, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getScheduledExpense, getScheduledExpenses, getSettlements, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, updateScheduledExpense, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isDevelopmentAuthBypass, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, markSignedOut, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
-import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, useOnlineStatus } from './ui';
+import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
@@ -19,11 +19,12 @@ import { localDateForTimeZone } from '../domain/recurrence';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
-const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection failed while online. Reconnect or check your session; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
+const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection issue. Retry when the connection is available; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
 function VerificationUnavailable({ onRetry }: { onRetry: () => void }) {
-  const online = useOnlineStatus();
-  return <PublicShell showAuthActions={false}><div className="public-status" role="status" aria-live="polite"><h1>{online ? 'Verification is unavailable' : 'You are offline'}</h1><p className="muted">BillSplit could not verify this browser for private access. Reconnect or try again; the app will not treat an unverified account as signed out.</p><Button type="button" variant="secondary" onClick={onRetry}>Retry verification</Button></div></PublicShell>;
+  const connection = useConnectionState();
+  const title = connection.status === 'offline' ? 'You are offline' : connection.status === 'connection-issue' ? 'Connection issue' : 'Verification is unavailable';
+  return <PublicShell showAuthActions={false}><div className="public-status" role="status" aria-live="polite"><h1>{title}</h1><p className="muted">BillSplit could not verify this browser for private access. Retry when the connection is available; the app will not treat an unverified account as signed out.</p><Button type="button" variant="secondary" onClick={onRetry}>Retry verification</Button></div></PublicShell>;
 }
 
 function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
@@ -49,6 +50,12 @@ function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
 }
 function ErrorBox({ error, id = 'resource-error', onRetry, retryLabel = 'Try again' }: { error: unknown; id?: string; onRetry?: () => void; retryLabel?: string }) {
   return <div className="error" id={id} role="alert" aria-live="assertive"><span>{errorText(error)}</span>{onRetry ? <Button type="button" variant="secondary" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
+}
+const connectionBannerLabel = (status: ReturnType<typeof useConnectionState>['status']) => status === 'checking' ? 'Checking connection' : status === 'connection-issue' ? 'Connection issue' : 'Offline';
+function ConnectionBanner({ detail }: { detail: string }) {
+  const connection = useConnectionState();
+  const label = connectionBannerLabel(connection.status);
+  return <p className={`offline-banner connection-banner connection-banner--${connection.status}`} role={connection.status === 'connection-issue' ? 'alert' : 'status'}>{label} · {detail}</p>;
 }
 function Empty({ children }: { children: ReactNode }) { return <div className="empty">{children}</div>; }
 function retryFor<T>(key: string, userId: string | undefined, identityFailure = false) {
@@ -81,7 +88,7 @@ const nameOf = (members: GroupMember[], id: string) => members.find((member) => 
 const moneyInput = (minor: number) => (minor / 100).toFixed(2);
 
 function Home() {
-  const online = useOnlineStatus();
+   const online = useOnlineStatus();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const groupsResource = useResource<{ groups: Group[] }>(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id, (signal) => getGroups(signal), RESOURCE_FRESHNESS.groups, me.data?.id ? () => hydrateGroups(me.data!.id) : undefined);
   const groups = groupsResource.data?.groups || [];
@@ -148,7 +155,7 @@ function Home() {
     <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Friends &amp; groups</h1></div><div className="home-actions"><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'friend' ? undefined : 'friend'); }}>+ Add friend</Button><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'group' ? undefined : 'group'); }} variant="secondary">New group</Button></div></div>
       {formMode === 'friend' && <Surface><h2>Add friend</h2><p className="muted">Use the exact email your friend uses to sign in with Clerk to link them to this shared group ledger. Clerk verifies and asserts their identity; it does not grant group access. Leave it blank for a ledger-only friend; no email means they cannot log in to this ledger.</p><form onSubmit={createFriend} aria-describedby={createError ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-friend-error' : undefined} value={friendName} onChange={(event) => { setCreateError(undefined); setFriendName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={friendEmail} onChange={(event) => { setCreateError(undefined); setFriendEmail(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={friendCurrency} onChange={(value) => { setCreateError(undefined); setFriendCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-friend-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Adding…' : 'Add friend'}</Button></form></Surface>}
      {formMode === 'group' && <Surface><h2>New group</h2><p className="muted">Create a group for three or more people, then add friends from the group page.</p><form onSubmit={createGroup} aria-describedby={createError ? 'create-group-error' : undefined}><Field label="Group name"><input id="group-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-group-error' : undefined} value={name} onChange={(event) => { setCreateError(undefined); setName(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={(value) => { setCreateError(undefined); setCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-group-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Creating…' : 'Create group'}</Button></form></Surface>}
-     {offlineView ? <p className="offline-banner" role="status">Offline · showing your last verified groups. Friend and group creation require a connection; Add Expense remains available from cached groups.</p> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
+      {offlineView ? <ConnectionBanner detail="showing your last verified groups. Friend and group creation require a connection; Add Expense remains available from cached groups." /> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
      {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards">{groups.map((group) => <Link className="card" to={`/groups/${group.id}`} key={group.id}><strong className="card__name">{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</strong><div className="card__balances">{groupBalanceDisplays(group.balanceSummaries, group.currency).map((display, index) => display.kind === 'balance' ? <span className="card__balance" key={`${display.currency}-${index}`}><span className="card__balance-label">{display.label}</span><span className="card__balance-money"><Money amountMinor={display.amountMinor} currency={display.currency} tone={display.label === 'You are owed' ? 'positive' : 'debt'} /><small>{display.currency}</small></span></span> : <span className={`card__balance card__balance--${display.kind}`} key={`${display.label}-${index}`}><span className="card__balance-label">{display.label}</span><small>{display.currency}</small></span>)}</div></Link>)}</div> : <Empty>No groups yet. Add a friend or create a group to get started.</Empty>}</> : null}
   </Layout>;
 }
@@ -202,7 +209,7 @@ function GroupPage() {
    return <Layout>
      <Link to="/" className="back">← Groups</Link>
         <div className="page-title"><div><p className="eyebrow">{group.memberCount === 2 ? 'Friend group' : `${group.currency} group`}</p><h1>{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</h1></div><div className="expense-heading__actions"><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link><Link className="button button--secondary" to={`/groups/${id}/settle`}>Settle up</Link></div></div>
-       {offlineView ? <p className="offline-banner" role="status">Offline · stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection.</p> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
+        {offlineView ? <ConnectionBanner detail="stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
          <div className="actions"><Link to={`/activity?group=${encodeURIComponent(id)}`}>Activity</Link></div>
       <div className="group-overview-grid">
            <section className="stack stack--content"><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
@@ -460,7 +467,7 @@ function ExpenseForm() {
 
   return <Layout>
         <div className="page-title expense-heading"><div><Link to={routeGroupId ? `/groups/${id}` : '/'} className="back">← <span className="back__label">{routeGroupId ? group.name : 'Groups'}</span></Link><p className="eyebrow">{scheduleMode ? (scheduledExpenseId ? 'Edit scheduled expense' : 'New scheduled expense') : expenseId ? 'Edit expense' : 'New expense'}</p><h1>{scheduleMode ? (scheduledExpenseId ? 'Edit recurring expense' : 'Schedule an expense') : expenseId ? 'Edit expense' : 'Add expense'}</h1></div><div className="expense-heading__actions"><Link className="button button--secondary" to={routeGroupId ? `/groups/${id}` : '/'}>Cancel</Link></div></div>{meResource.error ? <CachedIdentityNotice resource={meResource} id="expense-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group details" retry={retryFor(resourceKeys.group(formUserId, id), meResource.data?.id)} /> : null}{expenseId && detailResource.error ? <ResourceNotice resource={detailResource} label="expense form data" retry={retryFor(resourceKeys.expenseDetail(formUserId, expenseId), meResource.data?.id)} /> : null}{scheduledExpenseId && scheduleResource.error ? <ResourceNotice resource={scheduleResource} label="scheduled expense form data" retry={retryFor(resourceKeys.scheduledExpense(formUserId, scheduledExpenseId), meResource.data?.id)} /> : null}
-        {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <p className="offline-banner" role="status">{scheduleMode ? 'Schedule management is online-only. Reconnect before saving changes.' : 'Editing expenses is online-only. Reconnect before saving changes.'}</p> : null}<form className="expense-form reading-width" onSubmit={submit} aria-describedby={formError ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined}>
+         {updatedElsewhere ? <div className="offline-banner updated-elsewhere" role="status"><span>Updated elsewhere. Your changes are preserved.</span><Button type="button" variant="secondary" onClick={resetToServer}>Reload</Button></div> : null}{editUnavailable ? <ConnectionBanner detail={scheduleMode ? 'Schedule management is online-only. Reconnect before saving changes.' : 'Editing expenses is online-only. Reconnect before saving changes.'} /> : null}<form className="expense-form reading-width" onSubmit={submit} aria-describedby={formError ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined}>
           {!expenseId && !scheduledExpenseId ? <Field label="Group / person" className="field--compact"><select required aria-label="Expense group" value={id} onChange={(event) => { setTargetGroupId(event.target.value); setDirty(false); }}><option value="" disabled>Choose a group</option>{(groupsResource.data?.groups || []).map((option) => <option value={option.id} key={option.id}>{option.memberCount === 2 && option.counterpartName ? option.counterpartName : option.name}</option>)}</select></Field> : null}
           <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input id="expense-amount" className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" aria-invalid={formError?.target === 'amount'} aria-describedby={formError?.target === 'amount' ? 'expense-form-error' : undefined} placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
           <Field label="Description" className="field--compact"><input id="expense-description" required aria-invalid={formError?.target === 'description'} aria-describedby={formError?.target === 'description' ? 'expense-form-error' : undefined} placeholder="What was this for?" value={description} onChange={(event) => { markDirty(); setDescription(event.target.value); }} /></Field>{!expenseId && !scheduledExpenseId ? <label className="checkbox-row recurrence-toggle" htmlFor="repeat-expense"><input id="repeat-expense" type="checkbox" checked={recurrenceEnabled} onChange={(event) => { markDirty(); setRecurrenceEnabled(event.target.checked); }} /><span>Repeat this expense</span></label> : null}
@@ -574,7 +581,7 @@ function LegacyActivityRedirect() {
 }
 
 function Settings() {
-  const online = useOnlineStatus();
+  const connection = useConnectionState();
   const [outbox, setOutbox] = useState<ExpenseOutboxItem[]>(getOutboxSnapshot());
   const [outboxReady, setOutboxReady] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -616,7 +623,7 @@ function Settings() {
 
   return <Layout>
     <div className="page-title"><div><p className="eyebrow">More</p><h1>Settings</h1></div></div>
-    <section><h2>Device</h2><p className="muted" role="status">{online ? 'Online' : 'Offline'} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
+    <section><h2>Device</h2><p className="muted" role="status">{connectionStatusLabel(connection.status)} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
     <section><h2>Pending expenses</h2>{outbox.length ? <div className="list">{outbox.map((item) => <div className="row" key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><strong>{item.display.currency} {(item.display.amountMinor / 100).toFixed(2)}</strong></div>)}</div> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</section>
      <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores a Clerk token, and replay still requires an active Clerk session. Only use this on a device you trust.</p></section>
      <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
@@ -643,7 +650,9 @@ export function App() {
   const offlineStartedBeforeClerkRef = useRef(false);
   const previousOnlineRef = useRef<boolean>();
   const previousClerkEvidenceRef = useRef<string>();
-  const online = useOnlineStatus();
+  const connection = useConnectionState();
+  const online = connection.status === 'connected';
+  const offline = connection.status === 'offline';
   useEffect(() => {
     // Start the bounded bootstrap even while Clerk is still restoring. A
     // Provider loading and the browser connectivity hint are not auth deadlines.
@@ -670,18 +679,18 @@ export function App() {
     const offlineAccountChanged = shouldRevokeForOfflineClerkUser(providerChangedAfterOfflineStart, isSignedIn === true, currentClerkUserId, cachedOfflineClerkUserId, clerkUserIdHydrated);
     const sessionTransition = sessionChanged || offlineAccountChanged;
     if (online && sessionTransition) resetForClerkSessionChange();
-    else if (!online && sessionTransition) revokeForClerkSessionChange();
+    else if (offline && sessionTransition) revokeForClerkSessionChange();
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
     if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
       clerkSessionRef.current = undefined;
       markSignedOut();
       return;
     }
-    if (!(sessionTransition && !online)) void initializeAuthLifecycle({ startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connectivityChanged || clerkEvidenceChanged) && shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
-  }, [auth.status, isLoaded, isSignedIn, online, sessionId, userId]);
+    if (!(sessionTransition && offline)) void initializeAuthLifecycle({ startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connection.status === 'checking' || (connectivityChanged || clerkEvidenceChanged) && (shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) || auth.status === 'authenticated')) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
+  }, [auth.status, connection.status, isLoaded, isSignedIn, offline, online, sessionId, userId]);
   useEffect(() => {
     if (isDefinitivelySignedOut(isLoaded === true, isSignedIn) && !isDevelopmentAuthBypass) return;
-    const retry = () => { void initializeAuthLifecycle({ networkOnly: auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
+    const retry = () => { void initializeAuthLifecycle({ networkOnly: auth.status === 'authenticated' || auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
     window.addEventListener('online', retry);
     window.addEventListener('focus', retry);
     document.addEventListener('visibilitychange', retry);

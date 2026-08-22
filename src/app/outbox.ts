@@ -1,4 +1,4 @@
-import { api, ApiError, getAuthEpoch, getAuthLifecycle, getVerifiedUserId, isAuthEpochCurrent, subscribeAuthLifecycle } from './api';
+import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getTrustedOfflineClerkUserId, getVerifiedUserId, initializeAuthLifecycle, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
 import {
   claimOutboxItem, discardOutboxIfIdle, isOfflineTrustUsable, listOutbox, markOutboxAuthRequired, readOfflineTrust, readOutboxItem,
   reactivateAuthRequired, recoverStaleSyncing, releaseOutboxClaimIfOwned, removeOutboxIfOwned, resetOutboxIfIdle, saveOutboxItem, updateOutboxIfOwned,
@@ -23,6 +23,9 @@ let initialized = false;
 let initializationPromise: Promise<void> | undefined;
 let snapshot: ExpenseOutboxItem[] = [];
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let connectionRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
+let connectionRecoveryPromise: Promise<void> | undefined;
+let connectionRecoveryAttempts = 0;
 let flushAgain = false;
 let logoutQuiescing = getSessionLogoutInProgress();
 const activeControllers = new Set<AbortController>();
@@ -33,7 +36,7 @@ export const RETRY_BASE_DELAY_MS = 1_000;
 export const RETRY_MAX_DELAY_MS = 60_000;
 
 const notify = () => listeners.forEach((listener) => listener());
-const canFlush = () => getAuthLifecycle().status === 'authenticated' && (typeof navigator === 'undefined' || navigator.onLine !== false);
+const canFlush = () => getAuthLifecycle().status === 'authenticated' && isUsableConnection();
 const currentOutboxUserId = () => getAuthLifecycle().status === 'authenticated' ? getVerifiedUserId() : undefined;
 const bounded = <T>(promise: Promise<T>, timeoutMs = OUTBOX_IDB_DEADLINE_MS): Promise<T | undefined> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -55,8 +58,62 @@ const scheduleRetry = (attempts: number) => {
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = scheduleTimer(() => { retryTimer = undefined; void flushOutbox(); }, delay);
 };
-export const cancelScheduledRetry = () => { if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; } };
+export const cancelScheduledRetry = () => {
+  if (retryTimer) { clearTimer(retryTimer); retryTimer = undefined; }
+  if (connectionRecoveryTimer) { clearTimer(connectionRecoveryTimer); connectionRecoveryTimer = undefined; }
+};
 export function setRetrySchedulerForTests(schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>, clear: (timer: ReturnType<typeof setTimeout>) => void) { const previous = { schedule: scheduleTimer, clear: clearTimer }; scheduleTimer = schedule; clearTimer = clear; return () => { scheduleTimer = previous.schedule; clearTimer = previous.clear; }; }
+
+const hasQueuedWork = () => snapshot.some((item) => item.status === 'pending' || item.status === 'syncing' || item.status === 'auth-required');
+const scheduleConnectionRecovery = (delay = retryDelay(connectionRecoveryAttempts + 1)) => {
+  // The in-memory snapshot is intentionally cleared while authentication is
+  // checking, so it is not a durable indication that the queue is empty.
+  // Let the recovery pass reload IDB before deciding whether there is work.
+  if (connectionRecoveryTimer || logoutQuiescing || getSessionLogoutInProgress()) return;
+  connectionRecoveryTimer = scheduleTimer(() => {
+    connectionRecoveryTimer = undefined;
+    void recoverConnection();
+  }, delay);
+};
+
+/**
+ * Reverify the live identity before allowing the queue to send. This is also
+ * used as a polling fallback: browsers and embedded webviews do not always
+ * deliver an `online` event when connectivity returns.
+ */
+export async function recoverConnection() {
+  if (connectionRecoveryPromise || logoutQuiescing || getSessionLogoutInProgress()) return;
+  // Rebuild the queue from its durable per-user store first. In particular,
+  // this handles authenticated/trusted-offline -> checking -> failed probe ->
+  // trusted-offline, where the visible snapshot is deliberately revoked while
+  // the identity is being checked.
+  await refreshOutbox();
+  if (!hasQueuedWork()) return;
+  const lifecycle = getAuthLifecycle().status;
+  if (lifecycle !== 'authenticated' && lifecycle !== 'trusted-offline') return;
+  connectionRecoveryPromise = (async () => {
+    const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (browserOffline) {
+      connectionRecoveryAttempts += 1;
+      scheduleConnectionRecovery(retryDelay(connectionRecoveryAttempts));
+      return;
+    }
+    try {
+      await initializeAuthLifecycle({ networkOnly: true, clerkUserId: getTrustedOfflineClerkUserId(), startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
+      if (getAuthLifecycle().status === 'authenticated' && isUsableConnection()) {
+        connectionRecoveryAttempts = 0;
+        await flushOutbox();
+      } else {
+        connectionRecoveryAttempts += 1;
+        scheduleConnectionRecovery(retryDelay(connectionRecoveryAttempts));
+      }
+    } catch {
+      connectionRecoveryAttempts += 1;
+      scheduleConnectionRecovery(retryDelay(connectionRecoveryAttempts));
+    }
+  })().finally(() => { connectionRecoveryPromise = undefined; });
+  await connectionRecoveryPromise;
+}
 export async function refreshOutbox() {
   if (logoutQuiescing || getSessionLogoutInProgress()) return;
   let next: ExpenseOutboxItem[] = [];
@@ -216,7 +273,10 @@ async function markAuthRequired(userId: string, error: ApiError, expectedAuthEpo
 }
 
 export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
-   if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
+   if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) {
+     if (!logoutQuiescing && !getSessionLogoutInProgress() && (getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline')) scheduleConnectionRecovery();
+     return;
+   }
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
   if (flushPromise) { flushAgain = true; return flushPromise; }
   cancelScheduledRetry();
@@ -372,14 +432,25 @@ function resumeAfterFailedLogout() {
 registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
+  if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void recoverConnection(); });
+  window.addEventListener('billsplit-connection-restored', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   window.addEventListener('billsplit-outbox-changed', () => void refreshOutbox());
   window.addEventListener('billsplit-cache-cleared', (event) => { if ((event as CustomEvent<{ clearOutbox?: boolean }>).detail?.clearOutbox) { snapshot = []; notify(); } void refreshOutbox(); });
   window.addEventListener('billsplit-authenticated', (event) => { const detail = (event as CustomEvent<{ userId?: string; authEpoch?: number }>).detail; if (detail?.userId && detail.authEpoch !== undefined && !logoutQuiescing) void handleAuthenticatedUser(detail.userId, detail.authEpoch); });
 }
+
+subscribeConnectionState(() => {
+  if (getConnectionState().status === 'connected') {
+    connectionRecoveryAttempts = 0;
+    if (connectionRecoveryTimer) { clearTimer(connectionRecoveryTimer); connectionRecoveryTimer = undefined; }
+    if (typeof document === 'undefined' || document.visibilityState === 'visible') void flushOutbox();
+  } else if (getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline') {
+    scheduleConnectionRecovery(getConnectionState().status === 'checking' ? 0 : undefined);
+  }
+});
 
 // Auth downgrades abort an in-flight send and cancel any work which might
 // otherwise be restarted by a stale completion.
@@ -389,7 +460,13 @@ subscribeAuthLifecycle(() => {
   if ((lifecycleStatus === 'authenticated' && (!authenticatedUserId || snapshot.some((item) => item.userId !== authenticatedUserId))) || (lifecycleStatus !== 'authenticated' && lifecycleStatus !== 'trusted-offline')) {
     if (snapshot.length) { snapshot = []; notify(); }
   }
-  if (getAuthLifecycle().status === 'authenticated') return;
+  if (getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline') {
+    void refreshOutbox().then(() => {
+      if (!isUsableConnection()) scheduleConnectionRecovery();
+      else if (typeof document === 'undefined' || document.visibilityState === 'visible') void flushOutbox();
+    }).catch(() => scheduleConnectionRecovery());
+    return;
+  }
   flushAgain = false;
   cancelScheduledRetry();
   for (const controller of activeControllers) controller.abort();

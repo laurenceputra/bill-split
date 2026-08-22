@@ -283,6 +283,7 @@ export function initializeForegroundCoordinator() {
   window.addEventListener('focus', () => { if (isVisible()) schedule(true); });
   window.addEventListener('pageshow', () => { if (isVisible()) schedule(true); });
   window.addEventListener('online', () => { if (isVisible()) schedule(); });
+  window.addEventListener('billsplit-connection-restored', () => { if (isVisible()) schedule(); });
 }
 export const isDocumentVisible = () => visible && isVisible();
 
