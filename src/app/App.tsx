@@ -4,7 +4,7 @@ import { SignInButton, SignUpButton, useAuth, useClerk } from '@clerk/react';
 import type { Activity as ActivityItem, Balances, Currency, Expense, Group, GroupMember, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Weekday } from '../shared/types';
 import { currencyOptions, scheduledExpenseInput, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
-import { ApiError, api, changeScheduledExpenseStatus, createScheduledExpense, getActivity, getAuthLifecycle, getBalances, getCategories, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getScheduledExpense, getScheduledExpenses, getSettlements, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, updateScheduledExpense, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isDevelopmentAuthBypass, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, markSignedOut, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+import { ApiError, api, changeScheduledExpenseStatus, coordinateAuthBootstrap, createScheduledExpense, getActivity, getAuthLifecycle, getBalances, getCategories, getExpenseDetails, getExpenses, getGroup, getGroups, getMe, getScheduledExpense, getScheduledExpenses, getSettlements, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, updateScheduledExpense, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
@@ -654,9 +654,9 @@ export function App() {
   const online = connection.status === 'connected';
   const offline = connection.status === 'offline';
   useEffect(() => {
-    // Start the bounded bootstrap even while Clerk is still restoring. A
-    // Provider loading and the browser connectivity hint are not auth deadlines.
-    // The old `!isLoaded && !online` branch intentionally no longer gates it.
+    // Clerk owns restoration. The coordinator starts its bounded deadline;
+    // the old `!isLoaded && !online` branch must never gate it, and this is
+    // the only code path from React which can request an auth probe.
     if (!shouldStartAuthCheck(online, isLoaded) && !isDevelopmentAuthBypass) return;
     if (!isLoaded) offlineStartedBeforeClerkRef.current = true;
     const sessionKey = userId && sessionId ? `${userId}:${sessionId}` : undefined;
@@ -683,26 +683,26 @@ export function App() {
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
     if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
       clerkSessionRef.current = undefined;
-      markSignedOut();
+      void coordinateAuthBootstrap({ isLoaded: true, isSignedIn: false });
       return;
     }
-    if (!(sessionTransition && offline)) void initializeAuthLifecycle({ startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connection.status === 'checking' || (connectivityChanged || clerkEvidenceChanged) && (shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) || auth.status === 'authenticated')) ? { networkOnly: true } : {}), ...(currentClerkUserId ? { clerkUserId: currentClerkUserId } : {}) });
+    if (!(sessionTransition && offline)) void coordinateAuthBootstrap({ isLoaded: isLoaded === true, isSignedIn, ...(currentClerkUserId ? { userId: currentClerkUserId } : {}), ...(sessionId ? { sessionId } : {}) }, { startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connection.status === 'checking' || (connectivityChanged || clerkEvidenceChanged) && (shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) || auth.status === 'authenticated')) ? { networkOnly: true } : {}) });
   }, [auth.status, connection.status, isLoaded, isSignedIn, offline, online, sessionId, userId]);
-  useEffect(() => {
-    if (isDefinitivelySignedOut(isLoaded === true, isSignedIn) && !isDevelopmentAuthBypass) return;
-    const retry = () => { void initializeAuthLifecycle({ networkOnly: auth.status === 'authenticated' || auth.status === 'trusted-offline', ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) }); };
-    window.addEventListener('online', retry);
-    window.addEventListener('focus', retry);
-    document.addEventListener('visibilitychange', retry);
-    return () => { window.removeEventListener('online', retry); window.removeEventListener('focus', retry); document.removeEventListener('visibilitychange', retry); };
-  }, [auth.status, isLoaded, isSignedIn, userId]);
   const returnTo = `${location.pathname}${location.search}${location.hash}`;
   const sessionTransitionPending = Boolean(clerkSessionRef.current && userId && sessionId && clerkSessionRef.current !== `${userId}:${sessionId}`);
-  const authoritativeClerkIdentityReady = isDevelopmentAuthBypass || !userId || getTrustedOfflineClerkUserId() === userId;
+  const incompleteLoadedSignedInEvidence = isIncompleteLoadedSignedInEvidence(isLoaded === true, isSignedIn, userId || undefined, sessionId || undefined);
+  // An authoritative /api/me response is sufficient for the live identity;
+  // durable trust is an optional offline capability, not a second Loading
+  // gate (a bounded IDB write may fail without invalidating the session).
+  const authoritativeClerkIdentityReady = isDevelopmentAuthBypass || (auth.status === 'authenticated' && Boolean(userId) && getVerifiedClerkUserId() === userId) || (auth.status === 'trusted-offline' && !incompleteLoadedSignedInEvidence && (!userId || getTrustedOfflineClerkUserId() === userId));
   if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
   if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+  // Clerk can report signed-in before it has supplied both pieces of
+  // session evidence. Keep the private route tree out of that bounded window
+  // even if a previously trusted offline lifecycle is still visible.
+  if (incompleteLoadedSignedInEvidence && auth.status !== 'verification-unavailable') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} />;
-  if (auth.status === 'verification-unavailable') return <VerificationUnavailable onRetry={() => void initializeAuthLifecycle({ networkOnly: false, ...(typeof userId === 'string' ? { clerkUserId: userId } : {}) })} />;
+  if (auth.status === 'verification-unavailable') return <VerificationUnavailable onRetry={() => void coordinateAuthBootstrap({ isLoaded: isLoaded === true, isSignedIn, ...(typeof userId === 'string' ? { userId } : {}), ...(sessionId ? { sessionId } : {}) }, { networkOnly: false, force: true })} />;
   if (auth.status === 'authenticated' && (sessionTransitionPending || !authoritativeClerkIdentityReady)) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   return <PrivateRoutes />;
 }

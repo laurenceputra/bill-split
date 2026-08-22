@@ -42,7 +42,14 @@ describe('Clerk authentication boundary', () => {
     expect(api).toContain('blockResourceIdentity');
     expect(app).toContain('sessionTransitionPending');
     expect(app).toContain('authoritativeClerkIdentityReady');
+    expect(app).toContain('getVerifiedClerkUserId() === userId');
     expect(app).toContain('if (auth.status === \'authenticated\' && (sessionTransitionPending || !authoritativeClerkIdentityReady))');
+  });
+
+  it('withholds private routes while loaded signed-in Clerk evidence is incomplete', () => {
+    expect(app).toContain('isIncompleteLoadedSignedInEvidence');
+    expect(app).toContain('if (incompleteLoadedSignedInEvidence && auth.status !== \'verification-unavailable\')');
+    expect(api).toContain('if (isIncompleteSignedInEvidence(clerkEvidence) && authLifecycle.status !== \'checking\')');
   });
 
   it('keeps the real-session bypass confined to the local E2E build and development Worker', () => {

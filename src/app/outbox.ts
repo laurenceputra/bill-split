@@ -1,4 +1,4 @@
-import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getTrustedOfflineClerkUserId, getVerifiedUserId, initializeAuthLifecycle, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
+import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getVerifiedUserId, requestAuthProbe, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
 import {
   claimOutboxItem, discardOutboxIfIdle, isOfflineTrustUsable, listOutbox, markOutboxAuthRequired, readOfflineTrust, readOutboxItem,
   reactivateAuthRequired, recoverStaleSyncing, releaseOutboxClaimIfOwned, removeOutboxIfOwned, resetOutboxIfIdle, saveOutboxItem, updateOutboxIfOwned,
@@ -99,7 +99,7 @@ export async function recoverConnection() {
       return;
     }
     try {
-      await initializeAuthLifecycle({ networkOnly: true, clerkUserId: getTrustedOfflineClerkUserId(), startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
+      await requestAuthProbe({ startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
       if (getAuthLifecycle().status === 'authenticated' && isUsableConnection()) {
         connectionRecoveryAttempts = 0;
         await flushOutbox();
@@ -433,7 +433,6 @@ registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
   if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void recoverConnection(); });
   window.addEventListener('billsplit-connection-restored', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });

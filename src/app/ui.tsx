@@ -4,7 +4,7 @@ import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthState, getConnectionState, initializeAuthLifecycle, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState, type ConnectionState } from './api';
+import { getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState, type ConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -96,7 +96,7 @@ function AuthBanner() {
   const checking = !auth.required && connection.status === 'checking';
   const message = auth.required ? 'Your secure session has expired. Sign in again to continue syncing; queued expenses remain on this device.' : checking ? 'Checking connection before resuming sync; queued expenses remain on this device.' : 'Connection issue. Retry to revalidate; queued expenses remain on this device.';
   const returnTo = sanitizeReturnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`);
-  const retry = () => { void initializeAuthLifecycle({ networkOnly: true }); };
+  const retry = () => { void requestAuthProbe(); };
   return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 
