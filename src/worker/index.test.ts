@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from './index';
 
 class Statement {
@@ -105,6 +105,16 @@ class ScheduledRouteStatement extends Statement {
   }
   async run() { return { meta: { changes: 1 } }; }
 }
+class ProjectionFailureStatement extends Statement {
+  async all<T>() {
+    if (this.sql.includes('FROM groups g LEFT JOIN projection_state')) return { results: [{ id: 'group-1' }] as T[] };
+    return { results: [] as T[] };
+  }
+}
+class ProjectionFailureDb {
+  prepare(sql: string) { return new ProjectionFailureStatement(sql); }
+  async batch() { throw new Error('projection backfill unavailable'); }
+}
 
 describe('worker boundary', () => {
   it('sanitizes bootstrap return paths', async () => {
@@ -148,6 +158,16 @@ describe('worker boundary', () => {
   it('preserves a valid request correlation ID', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com', 'X-Request-ID': 'test-request-1' } }), env(), {} as ExecutionContext);
     expect(response.headers.get('X-Request-ID')).toBe('test-request-1');
+  });
+  it('emits a compact structured completion record without request content', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com', 'X-Request-ID': 'structured-request' } }), env(), {} as ExecutionContext);
+      const records = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, unknown>);
+      expect(records).toContainEqual(expect.objectContaining({ event: 'bill-split.request', requestId: 'structured-request', method: 'GET', status: 200 }));
+      expect(records.find((record) => record.event === 'bill-split.request')).not.toHaveProperty('email');
+      expect(response.status).toBe(200);
+    } finally { log.mockRestore(); }
   });
   it('rejects oversized chunked mutation bodies with a structured error', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(70_000), currency: 'USD' }) }), env(), {} as ExecutionContext);
@@ -255,6 +275,18 @@ describe('worker boundary', () => {
     expect(response.status).toBe(403);
     expect(((await response.json()) as any).error.code).toBe('OWNER_REQUIRED');
   });
+  it('enforces owner-only invitation and member administration routes', async () => {
+    const paths: Array<[string, string]> = [
+      ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'GET'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'POST'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/members/person-1', 'DELETE'],
+    ];
+    for (const [path, method] of paths) {
+      const response = await worker.fetch(new Request(`https://split.example${path}`, { method, headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body: JSON.stringify({ email: 'invitee@example.com' }) } : {}) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: 'OWNER_REQUIRED' } });
+    }
+  });
   it('maps an expense deleted after authorization to a structured conflict', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/expenses/00000000-0000-4000-8000-000000000001', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2025-01-01', version: 1, payers: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }] }) }), env({ DB: new GoneOnUpdateDb() }), {} as ExecutionContext);
     expect(response.status).toBe(409);
@@ -292,7 +324,22 @@ describe('worker boundary', () => {
 
   it('runs the bounded scheduled handler on the unified Worker export', async () => {
      const database = new ScheduledRouteDb();
-     await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: database }), {} as ExecutionContext);
-     expect(database.batches.some((batch) => batch.some((statement: any) => String(statement.sql ?? '').includes('INSERT INTO expenses')))).toBe(true);
+     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+     try {
+       await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: database }), {} as ExecutionContext);
+       expect(database.batches.some((batch) => batch.some((statement: any) => String(statement.sql ?? '').includes('INSERT INTO expenses')))).toBe(true);
+       const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
+       expect(record).toMatchObject({ outcome: 'completed', generated: expect.any(Number), blocked: expect.any(Number), generationCapped: expect.any(Boolean), projection: { ready: true } });
+       expect(record).not.toHaveProperty('email');
+     } finally { log.mockRestore(); }
+  });
+  it('logs a structured projection failure and preserves the scheduled error', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: new ProjectionFailureDb() }), {} as ExecutionContext)).rejects.toThrow('projection backfill unavailable');
+      expect(error.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', stage: 'projection', outcome: 'failed', error: 'UNEXPECTED_ERROR' }));
+      expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'failed', projection: { ready: false } }));
+    } finally { log.mockRestore(); error.mockRestore(); }
   });
 });

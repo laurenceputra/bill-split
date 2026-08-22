@@ -1,5 +1,5 @@
-import type { Activity, Expense, Group, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
-import type { ScheduledExpenseInput } from '../shared/schemas';
+import type { Activity, AuditEvent, CursorPage, Expense, Group, GroupInvitation, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
+import type { ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
@@ -8,7 +8,7 @@ import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, 
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
-export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string };
+export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string; headers?: Headers };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
 export type AuthState = { required: boolean; code?: AuthRequiredCode };
 export type ConnectionStatus = 'checking' | 'connected' | 'connection-issue' | 'offline';
@@ -16,6 +16,12 @@ export type ConnectionState = { status: ConnectionStatus; reconnectRequired: boo
 export type AuthLifecycleStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'trusted-offline' | 'verification-unavailable';
 export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown };
 export type ClerkAuthEvidence = { isLoaded: boolean; isSignedIn: boolean | undefined; userId?: string; sessionId?: string };
+export type ExpensePage = { expenses: Expense[]; nextCursor?: string };
+export type SettlementPage = { settlements: Settlement[]; nextCursor?: string };
+export type ActivityPage = { activity: Activity[]; nextCursor?: string };
+export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
+export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
+export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
 
 export class ClerkSignOutFailure extends Error {
   constructor(message: string) {
@@ -216,7 +222,7 @@ const assertRequestGeneration = (generation: number) => {
   if (!isSessionGenerationCurrent(generation)) throw new ApiError('The local session was cleared.', { status: 401, code: 'AUTH_REQUIRED' });
 };
 
-async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<ApiResponse<T>> {
+async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number, responseMode: 'json' | 'blob' = 'json'): Promise<ApiResponse<T>> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
   headers.set('X-Requested-With', 'XMLHttpRequest');
@@ -254,7 +260,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     if (!response.ok) { if (currentTransportEpoch) { if (response.status >= 500) signalReconnectRequired(); else clearReconnectRequired(authoritativePath); } throw new ApiError(`Request failed (${response.status})`, { status: response.status }); }
     assertTransportEpoch();
     clearReconnectRequired(authoritativePath);
-    return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
+     return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined, headers: response.headers };
   }
 
   const bodyText = await response.clone().text();
@@ -274,6 +280,11 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     const authCode: AuthRequiredCode = responseCode === 'IDENTITY_MISMATCH' || signedInClerkEvidence || incompleteSignedInClerkEvidence ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
     if (!authEvidenceRestoring && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalAuthRequired(authCode);
     throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: authCode });
+  }
+  if (responseMode === 'blob' && response.ok) {
+    assertTransportEpoch();
+    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired(authoritativePath);
+    return { data: await response.blob() as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined, headers: response.headers };
   }
   if (body === null || unexpectedFormat) {
     if (currentTransportEpoch) signalReconnectRequired();
@@ -304,6 +315,11 @@ export function apiWithMeta<T>(path: string, init?: RequestInit, expectedAuthEpo
   return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
     ? runMutation(() => apiWithMetaTransport<T>(path, init, requestEpoch))
     : apiWithMetaTransport<T>(path, init, requestEpoch);
+}
+
+export function apiBlobWithMeta(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<ApiResponse<Blob>> {
+  const requestEpoch = expectedAuthEpoch ?? getAuthEpoch();
+  return apiWithMetaTransport<Blob>(path, init, requestEpoch, 'blob');
 }
 
 export async function api<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number): Promise<T> { return (await apiWithMeta<T>(path, init, expectedAuthEpoch)).data; }
@@ -883,12 +899,60 @@ export async function getGroup(id: string, signal?: AbortSignal): Promise<Cached
   }
 }
 
-export async function getExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<{ expenses: Expense[] }>> {
+export async function getPendingInvitations(signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
+  return (await apiWithMeta<{ invitations: GroupInvitation[] }>('/invitations', { signal })).data;
+}
+
+export const getCurrentUserInvitations = getPendingInvitations;
+export const getInvitations = getPendingInvitations;
+
+export async function getOwnerInvitations(groupId: string, signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
+  return (await apiWithMeta<{ invitations: GroupInvitation[] }>(`/groups/${groupId}/invitations`, { signal })).data;
+}
+export const getGroupInvitations = getOwnerInvitations;
+
+export async function createGroupInvitation(groupId: string, email: string) {
+  return api<{ invitation: GroupInvitation }>(`/groups/${groupId}/invitations`, { method: 'POST', body: JSON.stringify({ email }) });
+}
+export const createInvitation = createGroupInvitation;
+
+export async function revokeGroupInvitation(groupId: string, invitationId: string) {
+  return api<void>(`/groups/${groupId}/invitations/${invitationId}`, { method: 'DELETE' });
+}
+export const revokeInvitation = revokeGroupInvitation;
+
+export async function acceptInvitation(invitationId: string) {
+  return api<{ invitation: GroupInvitation }>(`/invitations/${invitationId}/accept`, { method: 'POST' });
+}
+
+export async function rejectInvitation(invitationId: string) {
+  return api<void>(`/invitations/${invitationId}/reject`, { method: 'POST' });
+}
+
+export async function removeGroupMember(groupId: string, personId: string) {
+  return api<void>(`/groups/${groupId}/members/${personId}`, { method: 'DELETE' });
+}
+export const removeMember = removeGroupMember;
+
+const pageParams = (options: { limit?: number; cursor?: string } = {}) => {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  return params.toString();
+};
+
+export async function getExpensePage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<ExpensePage> {
+  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
+  return (await apiWithMeta<ExpensePage>(`/groups/${groupId}/expenses?${query}`, { signal })).data;
+}
+export const getExpensesPage = getExpensePage;
+
+export async function getExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<ExpensePage>> {
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ expenses: Expense[] }>(`/groups/${id}/expenses`, { signal });
+     const result = await apiWithMeta<ExpensePage>(`/groups/${id}/expenses?limit=50`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
      if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
     return result.data;
@@ -896,7 +960,7 @@ export async function getExpenses(id: string, signal?: AbortSignal): Promise<Cac
     assertRequestGeneration(generation);
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
-    if (cached?.expenses) return offline({ expenses: cached.expenses });
+     if (cached?.expenses) return offline({ expenses: cached.expenses });
     throw error;
   }
 }
@@ -918,11 +982,17 @@ export async function getBalances(id: string, signal?: AbortSignal): Promise<Cac
   }
 }
 
-export async function getSettlements(id: string, signal?: AbortSignal): Promise<CachedResult<{ settlements: Settlement[] }>> {
+export async function getSettlementPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<SettlementPage> {
+  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
+  return (await apiWithMeta<SettlementPage>(`/groups/${groupId}/settlements?${query}`, { signal })).data;
+}
+export const getSettlementsPage = getSettlementPage;
+
+export async function getSettlements(id: string, signal?: AbortSignal): Promise<CachedResult<SettlementPage>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ settlements: Settlement[] }>(`/groups/${id}/settlements`, { signal });
+     const result = await apiWithMeta<SettlementPage>(`/groups/${id}/settlements?limit=50`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { settlements: result.data.settlements }, generation));
     return result.data;
@@ -983,14 +1053,42 @@ export async function getExpenseDetails(id: string, signal?: AbortSignal): Promi
   }
 }
 
-export async function getActivity(id?: string, signal?: AbortSignal): Promise<CachedResult<{ activity: Activity[] }>> {
+export async function getSettlementDetails(id: string, signal?: AbortSignal): Promise<{ settlement: Settlement; history: Array<{ id: string; revision: number; createdAt: string }> }> {
+  return (await apiWithMeta<{ settlement: Settlement; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/settlements/${id}`, { signal })).data;
+}
+export const getSettlement = getSettlementDetails;
+
+export async function restoreExpense(id: string, version: number) {
+  return api<{ expense: Expense }>(`/expenses/${id}/restore`, { method: 'POST', body: JSON.stringify({ version }) });
+}
+
+export async function restoreSettlement(id: string, version: number) {
+  return api<{ settlement: Settlement }>(`/settlements/${id}/restore`, { method: 'POST', body: JSON.stringify({ version }) });
+}
+
+export async function updateSettlement(id: string, input: SettlementInput) {
+  return api<{ settlement: Settlement }>(`/settlements/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export async function getAuditPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<AuditPage> {
+  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
+  return (await apiWithMeta<AuditPage>(`/groups/${groupId}/audit?${query}`, { signal })).data;
+}
+export const getAuditEventsPage = getAuditPage;
+
+export async function getActivityPage(id?: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<ActivityPage> {
+  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
+  return (await apiWithMeta<ActivityPage>(`${id ? `/activity?group=${encodeURIComponent(id)}&` : '/activity?'}${query}`, { signal })).data;
+}
+
+export async function getActivity(id?: string, signal?: AbortSignal): Promise<CachedResult<ActivityPage>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   try {
     const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
-    const result = await apiWithMeta<{ activity: Activity[] }>(id ? `/activity?group=${encodeURIComponent(id)}` : '/activity', { signal });
+     const result = await apiWithMeta<ActivityPage>(id ? `/activity?group=${encodeURIComponent(id)}&limit=50` : '/activity?limit=50', { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    const data = { activity: normalizeActivity(result.data.activity) };
+     const data = { activity: normalizeActivity(result.data.activity), nextCursor: result.data.nextCursor };
     if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id || 'all', activity: data.activity, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
     return data;
   } catch (error) {
@@ -1000,6 +1098,31 @@ export async function getActivity(id?: string, signal?: AbortSignal): Promise<Ca
     if (cached) return offline({ activity: cached.activity });
     throw error;
   }
+}
+
+export async function getGroupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null } = {}, signal?: AbortSignal): Promise<GroupExportPage> {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+  if (options.expenseCursor === null) params.set('expenseDone', '1');
+  else if (options.expenseCursor) params.set('expenseCursor', options.expenseCursor);
+  if (options.settlementCursor === null) params.set('settlementDone', '1');
+  else if (options.settlementCursor) params.set('settlementCursor', options.settlementCursor);
+  return (await apiWithMeta<GroupExportPage>(`/groups/${groupId}/export.json?${params}`, { signal })).data;
+}
+export const getPagedGroupExport = getGroupExportPage;
+
+export async function getExportPage(options: { limit?: number; groupCursor?: string } = {}, signal?: AbortSignal): Promise<ExportPage> {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 2) });
+  if (options.groupCursor) params.set('groupCursor', options.groupCursor);
+  return (await apiWithMeta<ExportPage>(`/export.json?${params}`, { signal })).data;
+}
+
+export type CsvExportPage = { blob: Blob; nextCursor?: string };
+export async function getGroupCsvExportPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<CsvExportPage> {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
+  if (options.cursor) params.set('cursor', options.cursor);
+  const headers = new Headers({ Accept: 'text/csv' });
+  const response = await apiBlobWithMeta(`/groups/${groupId}/export.csv?${params}`, { headers, signal });
+  return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
 }
 
 export async function getCategories(signal?: AbortSignal): Promise<CachedResult<{ categories: string[] }>> {

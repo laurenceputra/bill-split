@@ -18,7 +18,8 @@
     "cf:types": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply bill-split --local",
     "db:migrate:remote": "wrangler d1 migrations apply bill-split --remote",
-    "db:seed": "wrangler d1 execute bill-split --local --file=./seed/seed.sql"
+    "db:seed": "wrangler d1 execute bill-split --local --file=./seed/seed.sql",
+    "validate:large-ledger": "node scripts/validate-large-ledger.mjs"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.10",

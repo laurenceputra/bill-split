@@ -23,6 +23,11 @@ const scheduledCompletionSql = readFileSync(new URL('../../migrations/0008_sched
 const scheduledCursorSql = readFileSync(new URL('../../migrations/0009_scheduled_generation_cursor.sql', moduleUrl), 'utf8');
 const generatedOperationSql = readFileSync(new URL('../../migrations/0010_generated_expense_operation_namespace.sql', moduleUrl), 'utf8');
 const scheduledCategorySql = readFileSync(new URL('../../migrations/0011_scheduled_expense_category.sql', moduleUrl), 'utf8');
+const invitationsAuditSql = readFileSync(new URL('../../migrations/0012_invitations_audit_purge.sql', moduleUrl), 'utf8');
+const projectionSql = readFileSync(new URL('../../migrations/0013_projection_layer.sql', moduleUrl), 'utf8');
+const projectionIndexesSql = readFileSync(new URL('../../migrations/0014_projection_indexes.sql', moduleUrl), 'utf8');
+const projectionReadinessResetSql = readFileSync(new URL('../../migrations/0016_projection_readiness_reset.sql', moduleUrl), 'utf8');
+const auditActorSql = readFileSync(new URL('../../migrations/0015_audit_actor_snapshot.sql', moduleUrl), 'utf8');
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -85,6 +90,44 @@ describe('scheduled category migration', () => {
   });
 });
 
+describe('invitation, audit, and purge migration', () => {
+  it('adds normalized-email invitations, append-only audit rows, and occurrence tombstones', () => {
+    expect(invitationsAuditSql).toMatch(/CREATE TABLE group_invitations/);
+    expect(invitationsAuditSql).toMatch(/email_normalized TEXT NOT NULL/);
+    expect(invitationsAuditSql).toMatch(/CREATE TABLE audit_events/);
+    expect(invitationsAuditSql).toMatch(/before_json TEXT/);
+    expect(invitationsAuditSql).toMatch(/after_json TEXT/);
+    expect(invitationsAuditSql).toMatch(/expense_id TEXT NOT NULL UNIQUE/);
+    expect(invitationsAuditSql).not.toMatch(/expense_id TEXT NOT NULL UNIQUE REFERENCES expenses/);
+  });
+});
+
+describe('projection migrations', () => {
+  it('adds pending projection state for migration-first rollout without removing legacy triggers', () => {
+    expect(projectionSql).toMatch(/CREATE TABLE ledger_totals/);
+    expect(projectionSql).toMatch(/CREATE TABLE group_balance_projection/);
+    expect(projectionSql).toMatch(/CREATE TABLE projection_state/);
+    expect(projectionSql).toMatch(/backfill_cursor TEXT/);
+    expect(projectionSql).not.toMatch(/INSERT INTO ledger_totals\s*\(/);
+    expect(projectionSql).not.toMatch(/INSERT INTO group_balance_projection\s*\(/);
+    expect(projectionSql).toMatch(/SELECT id,'pending'/);
+    expect(projectionReadinessResetSql).toMatch(/SET status='pending'/);
+    expect(projectionIndexesSql).toMatch(/idx_expenses_group_keyset/);
+    expect(projectionIndexesSql).toMatch(/idx_settlements_group_keyset/);
+    expect(projectionIndexesSql).toMatch(/idx_payers_person_expense/);
+    expect(projectionIndexesSql).toMatch(/idx_splits_person_expense/);
+  });
+});
+
+describe('audit actor snapshot migration', () => {
+  it('adds person and name snapshots without adding email to audit rows', () => {
+    expect(auditActorSql).toMatch(/ALTER TABLE audit_events ADD COLUMN actor_person_id TEXT/i);
+    expect(auditActorSql).toMatch(/ALTER TABLE audit_events ADD COLUMN actor_name TEXT/i);
+    expect(auditActorSql).toMatch(/Unknown user/);
+    expect(auditActorSql).not.toMatch(/email/i);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -131,8 +174,8 @@ describe('scheduled completion migration integration', () => {
       await writeFile(seedPath, seed);
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
-      expect(query('PRAGMA foreign_key_check;')).toEqual([]);
-      await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
+       expect(query('PRAGMA foreign_key_check;')).toEqual([]);
+        await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -143,6 +186,12 @@ describe('scheduled completion migration integration', () => {
       expect(query('PRAGMA foreign_key_list(scheduled_occurrences);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
       expect(query('PRAGMA table_info(scheduled_expenses);')).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'category' })]));
       expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
+       expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
+         expect(query('SELECT status FROM projection_state WHERE group_id=\'group-1\';')).toEqual([{ status: 'pending' }]);
+        expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
+        expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
+       expect(query('SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;')).toEqual([]);
+       expect(query('PRAGMA foreign_key_check;')).toEqual([]);
 
       const invalidChild = spawnSync(wrangler, ['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES('missing-schedule','person-1',1);", '--yes'], { cwd: tempRoot, encoding: 'utf8' });
       expect(invalidChild.status).not.toBe(0);

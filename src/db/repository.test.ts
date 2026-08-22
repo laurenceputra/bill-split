@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Repository } from './repository';
+import { Repository, assertLikeSearch, decodeLedgerCursor, encodeLedgerCursor } from './repository';
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 
 class FakeDb {
@@ -34,6 +34,18 @@ class FakeStatement {
     if (this.sql.includes('INSERT INTO settlements(')) { const [id, groupId, fromPersonId, toPersonId, amountMinor, currency, date, note, createdBy, createdAt, updatedAt] = this.args; this.db.settlement = { id, group_id: groupId, from_person_id: fromPersonId, to_person_id: toPersonId, amount_minor: amountMinor, currency, settlement_date: date, note, created_by: createdBy, created_at: createdAt, updated_at: updatedAt, version: 1 }; }
     if (this.sql.includes('INSERT INTO payers(')) this.db.payers.push({ person_id: this.args[1], amount_minor: this.args[2] });
     if (this.sql.includes('INSERT INTO splits(')) this.db.splits.push({ person_id: this.args[1], amount_minor: this.args[2], metadata_json: this.args[3] });
+  }
+}
+
+class AuditPageDb {
+  prepare(sql: string) { return new AuditPageStatement(sql); }
+}
+class AuditPageStatement {
+  constructor(private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async all<T>() {
+    if (this.sql.includes('FROM audit_events')) return { results: [{ id: 'audit-1', group_id: 'group-1', entity_type: 'expense', entity_id: 'expense-1', version: 1, action: 'create', actor_id: 'user-1', actor_person_id: 'person-1', actor_name: 'Alex', occurred_at: '', before_json: null, after_json: null }] as T[] };
+    return { results: [] as T[] };
   }
 }
 
@@ -271,6 +283,27 @@ class GlobalActivityDb {
   }
 }
 
+class GlobalExportDb {
+  readonly groups = ['group-a', 'group-b', 'group-c'];
+  prepare(sql: string) { return new GlobalExportStatement(this, sql); }
+}
+class GlobalExportStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: GlobalExportDb, private readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT g.id FROM groups')) {
+      if (this.sql.includes('g.id>?')) {
+        const index = this.db.groups.findIndex((id) => id > String(this.args[1]));
+        return (index < 0 ? null : { id: this.db.groups[index] }) as T | null;
+      }
+      if (this.sql.includes('g.id=?')) return (this.db.groups.includes(String(this.args[0])) ? { id: this.args[0] } : null) as T | null;
+      return { id: this.db.groups[0] } as T;
+    }
+    return null;
+  }
+}
+
 class CategoriesDb {
   sql = '';
   args: unknown[] = [];
@@ -339,6 +372,25 @@ describe('repository expense hydration', () => {
     // 91 IDs are split into two chunks, so this is one page query plus two
     // payer/split query pairs, not 183 per-expense hydration queries.
     expect(db.queries).toBe(5);
+  });
+});
+
+describe('repository pagination guards', () => {
+  it('round-trips an opaque stable keyset cursor and rejects tampering', () => {
+    const cursor = encodeLedgerCursor({ date: '2026-01-01', createdAt: '2026-01-01T00:00:00.000Z', id: 'expense-2' });
+    expect(decodeLedgerCursor(cursor)).toEqual({ date: '2026-01-01', createdAt: '2026-01-01T00:00:00.000Z', id: 'expense-2' });
+    expect(() => decodeLedgerCursor(`${cursor}x`)).toThrowError(expect.objectContaining({ code: 'INVALID_CURSOR' }));
+  });
+
+  it('counts UTF-8 bytes and the two LIKE wildcards', () => {
+    expect(() => assertLikeSearch('é'.repeat(25))).toThrowError(expect.objectContaining({ code: 'INVALID_SEARCH' }));
+    expect(() => assertLikeSearch('é'.repeat(24))).not.toThrow();
+  });
+
+  it('returns actor IDs and a name snapshot without exposing email fields', async () => {
+    const page = await new Repository(new AuditPageDb() as never).auditPage('group-1', { limit: 10 });
+    expect(page.items[0]).toMatchObject({ actorId: 'user-1', actorPersonId: 'person-1', actorName: 'Alex' });
+    expect(page.items[0]).not.toHaveProperty('email');
   });
 });
 
@@ -447,6 +499,40 @@ describe('repository activity mapping', () => {
   });
 });
 
+describe('repository global export pagination', () => {
+  it('finishes unequal streams before advancing across multiple groups', async () => {
+    const db = new GlobalExportDb();
+    const repo = new Repository(db as never);
+    const calls: Array<{ groupId: string; expenseCursor?: string | null; settlementCursor?: string | null }> = [];
+    repo.groupExportPage = async (groupId, options = {}) => {
+      calls.push({ groupId, expenseCursor: options.expenseCursor, settlementCursor: options.settlementCursor });
+      if (groupId === 'group-a' && !options.settlementCursor) return { version: 1, exportedAt: '', group: { id: groupId }, members: [], expenses: [{ id: 'expense-a' }], settlements: [{ id: 'settlement-a-1' }], nextCursor: { expenses: null, settlements: 'settlement-a-next' } } as never;
+      if (groupId === 'group-a') return { version: 1, exportedAt: '', group: { id: groupId }, members: [], expenses: [], settlements: [{ id: 'settlement-a-2' }, { id: 'settlement-a-3' }] } as never;
+      return { version: 1, exportedAt: '', group: { id: groupId }, members: [], expenses: [{ id: `expense-${groupId}` }], settlements: [] } as never;
+    };
+
+    const first = await repo.exportPage('user-1', { limit: 2 });
+    expect(first.groups).toHaveLength(1);
+    expect(first.groups[0].settlements).toHaveLength(1);
+    expect(first.nextCursor).toBeTruthy();
+
+    const second = await repo.exportPage('user-1', { limit: 2, groupCursor: first.nextCursor });
+    expect(second.groups.map((group) => group.group?.id)).toEqual(['group-a', 'group-b']);
+    expect(second.groups[0].settlements).toHaveLength(2);
+    expect(second.nextCursor).toBeTruthy();
+
+    const third = await repo.exportPage('user-1', { limit: 2, groupCursor: second.nextCursor });
+    expect(third.groups.map((group) => group.group?.id)).toEqual(['group-c']);
+    expect(third.nextCursor).toBeUndefined();
+    expect(calls).toEqual([
+      { groupId: 'group-a', expenseCursor: undefined, settlementCursor: undefined },
+      { groupId: 'group-a', expenseCursor: null, settlementCursor: 'settlement-a-next' },
+      { groupId: 'group-b', expenseCursor: undefined, settlementCursor: undefined },
+      { groupId: 'group-c', expenseCursor: undefined, settlementCursor: undefined },
+    ]);
+  });
+});
+
 describe('repository categories', () => {
   it('includes custom categories from active authorized schedules as well as expenses', async () => {
     const db = new CategoriesDb();
@@ -469,7 +555,7 @@ describe('repository home balance summaries', () => {
     expect(db.sql).toContain('gm.user_id=?');
     expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=e.group_id');
     expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=s.group_id');
-    expect(db.sql).toContain('JOIN authorized_groups balance_member');
+    expect(db.sql).toContain('JOIN group_members balance_member');
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');
     expect(db.sql).toContain('ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC)');
@@ -511,7 +597,9 @@ describe('repository Clerk identity linking', () => {
     expect(identity.user.id).toBe('legacy-user');
     expect(identity.person.id).toBe('legacy-person');
     expect(db.users[0].clerk_user_id).toBe('user_123');
-    expect(db.members[0].user_id).toBe('legacy-user');
+    // Linking a verified identity must not turn a legacy ledger-only member
+    // into a group member; an invitation acceptance performs that transition.
+    expect(db.members[0].user_id).toBeNull();
   });
 
   it('creates a new app user and person when the verified email is new', async () => {

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createScheduledExpense, getActivity, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpenses, getGroups, getScheduledExpenses, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createGroupInvitation, createScheduledExpense, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
@@ -65,6 +65,29 @@ describe('frontend API errors and cache fallback', () => {
     const result = await getActivity('group-a');
     expect(result.activity.map((item) => item.id)).toEqual(['expense-1']);
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => item.id)).toEqual(['expense-1']);
+  });
+
+  it('uses the backend cursor contracts for invitations, transactions, audit, and restore', async () => {
+    const calls: Array<{ path: string; method: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(request), 'https://billsplit.test'); calls.push({ path: url.pathname + url.search, method: init?.method || 'GET' });
+      if (url.pathname === '/api/invitations') return json({ invitations: [] });
+      if (url.pathname.endsWith('/invitations')) return json({ invitations: [] });
+      if (url.pathname === '/api/activity') return json({ activity: [], nextCursor: 'activity-cursor' });
+      if (url.pathname.endsWith('/expenses')) return json({ expenses: [], nextCursor: 'expense-cursor' });
+      if (url.pathname.endsWith('/settlements')) return json({ settlements: [], nextCursor: 'settlement-cursor' });
+      if (url.pathname.endsWith('/audit')) return json({ audit: [], nextCursor: 'audit-cursor' });
+      if (url.pathname.endsWith('/restore')) return json({ expense: {}, settlement: {} });
+      return new Response(null, { status: 204 });
+    }));
+    await getPendingInvitations(); await getOwnerInvitations('group-a'); await getExpensePage('group-a', { cursor: 'e1' }); await getSettlementPage('group-a', { cursor: 's1' }); await getActivityPage('group-a', { cursor: 'a1' }); await getAuditPage('group-a', { cursor: 'u1' });
+    await createGroupInvitation('group-a', 'person@example.com'); await acceptInvitation('invite-a'); await rejectInvitation('invite-a'); await removeGroupMember('group-a', 'person-a'); await restoreExpense('expense-a', 2); await restoreSettlement('settlement-a', 2);
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: '/api/groups/group-a/expenses?limit=50&cursor=e1', method: 'GET' }),
+      expect.objectContaining({ path: '/api/groups/group-a/audit?limit=50&cursor=u1', method: 'GET' }),
+      expect.objectContaining({ path: '/api/expenses/expense-a/restore', method: 'POST' }),
+      expect.objectContaining({ path: '/api/settlements/settlement-a/restore', method: 'POST' }),
+    ]));
   });
 
   it('uses scheduled expense routes online without entering the expense outbox', async () => {

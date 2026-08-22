@@ -15,6 +15,9 @@ export const RESOURCE_FRESHNESS = Object.freeze({
   activity: 30_000,
   expenseDetail: 30_000,
   expenseHistory: 30_000,
+  invitations: 30_000,
+  audit: 30_000,
+  settlementDetail: 30_000,
 });
 
 export type ResourceStatus = 'idle' | 'loading' | 'ready' | 'error' | 'auth-blocked';
@@ -299,8 +302,12 @@ export const resourceKeys = Object.freeze({
   scheduledExpenses: (userId: string, groupId: string) => resourceKey('scheduled-expenses', `${userId}:${groupId}`),
   scheduledExpense: (userId: string, scheduleId: string) => resourceKey('scheduled-expense', `${userId}:${scheduleId}`),
   activity: (userId: string, groupId: string) => resourceKey('activity', `${userId}:${groupId}`),
+  invitations: (userId: string) => resourceKey('invitations', userId),
+  groupInvitations: (userId: string, groupId: string) => resourceKey('group-invitations', `${userId}:${groupId}`),
+  audit: (userId: string, groupId: string) => resourceKey('audit', `${userId}:${groupId}`),
   categories: (userId: string) => resourceKey('categories', userId),
   expenseDetail: (userId: string, expenseId: string) => resourceKey('expense-detail', `${userId}:${expenseId}`),
+  settlementDetail: (userId: string, settlementId: string) => resourceKey('settlement-detail', `${userId}:${settlementId}`),
 });
 export const useCachedResource = useResource;
 export const resourceCache = Object.freeze({
@@ -318,9 +325,10 @@ const invalidatePersistedCaches = async (userId: string, generation = captureSes
 };
 export const invalidateForMutation = {
   groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
-  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
-  settlementChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all')], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
+  settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId)] : [])], userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true }); },
+  invitationsChanged: async (groupId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.invitations(userId), ...(groupId ? [resourceKeys.groupInvitations(userId, groupId)] : [])], userId); },
   scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), resourceKeys.categories(userId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { categories: true, groups: false }); },
 };
 

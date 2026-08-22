@@ -47,9 +47,22 @@ export function expenseDetailPath(groupId: unknown, expenseId: unknown): string 
   return `/groups/${encodeURIComponent(groupId.trim())}/expenses/${encodeURIComponent(expenseId.trim())}`;
 }
 
+export function settlementDetailPath(groupId: unknown, settlementId: unknown): string | undefined {
+  const valid = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
+  if (!valid(groupId) || !valid(settlementId)) return undefined;
+  return `/groups/${encodeURIComponent(groupId.trim())}/settlements/${encodeURIComponent(settlementId.trim())}`;
+}
+
 /** Link only activity rows whose server/cache payload explicitly proves an active expense. */
 export function activityDetailPath(groupId: unknown, item: { type: string; entityId: unknown; entityActive?: boolean }): string | undefined {
   if (item.entityActive !== true || (item.type !== 'expense' && item.type !== 'expense_revision')) return undefined;
+  return expenseDetailPath(groupId, item.entityId);
+}
+
+/** Link eligible current and tombstone activity rows to their transaction detail. */
+export function transactionActivityPath(groupId: unknown, item: { type: string; entityId: unknown; entityActive?: boolean }): string | undefined {
+  if (item.type.startsWith('settlement')) return settlementDetailPath(groupId, item.entityId);
+  if (!item.type.startsWith('expense') || (item.entityActive !== true && !item.type.endsWith('_deleted'))) return undefined;
   return expenseDetailPath(groupId, item.entityId);
 }
 

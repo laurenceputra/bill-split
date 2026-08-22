@@ -3,6 +3,22 @@ account_id = "ef5da8772e934578524c5b4bf80d3e4b"
 main = "src/worker/index.ts"
 compatibility_date = "2025-08-01"
 
+# Keep traces useful without making a small production workload expensive.
+# Invocation logs remain enabled for the structured, intentionally PII-free
+# application logs emitted by the Worker.
+[observability]
+enabled = true
+head_sampling_rate = 0.1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.1
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
 [assets]
 directory = "dist"
 binding = "ASSETS"

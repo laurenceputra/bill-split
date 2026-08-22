@@ -9,7 +9,8 @@ export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export interface Person { id: string; name: string; email?: string | null; createdAt: string }
 export interface GroupBalanceSummary { currency: Currency; netMinor: number }
 export interface Group { id: string; name: string; currency: Currency; createdAt: string; updatedAt: string; role?: 'owner' | 'member'; memberCount?: number; counterpartName?: string | null; balanceSummaries?: GroupBalanceSummary[] }
-export interface GroupMember { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member' }
+export interface GroupMember { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member'; removedAt?: string | null }
+export interface GroupInvitation { id: string; groupId: string; email: string; createdBy: string; createdAt: string; expiresAt: string; revokedAt?: string | null; acceptedAt?: string | null; acceptedBy?: string | null; rejectedAt?: string | null }
 export interface Split { personId: string; amountMinor: number; metadata?: Record<string, unknown> }
 export interface Payer { personId: string; amountMinor: number }
 export interface Expense {
@@ -26,6 +27,9 @@ export interface ScheduledExpense {
   clientOperationId?: string | null; payers: Payer[]; splits: Split[];
 }
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
+export type AuditAction = 'create' | 'update' | 'delete' | 'restore';
+export interface AuditEvent { id: string; groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: AuditAction; actorId: string; actorPersonId?: string; actorName: string; occurredAt: string; before?: unknown; after?: unknown }
+export interface CursorPage<T> { items: T[]; nextCursor?: string }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }
 export interface PairwiseBalance { fromPersonId: string; fromName: string; toPersonId: string; toName: string; amountMinor: number; currency: Currency }
 export interface Balances { raw: Balance[]; simplified: PairwiseBalance[] }
