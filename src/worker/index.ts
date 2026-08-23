@@ -2,17 +2,19 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { assertFinancialInput, date, expenseInput, friendInput, groupInput, invitationInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
+import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, date, expenseInput, friendInput, groupInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
 import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthenticationError } from './clerk-auth';
-import { escapeCsvCell } from './csv';
+import { escapeCsvCell, settlementCsvRow } from './csv';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string }; repo: Repository; requestId: string } };
+type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string }; repo: Repository; requestId: string } };
+export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
+const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
 const api = new Hono<Env>();
-const jsonError = (c: any, status: number, code: string, message: string) => c.json({ error: { code, message } }, status);
+const jsonError = (c: any, status: number, code: string, message: string, details?: Record<string, unknown>) => c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
 export const MAX_API_BODY_BYTES = 64 * 1024;
 // Manual CSP follows Clerk's current CSP guidance. The FAPI origin is decoded
@@ -101,10 +103,37 @@ const allowsMutation = (c: any) => {
   return exactOrigin || trustedFetchSite || (!hasBrowserMetadata && explicitBearer);
 };
 const repositoryError = (c: any, error: unknown) => {
-  if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' ? 400 : 500, error.code, error.message);
+  if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' ? 400 : 500, error.code, error.message, error.details);
   throw error;
 };
+export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
+export const validateAccountDeletionIdentityBinding = (authenticatedClerkUserId: unknown, expectedClerkUserId: string | undefined) => {
+  if (typeof authenticatedClerkUserId !== 'string' || authenticatedClerkUserId.trim() === '') return { status: 401 as const, code: 'AUTH_REQUIRED' as const, message: 'A verified Clerk identity is required for account deletion' };
+  if (!expectedClerkUserId) return { status: 409 as const, code: 'IDENTITY_MISMATCH' as const, message: 'The account deletion request is not bound to the verified Clerk identity' };
+  if (expectedClerkUserId !== authenticatedClerkUserId) return { status: 409 as const, code: 'IDENTITY_MISMATCH' as const, message: 'The account deletion request is bound to a different Clerk identity' };
+  return { ok: true as const };
+};
+const accountDeletionIdentityError = (c: any) => {
+  const clerkUserId = c.get('auth')?.clerkUserId;
+  const expectedClerkUserId = c.req.header(ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER);
+  const result = validateAccountDeletionIdentityBinding(clerkUserId, expectedClerkUserId);
+  if (!result.ok) return jsonError(c, result.status, result.code, result.message);
+  return undefined;
+};
 const balanceError = (c: any, error: unknown) => error instanceof BalanceOverflowError ? jsonError(c, 422, error.code, error.message) : undefined;
+export type RateLimitOperation = 'group-create' | 'friend-create' | 'invitation-create' | 'invitation-accept' | 'invitation-reject';
+export const rateLimitOperationFor = (method: string, pathname: string): RateLimitOperation | undefined => {
+  if (method !== 'POST') return undefined;
+  if (pathname === '/api/groups') return 'group-create';
+  if (pathname === '/api/friends') return 'friend-create';
+  if (/^\/api\/groups\/[^/]+\/invitations$/.test(pathname)) return 'invitation-create';
+  if (/^\/api\/invitations\/[^/]+\/(accept|reject)$/.test(pathname)) return pathname.endsWith('/accept') ? 'invitation-accept' : 'invitation-reject';
+  return undefined;
+};
+export const rateLimitKeyFor = (userId: string, operation: RateLimitOperation): string => `${userId}:${operation}`;
+const rateLimitUnavailable = (c: any) => jsonError(c, 503, 'RATE_LIMITER_UNAVAILABLE', 'The protected operation is temporarily unavailable');
+const rateLimitExceeded = (c: any) => { c.header('Retry-After', '60'); return jsonError(c, 429, 'RATE_LIMITED', 'Too many requests; retry after 60 seconds', { retryAfter: 60 }); };
+const allowsDevelopmentRateLimitBypass = (environment?: string) => environment === 'development' || environment === 'test';
 
 api.use('/api/*', async (c, next) => {
   const startedAt = Date.now();
@@ -139,7 +168,7 @@ api.use('/api/*', async (c, next) => {
   const devEmail = c.req.header('X-Dev-Email');
   if (env.ENVIRONMENT === 'development' && devEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(devEmail)) {
     try {
-      const repo = new Repository(env.DB); const identity = await repo.user(devEmail.trim().toLowerCase());
+      const repo = repositoryFor(env); const identity = await repo.user(devEmail.trim().toLowerCase());
       const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id) };
       const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
@@ -151,22 +180,56 @@ api.use('/api/*', async (c, next) => {
     }
   }
 
+  let identityClaims: Awaited<ReturnType<typeof authenticateClerkSession>> | undefined;
   try {
     const clerkConfig = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
     assertClerkAuthenticationConfig(clerkConfig);
     const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
-    const identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
-    const repo = new Repository(env.DB); const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
+    identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
+    const repo = repositoryFor(env); const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
      const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId };
     const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
     if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
     c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
   } catch (error) {
     if (error instanceof ClerkAuthenticationError) return jsonError(c, 401, error.code, error.message);
-    if (error instanceof RepositoryError) return repositoryError(c, error);
+    if (error instanceof RepositoryError) {
+      // The server may have committed account deletion before its response
+      // reached the browser. Permit only the same authenticated DELETE to
+      // enter the idempotent route; all other requests remain rejected.
+      if (error.code === 'AUTH_IDENTITY_CONFLICT' && identityClaims && c.req.method === 'DELETE' && new URL(c.req.url).pathname === '/api/account') {
+        try {
+          const repo = repositoryFor(env);
+          const tombstoned = await repo.deletedAccountForIdentity(identityClaims.clerkUserId, identityClaims.primaryEmail);
+          if (tombstoned) {
+            const auth = { id: String(tombstoned.id), email: '', personId: '', clerkUserId: identityClaims.clerkUserId };
+            c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next(); return;
+          }
+        } catch (recoveryError) { if (recoveryError instanceof RepositoryError) return repositoryError(c, recoveryError); throw recoveryError; }
+      }
+      return repositoryError(c, error);
+    }
     if (error instanceof Error && /Clerk|token|JWT|authorized|session/i.test(error.message)) return jsonError(c, 401, 'AUTH_INVALID', 'The Clerk session could not be verified');
     console.error(JSON.stringify({ message: 'database request failed', requestId: c.get('requestId') })); return jsonError(c, 500, 'DATABASE_ERROR', 'The request could not be completed');
   }
+});
+// This middleware is deliberately placed after authentication. It only sees
+// internal BillSplit user IDs, never provider IDs, email addresses, or IPs.
+api.use('/api/*', async (c, next) => {
+  const operation = rateLimitOperationFor(c.req.method, new URL(c.req.url).pathname);
+  if (!operation) return next();
+  const environment = c.env.ENVIRONMENT;
+  const limiter = c.env.RATE_LIMITER;
+  if (!limiter && allowsDevelopmentRateLimitBypass(environment)) return next();
+  if (!limiter) return rateLimitUnavailable(c);
+  try {
+    const outcome = await limiter.limit({ key: rateLimitKeyFor(c.get('auth').id, operation) });
+    if (!outcome.success) return rateLimitExceeded(c);
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'bill-split.rate-limit', operation, outcome: 'unavailable', error: error instanceof Error ? error.name : 'UNEXPECTED_ERROR', requestId: c.get('requestId') }));
+    return rateLimitUnavailable(c);
+  }
+  return next();
 });
 
 async function authorizedGroup(c: any, groupId: string): Promise<{ repo: Repository; auth: { id: string; email: string; personId: string }; group: NonNullable<Awaited<ReturnType<Repository['group']>>>; role: 'owner' | 'member' } | Response> {
@@ -184,6 +247,7 @@ async function authorizedScheduled(c: any, scheduledId: string): Promise<{ repo:
 const ownerOnly = (c: any, x: { role: 'owner' | 'member' }) => x.role === 'owner' ? null : jsonError(c, 403, 'OWNER_REQUIRED', 'Only group owners can perform this action');
 async function validPeople(repo: Repository, groupId: string, ids: string[]) { const members = await repo.members(groupId); const allowed = new Set(members.map((m) => m.personId)); return ids.every((id) => allowed.has(id)); }
 function page(value: string | undefined, fallback: number, max: number) { if (value === undefined) return fallback; const n = Number(value); return Number.isSafeInteger(n) && n >= 0 ? Math.min(n, max) : -1; }
+const rejectOffset = (c: any) => c.req.query('offset') === undefined ? undefined : jsonError(c, 400, 'INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
 
 /** Return only a same-origin app path after authentication succeeds. */
 export function sanitizeReturnTo(value: unknown): string {
@@ -196,29 +260,32 @@ export function sanitizeReturnTo(value: unknown): string {
 }
 
 api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
+api.delete('/api/account', zValidator('json', accountDeletionInput), async (c) => {
+  const identityError = accountDeletionIdentityError(c);
+  if (identityError) return identityError;
+  try { await getRepo(c).deleteAccount(c.get('auth').id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); }
+});
+api.post('/api/category-suggestion', zValidator('json', categorySuggestionInput), async (c) => c.json({ category: await getRepo(c).categorySuggestion(c.get('auth').id, c.req.valid('json').description) }));
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ group: x.group, members: await x.repo.members(c.req.param('groupId')) }); });
+api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ group: x.group, members: await x.repo.members(c.req.param('groupId')), historicalParticipants: await x.repo.historicalParticipants(c.req.param('groupId')) }); });
+api.get('/api/groups/:groupId/historical-participants', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ participants: await x.repo.historicalParticipants(c.req.param('groupId')) }); });
 api.put('/api/groups/:groupId', zValidator('json', groupInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; return c.json({ group: await x.repo.updateGroup(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); });
 api.delete('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.deleteGroup(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ person: await x.repo.addPerson(c.req.param('groupId'), c.req.valid('json'), x.auth.id, x.auth.personId) }, 201); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/people', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ people: await x.repo.members(c.req.param('groupId')) }); });
 api.delete('/api/groups/:groupId/members/:personId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.removeMember(c.req.param('groupId'), c.req.param('personId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
-api.delete('/api/groups/:groupId/people/:personId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.removeMember(c.req.param('groupId'), c.req.param('personId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
+api.post('/api/groups/:groupId/transfer-ownership', zValidator('json', ownershipTransferInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.transferOwnership(c.req.param('groupId'), c.req.valid('json').person_id, x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
+api.post('/api/groups/:groupId/leave', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; try { await x.repo.leaveGroup(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/invitations', zValidator('json', invitationInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ invitation: await x.repo.createInvitation(c.req.param('groupId'), x.auth.id, c.req.valid('json').email) }, 201); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId/invitations', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; return c.json({ invitations: await x.repo.invitationsForOwner(c.req.param('groupId')) }); });
 api.delete('/api/groups/:groupId/invitations/:invitationId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; const revoked = await x.repo.revokeInvitation(c.req.param('groupId'), c.req.param('invitationId'), x.auth.id); if (!revoked) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
-api.post('/api/groups/:groupId/invitations/:invitationId/revoke', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; const revoked = await x.repo.revokeInvitation(c.req.param('groupId'), c.req.param('invitationId'), x.auth.id); if (!revoked) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
 api.get('/api/invitations', async (c) => c.json({ invitations: await getRepo(c).invitationsForUser(c.get('auth').id) }));
-api.get('/api/me/invitations', async (c) => c.json({ invitations: await getRepo(c).invitationsForUser(c.get('auth').id) }));
 api.post('/api/invitations/:invitationId/accept', async (c) => { try { return c.json({ invitation: await getRepo(c).acceptInvitation(c.req.param('invitationId'), c.get('auth').id) }); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/invitations/:invitationId/reject', async (c) => { const rejected = await getRepo(c).rejectInvitation(c.req.param('invitationId'), c.get('auth').id); if (!rejected) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
-api.post('/api/me/invitations/:invitationId/accept', async (c) => { try { return c.json({ invitation: await getRepo(c).acceptInvitation(c.req.param('invitationId'), c.get('auth').id) }); } catch (error) { return repositoryError(c, error); } });
-api.post('/api/me/invitations/:invitationId/reject', async (c) => { const rejected = await getRepo(c).rejectInvitation(c.req.param('invitationId'), c.get('auth').id); if (!rejected) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
 
-api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 50, 100); const offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); } catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } try { const result = await x.repo.expensePage(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, offset: q.cursor ? undefined : offset, cursor: q.cursor }); return c.json({ expenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/scheduled-expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 100, 100); const offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); return c.json({ scheduledExpenses: await x.repo.scheduledExpenses(c.req.param('groupId'), { limit, offset }) }); });
+api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); } catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } try { const result = await x.repo.expensePage(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor }); return c.json({ expenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/scheduled-expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 100, 100); const offset = q.offset === undefined ? undefined : page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || (offset !== undefined && offset < 0) || (q.cursor && q.offset !== undefined)) return jsonError(c, 400, 'INVALID_PAGINATION', q.cursor && q.offset !== undefined ? 'Use either cursor or offset pagination' : 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.scheduledExpenses(c.req.param('groupId'), { limit, offset, cursor: q.cursor }); return c.json({ scheduledExpenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/scheduled-expenses', zValidator('json', scheduledExpenseInput), async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
   const input = c.req.valid('json');
@@ -246,7 +313,7 @@ for (const [action, method] of [['pause', 'pauseScheduledExpense'], ['resume', '
   api.delete('/api/expenses/:expenseId', async (c) => { const old = await getRepo(c).expense(c.req.param('expenseId')); if (!old) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, old.groupId); if (x instanceof Response) return x; const version = page(c.req.query('version'), -1, Number.MAX_SAFE_INTEGER); if (version < 1) return jsonError(c, 400, 'INVALID_VERSION', 'A positive record version is required'); try { await x.repo.deleteExpense(c.req.param('expenseId'), x.auth.id, version); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
   api.post('/api/expenses/:expenseId/restore', zValidator('json', transactionVersionInput), async (c) => { const expense = await getRepo(c).expense(c.req.param('expenseId'), true); if (!expense || !expense.deletedAt || Date.now() - Date.parse(expense.deletedAt) > 30 * 24 * 60 * 60 * 1000) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Deleted expense not found'); const x = await authorizedGroup(c, expense.groupId); if (x instanceof Response) return x; try { return c.json({ expense: await x.repo.restoreExpense(c.req.param('expenseId'), x.auth.id, c.req.valid('json').version) }); } catch (error) { return repositoryError(c, error); } });
 
-api.get('/api/groups/:groupId/settlements', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100), offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.settlementPage(c.req.param('groupId'), { limit, offset: q.cursor ? undefined : offset, cursor: q.cursor }); return c.json({ settlements: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/settlements', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.settlementPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ settlements: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
   api.post('/api/groups/:groupId/settlements', zValidator('json', settlementInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'), people = await x.repo.groupPeople(c.req.param('groupId')); if (input.from_person_id === input.to_person_id || !people.includes(input.from_person_id) || !people.includes(input.to_person_id)) return jsonError(c, 400, 'INVALID_SETTLEMENT', 'Settlement participants are invalid'); try { return c.json({ settlement: await x.repo.createSettlement(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
   api.put('/api/settlements/:settlementId', zValidator('json', settlementInput), async (c) => { const input = c.req.valid('json'), repo = getRepo(c), row = await repo.settlement(c.req.param('settlementId')); if (!row) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; const people = await repo.groupPeople(row.groupId); if (input.version === undefined || input.from_person_id === input.to_person_id || !people.includes(input.from_person_id) || !people.includes(input.to_person_id)) return jsonError(c, 400, 'INVALID_SETTLEMENT', 'Settlement version or participants are invalid'); try { const settlement = await repo.updateSettlement(c.req.param('settlementId'), x.auth.id, input); if (!settlement) return jsonError(c, 409, 'CONFLICT', 'The record was deleted by another request'); return c.json({ settlement }); } catch (error) { return repositoryError(c, error); } });
   api.delete('/api/settlements/:settlementId', async (c) => { const row = await getRepo(c).settlement(c.req.param('settlementId')); if (!row) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; const version = page(c.req.query('version'), -1, Number.MAX_SAFE_INTEGER); if (version < 1) return jsonError(c, 400, 'INVALID_VERSION', 'A positive record version is required'); try { await x.repo.deleteSettlement(c.req.param('settlementId'), x.auth.id, version); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
@@ -266,12 +333,11 @@ api.get('/api/groups/:groupId/balances', async (c) => {
   return c.json({ currencies, balances });
 });
 api.get('/api/activity', async (c) => { const q = c.req.query(), groupId = q.group; if (groupId && (await authorizedGroup(c, groupId)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found'); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await getRepo(c).globalActivity(c.get('auth').id, groupId || undefined, { limit, cursor: q.cursor }); return c.json({ activity: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/activity', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.globalActivity(x.auth.id, c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ activity: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/audit', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100), offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.auditPage(c.req.param('groupId'), { limit, offset: q.cursor ? undefined : offset, cursor: q.cursor }); return c.json({ audit: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/audit-events', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100), offset = page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || offset < 0) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.auditPage(c.req.param('groupId'), { limit, offset: q.cursor ? undefined : offset, cursor: q.cursor }); return c.json({ audit: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/audit', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.auditPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ audit: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/categories', async (c) => c.json({ categories: await getRepo(c).categories(c.get('auth').id) }));
  api.get('/api/groups/:groupId/export.json', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { return c.json(await x.repo.groupExportPage(c.req.param('groupId'), { limit, expenseCursor: q.expenseDone === '1' ? null : q.expenseCursor, settlementCursor: q.settlementDone === '1' ? null : q.settlementCursor })); } catch (error) { return repositoryError(c, error); } });
- api.get('/api/groups/:groupId/export.csv', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 100, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.expensePage(c.req.param('groupId'), { limit, cursor: q.cursor }); const csv = ['date,description,amount_minor,currency,payers,splits', ...result.items.map((expense) => [expense.date, expense.description, expense.amountMinor, expense.currency, expense.payers.map((p) => `${p.personId}:${p.amountMinor}`).join(';'), expense.splits.map((s) => `${s.personId}:${s.amountMinor}`).join(';')].map(escapeCsvCell).join(','))].join('\n'); const headers: Record<string, string> = { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="group-expenses.csv"' }; if (result.nextCursor) headers['X-Next-Cursor'] = result.nextCursor; return new Response(csv, { headers }); } catch (error) { return repositoryError(c, error); } });
+   api.get('/api/groups/:groupId/export.csv', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 100, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.expensePage(c.req.param('groupId'), { limit, cursor: q.cursor }); const csv = ['date,description,amount_minor,currency,payers,splits', ...result.items.map((expense) => [expense.date, expense.description, expense.amountMinor, expense.currency, expense.payers.map((p) => `${p.personId}:${p.amountMinor}`).join(';'), expense.splits.map((s) => `${s.personId}:${s.amountMinor}`).join(';')].map(escapeCsvCell).join(','))].join('\n'); const headers: Record<string, string> = { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="group-expenses.csv"' }; if (result.nextCursor) headers['X-Next-Cursor'] = result.nextCursor; return new Response(csv, { headers }); } catch (error) { return repositoryError(c, error); } });
+   api.get('/api/groups/:groupId/settlements.csv', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 100, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.settlementPage(c.req.param('groupId'), { limit, cursor: q.cursor }); const csv = ['date,from_person,to_person,amount_minor,currency,note', ...result.items.map(settlementCsvRow)].join('\n'); const headers: Record<string, string> = { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="group-settlements.csv"' }; if (result.nextCursor) headers['X-Next-Cursor'] = result.nextCursor; return new Response(csv, { headers }); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/export.json', async (c) => { const q = c.req.query(), limit = page(q.limit, 1, 2); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); return c.json(await getRepo(c).exportPage(c.get('auth').id, { limit, groupCursor: q.groupCursor })); });
 
 api.notFound((c) => jsonError(c, 404, 'NOT_FOUND', 'API route not found'));
@@ -292,7 +358,7 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
   // Cron is deliberately bounded in the repository so a long-outage catch-up
   // cannot consume the entire invocation. A later tick resumes from the
   // template's next occurrence cursor.
-   const repo = new Repository(env.DB);
+    const repo = repositoryFor(env);
    const asOf = new Date(controller.scheduledTime);
    let failure: unknown;
    let purge: Awaited<ReturnType<Repository['purgeExpiredData']>> | undefined;

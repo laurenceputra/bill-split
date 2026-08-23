@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { assertFinancialInput, currencyOptions, expenseInput, friendInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
 import { BalanceOverflowError } from './money';
 
 const base = { description: 'Lunch', amount_minor: 1000, currency: 'USD' as const, date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }] };
 describe('financial input', () => {
+  it('bounds category suggestion descriptions to the expense contract', () => {
+    expect(categorySuggestionInput.parse({ description: '  Lunch  ' }).description).toBe('Lunch');
+    expect(categorySuggestionInput.safeParse({ description: 'x'.repeat(241) }).success).toBe(false);
+  });
   it('rejects mismatched totals and unsafe integers', () => {
     expect(() => assertFinancialInput({ ...base, splits: [{ ...base.splits[0], amount_minor: 999 }] })).toThrow('Splits must sum');
     expect(expenseInput.safeParse({ ...base, amount_minor: Number.MAX_SAFE_INTEGER + 1 }).success).toBe(false);

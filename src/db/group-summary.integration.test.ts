@@ -61,7 +61,7 @@ describe('home balance summaries against local D1', () => {
       '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql',
       '0012_invitations_audit_purge.sql', '0013_projection_layer.sql',
       '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql',
-      '0016_projection_readiness_reset.sql',
+      '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql',
     ];
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES

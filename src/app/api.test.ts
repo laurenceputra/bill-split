@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, createGroupInvitation, createScheduledExpense, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState, transferGroupOwnership, updateGroup } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
@@ -10,6 +10,7 @@ import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quie
 const json = (body: unknown, status = 200, userId?: string, clerkUserId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}), ...(clerkUserId ? { 'X-BillSplit-Clerk-User-Id': clerkUserId } : {}) } });
 
 beforeEach(async () => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   await new Promise<void>((resolve, reject) => { const request = indexedDB.deleteDatabase(DB_NAME); request.onsuccess = () => resolve(); request.onerror = () => reject(request.error); request.onblocked = () => resolve(); });
 });
@@ -67,6 +68,13 @@ describe('frontend API errors and cache fallback', () => {
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => item.id)).toEqual(['expense-1']);
   });
 
+  it('normalizes activity pages without losing a server cursor', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ activity: [{ type: 'expense_deleted', id: 'deleted-1' }, { type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', entityActive: false, fromName: 'A', toName: 'B' }], nextCursor: 'next-page' })));
+    const page = await getActivityPage(undefined, { limit: 1 });
+    expect(page.activity.map((item) => item.id)).toEqual(['revision-1']);
+    expect(page.nextCursor).toBe('next-page');
+  });
+
   it('uses the backend cursor contracts for invitations, transactions, audit, and restore', async () => {
     const calls: Array<{ path: string; method: string }> = [];
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
@@ -81,13 +89,262 @@ describe('frontend API errors and cache fallback', () => {
       return new Response(null, { status: 204 });
     }));
     await getPendingInvitations(); await getOwnerInvitations('group-a'); await getExpensePage('group-a', { cursor: 'e1' }); await getSettlementPage('group-a', { cursor: 's1' }); await getActivityPage('group-a', { cursor: 'a1' }); await getAuditPage('group-a', { cursor: 'u1' });
-    await createGroupInvitation('group-a', 'person@example.com'); await acceptInvitation('invite-a'); await rejectInvitation('invite-a'); await removeGroupMember('group-a', 'person-a'); await restoreExpense('expense-a', 2); await restoreSettlement('settlement-a', 2);
+     await createGroupInvitation('group-a', 'person@example.com'); await acceptInvitation('invite-a'); await rejectInvitation('invite-a'); await removeGroupMember('group-a', 'person-a'); await transferGroupOwnership('group-a', 'person-b'); await leaveGroup('group-a'); await restoreExpense('expense-a', 2); await restoreSettlement('settlement-a', 2);
     expect(calls).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: '/api/groups/group-a/expenses?limit=50&cursor=e1', method: 'GET' }),
       expect.objectContaining({ path: '/api/groups/group-a/audit?limit=50&cursor=u1', method: 'GET' }),
       expect.objectContaining({ path: '/api/expenses/expense-a/restore', method: 'POST' }),
-      expect.objectContaining({ path: '/api/settlements/settlement-a/restore', method: 'POST' }),
-    ]));
+       expect.objectContaining({ path: '/api/settlements/settlement-a/restore', method: 'POST' }),
+       expect.objectContaining({ path: '/api/groups/group-a/transfer-ownership', method: 'POST' }),
+       expect.objectContaining({ path: '/api/groups/group-a/leave', method: 'POST' }),
+     ]));
+  });
+
+  it('constructs expense filters and preserves them for cursor pagination', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { calls.push(new URL(String(request), 'https://billsplit.test').search); return json({ expenses: [], nextCursor: 'next' }); }));
+    const filters = { q: 'dinner', person: 'person-a', category: 'Dining', from: '2026-01-01', to: '2026-01-31', currency: 'USD' as const };
+    await getExpensePage('group-a', { ...filters });
+    await getExpensePage('group-a', { ...filters, cursor: 'next' });
+    expect(calls).toEqual([
+      '?limit=50&q=dinner&person=person-a&category=Dining&from=2026-01-01&to=2026-01-31&currency=USD',
+      '?limit=50&cursor=next&q=dinner&person=person-a&category=Dining&from=2026-01-01&to=2026-01-31&currency=USD',
+    ]);
+  });
+
+  it('requests the separate paged settlement CSV endpoint', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => { calls.push(new URL(String(request), 'https://billsplit.test').pathname + new URL(String(request), 'https://billsplit.test').search); return new Response('date,from_person,to_person,amount_minor,currency,note\n', { headers: { 'Content-Type': 'text/csv', 'X-Next-Cursor': 'next' } }); }));
+    const page = await getGroupSettlementCsvExportPage('group-a', { cursor: 'cursor-a' });
+    expect(page.nextCursor).toBe('next');
+    expect(calls).toEqual(['/api/groups/group-a/settlements.csv?limit=100&cursor=cursor-a']);
+  });
+
+  it('uses the owner group settings mutation endpoints', async () => {
+    const calls: Array<{ path: string; method: string; body?: string; expectedClerkUserId?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const url = new URL(String(request), 'https://billsplit.test'); calls.push({ path: url.pathname, method: init?.method || 'GET', body: init?.body as string | undefined }); return init?.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ group: {} }); }));
+    await updateGroup('group-a', { name: 'Renamed', currency: 'EUR' });
+    await deleteGroup('group-a');
+    expect(calls).toEqual([{ path: '/api/groups/group-a', method: 'PUT', body: JSON.stringify({ name: 'Renamed', currency: 'EUR' }) }, { path: '/api/groups/group-a', method: 'DELETE' }]);
+  });
+
+  it('uses the typed account deletion endpoint and keeps Clerk deletion capability explicit', async () => {
+     const calls: Array<{ path: string; method: string; body?: string; expectedClerkUserId?: string }> = [];
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const url = new URL(String(request), 'https://billsplit.test'); calls.push({ path: url.pathname, method: init?.method || 'GET', body: init?.body as string | undefined, expectedClerkUserId: new Headers(init?.headers).get('X-BillSplit-Expected-Clerk-User-Id') || undefined }); return new Response(null, { status: 204 }); }));
+     await deleteAccount('clerk-original');
+     expect(calls).toEqual([{ path: '/api/account', method: 'DELETE', body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }), expectedClerkUserId: 'clerk-original' }]);
+    expect(storage.get('billsplit-pending-account-deletion')).toContain('clerk-original');
+    await expect(deleteClerkUserIfSupported(undefined)).resolves.toBe('unsupported');
+    const deleteUser = vi.fn(async () => undefined);
+    await expect(deleteClerkUserIfSupported({ delete: deleteUser })).resolves.toBe('deleted');
+    expect(deleteUser).toHaveBeenCalledOnce();
+  });
+
+  it('resumes provider deletion after a first local cleanup failure without repeating server deletion', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    storage.set('billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-deleted', clerkUserId: 'clerk-original' }));
+    expect(hasPendingAccountDeletion()).toBe(true);
+    const clearLocal = vi.fn().mockRejectedValueOnce(new Error('storage temporarily unavailable')).mockResolvedValue(undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: vi.fn() }, vi.fn(async () => undefined), { clearLocal })).rejects.toThrow('storage temporarily unavailable');
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(providerDelete).toHaveBeenCalledOnce();
+    expect(hasPendingAccountDeletion()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it('retries a pending server deletion and never calls provider deletion after network uncertainty', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn().mockRejectedValue(new TypeError('network unavailable'));
+    vi.stubGlobal('fetch', fetchSpy);
+   const providerDelete = vi.fn(async () => undefined);
+   await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined))).rejects.toThrow('Connection issue');
+   expect(fetchSpy).toHaveBeenCalledOnce();
+   expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get('X-BillSplit-Expected-Clerk-User-Id')).toBe('clerk-original');
+   expect(providerDelete).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('recovers when the server committed before the phase marker update', async () => {
+    const storage = new Map<string, string>();
+    let phaseWriteCount = 0;
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) || null,
+      setItem: (key: string, value: string) => {
+        phaseWriteCount += 1;
+        if (phaseWriteCount === 2) throw new Error('crash after server commit');
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => storage.delete(key),
+    });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(deleteAccount('clerk-original')).rejects.toThrow('crash after server commit');
+    expect(storage.get('billsplit-pending-account-deletion')).toContain('server-pending');
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal: vi.fn(async () => undefined) })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(providerDelete).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps cleanup blocked when a retry fails before the server commit, then completes on a later retry', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'ACCOUNT_DELETION_BLOCKED', message: 'owned group' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal: vi.fn(async () => undefined) })).rejects.toThrow('owned group');
+    expect(providerDelete).not.toHaveBeenCalled();
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal: vi.fn(async () => undefined) })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(providerDelete).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not retry a pending marker under an unrelated provider identity', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-unrelated', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal: vi.fn(async () => undefined) })).rejects.toThrow('provider identity changed');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(providerDelete).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails closed for an unbound marker and only discards it explicitly', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const clearLocal = vi.fn(async () => undefined);
+    const providerDelete = vi.fn(async () => undefined);
+    expect(hasPendingAccountDeletion()).toBe(true);
+    await expect(completePendingAccountDeletion({ id: 'clerk-current', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal })).rejects.toThrow('marker is invalid');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(clearLocal).not.toHaveBeenCalled();
+    expect(providerDelete).not.toHaveBeenCalled();
+    expect(discardInvalidPendingAccountDeletion()).toBe(true);
+    expect(hasPendingAccountDeletion()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it('fails closed for a malformed marker without binding it to the current user', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', '{not-json']]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(completePendingAccountDeletion({ id: 'clerk-current', delete: vi.fn() }, vi.fn(async () => undefined))).rejects.toThrow('marker is invalid');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(discardInvalidPendingAccountDeletion()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('recovers a marker only for the exact current Clerk user', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-deleted', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const clearLocal = vi.fn(async () => undefined);
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(clearLocal).toHaveBeenCalledOnce();
+    expect(providerDelete).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
+   it('retains local-cleared recovery after reload when Clerk is authoritatively signed out', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'local-cleared', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const signOut = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion(undefined, signOut, { clerkEvidence: { isLoaded: true, isSignedIn: false } })).resolves.toEqual({ clerkStatus: 'signed-out' });
+    expect(signOut).not.toHaveBeenCalled();
+     expect(hasPendingAccountDeletion()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+   it('retains server-deleted recovery after local cleanup when Clerk is signed out', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-deleted', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const clearLocal = vi.fn(async () => undefined);
+    const signOut = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion(undefined, signOut, { clearLocal, clerkEvidence: { isLoaded: true, isSignedIn: false } })).resolves.toEqual({ clerkStatus: 'signed-out' });
+    expect(clearLocal).toHaveBeenCalledOnce();
+    expect(signOut).not.toHaveBeenCalled();
+     expect(hasPendingAccountDeletion()).toBe(true);
+     vi.unstubAllGlobals();
+   });
+
+   it('completes retained local-cleared recovery after the original Clerk account signs in', async () => {
+     const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'local-cleared', clerkUserId: 'clerk-original' })]]);
+     vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+     const providerDelete = vi.fn(async () => undefined);
+     await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clerkEvidence: { isLoaded: true, isSignedIn: true, userId: 'clerk-original' } })).resolves.toEqual({ clerkStatus: 'deleted' });
+     expect(providerDelete).toHaveBeenCalledOnce();
+     expect(hasPendingAccountDeletion()).toBe(false);
+     vi.unstubAllGlobals();
+   });
+
+   it('keeps the marker when provider deletion fails during a session expiry', async () => {
+     const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'local-cleared', clerkUserId: 'clerk-original' })]]);
+     vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+     const providerDelete = vi.fn(async () => { throw new Error('session expired'); });
+     const signOut = vi.fn(async () => undefined);
+     await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, signOut, { clerkEvidence: { isLoaded: true, isSignedIn: true, userId: 'clerk-original' } })).resolves.toEqual({ clerkStatus: 'unsupported' });
+     expect(signOut).toHaveBeenCalledOnce();
+     expect(hasPendingAccountDeletion()).toBe(true);
+     vi.unstubAllGlobals();
+   });
+
+  it('finishes provider-deleted recovery after reload without a Clerk user', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'provider-deleted', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    await expect(completePendingAccountDeletion(undefined, vi.fn(async () => undefined), { clerkEvidence: { isLoaded: true, isSignedIn: false } })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(hasPendingAccountDeletion()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it('denies server-pending recovery while Clerk is authoritatively signed out', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const clearLocal = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion(undefined, vi.fn(async () => undefined), { clearLocal, clerkEvidence: { isLoaded: true, isSignedIn: false } })).rejects.toThrow('loaded Clerk user ID');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(clearLocal).not.toHaveBeenCalled();
+    expect(hasPendingAccountDeletion()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('aborts before DELETE when the pre-mutation marker cannot be persisted', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => { throw new Error('marker storage failed'); }, removeItem: () => undefined });
+    await expect(deleteAccount('clerk-original')).rejects.toThrow('marker storage failed');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('requires a loaded Clerk user ID before marking or starting deletion', async () => {
+    expect(() => markAccountDeletionPending('')).toThrow('loaded Clerk user ID');
+    await expect(deleteAccount('')).rejects.toThrow('loaded Clerk user ID');
+  });
+
+  it('retains the separately authorized historical participant list in group responses', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request), 'https://billsplit.test').pathname;
+      if (path === '/api/me') return json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a');
+      return json({ group: { id: 'group-a', name: 'Trip', currency: 'USD', createdAt: '', updatedAt: '' }, members: [{ personId: 'person-a', name: 'A', joinedAt: '', role: 'owner' }], historicalParticipants: [{ personId: 'person-a', name: 'A', joinedAt: '', role: 'owner', status: 'active' }, { personId: 'person-removed', name: 'Former', joinedAt: '', role: 'member', status: 'removed' }] }, 200, 'user-a');
+    }));
+    const result = await getGroup('group-a');
+    expect(result.historicalParticipants).toEqual(expect.arrayContaining([expect.objectContaining({ personId: 'person-removed', status: 'removed' })]));
   });
 
   it('uses scheduled expense routes online without entering the expense outbox', async () => {
@@ -108,19 +365,39 @@ describe('frontend API errors and cache fallback', () => {
       ['/api/groups/group-a/scheduled-expenses', 'POST'], ['/api/scheduled-expenses/schedule-1/pause', 'POST'],
     ]);
   });
+  it('uses the authenticated category suggestion route', async () => {
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      calls.push({ path: url.pathname, method: init?.method || 'GET', body: init?.body as string | undefined });
+      return json({ category: 'Dining' }, 200, 'user-a');
+    }));
+    await expect(getCategorySuggestion('  Dinner  ')).resolves.toEqual({ category: 'Dining' });
+    expect(calls).toEqual([{ path: '/api/category-suggestion', method: 'POST', body: JSON.stringify({ description: '  Dinner  ' }) }]);
+  });
 
-  it('loads every scheduled-expense page beyond the D1-sized API page', async () => {
+  it('loads only the first scheduled-expense page and leaves the cursor for Load more', async () => {
     const calls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
       const url = new URL(String(request), 'https://billsplit.test');
       calls.push(url.search);
-      const offset = Number(url.searchParams.get('offset') || 0);
-      const count = offset === 0 ? 100 : 2;
-      return json({ scheduledExpenses: Array.from({ length: count }, (_, index) => ({ id: `schedule-${offset + index}` })) }, 200, 'user-a');
+      const cursor = url.searchParams.get('cursor');
+      const count = cursor ? 2 : 100;
+      return json({ scheduledExpenses: Array.from({ length: count }, (_, index) => ({ id: `schedule-${cursor ? 100 + index : index}` })), ...(cursor ? {} : { nextCursor: 'scheduled-cursor' }) }, 200, 'user-a');
     }));
     const result = await getScheduledExpenses('group-a');
-    expect(result.scheduledExpenses).toHaveLength(102);
-    expect(calls).toEqual(['?limit=100&offset=0', '?limit=100&offset=100']);
+    expect(result.scheduledExpenses).toHaveLength(100);
+    expect(result.nextCursor).toBe('scheduled-cursor');
+    expect(calls).toEqual(['?limit=100']);
+  });
+
+  it('loads a scheduled-expense continuation only when given its cursor', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      return json({ scheduledExpenses: [{ id: 'schedule-next' }], nextCursor: undefined }, 200, 'user-a');
+    }));
+    await expect(getScheduledExpensePage('group-a', { cursor: 'scheduled-cursor' })).resolves.toEqual({ scheduledExpenses: [{ id: 'schedule-next' }], nextCursor: undefined });
+    expect(String((fetch as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('cursor=scheduled-cursor');
   });
 
   it('marks API calls as AJAX requests and publishes auth-required state', async () => {

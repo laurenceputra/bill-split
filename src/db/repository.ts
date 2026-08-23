@@ -5,22 +5,30 @@ import { checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
+import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
+const identityHash = async (value: string, key: string) => {
+  const cryptoKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const digest = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+};
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR', message: string) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
+const flag = (value: unknown) => value === true || value === 1 || text(value) === '1';
 const minor = (value: unknown) => checkedMinor(value);
 const currency = (value: unknown) => text(value) as Expense['currency'];
 const stableJson = (value: unknown): string => JSON.stringify(value, (_key, nested) => nested && typeof nested === 'object' && !Array.isArray(nested) ? Object.fromEntries(Object.entries(nested as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) : nested);
+export const normalizeCategoryDescription = normalizeCategoryDescriptionValue;
 
 export type LedgerCursor = { date: string; createdAt: string; id: string };
-const cursorText = (value: LedgerCursor) => {
+const cursorText = (value: unknown) => {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
@@ -35,6 +43,18 @@ export const decodeLedgerCursor = (value: string | undefined): LedgerCursor | un
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<LedgerCursor>;
     if (typeof parsed.date !== 'string' || typeof parsed.createdAt !== 'string' || typeof parsed.id !== 'string' || !parsed.id) throw new Error('invalid cursor');
     return { date: parsed.date, createdAt: parsed.createdAt, id: parsed.id };
+  } catch { throw new RepositoryError('INVALID_CURSOR', 'The pagination cursor is invalid'); }
+};
+type ScheduledExpenseCursor = { createdAt: string; id: string };
+const encodeScheduledExpenseCursor = (value: ScheduledExpenseCursor) => cursorText(value);
+const decodeScheduledExpenseCursor = (value: string | undefined): ScheduledExpenseCursor | undefined => {
+  if (!value) return undefined;
+  try {
+    if (!/^[A-Za-z0-9_-]{1,512}$/.test(value)) throw new Error('invalid cursor');
+    const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
+    const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)))) as Partial<ScheduledExpenseCursor>;
+    if (typeof parsed.createdAt !== 'string' || typeof parsed.id !== 'string' || !parsed.id) throw new Error('invalid cursor');
+    return { createdAt: parsed.createdAt, id: parsed.id };
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The pagination cursor is invalid'); }
 };
 export const assertLikeSearch = (value: string | undefined) => {
@@ -144,7 +164,39 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
   WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
 
 export class Repository {
-  constructor(private readonly db: D1Database) {}
+  constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string) {}
+
+  private tombstoneKey() {
+    const key = this.identityTombstoneKey?.trim();
+    if (!key) throw new RepositoryError('DATABASE_ERROR', 'Identity tombstone protection is not configured');
+    return key;
+  }
+
+  /** The SQL migration and this method intentionally share trim + lowercase. */
+  normalizeCategoryDescription(description: string) { return normalizeCategoryDescriptionValue(description); }
+
+  async categoryPreference(userId: string, description: string) {
+    const normalized = this.normalizeCategoryDescription(description);
+    if (!normalized) return null;
+    const row = await this.db.prepare('SELECT category FROM category_preferences WHERE user_id=? AND normalized_description=?').bind(userId, normalized).first<Row>();
+    return row?.category == null ? null : text(row.category);
+  }
+  async categorySuggestion(userId: string, description: string) { return this.categoryPreference(userId, description); }
+
+  /**
+   * Build the learning statements separately so callers can append them to
+   * the mutation batch. A mutation guard is used by expense/schedule writes:
+   * a conditional update that changes zero rows must not still learn a value.
+   */
+  categoryPreferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now(), guard?: { table: 'expenses' | 'scheduled_expenses'; id: string; version?: number; generationClaimId?: string }) {
+    const normalized = this.normalizeCategoryDescription(description);
+    if (!normalized) return [];
+    const guardSql = guard ? ` AND EXISTS (SELECT 1 FROM ${guard.table} learned_entity WHERE learned_entity.id=?${guard.version === undefined ? '' : ' AND learned_entity.version=?'}${guard.table === 'expenses' ? ' AND learned_entity.deleted_at IS NULL' : guard.generationClaimId === undefined ? '' : ' AND learned_entity.generation_claim_id=?'})` : '';
+    const guardArgs = guard ? [guard.id, ...(guard.version === undefined ? [] : [guard.version]), ...(guard.table === 'scheduled_expenses' && guard.generationClaimId !== undefined ? [guard.generationClaimId] : [])] : [];
+    if (category == null || category.trim() === '') return [this.db.prepare(`DELETE FROM category_preferences WHERE user_id=? AND normalized_description=?${guardSql}`).bind(userId, normalized, ...guardArgs)];
+    return [this.db.prepare(`INSERT INTO category_preferences(user_id,normalized_description,category,updated_at) SELECT ?,?,?,? WHERE 1=1${guardSql} ON CONFLICT(user_id,normalized_description) DO UPDATE SET category=excluded.category,updated_at=excluded.updated_at`).bind(userId, normalized, category.trim(), updatedAt, ...guardArgs)];
+  }
+  preferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now()) { return this.categoryPreferenceStatements(userId, description, category, updatedAt); }
 
   /**
    * Recompute one group's compact read model inside the caller's D1 batch.
@@ -178,11 +230,6 @@ export class Repository {
         ) GROUP BY group_id,currency,person_id HAVING SUM(net_minor)<>0`).bind(timestamp, groupId, groupId, groupId, groupId),
       readiness,
     ];
-  }
-
-  private async rebuildProjection(groupId: string) {
-    try { await this.db.batch(this.projectionStatements(groupId, now(), true)); }
-    catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); throw error; }
   }
 
   async projectionBackfill(options: { maxGroups?: number } = {}) {
@@ -226,29 +273,40 @@ export class Repository {
   }
 
   private async personForUser(user: Row, email: string, t = now()) {
+    if (user.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
+    const activeUser = this.activeUserGuard(text(user.id));
     let person = await this.db.prepare('SELECT * FROM people WHERE user_id=? AND deleted_at IS NULL').bind(user.id).first<Row>();
     if (!person) {
       const candidate = await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(email).first<Row>();
       if (candidate && (candidate.user_id == null || String(candidate.user_id) === String(user.id))) {
-        await this.db.prepare('UPDATE people SET user_id=? WHERE id=? AND user_id IS NULL').bind(user.id, candidate.id).run();
-        person = { ...candidate, user_id: user.id };
+        const linked = await this.db.prepare(`UPDATE people SET user_id=? WHERE id=? AND user_id IS NULL AND ${activeUser.sql}`).bind(user.id, candidate.id, ...activeUser.args).run();
+        if (linked.meta?.changes !== undefined && linked.meta.changes === 0) {
+          const current = await this.db.prepare('SELECT * FROM people WHERE id=? AND deleted_at IS NULL').bind(candidate.id).first<Row>();
+          if (!current || String(current.user_id) !== String(user.id)) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The authenticated account changed before its person could be linked');
+          person = current;
+        } else {
+          person = { ...candidate, user_id: user.id };
+        }
       } else {
         const id = uid();
         // A pre-existing person with this email may belong to another identity.
         // Keep the new identity unambiguous rather than linking accounts.
         try {
-          await this.db.prepare('INSERT INTO people(id,name,email,user_id,created_at) VALUES(?,?,?,?,?)').bind(id, email.split('@')[0], candidate ? null : email, user.id, t).run();
+          const created = await this.db.prepare(`INSERT INTO people(id,name,email,user_id,created_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, email.split('@')[0], candidate ? null : email, user.id, t, ...activeUser.args).run();
+          if (created.meta?.changes !== undefined && created.meta.changes === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
           person = { id, name: email.split('@')[0], email: candidate ? null : email, user_id: user.id, created_at: t };
         } catch (error) {
           if (!(error instanceof Error) || !/unique|constraint/i.test(error.message)) throw error;
           const winner = await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(email).first<Row>();
           if (winner && winner.user_id == null) {
-            await this.db.prepare('UPDATE people SET user_id=? WHERE id=? AND user_id IS NULL').bind(user.id, winner.id).run();
+            const linked = await this.db.prepare(`UPDATE people SET user_id=? WHERE id=? AND user_id IS NULL AND ${activeUser.sql}`).bind(user.id, winner.id, ...activeUser.args).run();
+            if (linked.meta?.changes !== undefined && linked.meta.changes === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
             person = { ...winner, user_id: user.id };
           } else if (winner && String(winner.user_id) === String(user.id)) {
             person = winner;
           } else {
-            await this.db.prepare('INSERT INTO people(id,name,email,user_id,created_at) VALUES(?,?,?,?,?)').bind(id, email.split('@')[0], null, user.id, t).run();
+            const created = await this.db.prepare(`INSERT INTO people(id,name,email,user_id,created_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, email.split('@')[0], null, user.id, t, ...activeUser.args).run();
+            if (created.meta?.changes !== undefined && created.meta.changes === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
             person = { id, name: email.split('@')[0], email: null, user_id: user.id, created_at: t };
           }
         }
@@ -262,13 +320,74 @@ export class Repository {
 
   async user(rawEmail: string) {
     const email = rawEmail.trim().toLowerCase();
+    const deletedEmailHash = await identityHash(email, this.tombstoneKey());
+    const deletedIdentity = await this.db.prepare('SELECT id FROM users WHERE deleted_at IS NOT NULL AND deleted_email_hash=?').bind(deletedEmailHash).first<Row>();
+    if (deletedIdentity) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
     const t = now();
-    await this.db.prepare('INSERT OR IGNORE INTO users(id,email,created_at,updated_at) VALUES(?,?,?,?)').bind(uid(), email, t, t).run();
+    await this.db.prepare('INSERT OR IGNORE INTO users(id,email,created_at,updated_at) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM users deleted_user WHERE deleted_user.deleted_at IS NOT NULL AND deleted_user.deleted_email_hash=?)').bind(uid(), email, t, t, deletedEmailHash).run();
     const user = await this.db.prepare('SELECT * FROM users WHERE email=?').bind(email).first<Row>();
     if (!user) throw new RepositoryError('DATABASE_ERROR', 'Unable to create user');
     return this.personForUser(user, email, t);
   }
   async me(email: string) { return this.user(email); }
+
+  /**
+   * Delete the application's account without deleting financial rows. The
+   * owner check is performed before and repeated by the conditional claim in
+   * the single D1 batch, so a blocked or racing request cannot partially
+   * revoke invitations or memberships. Actor IDs and person IDs remain FK
+   * anchors; audit and membership-event name snapshots are the intentional
+   * retained record of who performed historical financial work.
+   */
+  async deleteAccount(userId: string) {
+    const tombstoneKey = this.tombstoneKey();
+    const user = await this.db.prepare('SELECT id,email,clerk_user_id,deleted_at FROM users WHERE id=?').bind(userId).first<Row>();
+    if (!user) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has already been deleted');
+    // A response can be lost after D1 commits. Repeating the authenticated
+    // deletion is therefore a successful no-op, not a second mutation.
+    if (user.deleted_at != null) return { deletedAt: text(user.deleted_at), alreadyDeleted: true };
+    const owned = await this.db.prepare(`SELECT COUNT(*) AS count FROM group_members gm JOIN groups g ON g.id=gm.group_id
+      WHERE gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND g.deleted_at IS NULL`).bind(userId).first<Row>();
+    const ownedGroupCount = number(owned?.count);
+    if (ownedGroupCount > 0) throw new RepositoryError('ACCOUNT_DELETION_BLOCKED', 'Transfer ownership or delete your active groups before deleting your account', { activeOwnedGroupCount: ownedGroupCount });
+
+    const timestamp = now();
+    const originalEmail = normalizeEmail(text(user.email));
+    const [deletedEmailHash, deletedClerkHash] = await Promise.all([
+      identityHash(originalEmail, tombstoneKey),
+      user.clerk_user_id == null ? Promise.resolve(null) : identityHash(text(user.clerk_user_id), tombstoneKey),
+    ]);
+    const pseudonym = `deleted+${userId}@billsplit.invalid`;
+    const deletionGuard = 'EXISTS (SELECT 1 FROM users deleted_user WHERE deleted_user.id=? AND deleted_user.deleted_at=?)';
+    const result = await this.db.batch([
+      this.db.prepare(`UPDATE users SET email=?,clerk_user_id=NULL,deleted_email_hash=?,deleted_clerk_hash=?,deleted_at=?,updated_at=?
+        WHERE id=? AND deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.id=gm.group_id
+          WHERE gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND g.deleted_at IS NULL)`).bind(pseudonym, deletedEmailHash, deletedClerkHash, timestamp, timestamp, userId, userId),
+      this.db.prepare(`UPDATE group_members SET deleted_at=? WHERE user_id=? AND role='member' AND deleted_at IS NULL AND ${deletionGuard}`).bind(timestamp, userId, userId, timestamp),
+      // Account deletion also terminally cancels this creator's active
+      // templates in the same atomic batch. Existing expenses remain intact.
+      this.db.prepare(`UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE created_by=? AND status!='cancelled' AND EXISTS (SELECT 1 FROM users deleted_creator WHERE deleted_creator.id=? AND deleted_creator.deleted_at=?)`).bind(timestamp, userId, userId, timestamp),
+      this.db.prepare(`UPDATE group_invitations SET revoked_at=? WHERE revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL
+        AND (created_by=? OR email_normalized=?) AND ${deletionGuard}`).bind(timestamp, userId, originalEmail, userId, timestamp),
+      // Invitation history is retained, but the deleted account's normalized
+      // email is not. Do this for every status, not only pending rows.
+      // Keep invitation history useful without leaving a contact address or
+      // using a stable account-wide pseudonym. The invitation ID makes each
+      // redaction distinct and the reserved .invalid TLD prevents delivery.
+      this.db.prepare(`UPDATE group_invitations SET email_normalized='deleted+'||id||'@billsplit.invalid' WHERE email_normalized=? AND ${deletionGuard}`).bind(originalEmail, userId, timestamp),
+      this.db.prepare(`DELETE FROM category_preferences WHERE user_id=? AND ${deletionGuard}`).bind(userId, userId, timestamp),
+      this.db.prepare(`DELETE FROM idempotency_keys WHERE user_id=? AND ${deletionGuard}`).bind(userId, userId, timestamp),
+      this.db.prepare(`UPDATE people SET name='Deleted account',email=NULL,user_id=NULL,deleted_at=? WHERE user_id=? AND deleted_at IS NULL AND ${deletionGuard}`).bind(timestamp, userId, userId, timestamp),
+    ]);
+    if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0) === 0) {
+      const currentOwned = await this.db.prepare(`SELECT COUNT(*) AS count FROM group_members gm JOIN groups g ON g.id=gm.group_id
+        WHERE gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND g.deleted_at IS NULL`).bind(userId).first<Row>();
+      const currentOwnedCount = number(currentOwned?.count);
+      if (currentOwnedCount > 0) throw new RepositoryError('ACCOUNT_DELETION_BLOCKED', 'Transfer ownership or delete your active groups before deleting your account', { activeOwnedGroupCount: currentOwnedCount });
+      throw new RepositoryError('CONFLICT', 'The account changed before deletion could complete');
+    }
+    return { deletedAt: timestamp };
+  }
 
   /**
    * Resolve a verified Clerk session without changing the application's
@@ -279,11 +398,16 @@ export class Repository {
     const clerkId = clerkUserId.trim();
     const email = rawEmail.trim().toLowerCase();
     if (!clerkId || !email) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The verified Clerk identity could not be linked safely');
+    const tombstoneKey = this.tombstoneKey();
+    const [clerkHash, emailHash] = await Promise.all([identityHash(clerkId, tombstoneKey), identityHash(email, tombstoneKey)]);
 
     const mapped = await this.db.prepare('SELECT * FROM users WHERE clerk_user_id=?').bind(clerkId).first<Row>();
+    if (mapped?.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
     if (mapped) return this.personForUser(mapped, text(mapped.email).toLowerCase());
+    const deletedIdentity = await this.db.prepare(`SELECT id FROM users WHERE deleted_at IS NOT NULL AND (deleted_clerk_hash=? OR deleted_email_hash=?)`).bind(clerkHash, emailHash).first<Row>();
+    if (deletedIdentity) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot be linked again');
 
-    const byEmail = await this.db.prepare('SELECT * FROM users WHERE lower(email)=?').bind(email).first<Row>();
+    const byEmail = await this.db.prepare('SELECT * FROM users WHERE lower(email)=? AND deleted_at IS NULL').bind(email).first<Row>();
     if (byEmail?.clerk_user_id != null && String(byEmail.clerk_user_id) !== clerkId) {
       throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This email is already linked to another Clerk identity');
     }
@@ -293,7 +417,7 @@ export class Repository {
       try {
         // D1 batches are atomic. The conditional predicate makes a concurrent
         // first-link loser observable when the mapping is read back below.
-        await this.db.batch([this.db.prepare('UPDATE users SET clerk_user_id=?,updated_at=? WHERE id=? AND clerk_user_id IS NULL').bind(clerkId, t, byEmail.id)]);
+      await this.db.batch([this.db.prepare('UPDATE users SET clerk_user_id=?,updated_at=? WHERE id=? AND clerk_user_id IS NULL AND deleted_at IS NULL').bind(clerkId, t, byEmail.id)]);
       } catch (error) {
         if (!Repository.isUnique(error)) throw error;
       }
@@ -304,7 +428,7 @@ export class Repository {
 
     const id = uid();
     try {
-      await this.db.batch([this.db.prepare('INSERT INTO users(id,email,clerk_user_id,created_at,updated_at) VALUES(?,?,?,?,?)').bind(id, email, clerkId, t, t)]);
+      await this.db.batch([this.db.prepare('INSERT INTO users(id,email,clerk_user_id,created_at,updated_at) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM users deleted_user WHERE deleted_user.deleted_at IS NOT NULL AND (deleted_user.deleted_clerk_hash=? OR deleted_user.deleted_email_hash=?))').bind(id, email, clerkId, t, t, clerkHash, emailHash)]);
     } catch (error) {
       if (!Repository.isUnique(error)) throw error;
       const winner = await this.db.prepare('SELECT * FROM users WHERE clerk_user_id=?').bind(clerkId).first<Row>();
@@ -314,6 +438,19 @@ export class Repository {
     const created = await this.db.prepare('SELECT * FROM users WHERE id=?').bind(id).first<Row>();
     if (!created || String(created.clerk_user_id) !== clerkId) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The Clerk identity was not linked safely');
     return this.personForUser(created, email, t);
+  }
+
+  /** Narrow recovery lookup used only to make a committed account deletion retryable. */
+  async deletedAccountForIdentity(clerkUserId: string, rawEmail: string) {
+    // Email is intentionally not a recovery credential. It may have changed
+    // on the provider, and an unrelated Clerk identity must never be able to
+    // target a deleted account merely by presenting its old email address.
+    const clerkId = clerkUserId.trim();
+    if (!clerkId) return null;
+    const key = this.tombstoneKey();
+    const clerkHash = await identityHash(clerkId, key);
+    void rawEmail;
+    return this.db.prepare('SELECT id,deleted_at FROM users WHERE deleted_at IS NOT NULL AND deleted_clerk_hash=?').bind(clerkHash).first<Row>();
   }
 
   async groups(userId: string): Promise<Group[]> {
@@ -328,12 +465,21 @@ export class Repository {
     return row ? (text(row.role) === 'owner' ? 'owner' : 'member') : null;
   }
   async members(groupId: string): Promise<GroupMember[]> {
-    const rows = (await this.db.prepare('SELECT p.id AS person_id,p.name,p.email,gm.joined_at,gm.role FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name').bind(groupId).all<Row>()).results;
-    return rows.map((row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' : 'member' }));
+    const rows = (await this.db.prepare('SELECT p.id AS person_id,p.name,p.email,gm.joined_at,gm.role,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name').bind(groupId).all<Row>()).results;
+    return rows.map((row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' : 'member', linked: flag(row.linked) }));
   }
   async allMembers(groupId: string): Promise<GroupMember[]> {
-    const rows = (await this.db.prepare('SELECT p.id AS person_id,p.name,p.email,gm.joined_at,gm.role FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND p.deleted_at IS NULL ORDER BY p.name').bind(groupId).all<Row>()).results;
-    return rows.map((row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' : 'member' }));
+    const rows = (await this.db.prepare("SELECT p.id AS person_id,COALESCE(p.name,'Deleted account') AS name,p.email,gm.joined_at,gm.role,gm.deleted_at,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? ORDER BY p.name").bind(groupId).all<Row>()).results;
+    return rows.map((row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' : 'member', linked: flag(row.linked), removedAt: row.deleted_at == null ? null : text(row.deleted_at) }));
+  }
+  async historicalParticipants(groupId: string) {
+    const rows = (await this.db.prepare("SELECT p.id AS person_id,COALESCE(p.name,'Deleted account') AS name,gm.joined_at,gm.role,gm.deleted_at AS membership_deleted_at,p.deleted_at AS person_deleted_at,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? ORDER BY p.name,p.id").bind(groupId).all<Row>()).results;
+    return rows.map((row) => ({
+      personId: text(row.person_id), name: text(row.name), joinedAt: text(row.joined_at),
+      role: text(row.role) === 'owner' ? 'owner' as const : 'member' as const, linked: flag(row.linked),
+      removedAt: row.membership_deleted_at == null ? null : text(row.membership_deleted_at),
+      status: row.person_deleted_at != null ? 'deleted' as const : row.membership_deleted_at != null ? 'removed' as const : 'active' as const,
+    }));
   }
   async groupPeople(groupId: string): Promise<string[]> {
     const rows = (await this.db.prepare('SELECT gm.person_id FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=?').bind(groupId).all<Row>()).results;
@@ -358,20 +504,22 @@ export class Repository {
     const existing = await this.db.prepare("SELECT * FROM group_invitations WHERE group_id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT 1").bind(groupId, normalized, t).first<Row>();
     if (existing) return this.mapInvitation(existing);
     const result = await this.db.batch([
-      this.db.prepare("INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL)").bind(id, groupId, normalized, userId, t, expires, groupId, userId),
+      this.db.prepare("INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users owner_user ON owner_user.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(id, groupId, normalized, userId, t, expires, groupId, userId),
     ]);
-    if (result.length && Number((result[0] as { meta?: { changes?: number } }).meta?.changes) === 0) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can create invitations');
+    if (result.length && Number((result[0] as { meta?: { changes?: number } }).meta?.changes) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can create invitations'); }
     const created = await this.db.prepare('SELECT * FROM group_invitations WHERE id=?').bind(id).first<Row>();
     if (!created) throw new RepositoryError('DATABASE_ERROR', 'The invitation could not be created');
     return this.mapInvitation(created);
   }
   async revokeInvitation(groupId: string, invitationId: string, userId: string): Promise<boolean> {
-    const result = await this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE id=? AND group_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL)").bind(now(), invitationId, groupId, groupId, userId).run();
+    const result = await this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE id=? AND group_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(now(), invitationId, groupId, groupId, userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) await this.throwIfDeleted(userId);
     return Number(result.meta?.changes ?? 0) > 0;
   }
   async acceptInvitation(invitationId: string, userId: string): Promise<GroupInvitation> {
     const user = await this.db.prepare('SELECT * FROM users WHERE id=?').bind(userId).first<Row>();
     if (!user) throw new RepositoryError('INVITATION_INVALID', 'The authenticated user is not available');
+    if (user.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot accept invitations');
     const email = normalizeEmail(text(user.email)), invitation = await this.db.prepare('SELECT * FROM group_invitations WHERE id=? AND email_normalized=?').bind(invitationId, email).first<Row>();
     if (!invitation) throw new RepositoryError('INVITATION_INVALID', 'Invitation not found for the authenticated email');
     const t = now();
@@ -383,13 +531,13 @@ export class Repository {
     const groupPerson = await this.db.prepare('SELECT p.* FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND lower(p.email)=? AND p.deleted_at IS NULL').bind(groupId, email).first<Row>();
     const linkedPerson = groupPerson ?? await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND user_id=? AND deleted_at IS NULL').bind(email, userId).first<Row>();
     const personId = text(linkedPerson?.id || uid()), statements = [
-      this.db.prepare("UPDATE group_invitations SET accepted_at=?,accepted_by=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL)").bind(t, userId, invitationId, email, t, groupId),
-      ...(linkedPerson ? [] : [this.db.prepare("INSERT INTO people(id,name,email,user_id,created_at) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL)").bind(personId, email.split('@')[0], email, userId, t, invitationId, userId)]),
-      this.db.prepare("UPDATE group_members SET user_id=?,deleted_at=NULL,role='member' WHERE group_id=? AND person_id=? AND EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL)").bind(userId, groupId, personId, invitationId, userId),
-      this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? )").bind(groupId, personId, userId, t, invitationId, userId, groupId, personId),
+      this.db.prepare("UPDATE group_invitations SET accepted_at=?,accepted_by=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(t, userId, invitationId, email, t, groupId, userId),
+      ...(linkedPerson ? [] : [this.db.prepare("INSERT INTO people(id,name,email,user_id,created_at) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(personId, email.split('@')[0], email, userId, t, invitationId, userId, userId)]),
+      this.db.prepare("UPDATE group_members SET user_id=?,deleted_at=NULL,role='member' WHERE group_id=? AND person_id=? AND EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(userId, groupId, personId, invitationId, userId, userId),
+      this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? )").bind(groupId, personId, userId, t, invitationId, userId, userId, groupId, personId),
     ];
     const result = await this.db.batch(statements);
-    if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('CONFLICT', 'The invitation changed before it could be accepted');
+    if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The invitation changed before it could be accepted'); }
     const accepted = await this.db.prepare('SELECT * FROM group_invitations WHERE id=?').bind(invitationId).first<Row>();
     if (!accepted) throw new RepositoryError('DATABASE_ERROR', 'The accepted invitation could not be read');
     return this.mapInvitation(accepted);
@@ -397,17 +545,46 @@ export class Repository {
   async rejectInvitation(invitationId: string, userId: string): Promise<boolean> {
     const user = await this.db.prepare('SELECT email FROM users WHERE id=?').bind(userId).first<Row>();
     if (!user) return false;
-    const result = await this.db.prepare("UPDATE group_invitations SET rejected_at=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>?").bind(now(), invitationId, normalizeEmail(text(user.email)), now()).run();
+    if (user.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot reject invitations');
+    const result = await this.db.prepare("UPDATE group_invitations SET rejected_at=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM users reject_user WHERE reject_user.id=? AND reject_user.deleted_at IS NULL)").bind(now(), invitationId, normalizeEmail(text(user.email)), now(), userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) await this.throwIfDeleted(userId);
     return Number(result.meta?.changes ?? 0) > 0;
   }
+
+  private membershipEventInsert(event: { id?: string; groupId: string; eventType: 'owner_transfer' | 'member_leave' | 'member_remove'; actorId: string; subjectPersonId?: string; occurredAt: string; where: string; whereArgs: unknown[] }) {
+    const targetJoin = event.subjectPersonId === undefined
+      ? 'JOIN group_members target ON target.group_id=actor.group_id AND target.person_id=actor.person_id'
+      : 'JOIN group_members target ON target.group_id=actor.group_id AND target.person_id=?';
+    const targetArgs = event.subjectPersonId === undefined ? [] : [event.subjectPersonId];
+    const differentTarget = event.subjectPersonId === undefined ? '' : ' AND target.person_id != actor.person_id';
+    const newRole = event.eventType === 'owner_transfer' ? 'owner' : null;
+    const previousRole = 'target.role';
+    return this.db.prepare(`INSERT INTO group_membership_events(id,group_id,event_type,actor_id,actor_person_id,actor_name,subject_person_id,subject_name,previous_role,new_role,occurred_at)
+      SELECT ?,?,?,?,actor.person_id,COALESCE(actor_person.name,'Unknown user'),target.person_id,COALESCE(target_person.name,'Unknown member'),${previousRole},?,?
+      FROM groups group_row
+      JOIN group_members actor ON actor.group_id=group_row.id
+      JOIN people actor_person ON actor_person.id=actor.person_id
+      ${targetJoin}
+      JOIN people target_person ON target_person.id=target.person_id
+       WHERE group_row.id=? AND group_row.deleted_at IS NULL AND actor.user_id=? AND actor.deleted_at IS NULL AND actor_person.deleted_at IS NULL AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users actor_user WHERE actor_user.id=actor.user_id AND actor_user.deleted_at IS NULL)${differentTarget} AND ${event.where}`)
+      .bind(event.id ?? uid(), event.groupId, event.eventType, event.actorId, newRole, event.occurredAt, ...targetArgs, event.groupId, event.actorId, ...event.whereArgs);
+  }
+
   async removeMember(groupId: string, personId: string, userId: string): Promise<boolean> {
-    const timestamp = now();
+    const timestamp = now(), eventId = uid();
+    const removalAuthorization = "actor.role='owner' AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users removal_actor WHERE removal_actor.id=actor.user_id AND removal_actor.deleted_at IS NULL) AND (target.role!='owner' OR (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)>1)";
     const result = await this.db.batch([
-      this.db.prepare("UPDATE group_members SET deleted_at=? WHERE group_id=? AND person_id=? AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members actor WHERE actor.group_id=? AND actor.user_id=? AND actor.role='owner' AND actor.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members self WHERE self.group_id=? AND self.person_id=? AND self.user_id=?) AND (role!='owner' OR (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)>1)").bind(timestamp, groupId, personId, groupId, groupId, userId, groupId, personId, userId, groupId),
-      this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE group_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND email_normalized=(SELECT lower(p.email) FROM people p WHERE p.id=? AND p.email IS NOT NULL)").bind(timestamp, groupId, personId),
+      this.membershipEventInsert({ id: eventId, groupId, eventType: 'member_remove', actorId: userId, subjectPersonId: personId, occurredAt: timestamp, where: removalAuthorization, whereArgs: [groupId] }),
+       this.db.prepare("UPDATE group_members SET deleted_at=? WHERE group_id=? AND person_id=? AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members actor JOIN people actor_person ON actor_person.id=actor.person_id WHERE actor.group_id=? AND actor.user_id=? AND actor.role='owner' AND actor.deleted_at IS NULL AND actor_person.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users removal_actor WHERE removal_actor.id=actor.user_id AND removal_actor.deleted_at IS NULL)) AND EXISTS (SELECT 1 FROM people target_person WHERE target_person.id=? AND target_person.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members self WHERE self.group_id=? AND self.person_id=? AND self.user_id=?) AND (role!='owner' OR (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)>1)").bind(timestamp, groupId, personId, groupId, groupId, userId, personId, groupId, personId, userId, groupId),
+       // Only the removed creator's templates are cancelled. Other members'
+       // templates remain valid even when they include the removed person as a
+       // payer or split (participant validity is enforced separately).
+        this.db.prepare("UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE group_id=? AND status!='cancelled' AND created_by=(SELECT removed_member.user_id FROM group_members removed_member WHERE removed_member.group_id=? AND removed_member.person_id=? AND removed_member.deleted_at=?) AND EXISTS (SELECT 1 FROM group_membership_events removal_event WHERE removal_event.id=? AND removal_event.group_id=? AND removal_event.event_type='member_remove' AND removal_event.actor_id=? AND removal_event.subject_person_id=?)").bind(timestamp, groupId, groupId, personId, timestamp, eventId, groupId, userId, personId),
+       this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE group_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND email_normalized=(SELECT lower(p.email) FROM people p WHERE p.id=? AND p.email IS NOT NULL) AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members owner_member WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users removal_actor WHERE removal_actor.id=owner_member.user_id AND removal_actor.deleted_at IS NULL)) AND EXISTS (SELECT 1 FROM group_members removed_member WHERE removed_member.group_id=? AND removed_member.person_id=? AND removed_member.deleted_at=? ) AND EXISTS (SELECT 1 FROM group_membership_events removal_event WHERE removal_event.id=? AND removal_event.group_id=? AND removal_event.event_type='member_remove' AND removal_event.actor_id=? AND removal_event.subject_person_id=?)").bind(timestamp, groupId, personId, groupId, groupId, userId, groupId, personId, timestamp, eventId, groupId, userId, personId),
     ]);
-    const memberChanges = Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+    const memberChanges = Number((result[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
     if (memberChanges === 0) {
+      await this.throwIfDeleted(userId);
       const selfRemoval = await this.db.prepare('SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND deleted_at IS NULL').bind(groupId, personId, userId).first<Row>();
       if (selfRemoval) throw new RepositoryError('MEMBER_REQUIRED', 'An owner cannot remove their own membership');
       const target = await this.db.prepare('SELECT role,deleted_at FROM group_members WHERE group_id=? AND person_id=?').bind(groupId, personId).first<Row>();
@@ -416,13 +593,54 @@ export class Repository {
     }
     return true;
   }
+
+  /**
+   * Transfer ownership and record the event in one D1 transaction. The
+   * precondition is repeated by both statements so a stale or racing request
+   * cannot create an audit row or change a membership without the other.
+   */
+  async transferOwnership(groupId: string, targetPersonId: string, userId: string): Promise<boolean> {
+    const timestamp = now(), eventId = uid();
+    const result = await this.db.batch([
+       this.membershipEventInsert({ id: eventId, groupId, eventType: 'owner_transfer', actorId: userId, subjectPersonId: targetPersonId, occurredAt: timestamp, where: "actor.role='owner' AND target.role='member' AND target.user_id IS NOT NULL AND EXISTS (SELECT 1 FROM users target_user WHERE target_user.id=target.user_id AND target_user.deleted_at IS NULL) AND (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)=1", whereArgs: [groupId] }),
+       this.db.prepare("UPDATE group_members SET role='member' WHERE group_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members target WHERE target.group_id=? AND target.person_id=? AND target.role='member' AND target.user_id IS NOT NULL AND target.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users target_user WHERE target_user.id=target.user_id AND target_user.deleted_at IS NULL)) AND (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)=1 AND EXISTS (SELECT 1 FROM users actor_user WHERE actor_user.id=? AND actor_user.deleted_at IS NULL)").bind(groupId, userId, groupId, groupId, targetPersonId, groupId, userId),
+       this.db.prepare("UPDATE group_members SET role='owner' WHERE group_id=? AND person_id=? AND role='member' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members actor WHERE actor.group_id=? AND actor.user_id=? AND actor.role='member' AND actor.deleted_at IS NULL) AND (SELECT COUNT(*) FROM group_members owners WHERE owners.group_id=? AND owners.role='owner' AND owners.deleted_at IS NULL)=0 AND EXISTS (SELECT 1 FROM group_membership_events event WHERE event.id=? AND event.group_id=? AND event.event_type='owner_transfer' AND event.actor_id=? AND event.subject_person_id=? AND event.occurred_at=?) AND EXISTS (SELECT 1 FROM users actor_user WHERE actor_user.id=? AND actor_user.deleted_at IS NULL)").bind(groupId, targetPersonId, groupId, groupId, userId, groupId, eventId, groupId, userId, targetPersonId, timestamp, userId),
+    ]);
+    const changes = Number((result[2] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+    if (changes > 0) return true;
+    await this.throwIfDeleted(userId);
+    const actor = await this.db.prepare('SELECT role FROM group_members WHERE group_id=? AND user_id=? AND deleted_at IS NULL').bind(groupId, userId).first<Row>();
+    if (text(actor?.role) !== 'owner') throw new RepositoryError('OWNER_REQUIRED', 'Only the active group owner can transfer ownership');
+    throw new RepositoryError('MEMBER_REQUIRED', 'Ownership can only be transferred to an active linked member');
+  }
+
+  /** Leave is deliberately self-scoped: the authenticated user is the only
+   * membership row this operation can soft-remove. */
+  async leaveGroup(groupId: string, userId: string): Promise<boolean> {
+    const timestamp = now(), eventId = uid();
+    const result = await this.db.batch([
+      this.membershipEventInsert({ id: eventId, groupId, eventType: 'member_leave', actorId: userId, subjectPersonId: undefined, occurredAt: timestamp, where: "actor.role='member'", whereArgs: [] }),
+       this.db.prepare("UPDATE group_members SET deleted_at=? WHERE group_id=? AND user_id=? AND role='member' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users leave_user WHERE leave_user.id=? AND leave_user.deleted_at IS NULL)").bind(timestamp, groupId, userId, groupId, userId),
+       this.db.prepare("UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE group_id=? AND status!='cancelled' AND created_by=? AND EXISTS (SELECT 1 FROM group_members left_member WHERE left_member.group_id=? AND left_member.user_id=? AND left_member.role='member' AND left_member.deleted_at=?) AND EXISTS (SELECT 1 FROM group_membership_events leave_event WHERE leave_event.id=? AND leave_event.group_id=? AND leave_event.event_type='member_leave' AND leave_event.actor_id=?)").bind(timestamp, groupId, userId, groupId, userId, timestamp, eventId, groupId, userId),
+        this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE group_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND (email_normalized=(SELECT lower(p.email) FROM people p JOIN group_members member ON member.person_id=p.id WHERE member.group_id=? AND member.user_id=? AND member.role='member' AND member.deleted_at=? AND p.email IS NOT NULL) OR email_normalized=(SELECT lower(email) FROM users WHERE id=?)) AND EXISTS (SELECT 1 FROM users leave_user WHERE leave_user.id=? AND leave_user.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members removed_member WHERE removed_member.group_id=? AND removed_member.user_id=? AND removed_member.role='member' AND removed_member.deleted_at=?) AND EXISTS (SELECT 1 FROM group_membership_events removal_event WHERE removal_event.id=? AND removal_event.group_id=? AND removal_event.event_type='member_leave' AND removal_event.actor_id=?)").bind(timestamp, groupId, groupId, userId, timestamp, userId, userId, groupId, userId, timestamp, eventId, groupId, userId),
+     ]);
+     const changes = Number((result[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+    if (changes > 0) return true;
+    await this.throwIfDeleted(userId);
+    const current = await this.db.prepare('SELECT role FROM group_members WHERE group_id=? AND user_id=? AND deleted_at IS NULL').bind(groupId, userId).first<Row>();
+    if (text(current?.role) === 'owner') throw new RepositoryError('MEMBER_REQUIRED', 'An owner must transfer ownership or delete the group before leaving');
+    throw new RepositoryError('MEMBER_REQUIRED', 'You are not an active member of this group');
+  }
+  async leaveMember(groupId: string, userId: string) { return this.leaveGroup(groupId, userId); }
   async createGroup(userId: string, personId: string, input: { name: string; currency: string }) {
     const id = uid(), t = now();
-    await this.db.batch([
-      this.db.prepare('INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES(?,?,?,?,?)').bind(id, input.name, input.currency, t, t),
-      this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES(?,?,?,?, 'owner')").bind(id, personId, userId, t),
-      this.db.prepare("INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at) VALUES(?,'ready',NULL,?,?)").bind(id, t, t),
+    const activeUser = this.activeUserGuard(userId);
+    const result = await this.db.batch([
+      this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
+      this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
+      this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at) SELECT ?,'ready',NULL,?,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, ...activeUser.args, id),
     ]);
+    if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
     return this.group(id, userId);
   }
   async createFriend(userId: string, personId: string, input: { name: string; email?: string | null; currency: string; client_operation_id?: string }) {
@@ -433,6 +651,7 @@ export class Repository {
 
     const operationId = input.client_operation_id;
     const hash = stableJson({ ...input, name, email });
+    const activeUser = this.activeUserGuard(userId);
     if (operationId) {
       const existingClaim = await this.db.prepare('SELECT * FROM idempotency_keys WHERE kind=? AND user_id=? AND operation_id=?').bind('friend.create', userId, operationId).first<Row>();
       if (existingClaim) {
@@ -450,13 +669,15 @@ export class Repository {
       const targetPersonId = target ? text(target.id) : friendId;
       const targetUserId = target?.user_id == null ? null : text(target.user_id);
       const statements = [
-        ...(target ? [] : [this.db.prepare('INSERT INTO people(id,name,email,created_at) VALUES(?,?,?,?)').bind(friendId, name, email, t)]),
-        this.db.prepare('INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES(?,?,?,?,?)').bind(id, `With ${name}`, input.currency, t, t),
-        this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES(?,?,?,?, 'owner')").bind(id, personId, userId, t),
-        this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES(?,?,?,?, 'member')").bind(id, targetPersonId, targetUserId, t),
-        ...(operationId ? [this.db.prepare('INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) VALUES(?,?,?,?,?,?,?)').bind('friend.create', userId, id, operationId, hash, id, t)] : []),
+        ...(target ? [] : [this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${activeUser.sql}`).bind(friendId, name, email, t, ...activeUser.args)]),
+        this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
+        this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
+        this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, targetUserId, t, ...activeUser.args),
+        ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql}`).bind('friend.create', userId, id, operationId, hash, id, t, ...activeUser.args)] : []),
       ];
-      await this.db.batch(statements);
+      const result = await this.db.batch(statements);
+      const groupIndex = target ? 0 : 1;
+      if (Number((result?.[groupIndex] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a friend');
     };
     try {
       await create(existing);
@@ -483,19 +704,19 @@ export class Repository {
     return this.group(id, userId);
   }
   async updateGroup(id: string, userId: string, input: { name: string; currency: string }) {
-    const result = await this.db.prepare("UPDATE groups SET name=?,currency=?,updated_at=? WHERE id=? AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL)").bind(input.name, input.currency, now(), id, id, userId).run();
-    if (Number(result.meta?.changes ?? 0) === 0) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update this group');
+    const result = await this.db.prepare("UPDATE groups SET name=?,currency=?,updated_at=? WHERE id=? AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(input.name, input.currency, now(), id, id, userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update this group'); }
     return this.group(id, userId);
   }
   async deleteGroup(id: string, userId?: string) {
-    const guard = userId ? " AND EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL)" : '';
+    const guard = userId ? " AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)" : '';
     const args = userId ? [now(), now(), id, id, userId] : [now(), now(), id];
     const result = await this.db.prepare(`UPDATE groups SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL${guard}`).bind(...args).run();
-    if (userId && Number(result.meta?.changes ?? 0) === 0) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can delete this group');
+    if (userId && Number(result.meta?.changes ?? 0) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can delete this group'); }
   }
   async addPerson(groupId: string, person: { name: string; email?: string | null }, userId?: string, creatorPersonId?: string) {
     const id = uid(), t = now(), email = person.email?.trim().toLowerCase() ?? null;
-    const ownerGuard = userId ? { sql: 'EXISTS (SELECT 1 FROM group_members owner_member WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL)', args: [groupId, userId] } : { sql: '1=1', args: [] as unknown[] };
+    const ownerGuard = userId ? { sql: 'EXISTS (SELECT 1 FROM group_members owner_member WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users owner_user WHERE owner_user.id=? AND owner_user.deleted_at IS NULL)', args: [groupId, userId, userId] } : { sql: '1=1', args: [] as unknown[] };
     if (email) {
       const linkedUser = userId ? await this.db.prepare('SELECT email FROM users WHERE id=?').bind(userId).first<Row>() : null;
       const creator = creatorPersonId ? await this.db.prepare('SELECT * FROM people WHERE id=? AND deleted_at IS NULL').bind(creatorPersonId).first<Row>() : null;
@@ -513,6 +734,7 @@ export class Repository {
         ]);
         const changes = result.length ? result.reduce((total, statement) => total + Number((statement as { meta?: { changes?: number } }).meta?.changes ?? 0), 0) : 1;
         if (userId && changes === 0) {
+          await this.throwIfDeleted(userId);
           const stillOwner = await this.db.prepare('SELECT 1 FROM group_members WHERE group_id=? AND user_id=? AND role=\'owner\' AND deleted_at IS NULL').bind(groupId, userId).first<Row>();
           if (!stillOwner) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can add people');
         }
@@ -523,7 +745,7 @@ export class Repository {
       this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${ownerGuard.sql}`).bind(id, person.name, email, t, ...ownerGuard.args),
       this.db.prepare(`INSERT INTO group_members(group_id,person_id,joined_at,role) SELECT ?,?,?, 'member' WHERE ${ownerGuard.sql}`).bind(groupId, id, t, ...ownerGuard.args),
     ]);
-    if (userId && Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can add people');
+    if (userId && Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can add people'); }
     return { id, name: person.name, email, createdAt: t };
   }
 
@@ -600,10 +822,21 @@ export class Repository {
     }
     return rows.map((row) => this.mapScheduled(row, payerRows.get(text(row.id)) ?? [], splitRows.get(text(row.id)) ?? []));
   }
-  async scheduledExpenses(groupId: string, options: { limit?: number; offset?: number } = {}): Promise<ScheduledExpense[]> {
-    const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), offset = Math.max(options.offset ?? 0, 0);
-    const rows = (await this.db.prepare('SELECT * FROM scheduled_expenses WHERE group_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(groupId, limit, offset).all<Row>()).results;
-    return this.hydrateScheduledRows(rows);
+  async scheduledExpenses(groupId: string, options: { limit?: number; offset?: number; cursor?: string } = {}) {
+    if (options.cursor && options.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Use either cursor or offset pagination');
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeScheduledExpenseCursor(options.cursor);
+    let sql = 'SELECT * FROM scheduled_expenses WHERE group_id=?';
+    const args: unknown[] = [groupId];
+    if (cursor) { sql += ' AND (created_at<? OR (created_at=? AND id<?))'; args.push(cursor.createdAt, cursor.createdAt, cursor.id); }
+    sql += ' ORDER BY created_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
+    // Offset is retained only for one grace release for already-deployed PWA
+    // clients. The current client uses the cursor path above. Keep the legacy
+    // path explicit rather than accepting and ignoring its offset parameter.
+    if (!cursor && options.offset !== undefined) { sql += ' OFFSET ?'; args.push(Math.max(options.offset, 0)); }
+    const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
+    const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const items = await this.hydrateScheduledRows(pageRows), last = pageRows[pageRows.length - 1];
+    return { items, nextCursor: hasMore && last ? encodeScheduledExpenseCursor({ createdAt: text(last.created_at), id: text(last.id) }) : undefined };
   }
   async scheduledExpense(id: string): Promise<ScheduledExpense | null> {
     const row = await this.db.prepare('SELECT * FROM scheduled_expenses WHERE id=?').bind(id).first<Row>();
@@ -629,6 +862,7 @@ export class Repository {
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('scheduled.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
       this.db.prepare(`INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
+      ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'scheduled_expenses', id }),
        ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES(?,?,?)').bind(id, payer.person_id, payer.amount_minor)),
        ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) VALUES(?,?,?,?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null)),
     ];
@@ -639,7 +873,7 @@ export class Repository {
       if (text(existing.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
       const found = await this.scheduledExpense(text(existing.entity_id)); if (found?.groupId === groupId) return found; throw error;
     }
-    const created = await this.scheduledExpense(id); if (!created) throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or a scheduled participant is no longer active'); return created;
+     const created = await this.scheduledExpense(id); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or a scheduled participant is no longer active'); } return created;
   }
   async updateScheduledExpense(id: string, userId: string, input: ScheduledExpenseInput) {
     if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required');
@@ -652,18 +886,20 @@ export class Repository {
     const status = old.status === 'active' && !next ? 'completed' : old.status === 'completed' && next ? 'active' : old.status;
     const claimId = uid();
     const timestamp = now(), version = input.version + 1;
-    const actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id));
-    const batchResult = await this.conditionalBatch([
-      this.db.prepare(`UPDATE scheduled_expenses SET description=?,amount_minor=?,currency=?,start_date=?,end_date=?,frequency=?,interval_count=?,weekdays_json=?,timezone=?,status=?,blocked_reason=NULL,next_occurrence_date=?,generation_claim_id=?,updated_at=?,version=? WHERE id=? AND version=? AND generation_claim_id IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.description, input.amount_minor, input.currency, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, claimId, timestamp, version, id, input.version, ...actor.args, ...participants.args),
+     const actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id));
+     const creator = status === 'active' ? this.activeCreatorGuard(old.groupId, old.createdBy) : { sql: '1=1', args: [] as unknown[] };
+     const batchResult = await this.conditionalBatch([
+       this.db.prepare(`UPDATE scheduled_expenses SET description=?,amount_minor=?,currency=?,start_date=?,end_date=?,frequency=?,interval_count=?,weekdays_json=?,timezone=?,status=?,blocked_reason=NULL,next_occurrence_date=?,generation_claim_id=?,updated_at=?,version=? WHERE id=? AND version=? AND generation_claim_id IS NULL AND ${actor.sql} AND ${participants.sql} AND ${creator.sql}`).bind(input.description, input.amount_minor, input.currency, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, claimId, timestamp, version, id, input.version, ...actor.args, ...participants.args, ...creator.args),
       this.db.prepare('DELETE FROM scheduled_payers WHERE scheduled_expense_id=? AND EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, id, version, claimId),
       this.db.prepare('DELETE FROM scheduled_splits WHERE scheduled_expense_id=? AND EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, id, version, claimId),
        ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, payer.person_id, payer.amount_minor, id, version, claimId)),
        ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND version=? AND generation_claim_id=?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null, id, version, claimId)),
-      this.db.prepare('UPDATE scheduled_expenses SET category=? WHERE id=? AND version=? AND generation_claim_id=?').bind(input.category ?? null, id, version, claimId),
+       this.db.prepare('UPDATE scheduled_expenses SET category=? WHERE id=? AND version=? AND generation_claim_id=?').bind(input.category ?? null, id, version, claimId),
+       ...this.categoryPreferenceStatements(userId, input.description, input.category, timestamp, { table: 'scheduled_expenses', id, version, generationClaimId: claimId }),
       this.db.prepare('UPDATE scheduled_expenses SET generation_claim_id=NULL WHERE id=? AND version=? AND generation_claim_id=?').bind(id, version, claimId),
     ]);
     const parentChanges = Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes);
-    if (batchResult.length && parentChanges === 0) throw new RepositoryError('CONFLICT', 'The scheduled expense was changed or deleted by another request');
+     if (batchResult.length && parentChanges === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The scheduled expense was changed or deleted by another request'); }
     const current = await this.scheduledExpense(id); if (!current || current.version !== version) throw new RepositoryError('CONFLICT', 'The scheduled expense was changed by another request');
     return current;
   }
@@ -679,11 +915,12 @@ export class Repository {
     }
     const nextOccurrence = status === 'active'
       ? await this.firstUngeneratedOccurrence(id, recurrenceDefinition(before), localDateForTimeZone(asOf, before.timezone))
-      : before.nextOccurrenceDate;
+      : status === 'cancelled' ? null : before.nextOccurrenceDate;
     const storedStatus = status === 'active' && !nextOccurrence ? 'completed' : status;
-    const actor = userId ? this.activeMutationGuard(before.groupId, userId) : { sql: '1=1', args: [] as unknown[] };
-    const result = await this.db.prepare(`UPDATE scheduled_expenses SET status=?,blocked_reason=NULL,next_occurrence_date=?,generation_claim_id=NULL,updated_at=?,version=? WHERE id=? AND version=? AND generation_claim_id IS NULL AND ${actor.sql}`).bind(storedStatus, nextOccurrence, now(), version + 1, id, version, ...actor.args).run();
-    if (result.meta?.changes !== undefined && result.meta.changes === 0) throw new RepositoryError('CONFLICT', 'The scheduled expense was changed or deleted by another request');
+     const actor = userId ? this.activeMutationGuard(before.groupId, userId) : { sql: '1=1', args: [] as unknown[] };
+     const creator = storedStatus === 'active' ? this.activeCreatorGuard(before.groupId, before.createdBy) : { sql: '1=1', args: [] as unknown[] };
+      const result = await this.db.prepare(`UPDATE scheduled_expenses SET status=?,blocked_reason=NULL,next_occurrence_date=?,generation_claim_id=NULL,updated_at=?,version=? WHERE id=? AND version=? AND generation_claim_id IS NULL AND ${actor.sql} AND ${creator.sql}`).bind(storedStatus, nextOccurrence, now(), version + 1, id, version, ...actor.args, ...creator.args).run();
+     if (result.meta?.changes !== undefined && result.meta.changes === 0) { if (userId) await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The scheduled expense was changed or deleted by another request'); }
     const current = await this.scheduledExpense(id); if (!current || current.version !== version + 1) throw new RepositoryError('CONFLICT', 'The scheduled expense was changed or deleted by another request');
     return current;
   }
@@ -696,6 +933,10 @@ export class Repository {
       WHERE schedule.id=? AND schedule.group_id=? AND schedule.status='active'
         AND schedule.version=? AND schedule.generation_claim_id=? AND schedule.next_occurrence_date=?
         AND EXISTS (SELECT 1 FROM groups g WHERE g.id=schedule.group_id AND g.deleted_at IS NULL)
+        AND EXISTS (SELECT 1 FROM users creator WHERE creator.id=schedule.created_by AND creator.deleted_at IS NULL)
+        AND EXISTS (SELECT 1 FROM group_members creator_member JOIN people creator_person ON creator_person.id=creator_member.person_id
+          WHERE creator_member.group_id=schedule.group_id AND creator_member.user_id=schedule.created_by
+            AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM (
           SELECT person_id FROM scheduled_payers WHERE scheduled_expense_id=schedule.id
           UNION
@@ -776,9 +1017,25 @@ export class Repository {
     const utcDate = typeof asOf === 'string' ? asOf : localDateForTimeZone(asOf, 'UTC');
     const candidateThrough = typeof asOf === 'string' ? asOf : nextCalendarDate(utcDate);
     await this.db.prepare("UPDATE scheduled_expenses SET status='completed',next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE status='active' AND generation_claim_id IS NULL AND end_date IS NOT NULL AND end_date<=? AND (next_occurrence_date IS NULL OR next_occurrence_date>end_date)").bind(now(), candidateThrough).run();
+    // A creator can become inactive between deployments or through an older
+    // membership path. Terminally cancel those rows before selecting due
+    // work, otherwise an invalid active row can remain due forever.
+    await this.db.prepare(`UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1
+      WHERE status='active' AND (NOT EXISTS (SELECT 1 FROM users creator WHERE creator.id=scheduled_expenses.created_by AND creator.deleted_at IS NULL)
+        OR NOT EXISTS (SELECT 1 FROM group_members creator_member JOIN people creator_person ON creator_person.id=creator_member.person_id
+          JOIN groups creator_group ON creator_group.id=creator_member.group_id
+          WHERE creator_member.group_id=scheduled_expenses.group_id AND creator_member.user_id=scheduled_expenses.created_by
+            AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL AND creator_group.deleted_at IS NULL))`).bind(now()).run();
     const cursorRow = await this.db.prepare('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1').first<Row>();
     const cursorId = cursorRow?.cursor_id == null ? null : text(cursorRow.cursor_id);
-    const rows = (await this.db.prepare("SELECT * FROM scheduled_expenses WHERE status='active' AND next_occurrence_date IS NOT NULL AND start_date<=? AND next_occurrence_date<=? ORDER BY CASE WHEN ? IS NULL OR id>? THEN 0 ELSE 1 END,id LIMIT ?").bind(candidateThrough, candidateThrough, cursorId, cursorId, maxTemplates).all<Row>()).results;
+    const rows = (await this.db.prepare(`SELECT * FROM scheduled_expenses
+      WHERE status='active' AND next_occurrence_date IS NOT NULL AND start_date<=? AND next_occurrence_date<=?
+        AND EXISTS (SELECT 1 FROM users creator WHERE creator.id=scheduled_expenses.created_by AND creator.deleted_at IS NULL)
+        AND EXISTS (SELECT 1 FROM users creator JOIN group_members creator_member ON creator_member.user_id=creator.id
+          JOIN people creator_person ON creator_person.id=creator_member.person_id JOIN groups creator_group ON creator_group.id=creator_member.group_id
+          WHERE creator.id=scheduled_expenses.created_by AND creator_member.group_id=scheduled_expenses.group_id
+            AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL AND creator_group.deleted_at IS NULL)
+      ORDER BY CASE WHEN ? IS NULL OR id>? THEN 0 ELSE 1 END,id LIMIT ?`).bind(candidateThrough, candidateThrough, cursorId, cursorId, maxTemplates).all<Row>()).results;
     if (rows.length) {
       // A compare-and-set keeps a slower overlapping Cron invocation from
       // moving a newer cursor backwards. Claims still make overlapping work
@@ -848,7 +1105,8 @@ export class Repository {
     if (blockedTemplates.length) await this.db.batch(blockedTemplates.map(({ template, reason }) => this.db.prepare("UPDATE scheduled_expenses SET status='blocked',blocked_reason=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status='active' AND version=?").bind(reason, now(), template.id, template.version)));
     return { templatesScanned: rows.length, generated, blocked, processed, capped: processed >= maxOccurrences || states.some((state) => !state.stopped && state.processed >= maxOccurrencesPerTemplate) };
   }
-  async expensePage(groupId: string, opts: { q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit: number; offset?: number; cursor?: string }) {
+  async expensePage(groupId: string, opts: { q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit: number; cursor?: string; offset?: number }) {
+    if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     assertLikeSearch(opts.q);
     const cursor = decodeLedgerCursor(opts.cursor);
     const limit = Math.min(Math.max(opts.limit, 1), 100);
@@ -864,20 +1122,12 @@ export class Repository {
       args.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.id);
     }
     sql += ' ORDER BY expense_date DESC,created_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
-    if (!cursor && opts.offset !== undefined) { sql += ' OFFSET ?'; args.push(Math.max(opts.offset, 0)); }
     const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
     const items = await this.hydrateExpenses(pageRows);
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.expense_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
-  }
-  async expenses(groupId: string, opts: { q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit: number; offset?: number; cursor?: string }) {
-    return (await this.expensePage(groupId, opts)).items;
-  }
-  async allExpenses(groupId: string) {
-    const result: Expense[] = []; const pageSize = 100; let cursor: string | undefined;
-    while (true) { const page = await this.expensePage(groupId, { limit: pageSize, cursor }); result.push(...page.items); if (!page.nextCursor) return result; cursor = page.nextCursor; }
   }
   async expense(id: string, includeDeleted = false) { const row = await this.rawExpense(id); return row && (includeDeleted || !row.deleted_at) ? this.hydrateExpense(row) : null; }
   private withinRestoreWindow(deletedAt: unknown) { return deletedAt != null && Date.now() - Date.parse(text(deletedAt)) <= 30 * 24 * 60 * 60 * 1000; }
@@ -918,8 +1168,20 @@ export class Repository {
     }
   }
 
+  private activeUserGuard(userId: string) {
+    return { sql: 'EXISTS (SELECT 1 FROM users active_actor WHERE active_actor.id=? AND active_actor.deleted_at IS NULL)', args: [userId] };
+  }
+  private async throwIfDeleted(userId: string) {
+    const user = await this.db.prepare('SELECT deleted_at FROM users WHERE id=?').bind(userId).first<Row>();
+    if (user?.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot mutate data');
+  }
   private activeMutationGuard(groupId: string, userId: string) {
-    return { sql: 'EXISTS (SELECT 1 FROM group_members auth_member JOIN groups auth_group ON auth_group.id=auth_member.group_id JOIN people auth_person ON auth_person.id=auth_member.person_id WHERE auth_member.group_id=? AND auth_member.user_id=? AND auth_member.deleted_at IS NULL AND auth_person.deleted_at IS NULL AND auth_group.deleted_at IS NULL)', args: [groupId, userId] };
+    return { sql: 'EXISTS (SELECT 1 FROM group_members auth_member JOIN groups auth_group ON auth_group.id=auth_member.group_id JOIN people auth_person ON auth_person.id=auth_member.person_id JOIN users auth_user ON auth_user.id=auth_member.user_id WHERE auth_member.group_id=? AND auth_member.user_id=? AND auth_member.deleted_at IS NULL AND auth_person.deleted_at IS NULL AND auth_group.deleted_at IS NULL AND auth_user.deleted_at IS NULL)', args: [groupId, userId] };
+  }
+  private activeCreatorGuard(groupId: string, userId: string) {
+    return { sql: `EXISTS (SELECT 1 FROM users schedule_creator WHERE schedule_creator.id=? AND schedule_creator.deleted_at IS NULL)
+      AND EXISTS (SELECT 1 FROM group_members schedule_creator_member JOIN people schedule_creator_person ON schedule_creator_person.id=schedule_creator_member.person_id
+        WHERE schedule_creator_member.group_id=? AND schedule_creator_member.user_id=? AND schedule_creator_member.deleted_at IS NULL AND schedule_creator_person.deleted_at IS NULL)`, args: [userId, groupId, userId] };
   }
   private activeParticipantGuard(groupId: string, ids: string[]) {
     const unique = [...new Set(ids)];
@@ -960,8 +1222,9 @@ export class Repository {
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('expense.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
       this.db.prepare(`INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1 WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, userId, t, t, scopedOperation ?? null, ...actor.args, ...participants.args),
        this.db.prepare("INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.payers), id),
-       this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.splits), id),
-       this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
+        this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.splits), id),
+        ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id }),
+        this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
        ...this.projectionStatements(groupId, t),
     ];
     try { await this.db.batch(statements); } catch (error) {
@@ -972,7 +1235,7 @@ export class Repository {
       if (text(existing.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
       const found = await this.expense(text(existing.entity_id)); if (found && found.groupId === groupId) return found; throw error;
     }
-    const created = await this.expense(id); if (!created) throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or a participant is no longer active'); return created;
+     const created = await this.expense(id); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or a participant is no longer active'); } return created;
   }
 
   async updateExpense(id: string, userId: string, input: ExpenseInput) {
@@ -986,24 +1249,27 @@ export class Repository {
       this.db.prepare('DELETE FROM payers WHERE expense_id=? AND EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)').bind(id, id, next),
       this.db.prepare('DELETE FROM splits WHERE expense_id=? AND EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)').bind(id, id, next),
        this.db.prepare("INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)").bind(id, JSON.stringify(input.payers), id, next),
-       this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)").bind(id, JSON.stringify(input.splits), id, next),
-       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after }),
+        this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)").bind(id, JSON.stringify(input.splits), id, next),
+        ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next }),
+        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after }),
        ...this.projectionStatements(old.groupId, t),
     ];
-     await this.conditionalBatch(statements);
+      const batchResult = await this.conditionalBatch(statements);
+      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
     const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.rawExpense(id); if (!revision || !current || number(current.version) !== next) throw new RepositoryError('CONFLICT', 'The record was changed by another request');
     return this.hydrateExpense(current);
   }
   async deleteExpense(id: string, userId: string, version: number) {
     const old = await this.expense(id); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
-     await this.conditionalBatch([
+      const batchResult = await this.conditionalBatch([
        this.db.prepare(`UPDATE expenses SET deleted_at=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND deleted_at IS NOT NULL)').bind(revisionId, 'expense', id, version, JSON.stringify(old), userId, t, id, next),
        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null }),
        ...this.projectionStatements(old.groupId, t),
     ]);
-    const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
+     if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
+     const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.rawExpense(id); if (!revision || !current || number(current.version) !== next || !current.deleted_at) throw new RepositoryError('CONFLICT', 'The record was changed by another request');
     return true;
   }
@@ -1011,29 +1277,26 @@ export class Repository {
     const old = await this.expense(id, true);
     if (!old || !old.deletedAt || !this.withinRestoreWindow(old.deletedAt) || old.version !== version) throw new RepositoryError('CONFLICT', 'The deleted expense is unavailable or was changed by another request');
     const next = version + 1, t = now(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
-    await this.conditionalBatch([
-      this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, id, version, ...actor.args),
+     const batchResult = await this.conditionalBatch([
+       this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND deleted_at IS NULL)').bind(uid(), 'expense', id, next, JSON.stringify(old), userId, t, id, next),
        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after }),
        ...this.projectionStatements(old.groupId, t),
     ]);
-    const current = await this.expense(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored');
+     if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored'); }
+     const current = await this.expense(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored');
     return current;
   }
 
   private mapSettlement(row: Row): Settlement { return { id: text(row.id), groupId: text(row.group_id), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id), amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.settlement_date), note: row.note == null ? null : text(row.note), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1 }; }
-  async settlementPage(groupId: string, options: { limit?: number; offset?: number; cursor?: string } = {}) {
+  async settlementPage(groupId: string, options: { limit?: number; cursor?: string; offset?: number } = {}) {
+    if (options.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100), cursor = decodeLedgerCursor(options.cursor);
     let sql = 'SELECT * FROM settlements WHERE group_id=? AND deleted_at IS NULL'; const args: unknown[] = [groupId];
     if (cursor) { sql += ' AND (settlement_date<? OR (settlement_date=? AND created_at<?) OR (settlement_date=? AND created_at=? AND id<?))'; args.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.id); }
     sql += ' ORDER BY settlement_date DESC,created_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
-    if (!cursor && options.offset !== undefined) { sql += ' OFFSET ?'; args.push(Math.max(options.offset, 0)); }
     const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results, pageRows = rows.length > limit ? rows.slice(0, limit) : rows, last = pageRows[pageRows.length - 1];
     return { items: pageRows.map((row) => this.mapSettlement(row)), nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.settlement_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
-  }
-  async settlements(groupId: string) {
-    const result: Settlement[] = []; let cursor: string | undefined;
-    while (true) { const page = await this.settlementPage(groupId, { limit: 100, cursor }); result.push(...page.items); if (!page.nextCursor) return result; cursor = page.nextCursor; }
   }
   async settlement(id: string, includeDeleted = false) { const row = await this.db.prepare(`SELECT * FROM settlements WHERE id=?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`).bind(id).first<Row>(); return row ? this.mapSettlement(row) : null; }
   private settlementParticipantGuard(groupId: string, ids: string[]) {
@@ -1041,8 +1304,9 @@ export class Repository {
     if (!unique.length) return { sql: '1=0', args: [] as unknown[] };
     return {
       sql: `NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (
-        SELECT 1 FROM group_members settlement_participant
+        SELECT 1 FROM group_members settlement_participant JOIN people settlement_person ON settlement_person.id=settlement_participant.person_id
         WHERE settlement_participant.group_id=? AND settlement_participant.person_id=requested.value
+          AND settlement_participant.deleted_at IS NULL AND settlement_person.deleted_at IS NULL
       ))`,
       args: [JSON.stringify(unique), groupId],
     };
@@ -1065,42 +1329,45 @@ export class Repository {
       if (!existing) throw error; if (text(existing.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
       const found = await this.settlement(text(existing.entity_id)); if (found && found.groupId === groupId) return found; throw error;
     }
-    const created = await this.settlement(id); if (!created) throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or settlement participants are not valid for this group'); return created;
+     const created = await this.settlement(id); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or settlement participants are not valid for this group'); } return created;
   }
   async updateSettlement(id: string, userId: string, input: SettlementInput) {
     if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required'); const old = await this.settlement(id); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request'); if (old.version !== input.version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.settlementParticipantGuard(old.groupId, [input.from_person_id, input.to_person_id]);
     const after: Settlement = { ...old, fromPersonId: input.from_person_id, toPersonId: input.to_person_id, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, updatedAt: t, version: next };
-     await this.conditionalBatch([
+     const batchResult = await this.conditionalBatch([
        this.db.prepare(`UPDATE settlements SET from_person_id=?,to_person_id=?,amount_minor=?,currency=?,settlement_date=?,note=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, id, input.version, ...actor.args, ...participants.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, input.version, JSON.stringify(old), userId, t, id, next),
         this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after }),
         ...this.projectionStatements(old.groupId, t),
     ]);
-    const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
+     if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
+     const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.db.prepare('SELECT * FROM settlements WHERE id=?').bind(id).first<Row>(); if (!revision || !current || number(current.version) !== next) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); return this.mapSettlement(current);
   }
   async deleteSettlement(id: string, userId: string, version: number) {
-    const old = await this.settlement(id); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
-     await this.conditionalBatch([
+     const old = await this.settlement(id); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
+      const batchResult = await this.conditionalBatch([
        this.db.prepare(`UPDATE settlements SET deleted_at=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NOT NULL)').bind(revisionId, 'settlement', id, version, JSON.stringify(old), userId, t, id, next),
         this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null }),
         ...this.projectionStatements(old.groupId, t),
     ]);
-    const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
+     if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
+     const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.db.prepare('SELECT * FROM settlements WHERE id=?').bind(id).first<Row>(); if (!revision || !current || number(current.version) !== next || !current.deleted_at) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); return true;
   }
   async restoreSettlement(id: string, userId: string, version: number) {
     const old = await this.settlement(id, true);
     if (!old || !old.deletedAt || !this.withinRestoreWindow(old.deletedAt) || old.version !== version) throw new RepositoryError('CONFLICT', 'The deleted settlement is unavailable or was changed by another request');
     const next = version + 1, t = now(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
-    await this.conditionalBatch([
+     const batchResult = await this.conditionalBatch([
       this.db.prepare(`UPDATE settlements SET deleted_at=NULL,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NULL)').bind(uid(), 'settlement', id, next, JSON.stringify(old), userId, t, id, next),
        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after }),
        ...this.projectionStatements(old.groupId, t),
     ]);
-    const current = await this.settlement(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored');
+     if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored'); }
+     const current = await this.settlement(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored');
     return current;
   }
 
@@ -1108,21 +1375,18 @@ export class Repository {
     const rows = (await this.db.prepare('SELECT id,entity_type,entity_id,revision,snapshot_json,created_by,created_at FROM revisions WHERE entity_type=? AND entity_id=? ORDER BY revision DESC').bind(type, id).all<Row>()).results;
     return rows.map((row) => ({ id: text(row.id), entityType: text(row.entity_type), entityId: text(row.entity_id), revision: number(row.revision), snapshot: JSON.parse(text(row.snapshot_json)), createdBy: text(row.created_by), createdAt: text(row.created_at) }));
   }
-  async auditPage(groupId: string, options: { limit?: number; offset?: number; cursor?: string } = {}) {
+  async auditPage(groupId: string, options: { limit?: number; cursor?: string; offset?: number } = {}) {
+    if (options.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100), cursor = decodeLedgerCursor(options.cursor);
     let sql = 'SELECT id,group_id,entity_type,entity_id,version,action,actor_id,actor_person_id,actor_name,occurred_at,before_json,after_json FROM audit_events WHERE group_id=?'; const args: unknown[] = [groupId];
     if (cursor) { sql += ' AND (occurred_at<? OR (occurred_at=? AND id<?))'; args.push(cursor.createdAt, cursor.createdAt, cursor.id); }
     sql += ' ORDER BY occurred_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
-    if (!cursor && options.offset !== undefined) { sql += ' OFFSET ?'; args.push(Math.max(options.offset, 0)); }
     const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
     const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
     const parse = (value: unknown) => { if (value == null) return undefined; try { return JSON.parse(text(value)); } catch { return undefined; } };
     const items = pageRows.map((row) => ({ id: text(row.id), groupId: text(row.group_id), entityType: text(row.entity_type) as AuditEvent['entityType'], entityId: text(row.entity_id), version: number(row.version), action: text(row.action) as AuditEvent['action'], actorId: text(row.actor_id), ...(row.actor_person_id == null ? {} : { actorPersonId: text(row.actor_person_id) }), actorName: text(row.actor_name) || 'Unknown user', occurredAt: text(row.occurred_at), ...(row.before_json == null ? {} : { before: parse(row.before_json) }), ...(row.after_json == null ? {} : { after: parse(row.after_json) }) }));
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.occurred_at), createdAt: text(last.occurred_at), id: text(last.id) }) : undefined };
-  }
-  async auditHistory(groupId: string, options: { limit?: number; offset?: number; cursor?: string } = {}): Promise<AuditEvent[]> {
-    return (await this.auditPage(groupId, options)).items;
   }
   async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number } = {}) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf, cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -1164,6 +1428,7 @@ export class Repository {
         this.db.prepare('DELETE FROM scheduled_expenses WHERE group_id=?').bind(groupId),
         this.db.prepare('DELETE FROM revisions WHERE entity_type IN (\'expense\',\'settlement\') AND entity_id IN (SELECT id FROM expenses WHERE group_id=? UNION SELECT id FROM settlements WHERE group_id=?)').bind(groupId, groupId),
          this.db.prepare('DELETE FROM audit_events WHERE group_id=?').bind(groupId),
+         this.db.prepare('DELETE FROM group_membership_events WHERE group_id=?').bind(groupId),
          this.db.prepare('DELETE FROM group_balance_projection WHERE group_id=?').bind(groupId),
          this.db.prepare('DELETE FROM ledger_totals WHERE group_id=?').bind(groupId),
          this.db.prepare('DELETE FROM projection_state WHERE group_id=?').bind(groupId),
@@ -1185,48 +1450,12 @@ export class Repository {
     }
     return { cutoff, transactionsScanned: transactionRows.length, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: transactionRows.length >= maxTransactions || groups.length >= maxGroups };
   }
-  async activity(groupId: string) {
-    const rows = (await this.db.prepare(`
-      SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
-      FROM expenses e WHERE e.group_id=? AND e.deleted_at IS NULL
-      UNION ALL
-      SELECT 'settlement' AS type,s.id,s.id AS entity_id,0 AS entity_active,s.note AS label,s.amount_minor,s.currency,s.settlement_date AS transaction_date,p_from.name AS from_name,p_to.name AS to_name,s.created_at
-      FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id
-      WHERE s.group_id=? AND s.deleted_at IS NULL
-      UNION ALL
-       SELECT CASE WHEN (r.entity_type='expense' AND e.deleted_at IS NOT NULL AND e.version = r.revision + 1) OR (r.entity_type='settlement' AND s.deleted_at IS NOT NULL AND s.version = r.revision + 1)
-         THEN r.entity_type || '_deleted' ELSE r.entity_type || '_revision' END AS type,
-        r.id,r.entity_id,
-        CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active,
-        CASE WHEN r.entity_type='expense' THEN json_extract(r.snapshot_json,'$.description') ELSE json_extract(r.snapshot_json,'$.note') END AS label,
-        json_extract(r.snapshot_json,'$.amountMinor') AS amount_minor,
-        json_extract(r.snapshot_json,'$.currency') AS currency,
-        json_extract(r.snapshot_json,'$.date') AS transaction_date,
-        p_from.name AS from_name,p_to.name AS to_name,r.created_at
-      FROM revisions r
-      LEFT JOIN expenses e ON r.entity_type='expense' AND e.id=r.entity_id
-      LEFT JOIN settlements s ON r.entity_type='settlement' AND s.id=r.entity_id
-      LEFT JOIN people p_from ON p_from.id=json_extract(r.snapshot_json,'$.fromPersonId')
-      LEFT JOIN people p_to ON p_to.id=json_extract(r.snapshot_json,'$.toPersonId')
-       WHERE (e.group_id=? OR s.group_id=?) AND ((r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL))
-      ORDER BY created_at DESC LIMIT 100
-    `).bind(groupId, groupId, groupId, groupId).all<Row>()).results;
-     return rows.filter((row) => !text(row.type).endsWith('_deleted')).map((row) => ({
-      type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
-      amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency),
-      transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
-      ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}),
-      createdAt: text(row.created_at),
-    })) as Activity[];
-  }
-  async globalActivity(userId: string, groupId?: string): Promise<Activity[]>;
-  async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }): Promise<{ items: Activity[]; nextCursor?: string }>;
-  async globalActivity(userId: string, groupId?: string, options?: { limit?: number; cursor?: string }): Promise<Activity[] | { items: Activity[]; nextCursor?: string }> {
-    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options?.cursor);
+  async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }) {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options.cursor);
     const boundary = cursor ? ' AND (activity.created_at<? OR (activity.created_at=? AND activity.id<?))' : '';
     const binds: unknown[] = groupId ? [userId, groupId] : [userId];
     if (cursor) binds.push(cursor.createdAt, cursor.createdAt, cursor.id);
-    if (options) binds.push(limit + 1);
+    binds.push(limit + 1);
     const rows = (await this.db.prepare(`
       SELECT activity.*,g.name AS group_name FROM (
         SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.group_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
@@ -1235,7 +1464,7 @@ export class Repository {
         SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
         FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
         UNION ALL
-        SELECT CASE WHEN (r.entity_type='expense' AND e.deleted_at IS NOT NULL AND e.version=r.revision+1) OR (r.entity_type='settlement' AND s.deleted_at IS NOT NULL AND s.version=r.revision+1) THEN r.entity_type||'_deleted' ELSE r.entity_type||'_revision' END,
+        SELECT r.entity_type||'_revision',
           r.id,r.entity_id,CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END,
           COALESCE(e.group_id,s.group_id),CASE WHEN r.entity_type='expense' THEN json_extract(r.snapshot_json,'$.description') ELSE json_extract(r.snapshot_json,'$.note') END,
           json_extract(r.snapshot_json,'$.amountMinor'),json_extract(r.snapshot_json,'$.currency'),json_extract(r.snapshot_json,'$.date'),p_from.name,p_to.name,r.created_at
@@ -1244,23 +1473,30 @@ export class Repository {
         WHERE (r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL)
       ) activity JOIN groups g ON g.id=activity.group_id JOIN group_members gm ON gm.group_id=g.id
        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL${groupId ? ' AND activity.group_id=?' : ''}${boundary}
-       ORDER BY activity.created_at DESC,activity.id DESC LIMIT ${options ? '?' : '100'}
+       ORDER BY activity.created_at DESC,activity.id DESC LIMIT ?
     `).bind(...binds).all<Row>()).results;
-    const mapped = rows.filter((row) => !text(row.type).endsWith('_deleted')).map((row) => ({ type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
+    const mapped = rows.map((row) => ({ type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
       groupId: text(row.group_id), groupName: text(row.group_name), amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency), transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
        ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}), createdAt: text(row.created_at) })) as Activity[];
-    if (!options) return mapped;
     const hasMore = rows.length > limit, items = hasMore ? mapped.slice(0, limit) : mapped, last = items[items.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: last.transactionDate, createdAt: last.createdAt, id: last.id }) : undefined };
   }
   async categories(userId: string) {
+    // Category choices are account-private. Shared group membership is not a
+    // reason to expose another member's learned or historical categories.
+     // A category explicitly chosen by the user remains a preference after a
+     // schedule is cancelled, so historical schedules contribute options too.
     const rows = (await this.db.prepare(`SELECT DISTINCT category FROM (
-      SELECT e.category FROM expenses e JOIN group_members gm ON gm.group_id=e.group_id JOIN groups g ON g.id=e.group_id
-        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL AND e.deleted_at IS NULL
+      SELECT cp.category FROM category_preferences cp WHERE cp.user_id=?
       UNION ALL
-      SELECT se.category FROM scheduled_expenses se JOIN group_members gm ON gm.group_id=se.group_id JOIN groups g ON g.id=se.group_id
-        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL
-    ) WHERE category IS NOT NULL AND trim(category)<>'' ORDER BY lower(category),category`).bind(userId, userId).all<Row>()).results;
+      SELECT e.category FROM expenses e
+        WHERE e.created_by=? AND e.deleted_at IS NULL
+          AND e.category IS NOT NULL AND trim(e.category)<>''
+      UNION ALL
+      SELECT se.category FROM scheduled_expenses se
+        WHERE se.created_by=?
+          AND se.category IS NOT NULL AND trim(se.category)<>''
+    ) WHERE category IS NOT NULL AND trim(category)<>'' ORDER BY lower(category),category`).bind(userId, userId, userId).all<Row>()).results;
     return rows.map((row) => text(row.category));
   }
   async groupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null } = {}) {
@@ -1276,16 +1512,8 @@ export class Repository {
   async exportPage(userId: string, options: { groupCursor?: string; limit?: number } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 1, 1), 2);
     let cursor: ExportCursor | undefined;
-    let afterGroupId: string | undefined;
     if (options.groupCursor) {
-      try { cursor = decodeExportCursor(options.groupCursor); }
-      catch (error) {
-        // Accept the old raw group-id cursor for one release so callers can
-        // migrate without losing their place. New cursors are composite and
-        // carry both ledger stream positions.
-        if (error instanceof RepositoryError && /^[A-Za-z0-9-]{1,128}$/.test(options.groupCursor)) afterGroupId = options.groupCursor;
-        else throw error;
-      }
+      cursor = decodeExportCursor(options.groupCursor);
     }
 
     const nextGroup = async (after?: string) => {
@@ -1302,7 +1530,7 @@ export class Repository {
         WHERE g.id=? AND gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL`).bind(id, userId).first<Row>();
       return row ? text(row.id) : undefined;
     };
-    let groupId = cursor ? await authorizedCursorGroup(cursor.groupId) : await nextGroup(afterGroupId);
+    let groupId = cursor ? await authorizedCursorGroup(cursor.groupId) : await nextGroup();
     if (cursor && !groupId) throw new RepositoryError('INVALID_CURSOR', 'The export pagination cursor is invalid');
     let expenseCursor = cursor?.expenseCursor;
     let settlementCursor = cursor?.settlementCursor;
@@ -1330,6 +1558,4 @@ export class Repository {
     }
     return { version: 1, exportedAt: now(), groups, nextCursor };
   }
-  async allExport(userId: string) { const groups = await this.groups(userId); const out = []; for (const group of groups) { const [members, expenses, settlements] = await Promise.all([this.members(group.id), this.allExpenses(group.id), this.settlements(group.id)]); out.push({ ...group, members, expenses, settlements }); } return { version: 1, exportedAt: now(), groups: out }; }
-  async groupExport(groupId: string) { const g = mapGroup(await this.db.prepare('SELECT * FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>()); const [members, expenses, settlements] = await Promise.all([this.members(groupId), this.allExpenses(groupId), this.settlements(groupId)]); return { version: 1, exportedAt: now(), group: g, members, expenses, settlements }; }
 }

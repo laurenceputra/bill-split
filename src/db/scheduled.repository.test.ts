@@ -41,7 +41,15 @@ class ScheduledBulkStatement {
   constructor(private readonly db: ScheduledBulkDb, readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; this.db.binds.push(args); return this; }
   async all<T>() {
-    if (this.sql.includes('FROM scheduled_expenses')) return { results: [scheduledRow, { ...scheduledRow, id: 'scheduled-2', client_operation_id: null }] as T[] };
+    if (this.sql.includes('FROM scheduled_expenses')) {
+      const rows = [scheduledRow, { ...scheduledRow, id: 'scheduled-2', client_operation_id: null }];
+      if (this.sql.includes('OFFSET ?')) {
+        const offset = Number(this.args[this.args.length - 1]);
+        const limit = Number(this.args[this.args.length - 2]);
+        return { results: rows.slice(offset, offset + limit) as T[] };
+      }
+      return { results: rows as T[] };
+    }
     if (this.sql.includes('FROM scheduled_payers')) return { results: [{ scheduled_expense_id: 'scheduled-1', person_id: 'person-1', amount_minor: 1000 }, { scheduled_expense_id: 'scheduled-2', person_id: 'person-2', amount_minor: 1000 }] as T[] };
     return { results: [{ scheduled_expense_id: 'scheduled-1', person_id: 'person-1', amount_minor: 1000, metadata_json: null }, { scheduled_expense_id: 'scheduled-2', person_id: 'person-2', amount_minor: 1000, metadata_json: null }] as T[] };
   }
@@ -50,11 +58,15 @@ class ScheduledBulkStatement {
 class ResumeDb {
   row: Record<string, unknown>;
   readonly generated = new Set<string>();
+  readonly prepares: string[] = [];
+  creatorActive = true;
+  creatorDeleted = false;
   constructor(row: Record<string, unknown> = { ...scheduledRow, status: 'paused' }, generated: string[] = []) { this.row = row; for (const date of generated) this.generated.add(date); }
-  prepare(sql: string) { return new ResumeStatement(this, sql); }
+  prepare(sql: string) { this.prepares.push(sql); return new ResumeStatement(this, sql); }
   async batch(statements: ResumeStatement[]) {
     const parent = statements[0];
     if (parent?.sql.includes('UPDATE scheduled_expenses SET description=')) {
+      if (!this.creatorActive) return statements.map((_, index) => ({ meta: { changes: index === 0 ? 0 : 0 } }));
       this.row = { ...this.row, status: parent.args[9], next_occurrence_date: parent.args[10], version: parent.args[13], generation_claim_id: null };
     }
     return statements.map((_, index) => ({ meta: { changes: index === 0 ? 1 : 0 } }));
@@ -66,6 +78,7 @@ class ResumeStatement {
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
     if (this.sql.includes('FROM scheduled_expenses')) return this.db.row as T;
+    if (this.sql.includes('FROM users')) return this.db.creatorDeleted ? { deleted_at: '2026-01-02T00:00:00.000Z' } as T : null;
     if (this.sql.includes('FROM scheduled_occurrences')) return this.db.generated.has(String(this.args[1])) ? { occurrence_date: this.args[1] } as T : null;
     return null;
   }
@@ -74,7 +87,10 @@ class ResumeStatement {
     return { results: [] as T[] };
   }
   async run() {
-    if (this.sql.includes('SET status=?')) { this.db.row = { ...this.db.row, status: String(this.args[0]), next_occurrence_date: this.args[1] as string | null, version: Number(this.args[3]) }; }
+    if (this.sql.includes('SET status=?')) {
+      if (!this.db.creatorActive && String(this.args[0]) === 'active') return { meta: { changes: 0 } };
+      this.db.row = { ...this.db.row, status: String(this.args[0]), next_occurrence_date: this.args[1] as string | null, version: Number(this.args[3]) };
+    }
     return { meta: { changes: 1 } };
   }
 }
@@ -85,6 +101,7 @@ class GenerationDb {
   overflowForFirst = false;
   permanentForFirst = false;
   uniqueForFirst = false;
+  creatorActive = true;
   existingOccurrenceForFirst = false;
   private uniqueThrown = false;
   participantCount = 1;
@@ -94,6 +111,7 @@ class GenerationDb {
   prepare(sql: string) { return new GenerationStatement(this, sql); }
   async batch(statements: GenerationStatement[]) {
     this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args })));
+    if (!this.creatorActive && statements.some((statement) => statement.sql.includes('INSERT INTO expenses'))) return statements.map((_, index) => ({ meta: { changes: index === 0 ? this.claimChanges : 0 } }));
     if (this.overflowForFirst && statements.some((statement) => statement.sql.includes('INSERT INTO expenses')) && !this.batches.slice(0, -1).some((batch) => batch.some((statement) => statement.sql.includes('INSERT INTO expenses')))) throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW');
     if (this.permanentForFirst && statements.some((statement) => statement.sql.includes('INSERT INTO expenses')) && !this.batches.slice(0, -1).some((batch) => batch.some((statement) => statement.sql.includes('INSERT INTO expenses')))) throw new Error('SQLITE_ERROR: too many SQL variables');
     if (this.uniqueForFirst && statements.some((statement) => statement.sql.includes('INSERT INTO expenses')) && !this.uniqueThrown) { this.uniqueThrown = true; throw new Error('UNIQUE constraint failed: expenses.created_by, expenses.client_operation_id'); }
@@ -254,12 +272,20 @@ describe('scheduled expense repository', () => {
 
   it('bulk-hydrates a schedule page and strips the internal operation prefix', async () => {
     const db = new ScheduledBulkDb();
-    const result = await new Repository(db as never).scheduledExpenses('group-1', { limit: 500, offset: 0 });
-    expect(result).toHaveLength(2);
-    expect(result[0].clientOperationId).toBe('rent-template');
+    const result = await new Repository(db as never).scheduledExpenses('group-1', { limit: 500 });
+    expect(result.items).toHaveLength(2);
+    expect(result.items[0].clientOperationId).toBe('rent-template');
     expect(db.prepares.filter((sql) => sql.includes('scheduled_payers') || sql.includes('scheduled_splits'))).toHaveLength(2);
-    expect(db.prepares.find((sql) => sql.includes('scheduled_expenses'))).toContain('LIMIT ? OFFSET ?');
-    expect(db.binds[0].slice(-2)).toEqual([100, 0]);
+    expect(db.prepares.find((sql) => sql.includes('scheduled_expenses'))).toContain('ORDER BY created_at DESC,id DESC LIMIT ?');
+    expect(db.binds[0].slice(-1)).toEqual([101]);
+  });
+
+  it('uses the legacy offset for one grace release instead of repeating page one', async () => {
+    const db = new ScheduledBulkDb();
+    const result = await new Repository(db as never).scheduledExpenses('group-1', { limit: 1, offset: 1 });
+    expect(result.items.map((item) => item.id)).toEqual(['scheduled-2']);
+    expect(db.prepares.find((sql) => sql.includes('scheduled_expenses'))).toContain('ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?');
+    expect(db.binds[0].slice(-2)).toEqual([2, 1]);
   });
 
   it('recalculates a resumed cursor from the schedule timezone and skips elapsed dates', async () => {
@@ -282,6 +308,30 @@ describe('scheduled expense repository', () => {
       ...input, start_date: today, frequency: 'daily', interval: 1, weekdays: [], timezone: 'UTC', version: 1,
     });
     expect(result.nextOccurrenceDate).toBe(addCalendarDays(today, 1));
+  });
+
+  it('cannot reactivate a paused template after its creator leaves, even when a peer edits or resumes it', async () => {
+    const db = new ResumeDb({ ...scheduledRow, status: 'paused' });
+    db.creatorActive = false;
+    const repository = new Repository(db as never);
+
+    await expect(repository.resumeScheduledExpense('scheduled-1', 'peer-user', 1, new Date('2026-01-06T08:30:00Z'))).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(repository.updateScheduledExpense('scheduled-1', 'peer-user', { ...input, version: 1 })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.prepares.some((sql) => sql.includes('schedule_creator'))).toBe(true);
+  });
+
+  it('rejects reactivation when the creator account is deleted', async () => {
+    const db = new ResumeDb({ ...scheduledRow, status: 'paused' });
+    db.creatorActive = false;
+    db.creatorDeleted = true;
+    await expect(new Repository(db as never).resumeScheduledExpense('scheduled-1', 'peer-user', 1, new Date('2026-01-06T08:30:00Z'))).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+  });
+
+  it('allows a peer to resume a template whose creator is still active', async () => {
+    const db = new ResumeDb({ ...scheduledRow, status: 'paused' });
+    const result = await new Repository(db as never).resumeScheduledExpense('scheduled-1', 'peer-user', 1, new Date('2026-01-06T08:30:00Z'));
+    expect(result.status).toBe('active');
+    expect(db.row.status).toBe('active');
   });
 
   it('does not let the losing version update replace the winning children', async () => {
@@ -308,7 +358,17 @@ describe('scheduled expense repository', () => {
       expect(statement.sql).toContain('schedule.version=?');
       expect(statement.sql).toContain('g.deleted_at IS NULL');
       expect(statement.sql).toContain('gm.deleted_at IS NULL');
+      expect(statement.sql).toContain('users creator');
+      expect(statement.sql).toContain('creator_member.deleted_at IS NULL');
     }
+  });
+
+  it('does not write an expense when the creator becomes inactive before guarded generation', async () => {
+    const db = new GenerationDb(); db.creatorActive = false;
+    const result = await new Repository(db as never).generateDueScheduledExpenses('2026-01-02');
+    expect(result.generated).toBe(0);
+    const generation = db.batches.find((batch) => batch.some((statement) => statement.sql.includes('INSERT INTO expenses')))!;
+    expect(generation.find((statement) => statement.sql.includes('INSERT INTO expenses'))?.sql).toMatch(/users creator[\s\S]*creator_member/);
   });
 
   it('advances past an occurrence that already exists and continues with later schedules', async () => {

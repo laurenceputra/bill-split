@@ -1,5 +1,13 @@
 export type PagedExport<T> = { items: T[]; nextCursor?: string };
 
+/** Join CSV response pages while retaining one header and one row boundary. */
+export function assembleCsvPages(pages: string[], header: string): string {
+  return pages.map((page, index) => {
+    if (index === 0 || !page.startsWith(header)) return page;
+    return page.slice(header.length).replace(/^\r?\n/, '');
+  }).join('\n');
+}
+
 export type GroupExportPage<TExpense, TSettlement, TGroup, TMember> = {
   group: TGroup | null;
   members: TMember[];
@@ -50,4 +58,47 @@ export async function collectPagedExport<T>(load: (cursor: string | undefined, s
     cursor = page.nextCursor;
   } while (cursor);
   return items;
+}
+
+type AccountGroupPage<TExpense, TSettlement, TGroup, TMember> = {
+  group: TGroup | null;
+  members: TMember[];
+  expenses: TExpense[];
+  settlements: TSettlement[];
+};
+
+/** Merge account-export continuation pages into complete groups before download. */
+export async function collectPagedAccountExport<TExpense extends { id: string }, TSettlement extends { id: string }, TGroup extends { id?: string }, TMember extends { personId?: string; id?: string }>(
+  load: (cursor: string | undefined, signal: AbortSignal) => Promise<{ groups: AccountGroupPage<TExpense, TSettlement, TGroup, TMember>[]; nextCursor?: string }>,
+  signal: AbortSignal,
+  onPage?: (page: number) => void,
+) {
+  const groups = new Map<string, { group: TGroup | null; members: TMember[]; expenses: TExpense[]; settlements: TSettlement[] }>();
+  const memberIds = new Map<string, Set<string>>(), expenseIds = new Map<string, Set<string>>(), settlementIds = new Map<string, Set<string>>();
+  let cursor: string | undefined;
+  let pageNumber = 0;
+  do {
+    if (signal.aborted) throw new DOMException('The export was cancelled', 'AbortError');
+    const page = await load(cursor, signal);
+    for (const incoming of page.groups) {
+      const id = incoming.group?.id;
+      if (!id) continue;
+      const existing = groups.get(id) || { group: incoming.group, members: [], expenses: [], settlements: [] };
+      existing.group ??= incoming.group;
+      const members = memberIds.get(id) || new Set<string>();
+      for (const member of incoming.members) {
+        const memberId = member.personId || member.id || JSON.stringify(member);
+        if (!members.has(memberId)) { members.add(memberId); existing.members.push(member); }
+      }
+      const expenses = expenseIds.get(id) || new Set<string>();
+      for (const expense of incoming.expenses) if (!expenses.has(expense.id)) { expenses.add(expense.id); existing.expenses.push(expense); }
+      const settlements = settlementIds.get(id) || new Set<string>();
+      for (const settlement of incoming.settlements) if (!settlements.has(settlement.id)) { settlements.add(settlement.id); existing.settlements.push(settlement); }
+      groups.set(id, existing); memberIds.set(id, members); expenseIds.set(id, expenses); settlementIds.set(id, settlements);
+    }
+    cursor = page.nextCursor;
+    pageNumber += 1;
+    onPage?.(pageNumber);
+  } while (cursor);
+  return [...groups.values()];
 }

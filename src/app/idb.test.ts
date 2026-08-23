@@ -152,6 +152,19 @@ describe('user-scoped IndexedDB', () => {
     expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
+  it('removes a deleted group from the persisted list and snapshot', async () => {
+    await saveGroups({ userId: 'user-a', groups: [
+      { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' },
+      { id: 'group-b', name: 'B', currency: 'USD', createdAt: '', updatedAt: '' },
+    ], cachedAt: 'groups-time' });
+    await updateGroupSnapshot('user-a', 'group-a', { group: { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' } });
+    await saveExpenseDetails({ userId: 'user-a', expenseId: 'expense-a', expense: { id: 'expense-a', groupId: 'group-a', description: 'Private', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: '', updatedAt: '', version: 1, payers: [], splits: [] }, history: [], fetchedAt: 'details-time' });
+    await invalidateCachedGroups('user-a', undefined, { groupId: 'group-a' });
+    expect((await readGroups('user-a'))?.groups.map((group) => group.id)).toEqual(['group-b']);
+    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+    expect(await readExpenseDetails('user-a', 'expense-a')).toBeUndefined();
+  });
+
   it('deletes persisted activity and category caches when a mutation invalidates them', async () => {
     const timestamp = new Date().toISOString();
     await saveGroups({ userId: 'user-a', groups: [], cachedAt: timestamp });
@@ -185,10 +198,11 @@ describe('user-scoped IndexedDB', () => {
       { type: 'expense_deleted', id: 'revision-deleted', entityId: 'expense-2', entityActive: false, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Deleted', createdAt: timestamp },
       { type: 'expense_revision', id: 'revision-old', entityId: 'expense-2', entity_active: false, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Old edit', createdAt: timestamp } as never,
       { type: 'settlement', id: 'settlement-1', entityId: 'settlement-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Paid', createdAt: timestamp, fromName: 'A', toName: 'B' },
+      { type: 'settlement_revision', id: 'settlement-revision-1', entityId: 'settlement-1', entityActive: false, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Edited payment', createdAt: timestamp, fromName: 'A', toName: 'B' },
       { type: 'expense_revision', id: 'revision-unknown', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Unknown', createdAt: timestamp } as never,
     ], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => [item.entityId, item.entityActive])).toEqual([
-      ['expense-1', true], ['expense-1', true], ['settlement-1', false], ['', undefined],
+      ['expense-1', true], ['expense-1', true], ['settlement-1', false], ['settlement-1', false], ['', undefined],
     ]);
   });
 

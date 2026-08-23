@@ -7,3 +7,7 @@ export function escapeCsvCell(value: unknown): string {
   const safe = /^[=+\-@]/.test(valueText.trimStart()) ? `'${valueText}` : valueText;
   return `"${safe.replaceAll('"', '""')}"`;
 }
+
+export function settlementCsvRow(settlement: { date: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: string; note?: string | null }): string {
+  return [settlement.date, settlement.fromPersonId, settlement.toPersonId, settlement.amountMinor, settlement.currency, settlement.note || ''].map(escapeCsvCell).join(',');
+}

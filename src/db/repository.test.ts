@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { Repository, assertLikeSearch, decodeLedgerCursor, encodeLedgerCursor } from './repository';
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 
+const IDENTITY_TOMBSTONE_TEST_KEY = 'test-identity-tombstone-key';
+
 class FakeDb {
   claim: Record<string, unknown> | null = null;
   expense: Record<string, unknown> | null = null;
@@ -148,6 +150,7 @@ class ClerkIdentityDb {
   people: Array<Record<string, unknown>> = [];
   members: Array<Record<string, unknown>> = [];
   raceLinkClerkId: string | undefined;
+  deletedIdentityTombstone = false;
   prepare(sql: string) { return new ClerkIdentityStatement(this, sql); }
   async batch(statements: ClerkIdentityStatement[]) {
     for (const statement of statements) {
@@ -166,6 +169,7 @@ class ClerkIdentityStatement {
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
     if (this.sql.includes('FROM users WHERE clerk_user_id')) return (this.db.users.find((row) => row.clerk_user_id === this.args[0]) ?? null) as T | null;
+    if (this.sql.includes('deleted_clerk_hash')) return this.db.deletedIdentityTombstone ? { id: 'deleted-user' } as T : null;
     if (this.sql.includes('FROM users WHERE lower(email)')) return (this.db.users.find((row) => String(row.email).toLowerCase() === this.args[0]) ?? null) as T | null;
     if (this.sql.includes('FROM users WHERE id=')) return (this.db.users.find((row) => row.id === this.args[0]) ?? null) as T | null;
     if (this.sql.includes('FROM people WHERE user_id=')) return (this.db.people.find((row) => row.user_id === this.args[0] && row.deleted_at == null) ?? null) as T | null;
@@ -200,45 +204,6 @@ class ClerkIdentityStatement {
   }
 }
 
-class ActivityDb {
-  sql = '';
-  prepare(sql: string) { this.sql = sql; return new ActivityStatement(sql); }
-}
-class ActivityStatement {
-  constructor(private readonly sql: string) {}
-  bind(..._args: unknown[]) { return this; }
-  async all<T>() {
-    return { results: [
-      { type: 'expense', id: 'expense-event', entity_id: 'expense-1', entity_active: 1, label: 'Lunch', amount_minor: 1250, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02T10:00:00Z' },
-      { type: 'settlement_revision', id: 'revision-1', entity_id: 'settlement-1', entity_active: 0, label: 'Paid back', amount_minor: 500, currency: 'EUR', transaction_date: '2026-01-01', from_name: 'A', to_name: 'B', created_at: '2026-01-02T11:00:00Z' },
-    ] as T[] };
-  }
-}
-class RevisionActivityDb {
-  sql = '';
-  prepare(sql: string) { this.sql = sql; return new RevisionActivityStatement(this, sql); }
-}
-class RevisionActivityStatement {
-  constructor(private readonly db: RevisionActivityDb, private readonly sql: string) {}
-  bind(..._args: unknown[]) { return this; }
-  async all<T>() {
-    const current = { group_id: 'group-1', version: 3, deleted_at: '2026-01-03T00:00:00Z' };
-    const revisions = [
-      { id: 'revision-1', entity_type: 'expense', entity_id: 'expense-1', revision: 1, description: 'Lunch', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-02T10:00:00Z' },
-      { id: 'revision-2', entity_type: 'expense', entity_id: 'expense-1', revision: 2, description: 'Dinner', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-03T10:00:00Z' },
-    ];
-    const results = revisions.map((revision) => ({
-      type: current.deleted_at && current.version === revision.revision + 1 ? 'expense_deleted' : 'expense_revision',
-      id: revision.id, entity_id: revision.entity_id, entity_active: current.deleted_at ? 0 : 1, label: revision.description, amount_minor: revision.amount_minor,
-      currency: revision.currency, transaction_date: revision.transaction_date, created_at: revision.created_at,
-    }));
-    // Keep the fake grounded in raw revision/current-entity state rather than
-    // returning a pre-mapped expected payload.
-    if (!this.db.sql.includes('e.version = r.revision + 1')) throw new Error('revision deletion predicate missing');
-    return { results: results as T[] };
-  }
-}
-
 class GroupSummaryDb {
   sql = '';
   args: unknown[] = [];
@@ -264,17 +229,145 @@ class GroupAuthorizationDb {
   }
 }
 
+class LifecycleDb {
+  actorRole: 'owner' | 'member' | 'removed' = 'owner';
+  targetRole: 'owner' | 'member' = 'member';
+  targetLinked = true;
+  batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+  prepare(sql: string) { return new LifecycleStatement(this, sql); }
+  async batch(statements: LifecycleStatement[]) {
+    this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args })));
+    const event = statements.find((statement) => statement.sql.includes('INSERT INTO group_membership_events'));
+    const eventType = event?.args[2];
+    const allowed = eventType === 'owner_transfer' ? this.actorRole === 'owner' && this.targetRole === 'member' && this.targetLinked : eventType === 'member_leave' ? this.actorRole === 'member' : true;
+    return statements.map((statement) => {
+      if (statement === event) return { meta: { changes: allowed ? 1 : 0 } };
+      if (statement.sql.includes("UPDATE group_members SET role='member'")) {
+        if (allowed) { this.actorRole = 'member'; return { meta: { changes: 1 } }; }
+        return { meta: { changes: 0 } };
+      }
+      if (statement.sql.includes("UPDATE group_members SET role='owner'")) {
+        if (allowed) { this.targetRole = 'owner'; return { meta: { changes: 1 } }; }
+        return { meta: { changes: 0 } };
+      }
+      if (statement.sql.includes("UPDATE group_members SET deleted_at")) {
+        if (allowed) { this.actorRole = 'removed'; return { meta: { changes: 1 } }; }
+        return { meta: { changes: 0 } };
+      }
+      return { meta: { changes: 0 } };
+    });
+  }
+}
+class LifecycleStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: LifecycleDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT role FROM group_members')) return (this.db.actorRole === 'removed' ? null : { role: this.db.actorRole }) as T | null;
+    return null;
+  }
+}
+
+class DeletedMutationDb {
+  batches: Array<Array<string>> = [];
+  prepare(sql: string) { return new DeletedMutationStatement(this, sql); }
+  async batch(statements: DeletedMutationStatement[]) {
+    this.batches.push(statements.map((statement) => statement.sql));
+    return statements.map(() => ({ meta: { changes: 0 } }));
+  }
+}
+class DeletedMutationStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: DeletedMutationDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT deleted_at FROM users')) return { deleted_at: '2026-01-01T00:00:00.000Z' } as T;
+    if (this.sql.includes('SELECT * FROM users WHERE id=')) return { id: 'user-1', email: 'person@example.com', deleted_at: null } as T;
+    if (this.sql.includes('FROM people WHERE id=')) return { id: 'person-1', name: 'Friend', email: null, deleted_at: null } as T;
+    if (this.sql.includes('FROM group_invitations WHERE id=')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'person@example.com', expires_at: '9999-01-01T00:00:00.000Z', revoked_at: null, accepted_at: null, rejected_at: null } as T;
+    return null;
+  }
+  async run() { return { meta: { changes: 0 } }; }
+}
+
+class StaleRemovalDb {
+  invitationSql = '';
+  prepare(sql: string) { return new StaleRemovalStatement(this, sql); }
+  async batch(statements: StaleRemovalStatement[]) {
+    this.invitationSql = statements.find((statement) => statement.sql.includes('UPDATE group_invitations'))?.sql ?? '';
+    return statements.map(() => ({ meta: { changes: 0 } }));
+  }
+}
+class StaleRemovalStatement {
+  constructor(private readonly db: StaleRemovalDb, readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT role,deleted_at')) return { role: 'member', deleted_at: null } as T;
+    return null;
+  }
+}
+
+class AccountDeletionDb {
+  ownerCount = 0;
+  deleted = false;
+  batches: Array<AccountDeletionStatement[]> = [];
+  failBatch = false;
+  prepare(sql: string) { return new AccountDeletionStatement(this, sql); }
+  async batch(statements: AccountDeletionStatement[]) {
+    this.batches.push(statements);
+    if (this.failBatch) throw new Error('cleanup failed');
+    this.deleted = true;
+    return statements.map((_, index) => index === 0 ? { meta: { changes: 1 } } : { meta: { changes: 0 } });
+  }
+}
+class AccountDeletionStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: AccountDeletionDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT id,email,clerk_user_id,deleted_at FROM users')) return { id: 'user-1', email: 'person@example.com', clerk_user_id: 'clerk-1', deleted_at: this.db.deleted ? '2026-01-01T00:00:00.000Z' : null } as T;
+    if (this.sql.includes('SELECT COUNT(*) AS count')) return { count: this.db.ownerCount } as T;
+    return null;
+  }
+  async run() { return { meta: { changes: 1 } }; }
+}
+class DeletedRecoveryDb {
+  recoveryHash: unknown;
+  prepare(sql: string) { return new DeletedRecoveryStatement(this, sql); }
+}
+class DeletedRecoveryStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: DeletedRecoveryDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (!this.sql.includes('deleted_clerk_hash')) return null;
+    if (this.db.recoveryHash === undefined) this.db.recoveryHash = this.args[0];
+    return this.args[0] === this.db.recoveryHash ? { id: 'deleted-user', deleted_at: '2026-01-01T00:00:00.000Z' } as T : null;
+  }
+}
+class HistoricalParticipantsDb {
+  sql = '';
+  prepare(sql: string) { this.sql = sql; return this; }
+  bind(..._args: unknown[]) { return this; }
+  async all<T>() { return { results: [
+    { person_id: 'active-person', name: 'Active', joined_at: '2026-01-01', role: 'member', membership_deleted_at: null, person_deleted_at: null, linked: 1 },
+    { person_id: 'removed-person', name: 'Former', joined_at: '2026-01-02', role: 'member', membership_deleted_at: '2026-02-01', person_deleted_at: null, linked: 0 },
+    { person_id: 'deleted-person', name: 'Deleted account', joined_at: '2026-01-03', role: 'member', membership_deleted_at: '2026-02-02', person_deleted_at: '2026-03-01', linked: 0 },
+  ] as T[] }; }
+}
+
 class GlobalActivityDb {
   sql = '';
   args: unknown[] = [];
   prepare(sql: string) { this.sql = sql; return this; }
   bind(...args: unknown[]) { this.args = args; return this; }
   async all<T>() {
-    const selectedGroup = this.args.length === 2 ? this.args[1] : undefined;
+    const selectedGroup = this.sql.includes('activity.group_id=?') ? this.args[1] : undefined;
     const rows = [
       { type: 'expense', id: 'expense-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Lunch', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
       { type: 'settlement', id: 'settlement-allowed', entity_id: 'settlement-allowed', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Paid', amount_minor: 50, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02' },
       { type: 'expense_revision', id: 'revision-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Edited lunch', amount_minor: 125, currency: 'USD', transaction_date: '2026-01-03', created_at: '2026-01-03' },
+      { type: 'settlement_revision', id: 'settlement-revision-allowed', entity_id: 'settlement-allowed', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Edited payment', amount_minor: 50, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-04', from_name: 'A', to_name: 'B' },
       { type: 'expense_deleted', id: 'deleted-expense', entity_id: 'expense-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Deleted', amount_minor: 75, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-04', deleted: true },
       { type: 'settlement_revision', id: 'deleted-settlement-revision', entity_id: 'settlement-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Old payment', amount_minor: 25, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-05', deleted: true },
       { type: 'expense', id: 'expense-other', entity_id: 'expense-other', entity_active: 1, group_id: 'group-other', group_name: 'Other', label: 'Secret', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
@@ -310,6 +403,19 @@ class CategoriesDb {
   prepare(sql: string) { this.sql = sql; return this; }
   bind(...args: unknown[]) { this.args = args; return this; }
   async all<T>() { return { results: [{ category: 'Custom rent' }, { category: 'Dining' }] as T[] }; }
+}
+
+class PreferenceDb {
+  sql = '';
+  args: unknown[] = [];
+  prepare(sql: string) {
+    this.sql = sql;
+    const statement = {
+      bind: (...args: unknown[]) => { this.args = args; return statement; },
+      first: async <T>() => ({ category: 'Dining' } as T),
+    };
+    return statement;
+  }
 }
 
 describe('repository idempotency', () => {
@@ -363,10 +469,128 @@ describe('repository mutation safety', () => {
   });
 });
 
+describe('repository collaboration lifecycle', () => {
+  it('transfers ownership atomically and records a non-email event', async () => {
+    const db = new LifecycleDb();
+    await expect(new Repository(db as never).transferOwnership('group-1', 'person-2', 'user-1')).resolves.toBe(true);
+    expect(db.actorRole).toBe('member');
+    expect(db.targetRole).toBe('owner');
+    expect(db.batches[0]).toHaveLength(3);
+    expect(db.batches[0][0].sql).toContain('group_membership_events');
+    expect(db.batches[0][0].sql.toLowerCase()).not.toContain('email');
+    expect(db.batches[0][1].sql).toContain("(SELECT COUNT(*) FROM group_members owners");
+  });
+
+  it('rejects transfer attempts by non-owners and to ledger-only members', async () => {
+    const nonOwner = new LifecycleDb(); nonOwner.actorRole = 'member';
+    await expect(new Repository(nonOwner as never).transferOwnership('group-1', 'person-2', 'user-1')).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    const ledgerOnly = new LifecycleDb(); ledgerOnly.targetLinked = false;
+    await expect(new Repository(ledgerOnly as never).transferOwnership('group-1', 'person-2', 'user-1')).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
+  });
+
+  it('allows a non-owner to leave but protects the owner', async () => {
+    const member = new LifecycleDb(); member.actorRole = 'member';
+    await expect(new Repository(member as never).leaveGroup('group-1', 'user-1')).resolves.toBe(true);
+    expect(member.actorRole).toBe('removed');
+    expect(member.batches[0][0].sql).toContain("event_type");
+     expect(member.batches[0].some((statement) => statement.sql.includes("UPDATE scheduled_expenses SET status='cancelled'") && !statement.sql.includes("status='active'"))).toBe(true);
+    const owner = new LifecycleDb();
+    await expect(new Repository(owner as never).leaveGroup('group-1', 'user-1')).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
+  });
+
+  it('cancels only templates created by a removed member', async () => {
+    const db = new LifecycleDb();
+    await expect(new Repository(db as never).removeMember('group-1', 'person-2', 'user-1')).resolves.toBe(true);
+     const cancellation = db.batches[0].find((statement) => statement.sql.includes("UPDATE scheduled_expenses SET status='cancelled'"));
+     expect(cancellation?.sql).toContain('created_by=(SELECT removed_member.user_id');
+     expect(cancellation?.sql).toContain('next_occurrence_date=NULL');
+     expect(cancellation?.sql).not.toContain("status='active'");
+  });
+});
+
+describe('repository account-deletion mutation guards', () => {
+  it('keeps create, friend, and invitation acceptance writes atomic when deletion wins the race', async () => {
+    const groupDb = new DeletedMutationDb();
+    await expect(new Repository(groupDb as never).createGroup('user-1', 'person-1', { name: 'Group', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    expect(groupDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
+
+    const friendDb = new DeletedMutationDb();
+    await expect(new Repository(friendDb as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    expect(friendDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
+
+    const invitationDb = new DeletedMutationDb();
+    await expect(new Repository(invitationDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    expect(invitationDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
+  });
+
+  it('does not revoke invitations when a stale owner removal is rejected', async () => {
+    const db = new StaleRemovalDb();
+    await expect(new Repository(db as never).removeMember('group-1', 'person-2', 'user-1')).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+    expect(db.invitationSql).toContain('removed_member.deleted_at=?');
+  });
+});
+
+describe('repository account deletion', () => {
+  it('blocks deletion with only the active owned-group count and does not start cleanup', async () => {
+    const db = new AccountDeletionDb(); db.ownerCount = 2;
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).deleteAccount('user-1')).rejects.toMatchObject({
+      code: 'ACCOUNT_DELETION_BLOCKED',
+      details: { activeOwnedGroupCount: 2 },
+    });
+    expect(db.batches).toHaveLength(0);
+  });
+
+  it('submits membership, invitation, preference, idempotency, identity, and linkage cleanup atomically', async () => {
+    const db = new AccountDeletionDb();
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).deleteAccount('user-1')).resolves.toEqual(expect.objectContaining({ deletedAt: expect.any(String) }));
+    expect(db.batches).toHaveLength(1);
+    expect(db.batches[0]).toHaveLength(8);
+    expect(db.batches[0].map((statement) => statement.sql)).toEqual(expect.arrayContaining([
+       expect.stringContaining('UPDATE group_members SET deleted_at'),
+       expect.stringContaining("UPDATE scheduled_expenses SET status='cancelled'"),
+      expect.stringContaining('UPDATE group_invitations SET revoked_at'),
+      expect.stringContaining('UPDATE group_invitations SET email_normalized'),
+      expect.stringContaining('DELETE FROM category_preferences'),
+      expect.stringContaining('DELETE FROM idempotency_keys'),
+      expect.stringContaining('UPDATE people SET name'),
+      expect.stringContaining('UPDATE users SET email'),
+     ]));
+     expect(db.batches[0].find((statement) => statement.sql.includes("UPDATE scheduled_expenses SET status='cancelled'"))?.sql).not.toContain("status='active'");
+    expect(db.batches[0].find((statement) => statement.sql.includes('SET email_normalized'))?.sql).toContain('WHERE email_normalized=?');
+  });
+
+  it('treats a repeated delete for the authenticated account as already committed', async () => {
+    const db = new AccountDeletionDb();
+    const repository = new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY);
+    await repository.deleteAccount('user-1');
+    await expect(repository.deleteAccount('user-1')).resolves.toMatchObject({ alreadyDeleted: true });
+    expect(db.batches).toHaveLength(1);
+  });
+
+  it('limits deletion recovery to the same non-empty Clerk identity, not email', async () => {
+    const db = new DeletedRecoveryDb();
+    const repository = new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY);
+    await expect(repository.deletedAccountForIdentity('clerk-original', 'person@example.com')).resolves.toMatchObject({ id: 'deleted-user' });
+    await expect(repository.deletedAccountForIdentity('clerk-unrelated', 'person@example.com')).resolves.toBeNull();
+    await expect(repository.deletedAccountForIdentity('', 'person@example.com')).resolves.toBeNull();
+  });
+});
+
+describe('repository historical settlement participants', () => {
+  it('returns removed and deleted people without making them active members', async () => {
+    const db = new HistoricalParticipantsDb();
+    const participants = await new Repository(db as never).historicalParticipants('group-1');
+    expect(participants.map((participant) => [participant.personId, participant.status])).toEqual([
+      ['active-person', 'active'], ['removed-person', 'removed'], ['deleted-person', 'deleted'],
+    ]);
+    expect(db.sql).toContain('person_deleted_at');
+  });
+});
+
 describe('repository expense hydration', () => {
   it('uses two bulk child queries per bind-limited chunk rather than two per expense', async () => {
     const db = new BulkHydrationDb(91);
-    const expenses = await new Repository(db as never).expenses('group-1', { limit: 100, offset: 0 });
+    const expenses = (await new Repository(db as never).expensePage('group-1', { limit: 100 })).items;
     expect(expenses).toHaveLength(91);
     expect(expenses.every((expense) => expense.payers.length === 1 && expense.splits.length === 1)).toBe(true);
     // 91 IDs are split into two chunks, so this is one page query plus two
@@ -460,38 +684,16 @@ describe('repository friend creation', () => {
 });
 
 describe('repository activity mapping', () => {
-  it('keeps event IDs separate from canonical entity IDs and carries transaction context', async () => {
-    const db = new ActivityDb();
-    const activity = await new Repository(db as never).activity('group-1');
-    expect(activity[0]).toMatchObject({ type: 'expense', id: 'expense-event', entityId: 'expense-1', entityActive: true, amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02' });
-    expect(activity[1]).toMatchObject({ type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', entityActive: false, fromName: 'A', toName: 'B' });
-    expect(db.sql).toContain("SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active");
-    expect(db.sql).toContain("SELECT 'settlement' AS type,s.id,s.id AS entity_id,0 AS entity_active");
-    expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
-  });
-
-  it('does not expose revisions from deleted transactions', async () => {
-    const db = new RevisionActivityDb();
-    const activity = await new Repository(db as never).activity('group-1');
-    // D1 evaluates this against the current version and deleted_at. Earlier
-    // edit revisions therefore stay revisions after an edit-then-delete.
-    expect(db.sql).toContain("e.deleted_at IS NOT NULL AND e.version = r.revision + 1");
-    expect(db.sql).toContain("s.deleted_at IS NOT NULL AND s.version = r.revision + 1");
-    expect(db.sql).toContain("r.entity_type='expense' AND e.deleted_at IS NULL");
-    expect(db.sql).toContain("CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END AS entity_active");
-    expect(activity.map((item) => item.type)).toEqual(['expense_revision']);
-    expect(activity.map((item) => item.entityId)).toEqual(['expense-1']);
-  });
-
   it('scopes global activity to the authenticated user and optional authorized group', async () => {
     const db = new GlobalActivityDb();
     const repo = new Repository(db as never);
-    await expect(repo.globalActivity('user-a')).resolves.toMatchObject([
+    await expect(repo.globalActivity('user-a', undefined, { limit: 100 })).resolves.toMatchObject({ items: [
       { type: 'expense', groupId: 'group-allowed', label: 'Lunch' },
       { type: 'settlement', groupId: 'group-allowed', label: 'Paid' },
       { type: 'expense_revision', groupId: 'group-allowed', label: 'Edited lunch' },
-    ]);
-    await expect(repo.globalActivity('user-a', 'group-other')).resolves.toEqual([]);
+      { type: 'settlement_revision', groupId: 'group-allowed', label: 'Edited payment' },
+    ] });
+    await expect(repo.globalActivity('user-a', 'group-other', { limit: 100 })).resolves.toMatchObject({ items: [] });
     expect(db.sql).toContain('gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL');
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');
@@ -500,6 +702,10 @@ describe('repository activity mapping', () => {
 });
 
 describe('repository global export pagination', () => {
+  it('rejects the removed raw group-id cursor format', async () => {
+    await expect(new Repository(new GlobalExportDb() as never).exportPage('user-1', { groupCursor: 'group-a' })).rejects.toMatchObject({ code: 'INVALID_CURSOR' });
+  });
+
   it('finishes unequal streams before advancing across multiple groups', async () => {
     const db = new GlobalExportDb();
     const repo = new Repository(db as never);
@@ -537,10 +743,25 @@ describe('repository categories', () => {
   it('includes custom categories from active authorized schedules as well as expenses', async () => {
     const db = new CategoriesDb();
     await expect(new Repository(db as never).categories('user-a')).resolves.toEqual(['Custom rent', 'Dining']);
-    expect(db.args).toEqual(['user-a', 'user-a']);
+    expect(db.args).toEqual(['user-a', 'user-a', 'user-a']);
     expect(db.sql).toContain('FROM scheduled_expenses se');
-    expect(db.sql).toContain('gm.user_id=?');
-    expect(db.sql).toContain('g.deleted_at IS NULL');
+    expect(db.sql).not.toContain("se.status<>'cancelled'");
+    expect(db.sql).toContain('e.created_by=?');
+  });
+  it('normalizes descriptions, scopes lookups, and generates guarded upsert/delete statements', async () => {
+    const db = new PreferenceDb();
+    const repo = new Repository(db as never);
+    expect(repo.normalizeCategoryDescription('  DINNER  ')).toBe('dinner');
+    await expect(repo.categoryPreference('user-a', '  Dinner ')).resolves.toBe('Dining');
+    expect(db.args).toEqual(['user-a', 'dinner']);
+    repo.categoryPreferenceStatements('user-a', ' Dinner ', ' Dining ');
+    expect(db.sql).toContain('ON CONFLICT(user_id,normalized_description) DO UPDATE');
+    expect(db.args).toEqual(['user-a', 'dinner', 'Dining', expect.any(String)]);
+    repo.categoryPreferenceStatements('user-a', 'Dinner', null);
+    expect(db.sql).toContain('DELETE FROM category_preferences');
+  });
+  it('uses the migration-compatible ASCII normalization for non-ASCII descriptions', () => {
+    expect(new Repository(new PreferenceDb() as never).normalizeCategoryDescription('  ÉCLAIR  ')).toBe('Éclair');
   });
 });
 
@@ -593,7 +814,7 @@ describe('repository Clerk identity linking', () => {
     db.users.push({ id: 'legacy-user', email: 'person@example.com', clerk_user_id: null });
     db.people.push({ id: 'legacy-person', name: 'Person', email: 'person@example.com', user_id: 'legacy-user', deleted_at: null });
     db.members.push({ group_id: 'group-1', person_id: 'legacy-person', user_id: null });
-    const identity = await new Repository(db as never).userForClerk('user_123', 'PERSON@example.com');
+    const identity = await new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('user_123', 'PERSON@example.com');
     expect(identity.user.id).toBe('legacy-user');
     expect(identity.person.id).toBe('legacy-person');
     expect(db.users[0].clerk_user_id).toBe('user_123');
@@ -604,7 +825,7 @@ describe('repository Clerk identity linking', () => {
 
   it('creates a new app user and person when the verified email is new', async () => {
     const db = new ClerkIdentityDb();
-    const identity = await new Repository(db as never).userForClerk('user_new', 'new@example.com');
+    const identity = await new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('user_new', 'new@example.com');
     expect(identity.user.email).toBe('new@example.com');
     expect(identity.user.clerk_user_id).toBe('user_new');
     expect(identity.person.user_id).toBe(identity.user.id);
@@ -613,15 +834,27 @@ describe('repository Clerk identity linking', () => {
   it('fails closed for an email already linked to another Clerk ID', async () => {
     const db = new ClerkIdentityDb();
     db.users.push({ id: 'linked-user', email: 'person@example.com', clerk_user_id: 'user_existing' });
-    await expect(new Repository(db as never).userForClerk('user_other', 'person@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('user_other', 'person@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(db.users[0].clerk_user_id).toBe('user_existing');
+  });
+
+  it('does not relink a deleted internal user by its old Clerk identity', async () => {
+    const db = new ClerkIdentityDb();
+    db.users.push({ id: 'deleted-user', email: 'deleted+user@billsplit.invalid', clerk_user_id: 'deleted_clerk', deleted_at: '2026-01-01T00:00:00.000Z' });
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('deleted_clerk', 'person@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+  });
+
+  it('does not create a new internal user for a deleted identity email tombstone', async () => {
+    const db = new ClerkIdentityDb();
+    db.deletedIdentityTombstone = true;
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('new_clerk', 'person@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
   });
 
   it('resolves a linked user by Clerk ID and retains the canonical D1 email after an email change', async () => {
     const db = new ClerkIdentityDb();
     db.users.push({ id: 'stable-user', email: 'old@example.com', clerk_user_id: 'user_stable' });
     db.people.push({ id: 'stable-person', name: 'Stable', email: 'old@example.com', user_id: 'stable-user', deleted_at: null });
-    const identity = await new Repository(db as never).userForClerk('user_stable', 'new@example.com');
+    const identity = await new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('user_stable', 'new@example.com');
     expect(identity.user.id).toBe('stable-user');
     expect(identity.user.email).toBe('old@example.com');
     expect(db.users).toHaveLength(1);
@@ -630,7 +863,7 @@ describe('repository Clerk identity linking', () => {
   it('self-heals a Clerk mapping left behind before person creation completed', async () => {
     const db = new ClerkIdentityDb();
     db.users.push({ id: 'interrupted-user', email: 'interrupted@example.com', clerk_user_id: 'user_interrupted' });
-    const identity = await new Repository(db as never).userForClerk('user_interrupted', 'interrupted@example.com');
+    const identity = await new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('user_interrupted', 'interrupted@example.com');
     expect(identity.user.id).toBe('interrupted-user');
     expect(identity.person.user_id).toBe('interrupted-user');
     expect(db.people).toHaveLength(1);
@@ -640,7 +873,7 @@ describe('repository Clerk identity linking', () => {
     const db = new ClerkIdentityDb();
     db.users.push({ id: 'raced-user', email: 'raced@example.com', clerk_user_id: null });
     db.raceLinkClerkId = 'winner_clerk_id';
-    await expect(new Repository(db as never).userForClerk('loser_clerk_id', 'raced@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+    await expect(new Repository(db as never, IDENTITY_TOMBSTONE_TEST_KEY).userForClerk('loser_clerk_id', 'raced@example.com')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(db.users[0].clerk_user_id).toBe('winner_clerk_id');
   });
 });

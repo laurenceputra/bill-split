@@ -252,6 +252,18 @@ describe('resource cache', () => {
     expect([resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].every((key) => getResourceSnapshot(key, 'user-a').stale)).toBe(true);
   });
 
+  it('invalidates every filtered expense resource for the mutated group', async () => {
+    setResourceIdentity('user-a');
+    const unfiltered = resourceKeys.expenses('user-a', 'group-1');
+    const filtered = resourceKeys.expenses('user-a', 'group-1', 'q:dinner');
+    const otherGroup = resourceKeys.expenses('user-a', 'group-2', 'q:dinner');
+    [unfiltered, filtered, otherGroup].forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.expenseChanged('group-1', 'expense-1', 'user-a');
+    expect(getResourceSnapshot(unfiltered, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(filtered, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(otherGroup, 'user-a').stale).toBe(false);
+  });
+
   it('invalidates only schedule resources for schedule mutations', async () => {
     setResourceIdentity('user-a');
     const scheduleKey = resourceKeys.scheduledExpenses('user-a', 'group-1');
@@ -267,5 +279,37 @@ describe('resource cache', () => {
     expect(getResourceSnapshot(detailKey, 'user-a').stale).toBe(true);
     expect(getResourceSnapshot(categoriesKey, 'user-a').stale).toBe(true);
     expect(getResourceSnapshot(balanceKey, 'user-a').stale).toBe(false);
+  });
+
+  it('invalidates all private group resources without revalidating after self-leave', async () => {
+    setResourceIdentity('user-a');
+    const keys = [resourceKeys.groups('user-a'), resourceKeys.group('user-a', 'group-1'), resourceKeys.expenses('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')];
+    keys.forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.groupLeft('group-1', 'user-a');
+    expect(keys.every((key) => getResourceSnapshot(key, 'user-a').data === undefined)).toBe(true);
+    expect(getResourceSnapshot(resourceKeys.group('user-a', 'group-1'), 'user-a').revalidating).toBe(false);
+  });
+
+  it('invalidates deleted group resources without revalidating them', async () => {
+    setResourceIdentity('user-a');
+    const keys = [resourceKeys.group('user-a', 'group-1'), resourceKeys.expenses('user-a', 'group-1'), resourceKeys.expenses('user-a', 'group-1', 'q:dinner')];
+    keys.forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.groupDeleted('group-1', 'user-a');
+    expect(keys.every((key) => getResourceSnapshot(key, 'user-a').data === undefined)).toBe(true);
+    expect(keys.every((key) => getResourceSnapshot(key, 'user-a').revalidating === false)).toBe(true);
+  });
+
+  it('hard-evicts revoked group resources and notifies the active route', async () => {
+    vi.stubGlobal('window', new EventTarget());
+    setResourceIdentity('user-a');
+    const keys = [resourceKeys.groups('user-a'), resourceKeys.group('user-a', 'group-1'), resourceKeys.expenses('user-a', 'group-1', '["q"]'), resourceKeys.activity('user-a', 'group-1'), resourceKeys.activity('user-a', 'all')];
+    keys.forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    const events: string[] = [];
+    const listener = (event: Event) => events.push((event as CustomEvent<{ groupId: string }>).detail.groupId);
+    window.addEventListener('billsplit-group-revoked', listener);
+    await invalidateForMutation.groupAccessRevoked('group-1', 'user-a');
+    window.removeEventListener('billsplit-group-revoked', listener);
+    expect(keys.every((key) => getResourceSnapshot(key, 'user-a').data === undefined)).toBe(true);
+    expect(events).toEqual(['group-1']);
   });
 });

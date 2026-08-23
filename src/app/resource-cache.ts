@@ -39,7 +39,7 @@ export type ResourceHydrator<T> = () => Promise<{ data: T; fetchedAt?: number; o
 export type RevalidateReason = 'route' | 'focus' | 'online' | 'visibility' | 'mutation' | 'auth-restored' | 'identity-check';
 export interface RevalidateOptions { force?: boolean; reason?: RevalidateReason }
 
-type Entry<T> = { snapshot: ResourceSnapshot<T>; loader?: ResourceLoader<T>; hydrate?: ResourceHydrator<T>; hydrationPromise?: Promise<void>; ttl: number; promise?: Promise<T>; controller?: AbortController; generation: number; forcePending?: RevalidateOptions; listeners: Set<() => void>; visible: number; evictionTimer?: ReturnType<typeof setTimeout> };
+type Entry<T> = { snapshot: ResourceSnapshot<T>; loader?: ResourceLoader<T>; hydrate?: ResourceHydrator<T>; hydrationPromise?: Promise<void>; ttl: number; promise?: Promise<T>; controller?: AbortController; generation: number; forcePending?: RevalidateOptions; listeners: Set<() => void>; visible: number; evicted?: boolean; evictionTimer?: ReturnType<typeof setTimeout> };
 const entries = new Map<ResourceKey, Entry<unknown>>();
 const identityListeners = new Set<() => void>();
 let activeUserId: string | undefined;
@@ -110,12 +110,14 @@ export function getResourceSnapshot<T>(key: ResourceKey, userId = activeUserId |
 }
 export function configureResource<T>(key: ResourceKey, userId: string, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS) {
   const resource = entry<T>(key, userId, ttl);
+  if (!resource.visible) resource.evicted = false;
   resource.loader = loader;
   resource.ttl = Math.max(MIN_RESOURCE_FRESHNESS_MS, ttl);
   return resource.snapshot;
 }
 export function subscribeResource<T>(key: ResourceKey, listener: () => void, userId = activeUserId || '') {
   const resource = entry<T>(key, isIdentityKey(key) ? 'identity' : userId, MIN_RESOURCE_FRESHNESS_MS);
+  if (!resource.visible) resource.evicted = false;
   if (resource.evictionTimer) { clearTimeout(resource.evictionTimer); resource.evictionTimer = undefined; }
   resource.listeners.add(listener);
   resource.visible += 1;
@@ -128,6 +130,7 @@ export function subscribeResource<T>(key: ResourceKey, listener: () => void, use
 export function useResource<T>(key: ResourceKey, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>) {
   const resolvedUser = isIdentityKey(key) ? 'identity' : userId || activeUserId || '';
   const resource = entry<T>(key, resolvedUser, ttl);
+  if (!resource.visible) resource.evicted = false;
   resource.loader = loader;
   resource.hydrate = hydrate;
   resource.ttl = Math.max(MIN_RESOURCE_FRESHNESS_MS, ttl);
@@ -176,6 +179,7 @@ export function readResource<T>(key: ResourceKey, userId = activeUserId || ''): 
 export function seedResource<T>(key: ResourceKey, userId: string, data: T, fetchedAt = now(), options: { offline?: boolean } = {}) {
   const scopedUserId = isIdentityKey(key) ? 'identity' : userId;
   const resource = entry<T>(key, scopedUserId, MIN_RESOURCE_FRESHNESS_MS);
+  resource.evicted = false;
   resource.snapshot = stable({ userId: scopedUserId, data, fetchedAt, status: 'ready', loading: false, revalidating: false, stale: false, offline: options.offline === true });
   notify(resource);
 }
@@ -190,7 +194,56 @@ export function invalidateResource(key: ResourceKey, userId = activeUserId || ''
   if (options.revalidate !== false && resource.visible > 0) void revalidate(key, userId, resource.forcePending);
 }
 
+/** Remove a resource rather than merely marking its old value stale. This is
+ * used when authorization has ended: back navigation must not render the
+ * revoked group's private data while a new request is pending. */
+export function evictResource(key: ResourceKey, userId = activeUserId || '') {
+  const resource = entries.get(key);
+  if (!resource || (userId && resource.snapshot.userId !== userId)) return;
+  resource.controller?.abort();
+  resource.generation += 1;
+  resource.promise = undefined;
+  resource.hydrationPromise = undefined;
+  resource.forcePending = undefined;
+  resource.loader = undefined;
+  resource.hydrate = undefined;
+  resource.evicted = true;
+  resource.snapshot = idleSnapshot(resource.snapshot.userId);
+  notify(resource);
+  if (!resource.visible && !resource.listeners.size) entries.delete(key);
+}
+
+export function evictResourcePrefix(prefix: string, userId = activeUserId || '') {
+  for (const key of [...entries.keys()]) if (key.startsWith(prefix)) evictResource(key, userId);
+}
+
+export function evictGroupResources(groupId: string, userId: string) {
+  const exact = [
+    resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId),
+    resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId),
+    resourceKeys.settlements(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId),
+    resourceKeys.activity(userId, groupId), resourceKeys.audit(userId, groupId),
+    resourceKeys.groupInvitations(userId, groupId),
+    resourceKeys.invitations(userId),
+  ];
+  for (const key of exact) evictResource(key, userId);
+  evictResourcePrefix(`expenses:${userId}:${groupId}:`, userId);
+  // Detail resources do not include a group ID in their key. Evict details
+  // whose loaded payload identifies this group, as well as schedule details.
+  for (const [key, resource] of entries) {
+    if (resource.snapshot.userId !== userId || resource.snapshot.data === undefined) continue;
+    const data = resource.snapshot.data as { expense?: { groupId?: string }; settlement?: { groupId?: string }; scheduledExpense?: { groupId?: string } };
+    if (data.expense?.groupId === groupId || data.settlement?.groupId === groupId || data.scheduledExpense?.groupId === groupId) evictResource(key, userId);
+  }
+  evictResource(resourceKeys.activity(userId, 'all'), userId);
+  evictResource(resourceKeys.groups(userId), userId);
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-group-revoked', { detail: { groupId } }));
+}
+
 export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') { for (const key of keys) invalidateResource(key, userId); }
+export function invalidateResourcePrefix(prefix: string, userId = activeUserId || '', options: { revalidate?: boolean } = {}) {
+  for (const [key, resource] of entries) if (key.startsWith(prefix) && (!userId || resource.snapshot.userId === userId)) invalidateResource(key, userId, options);
+}
 
 export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
   for (const [key, resource] of entries) {
@@ -212,7 +265,7 @@ export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
 export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '', options: RevalidateOptions = {}): Promise<T | undefined> {
   const resource = entry<T>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
   if (!authLifecycleReady && (options.reason === 'focus' || options.reason === 'online' || options.reason === 'visibility' || options.reason === 'identity-check')) return resource.snapshot.data;
-  if (!resource.loader || !isVisible()) return resource.snapshot.data;
+  if (resource.evicted || !resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
   if (!online() && resource.snapshot.data !== undefined) return resource.snapshot.data;
   const force = options.force === true || (isIdentityKey(key) && options.reason === 'identity-check');
@@ -296,7 +349,7 @@ export const resourceKeys = Object.freeze({
   groups: (userId: string) => resourceKey('groups', userId),
   group: (userId: string, groupId: string) => resourceKey('group', `${userId}:${groupId}`),
   members: (userId: string, groupId: string) => resourceKey('members', `${userId}:${groupId}`),
-  expenses: (userId: string, groupId: string) => resourceKey('expenses', `${userId}:${groupId}`),
+  expenses: (userId: string, groupId: string, filterKey = '') => resourceKey('expenses', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
   balances: (userId: string, groupId: string) => resourceKey('balances', `${userId}:${groupId}`),
   settlements: (userId: string, groupId: string) => resourceKey('settlements', `${userId}:${groupId}`),
   scheduledExpenses: (userId: string, groupId: string) => resourceKey('scheduled-expenses', `${userId}:${groupId}`),
@@ -318,15 +371,20 @@ export const resourceCache = Object.freeze({
   revalidate,
   invalidate: invalidateResource,
   invalidateMany: invalidateResources,
+  evict: evictResource,
+  evictPrefix: evictResourcePrefix,
   clear: clearResourceCache,
 });
-const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean } = {}) => {
+const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string } = {}) => {
   try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 };
 export const invalidateForMutation = {
   groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
   groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
+  groupDeleted: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
+  groupLeft: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
+  groupAccessRevoked: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
   settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId)] : [])], userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true }); },
   invitationsChanged: async (groupId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.invitations(userId), ...(groupId ? [resourceKeys.groupInvitations(userId, groupId)] : [])], userId); },
   scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), resourceKeys.categories(userId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { categories: true, groups: false }); },

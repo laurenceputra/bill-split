@@ -1,4 +1,4 @@
-import type { Activity, Balances, Expense, Group, GroupMember, Settlement } from '../shared/types';
+import type { Activity, Balances, Expense, Group, GroupMember, HistoricalParticipant, Settlement } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
@@ -66,6 +66,7 @@ export interface GroupSnapshot {
   groupId: string;
   group?: Group;
   members?: GroupMember[];
+  historicalParticipants?: HistoricalParticipant[];
   expenses?: Expense[];
   balances?: Record<string, Balances>;
   settlements?: Settlement[];
@@ -137,7 +138,7 @@ export function normalizeActivity(value: unknown): Activity[] {
     const expenseEntity = row.type === 'expense' || row.type === 'expense_revision';
     // A revision with an explicit inactive parent belongs to a transaction
     // which has since been deleted. Do not let an old cache resurrect it.
-    if ((row.type === 'expense_revision' || row.type === 'settlement_revision') && parsedEntityActive === false) return [];
+    if (row.type === 'expense_revision' && parsedEntityActive === false) return [];
     // A legacy direct expense row already represents the current entity, so its
     // event ID is a safe fallback for display/refetch. It is not an eligibility
     // assertion: only an explicit active flag can make an expense linkable.
@@ -366,12 +367,12 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutatio
 }
 
 /** Keep the home snapshot available offline, but make it immediately stale online. */
-export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean } = {}) {
+export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string } = {}) {
   assertSessionGeneration(generation);
   const staleAt = new Date(0).toISOString();
   const db = await open();
   await new Promise<void>((resolve, reject) => {
-    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])];
+    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId ? ['groupSnapshots', 'resourceFreshness', 'expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
     const tx = db.transaction(stores, 'readwrite');
     const generations = tx.objectStore('mutationGenerations');
     const current = generations.get(userId);
@@ -383,7 +384,11 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         const groups = tx.objectStore('groups');
         const cached = groups.get(userId);
         cached.onsuccess = () => {
-          if (cached.result) groups.put({ ...(cached.result as CachedGroups), cachedAt: staleAt });
+          if (cached.result) {
+            const current = cached.result as CachedGroups;
+            const groupsValue = options.groupId ? current.groups.filter((group) => group.id !== options.groupId) : current.groups;
+            groups.put({ ...current, groups: groupsValue, cachedAt: staleAt });
+          }
         };
         tx.objectStore('resourceFreshness').put({ userId, resource: 'groups', resourceKey: 'groups', fetchedAt: staleAt });
       }
@@ -395,6 +400,13 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         };
       }
       if (options.categories) tx.objectStore('categories').delete(userId);
+      if (options.groupId) {
+        tx.objectStore('groupSnapshots').delete([userId, options.groupId]);
+        const freshness = tx.objectStore('resourceFreshness').getAll();
+        freshness.onsuccess = () => { for (const row of freshness.result as ResourceFreshness[]) if (row.userId === userId && row.resourceKey.startsWith(`group:${options.groupId}:`)) tx.objectStore('resourceFreshness').delete([row.userId, row.resourceKey]); };
+        const details = tx.objectStore('expenseDetails').getAll();
+        details.onsuccess = () => { for (const row of details.result as CachedExpenseDetails[]) if (row.userId === userId && row.expense?.groupId === options.groupId) tx.objectStore('expenseDetails').delete([row.userId, row.expenseId]); };
+      }
     };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -518,7 +530,6 @@ export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> 
   return (all || []).filter((item) => !userId || item.userId === userId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export const deleteOutboxItem = (clientOperationId: string) => transaction('expenseOutbox', 'readwrite', (tx) => tx.objectStore('expenseOutbox').delete(clientOperationId));
 
 export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: number) {
   const db = await open();

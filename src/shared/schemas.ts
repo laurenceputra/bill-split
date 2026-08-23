@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { checkedSumMinor } from './money';
 import type { Weekday } from './types';
+export { normalizeCategoryDescription } from './category';
 
 export const id = z.string().uuid();
 export const supportedCurrencies = ['USD', 'EUR', 'GBP', 'AUD', 'CAD', 'NZD', 'SGD', 'HKD', 'CHF', 'CNY', 'INR'] as const;
@@ -14,7 +15,9 @@ export const date = z.string().refine((value) => {
 const safeMinor = z.number().int().nonnegative().refine(Number.isSafeInteger, 'Amount must be a safe integer');
 export const personInput = z.object({ name: z.string().trim().min(1).max(120), email: z.string().trim().email().max(320).optional().nullable() });
 export const invitationInput = z.object({ email: z.string().trim().email().max(320) });
+export const ownershipTransferInput = z.object({ person_id: id });
 export const transactionVersionInput = z.object({ version: z.number().int().positive() });
+export const categorySuggestionInput = z.object({ description: z.string().trim().min(1).max(240) });
 export const groupInput = z.object({ name: z.string().trim().min(1).max(120), currency: currency.default('USD') });
 export const friendInput = personInput.extend({ currency: currency.default('USD'), client_operation_id: z.string().trim().min(1).max(100).optional() });
 export const payerInput = z.object({ person_id: id, amount_minor: safeMinor });
@@ -43,12 +46,15 @@ export const scheduledExpenseInput = z.object({
   if (value.frequency !== 'weekly' && value.weekdays.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['weekdays'], message: 'Weekdays are only valid for weekly schedules' });
 });
 export const scheduledExpenseStatusInput = z.object({ version: z.number().int().positive() });
+export const ACCOUNT_DELETION_CONFIRMATION = 'DELETE MY ACCOUNT' as const;
+export const accountDeletionInput = z.object({ confirmation: z.literal(ACCOUNT_DELETION_CONFIRMATION) });
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
 export type FriendInput = z.infer<typeof friendInput>;
 export type InvitationInput = z.infer<typeof invitationInput>;
 export type ScheduledExpenseInput = z.infer<typeof scheduledExpenseInput>;
+export type CategorySuggestionInput = z.infer<typeof categorySuggestionInput>;
 
 export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));

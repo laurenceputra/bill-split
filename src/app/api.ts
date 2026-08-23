@@ -1,10 +1,12 @@
-import type { Activity, AuditEvent, CursorPage, Expense, Group, GroupInvitation, GroupMember, ScheduledExpense, Settlement, Balances } from '../shared/types';
+import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, ScheduledExpense, Settlement, Balances } from '../shared/types';
 import type { ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
+import type { ExpenseFilters } from './expense-filters';
+import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -28,6 +30,166 @@ export class ClerkSignOutFailure extends Error {
     super(message);
     this.name = 'ClerkSignOutFailure';
   }
+}
+
+/** The installed Clerk client exposes UserResource.delete(). Keep the check
+ * defensive so an older client can clearly report account-management
+ * deferral without claiming that Clerk was deleted. */
+export async function deleteClerkUserIfSupported(user: unknown): Promise<'deleted' | 'unsupported'> {
+  const candidate = user as { delete?: unknown } | null;
+  if (!candidate || typeof candidate.delete !== 'function') return 'unsupported';
+  await (candidate.delete as () => Promise<void>)();
+  return 'deleted';
+}
+
+const PENDING_ACCOUNT_DELETION_KEY = 'billsplit-pending-account-deletion';
+export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
+type PendingAccountDeletion = { version: 1; phase: 'server-pending' | 'server-deleted' | 'local-cleared' | 'provider-deleted'; clerkUserId: string };
+type CompletePendingAccountDeletionOptions = { clearLocal?: () => Promise<void>; clerkEvidence?: ClerkAuthEvidence };
+type ClerkDeletionStatus = 'deleted' | 'unsupported' | 'signed-out';
+let pendingAccountDeletionRequest: { clerkUserId: string; promise: Promise<{ clerkStatus: ClerkDeletionStatus }> } | undefined;
+
+const readRawPendingAccountDeletion = () => {
+  if (typeof localStorage === 'undefined') return undefined;
+  try { return localStorage.getItem(PENDING_ACCOUNT_DELETION_KEY) ?? undefined; }
+  catch { return undefined; }
+};
+
+const readPendingAccountDeletion = (): PendingAccountDeletion | undefined => {
+  const raw = readRawPendingAccountDeletion();
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as Partial<PendingAccountDeletion> | null;
+    return value?.version === 1 && (value.phase === 'server-pending' || value.phase === 'server-deleted' || value.phase === 'local-cleared' || value.phase === 'provider-deleted') && typeof value.clerkUserId === 'string' && value.clerkUserId.trim() !== '' ? value as PendingAccountDeletion : undefined;
+  } catch { return undefined; }
+};
+
+const requireClerkUserId = (clerkUserId: unknown) => {
+  if (typeof clerkUserId !== 'string' || clerkUserId.trim() === '') throw new Error('A loaded Clerk user ID is required before account deletion.');
+  return clerkUserId;
+};
+
+const writePendingAccountDeletion = (phase: PendingAccountDeletion['phase'], clerkUserId: string) => {
+  const id = requireClerkUserId(clerkUserId);
+  if (typeof localStorage === 'undefined') throw new Error('Local recovery storage is unavailable. Clerk deletion was not attempted.');
+  localStorage.setItem(PENDING_ACCOUNT_DELETION_KEY, JSON.stringify({ version: 1, phase, clerkUserId: id } satisfies PendingAccountDeletion));
+};
+export const hasPendingAccountDeletion = () => readRawPendingAccountDeletion() !== undefined;
+export const hasInvalidPendingAccountDeletion = () => {
+  const raw = readRawPendingAccountDeletion();
+  return raw !== undefined && readPendingAccountDeletion() === undefined;
+};
+export const getPendingAccountDeletionPhase = () => readPendingAccountDeletion()?.phase;
+export const getPendingAccountDeletionClerkUserId = () => readPendingAccountDeletion()?.clerkUserId;
+export const markAccountDeletionPending = (clerkUserId: string) => {
+  writePendingAccountDeletion('server-pending', requireClerkUserId(clerkUserId));
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-account-deletion-pending'));
+};
+/** Discard only an unreadable legacy marker; this never performs account cleanup or binds it to an identity. */
+export const discardInvalidPendingAccountDeletion = () => {
+  if (!hasInvalidPendingAccountDeletion() || typeof localStorage === 'undefined') return false;
+  localStorage.removeItem(PENDING_ACCOUNT_DELETION_KEY);
+  return true;
+};
+const clearPendingAccountDeletion = () => { if (typeof localStorage !== 'undefined') localStorage.removeItem(PENDING_ACCOUNT_DELETION_KEY); };
+
+const clerkUserIdFromUser = (user: unknown) => {
+  const id = typeof user === 'object' && user !== null && 'id' in user ? (user as { id?: unknown }).id : undefined;
+  return typeof id === 'string' && id.trim() !== '' ? id : undefined;
+};
+const hasAuthoritativeSignedOutEvidence = (evidence: ClerkAuthEvidence | undefined) => Boolean(evidence && evidence.isLoaded && evidence.isSignedIn === false && !evidence.userId);
+const currentRecoveryClerkEvidence = (fallback: ClerkAuthEvidence | undefined) => clerkEvidenceKnown && clerkEvidenceAuthoritative ? clerkEvidence : fallback;
+
+/** Finish an account deletion, retrying the server commit before local/provider cleanup. */
+export function completePendingAccountDeletion(user: unknown, signOut: (options?: { redirectUrl?: string }) => Promise<unknown>, options: CompletePendingAccountDeletionOptions = {}) {
+  if (pendingAccountDeletionRequest) {
+    const currentClerkUserId = clerkUserIdFromUser(user);
+    const pending = readPendingAccountDeletion();
+    if (typeof options.clerkEvidence?.userId === 'string' && options.clerkEvidence.userId !== pendingAccountDeletionRequest.clerkUserId) return Promise.reject(new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.'));
+    if (!currentClerkUserId) {
+      const safeSignedOutRecovery = hasAuthoritativeSignedOutEvidence(options.clerkEvidence) && (!pending || pending.phase === 'server-deleted' || pending.phase === 'local-cleared' || pending.phase === 'provider-deleted');
+      if (!safeSignedOutRecovery) return Promise.reject(new Error('A loaded Clerk user ID is required before account deletion recovery can continue.'));
+    } else if (currentClerkUserId !== pendingAccountDeletionRequest.clerkUserId) {
+      return Promise.reject(new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.'));
+    }
+    return pendingAccountDeletionRequest.promise;
+  }
+  const initialPending = readPendingAccountDeletion();
+  if (!initialPending) {
+    if (hasPendingAccountDeletion()) return Promise.reject(new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before continuing.'));
+    return Promise.resolve({ clerkStatus: 'unsupported' as const });
+  }
+  const request = (async () => {
+    let pending = readPendingAccountDeletion();
+    if (!pending) throw new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before continuing.');
+    const currentClerkUserId = clerkUserIdFromUser(user);
+    const recoveryEvidence = currentRecoveryClerkEvidence(options.clerkEvidence);
+    if (typeof currentClerkUserId === 'string' && currentClerkUserId !== pending.clerkUserId) throw new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.');
+    if (typeof recoveryEvidence?.userId === 'string' && recoveryEvidence.userId !== pending.clerkUserId) throw new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.');
+    // A provider-deleted marker is already proof that all destructive work
+    // completed. It must be recoverable after Clerk has removed the session.
+    if (pending.phase === 'provider-deleted') {
+      clearPendingAccountDeletion();
+      return { clerkStatus: 'deleted' as const };
+    }
+    const signedOut = hasAuthoritativeSignedOutEvidence(recoveryEvidence) && !user;
+    if (pending.phase === 'local-cleared' && signedOut) {
+      return { clerkStatus: 'signed-out' as const };
+    }
+    // The server-pending phase is the only phase that can still delete the
+    // BillSplit account. Never retry it on a signed-out or unidentified
+    // provider state.
+    if (pending.phase === 'server-pending') {
+      const matchingClerkUserId = requireClerkUserId(currentClerkUserId);
+      if (matchingClerkUserId !== pending.clerkUserId) throw new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.');
+    } else if (!currentClerkUserId && pending.phase !== 'server-deleted') {
+      throw new Error('The provider identity is still restoring. Retry account deletion when Clerk has loaded.');
+    }
+    if (pending.phase === 'server-pending') {
+      // The request may have committed before its response was lost. DELETE
+      // /account is deliberately idempotent for the authenticated tombstone,
+      // so retrying is the only safe way to turn that uncertainty into a
+      // confirmed server phase. No local or provider cleanup can run unless
+      // this request succeeds.
+      await deleteAccount(pending.clerkUserId);
+      pending = readPendingAccountDeletion();
+      if (!pending || pending.phase === 'server-pending') throw new Error('BillSplit account deletion is still awaiting server confirmation.');
+    }
+    if (pending.phase === 'server-deleted') {
+      await (options.clearLocal || clearEverythingForLogout)();
+      writePendingAccountDeletion('local-cleared', pending.clerkUserId);
+      pending = { version: 1, phase: 'local-cleared', clerkUserId: pending.clerkUserId };
+    }
+    if (pending.phase === 'local-cleared') {
+      if (!user) {
+        const latestEvidence = currentRecoveryClerkEvidence(options.clerkEvidence);
+        if (typeof latestEvidence?.userId === 'string' && latestEvidence.userId !== pending.clerkUserId) throw new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.');
+        if (hasAuthoritativeSignedOutEvidence(latestEvidence)) {
+          // BillSplit and local cleanup are already confirmed, but the
+          // provider account is not. Keep the identity-bound marker until the
+          // original Clerk account can call UserResource.delete().
+          return { clerkStatus: 'signed-out' as const };
+        }
+        throw new Error('The provider identity is still restoring. Retry account deletion when Clerk has loaded.');
+      }
+      let clerkStatus: 'deleted' | 'unsupported' = 'unsupported';
+      let clerkError: unknown;
+      try { clerkStatus = await deleteClerkUserIfSupported(user); } catch (cause) { clerkError = cause; }
+      if (clerkStatus === 'deleted' && !clerkError) {
+        writePendingAccountDeletion('provider-deleted', pending.clerkUserId);
+      } else {
+        try { await signOut({ redirectUrl: '/' }); return { clerkStatus }; }
+        catch (cause) { throw clerkError || cause; }
+      }
+    }
+    // UserResource.delete normally ends the Clerk session. The marker is
+    // cleared only after local cleanup and provider deletion are complete.
+    clearPendingAccountDeletion();
+    return { clerkStatus: 'deleted' as const };
+  })();
+  const tracked = request.finally(() => { if (pendingAccountDeletionRequest?.promise === tracked) pendingAccountDeletionRequest = undefined; });
+  pendingAccountDeletionRequest = { clerkUserId: initialPending.clerkUserId, promise: tracked };
+  return tracked;
 }
 
 let authState: AuthState = { required: false };
@@ -348,6 +510,14 @@ const assertResponseIdentity = (responseUserId: string | undefined, identity: Ca
     signalAuthRequired('IDENTITY_MISMATCH');
     throw new ApiError('The verified identity changed; cached data was not used.', { status: 401, code: 'IDENTITY_MISMATCH' });
   }
+};
+const isGroupAuthorizationLoss = (error: unknown) => error instanceof ApiError && error.status === 404 && error.code === 'GROUP_NOT_FOUND';
+const evictRevokedGroup = async (groupId: string, identity?: CacheIdentity) => {
+  if (identity?.user.id) await invalidateForMutation.groupAccessRevoked(groupId, identity.user.id, captureSessionGeneration());
+};
+const evictRevokedGroupForCurrentUser = async (groupId: string) => {
+  const userId = getVerifiedUserId();
+  if (userId) await invalidateForMutation.groupAccessRevoked(groupId, userId, captureSessionGeneration());
 };
 
 const AUTH_BOOTSTRAP_DEADLINE_MS = 2_500;
@@ -882,21 +1052,54 @@ export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ gr
   }
 }
 
-export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[] }>> {
+export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[] }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   try {
-    const result = await apiWithMeta<{ group: Group; members: GroupMember[] }>(`/groups/${id}`, { signal });
+    const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[] }>(`/groups/${id}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { group: result.data.group, members: result.data.members }, generation));
-    return result.data;
+    const data = { ...result.data, historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) };
+    if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants }, generation));
+    return data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
-    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members });
+    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members, historicalParticipants: cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) });
     throw error;
   }
+}
+
+export async function getHistoricalParticipants(groupId: string, signal?: AbortSignal): Promise<{ participants: HistoricalParticipant[] }> {
+  try { return (await apiWithMeta<{ participants: HistoricalParticipant[] }>(`/groups/${groupId}/historical-participants`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
+}
+
+export async function updateGroup(id: string, input: { name: string; currency: Group['currency'] }) {
+  return api<{ group: Group }>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export async function deleteGroup(id: string) {
+  return api<void>(`/groups/${id}`, { method: 'DELETE' });
+}
+
+export async function deleteAccount(clerkUserId: string) {
+  const currentClerkUserId = requireClerkUserId(clerkUserId);
+  const pending = readPendingAccountDeletion();
+  if (hasPendingAccountDeletion() && !pending) throw new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before starting a new deletion.');
+  // This write is deliberately before the destructive request. If storage is
+  // unavailable, no server mutation is dispatched and no provider cleanup can
+  // be reached by the marker-driven recovery path.
+  if (pending && pending.clerkUserId !== currentClerkUserId) throw new Error('The provider identity changed while account deletion was pending. Sign in with the original account to continue.');
+  if (pending && pending.phase !== 'server-pending') return;
+  if (!pending) markAccountDeletionPending(currentClerkUserId);
+  await api<void>('/account', { method: 'DELETE', body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }), headers: { [ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER]: currentClerkUserId } });
+  // A lost response can leave this phase behind. The server DELETE is
+  // idempotent for the authenticated tombstoned identity, so retrying this
+  // phase is safe until this marker update succeeds.
+  writePendingAccountDeletion('server-deleted', currentClerkUserId);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-account-deletion-pending'));
 }
 
 export async function getPendingInvitations(signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
@@ -907,7 +1110,8 @@ export const getCurrentUserInvitations = getPendingInvitations;
 export const getInvitations = getPendingInvitations;
 
 export async function getOwnerInvitations(groupId: string, signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
-  return (await apiWithMeta<{ invitations: GroupInvitation[] }>(`/groups/${groupId}/invitations`, { signal })).data;
+  try { return (await apiWithMeta<{ invitations: GroupInvitation[] }>(`/groups/${groupId}/invitations`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
 export const getGroupInvitations = getOwnerInvitations;
 
@@ -934,6 +1138,15 @@ export async function removeGroupMember(groupId: string, personId: string) {
 }
 export const removeMember = removeGroupMember;
 
+export async function transferGroupOwnership(groupId: string, personId: string) {
+  return api<void>(`/groups/${groupId}/transfer-ownership`, { method: 'POST', body: JSON.stringify({ person_id: personId }) });
+}
+
+export async function leaveGroup(groupId: string) {
+  return api<void>(`/groups/${groupId}/leave`, { method: 'POST' });
+}
+export const leaveGroupMember = leaveGroup;
+
 const pageParams = (options: { limit?: number; cursor?: string } = {}) => {
   const params = new URLSearchParams();
   if (options.limit !== undefined) params.set('limit', String(options.limit));
@@ -941,24 +1154,31 @@ const pageParams = (options: { limit?: number; cursor?: string } = {}) => {
   return params.toString();
 };
 
-export async function getExpensePage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<ExpensePage> {
-  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
-  return (await apiWithMeta<ExpensePage>(`/groups/${groupId}/expenses?${query}`, { signal })).data;
+export type ExpensePageOptions = ExpenseFilters & { limit?: number; cursor?: string };
+export async function getExpensePage(groupId: string, options: ExpensePageOptions = {}, signal?: AbortSignal): Promise<ExpensePage> {
+  const query = new URLSearchParams(pageParams({ limit: options.limit ?? 50, cursor: options.cursor }));
+  for (const [key, value] of expenseFilterQuery(options).entries()) query.set(key, value);
+  try { return (await apiWithMeta<ExpensePage>(`/groups/${groupId}/expenses?${query}`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export const getExpensesPage = getExpensePage;
 
-export async function getExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<ExpensePage>> {
+export async function getExpenses(id: string, signal?: AbortSignal, filters: ExpenseFilters = {}): Promise<CachedResult<ExpensePage>> {
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const identity = await requireIdentityForCache(signal);
   try {
-     const result = await apiWithMeta<ExpensePage>(`/groups/${id}/expenses?limit=50`, { signal });
+     const options = { limit: 50, ...filters };
+     const query = new URLSearchParams(pageParams(options));
+     for (const [key, value] of expenseFilterQuery(filters).entries()) query.set(key, value);
+     const result = await apiWithMeta<ExpensePage>(`/groups/${id}/expenses?${query}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-     if (result.userId) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
+     if (result.userId && !hasExpenseFilters(filters)) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
+    if (hasExpenseFilters(filters)) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
      if (cached?.expenses) return offline({ expenses: cached.expenses });
     throw error;
@@ -975,6 +1195,7 @@ export async function getBalances(id: string, signal?: AbortSignal): Promise<Cac
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
     if (cached?.balances) return offline({ balances: cached.balances });
@@ -984,9 +1205,9 @@ export async function getBalances(id: string, signal?: AbortSignal): Promise<Cac
 
 export async function getSettlementPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<SettlementPage> {
   const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
-  return (await apiWithMeta<SettlementPage>(`/groups/${groupId}/settlements?${query}`, { signal })).data;
+  try { return (await apiWithMeta<SettlementPage>(`/groups/${groupId}/settlements?${query}`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export const getSettlementsPage = getSettlementPage;
 
 export async function getSettlements(id: string, signal?: AbortSignal): Promise<CachedResult<SettlementPage>> {
   const generation = captureSessionGeneration();
@@ -998,6 +1219,7 @@ export async function getSettlements(id: string, signal?: AbortSignal): Promise<
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
     if (cached?.settlements) return offline({ settlements: cached.settlements });
@@ -1006,16 +1228,17 @@ export async function getSettlements(id: string, signal?: AbortSignal): Promise<
 }
 
 /** Schedules are intentionally online-only; unlike new expenses they never enter the outbox. */
-export async function getScheduledExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<{ scheduledExpenses: ScheduledExpense[] }>> {
-  const pageSize = 100;
-  const scheduledExpenses: ScheduledExpense[] = [];
-  let offset = 0;
-  while (true) {
-    const result = await apiWithMeta<{ scheduledExpenses: ScheduledExpense[] }>(`/groups/${id}/scheduled-expenses?limit=${pageSize}&offset=${offset}`, { signal });
-    scheduledExpenses.push(...result.data.scheduledExpenses);
-    if (result.data.scheduledExpenses.length < pageSize) return { ...result.data, scheduledExpenses };
-    offset += pageSize;
-  }
+export type ScheduledExpensePage = { scheduledExpenses: ScheduledExpense[]; nextCursor?: string };
+export async function getScheduledExpensePage(id: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<ScheduledExpensePage> {
+  const params = pageParams({ limit: options.limit ?? 100, cursor: options.cursor });
+  try { return (await apiWithMeta<ScheduledExpensePage>(`/groups/${id}/scheduled-expenses?${params}`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(id); throw error; }
+}
+/** The initial request is deliberately one bounded page; the UI owns the
+ * cursor and exposes explicit Load more rather than building an unbounded
+ * client-side list during a render. */
+export async function getScheduledExpenses(id: string, signal?: AbortSignal): Promise<CachedResult<ScheduledExpensePage>> {
+  return getScheduledExpensePage(id, {}, signal);
 }
 
 export async function getScheduledExpense(id: string, signal?: AbortSignal): Promise<CachedResult<{ scheduledExpense: ScheduledExpense }>> {
@@ -1035,7 +1258,6 @@ export async function changeScheduledExpenseStatus(id: string, action: 'pause' |
   return api<{ scheduledExpense: ScheduledExpense }>(`/scheduled-expenses/${id}/${action}`, { method: 'POST', body: JSON.stringify({ version }) });
 }
 
-export const getExpense = (id: string) => getExpenseDetails(id).then((result) => result.expense);
 export async function getExpenseDetails(id: string, signal?: AbortSignal): Promise<CachedResult<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
@@ -1046,6 +1268,11 @@ export async function getExpenseDetails(id: string, signal?: AbortSignal): Promi
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (isGroupAuthorizationLoss(error)) {
+      const cached = identity ? await cacheRead(() => readExpenseDetails(identity.user.id, id)) : undefined;
+      if (cached?.expense.groupId) await evictRevokedGroup(cached.expense.groupId, identity);
+      throw error;
+    }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readExpenseDetails(identity.user.id, id));
     if (cached) return offline({ expense: cached.expense, history: cached.history });
@@ -1056,7 +1283,6 @@ export async function getExpenseDetails(id: string, signal?: AbortSignal): Promi
 export async function getSettlementDetails(id: string, signal?: AbortSignal): Promise<{ settlement: Settlement; history: Array<{ id: string; revision: number; createdAt: string }> }> {
   return (await apiWithMeta<{ settlement: Settlement; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/settlements/${id}`, { signal })).data;
 }
-export const getSettlement = getSettlementDetails;
 
 export async function restoreExpense(id: string, version: number) {
   return api<{ expense: Expense }>(`/expenses/${id}/restore`, { method: 'POST', body: JSON.stringify({ version }) });
@@ -1072,13 +1298,16 @@ export async function updateSettlement(id: string, input: SettlementInput) {
 
 export async function getAuditPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<AuditPage> {
   const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
-  return (await apiWithMeta<AuditPage>(`/groups/${groupId}/audit?${query}`, { signal })).data;
+  try { return (await apiWithMeta<AuditPage>(`/groups/${groupId}/audit?${query}`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export const getAuditEventsPage = getAuditPage;
 
 export async function getActivityPage(id?: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<ActivityPage> {
   const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
-  return (await apiWithMeta<ActivityPage>(`${id ? `/activity?group=${encodeURIComponent(id)}&` : '/activity?'}${query}`, { signal })).data;
+  try {
+    const result = (await apiWithMeta<ActivityPage>(`${id ? `/activity?group=${encodeURIComponent(id)}&` : '/activity?'}${query}`, { signal })).data;
+    return { ...result, activity: normalizeActivity(result.activity) };
+  } catch (error) { if (id && isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(id); throw error; }
 }
 
 export async function getActivity(id?: string, signal?: AbortSignal): Promise<CachedResult<ActivityPage>> {
@@ -1093,6 +1322,7 @@ export async function getActivity(id?: string, signal?: AbortSignal): Promise<Ca
     return data;
   } catch (error) {
     assertRequestGeneration(generation);
+    if (id && isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readActivity(identity.user.id, id || 'all'));
     if (cached) return offline({ activity: cached.activity });
@@ -1106,9 +1336,9 @@ export async function getGroupExportPage(groupId: string, options: { limit?: num
   else if (options.expenseCursor) params.set('expenseCursor', options.expenseCursor);
   if (options.settlementCursor === null) params.set('settlementDone', '1');
   else if (options.settlementCursor) params.set('settlementCursor', options.settlementCursor);
-  return (await apiWithMeta<GroupExportPage>(`/groups/${groupId}/export.json?${params}`, { signal })).data;
+  try { return (await apiWithMeta<GroupExportPage>(`/groups/${groupId}/export.json?${params}`, { signal })).data; }
+  catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export const getPagedGroupExport = getGroupExportPage;
 
 export async function getExportPage(options: { limit?: number; groupCursor?: string } = {}, signal?: AbortSignal): Promise<ExportPage> {
   const params = new URLSearchParams({ limit: String(options.limit ?? 2) });
@@ -1121,8 +1351,19 @@ export async function getGroupCsvExportPage(groupId: string, options: { limit?: 
   const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
   if (options.cursor) params.set('cursor', options.cursor);
   const headers = new Headers({ Accept: 'text/csv' });
-  const response = await apiBlobWithMeta(`/groups/${groupId}/export.csv?${params}`, { headers, signal });
-  return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
+  try {
+    const response = await apiBlobWithMeta(`/groups/${groupId}/export.csv?${params}`, { headers, signal });
+    return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
+  } catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
+}
+
+export async function getGroupSettlementCsvExportPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<CsvExportPage> {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
+  if (options.cursor) params.set('cursor', options.cursor);
+  try {
+    const response = await apiBlobWithMeta(`/groups/${groupId}/settlements.csv?${params}`, { headers: new Headers({ Accept: 'text/csv' }), signal });
+    return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
+  } catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
 
 export async function getCategories(signal?: AbortSignal): Promise<CachedResult<{ categories: string[] }>> {
@@ -1143,6 +1384,10 @@ export async function getCategories(signal?: AbortSignal): Promise<CachedResult<
   }
 }
 
+export async function getCategorySuggestion(description: string, signal?: AbortSignal): Promise<{ category: string | null }> {
+  return api<{ category: string | null }>('/category-suggestion', { method: 'POST', body: JSON.stringify({ description }), signal });
+}
+
 export async function hydrateGroups(userId: string) {
   const cached = await cacheRead(() => readGroups(userId));
   return cached ? { data: { groups: cached.groups }, fetchedAt: cacheTimestamp(cached.cachedAt), offline: true } : undefined;
@@ -1154,7 +1399,7 @@ export async function hydrateIdentity() {
 }
 export async function hydrateGroup(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
-  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
+  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateExpenses(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));

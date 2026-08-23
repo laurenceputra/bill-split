@@ -28,6 +28,11 @@ const projectionSql = readFileSync(new URL('../../migrations/0013_projection_lay
 const projectionIndexesSql = readFileSync(new URL('../../migrations/0014_projection_indexes.sql', moduleUrl), 'utf8');
 const projectionReadinessResetSql = readFileSync(new URL('../../migrations/0016_projection_readiness_reset.sql', moduleUrl), 'utf8');
 const auditActorSql = readFileSync(new URL('../../migrations/0015_audit_actor_snapshot.sql', moduleUrl), 'utf8');
+const cleanupIndexesSql = readFileSync(new URL('../../migrations/0017_cleanup_indexes.sql', moduleUrl), 'utf8');
+const categoryPreferencesSql = readFileSync(new URL('../../migrations/0018_category_preferences.sql', moduleUrl), 'utf8');
+const membershipEventsSql = readFileSync(new URL('../../migrations/0019_group_membership_events.sql', moduleUrl), 'utf8');
+const accountDeletionSql = readFileSync(new URL('../../migrations/0020_account_deletion.sql', moduleUrl), 'utf8');
+const identityTombstonesSql = readFileSync(new URL('../../migrations/0021_deleted_identity_tombstones.sql', moduleUrl), 'utf8');
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -128,6 +133,53 @@ describe('audit actor snapshot migration', () => {
   });
 });
 
+describe('cleanup indexes migration', () => {
+  it('drops only exact duplicate indexes and keeps covered-but-different indexes', () => {
+    expect(cleanupIndexesSql).toMatch(/DROP INDEX IF EXISTS idx_audit_group_time/i);
+    expect(cleanupIndexesSql).toMatch(/DROP INDEX IF EXISTS idx_expenses_operation/i);
+    expect(cleanupIndexesSql).toMatch(/DROP INDEX IF EXISTS idx_scheduled_occurrence_expense/i);
+    expect(cleanupIndexesSql).not.toMatch(/idx_expenses_group_date|idx_settlements_group_date|idx_audit_entity/);
+  });
+});
+
+describe('category preferences migration', () => {
+  it('documents conservative normalization, private ownership, and deterministic backfill rules', () => {
+    expect(categoryPreferencesSql).toMatch(/CREATE TABLE category_preferences/);
+    expect(categoryPreferencesSql).toMatch(/REFERENCES users\(id\)/i);
+    expect(categoryPreferencesSql).toMatch(/normalized_description = lower\(trim\(normalized_description\)\)/i);
+    expect(categoryPreferencesSql).toMatch(/ROW_NUMBER\(\) OVER/);
+    expect(categoryPreferencesSql).toMatch(/ORDER BY updated_at DESC, id DESC, source DESC/);
+    expect(categoryPreferencesSql).not.toMatch(/status <> 'cancelled'/i);
+  });
+});
+
+describe('group membership lifecycle migration', () => {
+  it('stores non-email lifecycle snapshots and enforces one active owner', () => {
+    expect(membershipEventsSql).toMatch(/CREATE TABLE group_membership_events/);
+    expect(membershipEventsSql).toMatch(/event_type TEXT NOT NULL CHECK[\s\S]*owner_transfer/);
+    expect(membershipEventsSql).toMatch(/actor_person_id TEXT/);
+    expect(membershipEventsSql).toMatch(/actor_name TEXT NOT NULL/);
+    expect(membershipEventsSql).toMatch(/CREATE UNIQUE INDEX[\s\S]*group_members\(group_id\)[\s\S]*role='owner'/i);
+    expect(membershipEventsSql).not.toMatch(/email/i);
+  });
+});
+
+describe('account deletion migration', () => {
+  it('adds a soft-delete marker while retaining the user FK anchor', () => {
+    expect(accountDeletionSql).toMatch(/ALTER TABLE users ADD COLUMN deleted_at TEXT/i);
+    expect(accountDeletionSql).toMatch(/idx_users_deleted_at/);
+    expect(accountDeletionSql).not.toMatch(/DROP TABLE users|DELETE FROM users/i);
+  });
+
+  it('adds non-contact identity tombstones for relink prevention', () => {
+    expect(identityTombstonesSql).toMatch(/ALTER TABLE users ADD COLUMN deleted_email_hash TEXT/i);
+    expect(identityTombstonesSql).toMatch(/ALTER TABLE users ADD COLUMN deleted_clerk_hash TEXT/i);
+    expect(identityTombstonesSql).toMatch(/idx_users_deleted_email_hash/);
+    expect(identityTombstonesSql).toMatch(/idx_users_deleted_clerk_hash/);
+    expect(identityTombstonesSql).not.toMatch(/email[^_].*TEXT NOT NULL/i);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -145,9 +197,19 @@ describe('scheduled completion migration integration', () => {
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES('user-1','migration@example.com','2026-01-01','2026-01-01');
       INSERT INTO people(id,name,email,user_id,created_at) VALUES('person-1','Migration User','migration@example.com','user-1','2026-01-01');
-      INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-1','Migration Group','USD','2026-01-01','2026-01-01');
-      INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('group-1','person-1','user-1','2026-01-01','owner');
-      INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version) VALUES('expense-1','group-1','Existing occurrence',1000,'USD','2026-01-01','user-1','2026-01-01','2026-01-01',1);
+       INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-1','Migration Group','USD','2026-01-01','2026-01-01');
+       INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-multiple','Multiple Owners','USD','2026-01-01','2026-01-01');
+       INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-ownerless','Ownerless Group','USD','2026-01-01','2026-01-01');
+       INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('group-1','person-1','user-1','2026-01-01','owner');
+       INSERT INTO people(id,name,email,created_at) VALUES('person-2','Second','second@example.com','2026-01-01');
+       INSERT INTO people(id,name,email,created_at) VALUES('person-3','Third','third@example.com','2026-01-01');
+       INSERT INTO people(id,name,email,created_at) VALUES('person-4','Fourth','fourth@example.com','2026-01-01');
+       INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-multiple','person-3','2026-01-03','owner');
+       INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-multiple','person-2','2026-01-03','owner');
+       INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-ownerless','person-4','2026-01-02','member');
+       INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-ownerless','person-3','2026-01-01','member');
+       INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,created_by,created_at,updated_at,version) VALUES('expense-1','group-1','ÉCLAIR',1000,'USD','2026-01-01','Dining','user-1','2026-01-01','2026-01-01',1);
+       INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,created_by,created_at,updated_at,version) VALUES('expense-2','group-1','Éclair',500,'USD','2026-01-02','Dessert','user-1','2026-01-02','2026-01-02',1);
       INSERT INTO payers(expense_id,person_id,amount_minor) VALUES('expense-1','person-1',1000);
       INSERT INTO splits(expense_id,person_id,amount_minor) VALUES('expense-1','person-1',1000);
       INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,blocked_reason,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id,generation_claim_id)
@@ -175,7 +237,7 @@ describe('scheduled completion migration integration', () => {
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);
-        await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
+         await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -186,9 +248,14 @@ describe('scheduled completion migration integration', () => {
       expect(query('PRAGMA foreign_key_list(scheduled_occurrences);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
       expect(query('PRAGMA table_info(scheduled_expenses);')).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'category' })]));
       expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
-       expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
-         expect(query('SELECT status FROM projection_state WHERE group_id=\'group-1\';')).toEqual([{ status: 'pending' }]);
-        expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
+         expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
+         expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;")).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
+       expect(query('SELECT status FROM projection_state WHERE group_id=\'group-1\';')).toEqual([{ status: 'pending' }]);
+          expect(query('SELECT user_id,normalized_description,category FROM category_preferences;')).toEqual([{ user_id: 'user-1', normalized_description: 'Éclair', category: 'Dessert' }]);
+         expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
+         expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name='group_membership_events';")).toEqual([{ name: 'group_membership_events' }]);
+         expect(query("SELECT group_id,person_id,role FROM group_members WHERE group_id IN ('group-multiple','group-ownerless') AND role='owner' ORDER BY group_id,person_id;")).toEqual([{ group_id: 'group-multiple', person_id: 'person-2', role: 'owner' }, { group_id: 'group-ownerless', person_id: 'person-3', role: 'owner' }]);
+          expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
         expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
        expect(query('SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;')).toEqual([]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);

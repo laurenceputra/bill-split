@@ -4,12 +4,12 @@ import worker from './index';
 class Statement {
   constructor(protected readonly sql: string) {}
   bind(..._args: unknown[]) { return this; }
-  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return null; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
+  async first() { if (this.sql.includes('deleted_email_hash')) return null; if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return null; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
   async run() { return {}; }
   async all() { return { results: [] }; }
 }
 class MemberStatement extends Statement {
-  async first() { if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
+  async first() { if (this.sql.includes('deleted_email_hash')) return null; if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
 }
 class TriggerOverflowStatement extends MemberStatement {
   async all<T>() {
@@ -44,6 +44,7 @@ class GoneOnUpdateStatement {
   constructor(private readonly db: GoneOnUpdateDb, private readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
+    if (this.sql.includes('deleted_email_hash')) return null;
     if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
     if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' } as T;
     if (this.sql.includes('FROM groups')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner' } as T;
@@ -61,6 +62,7 @@ class GoneOnUpdateStatement {
 
 class OverflowStatement extends Statement {
   async first<T>() {
+    if (this.sql.includes('deleted_email_hash')) return null;
     if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
     if (this.sql.includes('FROM people')) return { id: 'person-a', name: 'A' } as T;
     if (this.sql.includes('FROM groups')) return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' } as T;
@@ -89,6 +91,7 @@ class ScheduledRouteDb {
 class ScheduledRouteStatement extends Statement {
   constructor(private readonly db: ScheduledRouteDb, sql: string) { super(sql); }
   async first<T>() {
+    if (this.sql.includes('deleted_email_hash')) return null;
     if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
     if (this.sql.includes('FROM people WHERE user_id')) return { id: 'person-1', name: 'Dev' } as T;
     if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-0000-0000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner' } as T;
@@ -115,6 +118,29 @@ class ProjectionFailureDb {
   prepare(sql: string) { return new ProjectionFailureStatement(sql); }
   async batch() { throw new Error('projection backfill unavailable'); }
 }
+class MutationDb {
+  prepare(sql: string) { return new Statement(sql); }
+  async batch(_statements: unknown[]) { return []; }
+}
+class IdentifiedStatement extends Statement {
+  constructor(sql: string, private readonly userId: string) { super(sql); }
+  async first<T>() {
+    if (this.sql.includes('deleted_email_hash')) return null;
+    if (this.sql.includes('FROM users')) return { id: this.userId, email: `${this.userId}@example.com` } as T;
+    if (this.sql.includes('FROM people')) return { id: `person-${this.userId}`, name: 'Dev' } as T;
+    return null;
+  }
+}
+class IdentifiedDb {
+  constructor(private readonly userId: string) {}
+  prepare(sql: string) { return new IdentifiedStatement(sql, this.userId); }
+  async batch(_statements: unknown[]) { return []; }
+}
+const testRateLimiter = (success = true) => ({
+  success,
+  keys: [] as string[],
+  async limit({ key }: { key: string }) { this.keys.push(key); return { success: this.success }; },
+});
 
 describe('worker boundary', () => {
   it('sanitizes bootstrap return paths', async () => {
@@ -145,6 +171,45 @@ describe('worker boundary', () => {
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(response.headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
+  });
+  it('allows protected creation routes and keys the native limiter by internal user and operation bucket', async () => {
+    const limiter = testRateLimiter();
+    const group = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'user-1@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Trip', currency: 'USD' }) }), env({ DB: new IdentifiedDb('user-1'), RATE_LIMITER: limiter }), {} as ExecutionContext);
+    const friend = await worker.fetch(new Request('https://split.example/api/friends', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'user-2@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Friend', currency: 'USD' }) }), env({ DB: new IdentifiedDb('user-2'), RATE_LIMITER: limiter }), {} as ExecutionContext);
+    expect(group.status).not.toBe(429);
+    expect(friend.status).not.toBe(429);
+    expect(limiter.keys).toEqual(['user-1:group-create', 'user-2:friend-create']);
+  });
+  it('denies a protected invitation operation with structured JSON and Retry-After', async () => {
+    const limiter = testRateLimiter(false);
+    const response = await worker.fetch(new Request('https://split.example/api/invitations/invitation-1/accept', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com' } }), env({ RATE_LIMITER: limiter }), {} as ExecutionContext);
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('60');
+    expect(await response.json()).toEqual({ error: { code: 'RATE_LIMITED', message: 'Too many requests; retry after 60 seconds', details: { retryAfter: 60 } } });
+    expect(limiter.keys).toEqual(['user-1:invitation-accept']);
+  });
+  it('covers only the intended high-risk operation buckets', async () => {
+    const { rateLimitOperationFor } = await import('./index');
+    expect(rateLimitOperationFor('POST', '/api/groups')).toBe('group-create');
+    expect(rateLimitOperationFor('POST', '/api/friends')).toBe('friend-create');
+    expect(rateLimitOperationFor('POST', '/api/groups/group-1/invitations')).toBe('invitation-create');
+    expect(rateLimitOperationFor('POST', '/api/invitations/inv-1/accept')).toBe('invitation-accept');
+    expect(rateLimitOperationFor('POST', '/api/invitations/inv-1/reject')).toBe('invitation-reject');
+    expect(rateLimitOperationFor('POST', '/api/groups/group-1/expenses')).toBeUndefined();
+    expect(rateLimitOperationFor('POST', '/api/groups/group-1/scheduled-expenses')).toBeUndefined();
+    expect(rateLimitOperationFor('POST', '/api/groups/group-1/settlements')).toBeUndefined();
+  });
+  it('does not rate-limit expense creation, including when the limiter would deny it', async () => {
+    const limiter = testRateLimiter(false);
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/expenses', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Offline replay', amount_minor: 100, currency: 'USD', date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100 }] }) }), env({ DB: new TriggerOverflowDb(), RATE_LIMITER: limiter }), {} as ExecutionContext);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+    expect(limiter.keys).toEqual([]);
+  });
+  it('returns a private category suggestion for the authenticated user', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/category-suggestion', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Dinner' }) }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ category: null });
   });
   it('does not expose the Clerk proof header on static assets', async () => {
     const response = await worker.fetch(new Request('https://split.example/'), env(), {} as ExecutionContext);
@@ -225,6 +290,18 @@ describe('worker boundary', () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toMatchObject({ error: { code: 'IDENTITY_MISMATCH' } });
   });
+  it('requires a verified Clerk identity and request binding for account deletion', async () => {
+    const { validateAccountDeletionIdentityBinding } = await import('./index');
+    expect(validateAccountDeletionIdentityBinding(undefined, undefined)).toMatchObject({ status: 401, code: 'AUTH_REQUIRED' });
+    expect(validateAccountDeletionIdentityBinding('clerk-a', undefined)).toMatchObject({ status: 409, code: 'IDENTITY_MISMATCH' });
+    expect(validateAccountDeletionIdentityBinding('clerk-a', 'clerk-b')).toMatchObject({ status: 409, code: 'IDENTITY_MISMATCH' });
+    expect(validateAccountDeletionIdentityBinding('clerk-a', 'clerk-a')).toEqual({ ok: true });
+  });
+  it('rejects development account deletion before repository mutation because it has no Clerk identity', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/account', { method: 'DELETE', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json', 'X-BillSplit-Expected-Clerk-User-Id': 'clerk-a' }, body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }) }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: 'AUTH_REQUIRED' } });
+  });
   it('rejects browser mutations with no same-origin metadata', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups', { method: 'POST', headers: { 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: '{}' }), env(), {} as ExecutionContext);
     expect(response.status).toBe(403);
@@ -280,9 +357,10 @@ describe('worker boundary', () => {
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'GET'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/members/person-1', 'DELETE'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/transfer-ownership', 'POST'],
     ];
     for (const [path, method] of paths) {
-      const response = await worker.fetch(new Request(`https://split.example${path}`, { method, headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body: JSON.stringify({ email: 'invitee@example.com' }) } : {}) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+       const response = await worker.fetch(new Request(`https://split.example${path}`, { method, headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(path.includes('transfer-ownership') ? { person_id: '00000000-0000-4000-8000-000000000002' } : { email: 'invitee@example.com' }) } : {}) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
       expect(response.status).toBe(403);
       expect(await response.json()).toMatchObject({ error: { code: 'OWNER_REQUIRED' } });
     }
@@ -341,5 +419,10 @@ describe('worker boundary', () => {
       expect(error.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', stage: 'projection', outcome: 'failed', error: 'UNEXPECTED_ERROR' }));
       expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'failed', projection: { ready: false } }));
     } finally { log.mockRestore(); error.mockRestore(); }
+  });
+  it.each(['/api/groups/group-1/expenses?offset=1', '/api/groups/group-1/settlements?offset=1', '/api/groups/group-1/audit?offset=1'])('rejects removed offset pagination on %s', async (path) => {
+    const response = await worker.fetch(new Request(`https://split.example${path}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'INVALID_PAGINATION' } });
   });
 });

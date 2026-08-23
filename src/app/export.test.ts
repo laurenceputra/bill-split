@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { collectPagedExport, collectPagedGroupExport } from './export';
+import { collectPagedAccountExport, collectPagedExport, collectPagedGroupExport } from './export';
 
 describe('paged export collection', () => {
   it('completes all cursor pages and reports progress', async () => {
@@ -30,5 +30,14 @@ describe('two-stream group export collection', () => {
     expect(result.expenses).toEqual([{ id: 'e1' }]);
     expect(result.settlements).toEqual([{ id: 's1' }, { id: 's2' }, { id: 's3' }]);
     expect(calls).toEqual([{}, { expenseCursor: null, settlementCursor: 's2' }, { expenseCursor: null, settlementCursor: 's3' }]);
+  });
+});
+
+describe('account export collection', () => {
+  it('merges continuation pages into one complete group without duplicate rows or members', async () => {
+    const result = await collectPagedAccountExport(async (cursor) => cursor
+      ? { groups: [{ group: { id: 'group-a' }, members: [{ personId: 'person-a' }], expenses: [{ id: 'expense-2' }], settlements: [{ id: 'settlement-1' }, { id: 'settlement-2' }] }] }
+      : { groups: [{ group: { id: 'group-a' }, members: [{ personId: 'person-a' }, { personId: 'person-b' }], expenses: [{ id: 'expense-1' }, { id: 'expense-2' }], settlements: [{ id: 'settlement-1' }] }], nextCursor: 'next' }, new AbortController().signal);
+    expect(result).toEqual([{ group: { id: 'group-a' }, members: [{ personId: 'person-a' }, { personId: 'person-b' }], expenses: [{ id: 'expense-1' }, { id: 'expense-2' }], settlements: [{ id: 'settlement-1' }, { id: 'settlement-2' }] }]);
   });
 });

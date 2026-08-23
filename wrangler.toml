@@ -35,8 +35,22 @@ migrations_dir = "migrations"
 ENVIRONMENT = "production"
 # Configure CLERK_PUBLISHABLE_KEY, CLERK_JWT_KEY, and
 # CLERK_AUTHORIZED_PARTIES as production Worker variables; set the required
-# CLERK_SECRET_KEY as an encrypted secret with `wrangler secret put`.
+# CLERK_SECRET_KEY and IDENTITY_TOMBSTONE_KEY as encrypted secrets with
+# `wrangler secret put`. IDENTITY_TOMBSTONE_KEY must be stable and must not be
+# derived from or rotated with a Clerk secret.
 # R2 is optional: add an [[r2_buckets]] binding named RECEIPTS when enabled.
+
+# Native Cloudflare rate limiting for authenticated high-risk operations. The
+# namespace IDs are account-scoped and intentionally distinct from the local
+# development namespace below. Five calls per user and operation bucket per
+# minute is deliberately conservative for this private application.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "510001"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60
 
 [triggers]
 crons = ["*/15 * * * *"]
@@ -47,6 +61,14 @@ custom_domain = true
 
 [env.dev]
 name = "bill-split-dev"
+
+[[env.dev.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "510002"
+
+  [env.dev.ratelimits.simple]
+  limit = 5
+  period = 60
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -59,4 +81,6 @@ migrations_dir = "migrations"
 
 [env.dev.vars]
 ENVIRONMENT = "development"
+# Explicit deterministic local-only fallback; never use this value in production.
+IDENTITY_TOMBSTONE_KEY = "billsplit-development-identity-tombstone-key-v1"
 # Local development only. Do not use this environment for a public hostname.
