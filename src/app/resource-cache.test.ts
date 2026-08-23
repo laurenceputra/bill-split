@@ -165,6 +165,19 @@ describe('resource cache', () => {
     expect(calls).toBe(1);
   });
 
+  it('does not fetch a cold resource while definitively offline', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    let calls = 0;
+    const key = `test-cold-offline-${crypto.randomUUID()}`;
+    configureResource(key, 'user-a', async () => { calls += 1; return 'server'; });
+
+    await revalidate(key, 'user-a');
+
+    expect(calls).toBe(0);
+    expect(getResourceSnapshot(key, 'user-a').data).toBeUndefined();
+    expect(getResourceSnapshot(key, 'user-a').status).toBe('idle');
+  });
+
   it('blocks repeated identity failures until explicit auth restoration', async () => {
     let calls = 0;
     configureResource('identity', 'identity', async () => { calls += 1; throw new Error('401'); });

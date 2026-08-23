@@ -58,12 +58,10 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
   });
 
-  it('spaces closed People chips without adding a second open-form gap', () => {
-    const peopleSection = appSource.match(/<section><div className="section-title">[\s\S]*?<div className="chips">[\s\S]*?<\/section>/)?.[0] ?? '';
-
-    expect(css).toMatch(/\.section-title\s*\+\s*\.chips\s*\{\s*margin-top: var\(--space-3\);\s*\}/);
-    expect(peopleSection).toMatch(/<div className="section-title">[\s\S]*\{!offlineView && addingPerson && <form/);
-    expect(peopleSection).toMatch(/<\/form>\}<div className="chips">/);
+  it('styles the native expense filter disclosure at its actual DOM depth', () => {
+    expect(css).toMatch(/\.expense-filters-disclosure\s*>\s*details\s*>\s*summary\s*\{/);
+    expect(css).toMatch(/\.expense-filters-disclosure\s*>\s*details\[open\]\s*>\s*summary\s*\{/);
+    expect(css).not.toMatch(/\.expense-filters-disclosure\s*>\s*summary\s*\{/);
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {

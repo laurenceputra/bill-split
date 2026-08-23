@@ -19,7 +19,7 @@ import { categoryOptions } from './categories';
 import { localDateForTimeZone } from '../domain/recurrence';
 import { appendUniquePage, createPageRequestScope } from './pagination';
 import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collectPagedGroupExport } from './export';
-import { expenseFilterKey, hasExpenseFilters, readExpenseFilters, writeExpenseFilters, type ExpenseFilters } from './expense-filters';
+import { expenseFilterCount, expenseFilterKey, hasExpenseFilters, readExpenseFilters, writeExpenseFilters, type ExpenseFilters } from './expense-filters';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -52,8 +52,9 @@ function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
     </div>
   </PublicShell>;
 }
-function ErrorBox({ error, id = 'resource-error', onRetry, retryLabel = 'Try again' }: { error: unknown; id?: string; onRetry?: () => void; retryLabel?: string }) {
-  return <div className="error" id={id} role="alert" aria-live="assertive"><span>{errorText(error)}</span>{onRetry ? <Button type="button" variant="secondary" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
+function ErrorBox({ error, id = 'resource-error', onRetry, retryLabel = 'Retry' }: { error: unknown; id?: string; onRetry?: () => void; retryLabel?: string }) {
+  const connection = useConnectionState();
+  return <div className="error" id={id} role="alert" aria-live="assertive"><span>{errorText(error)}</span>{onRetry && connection.status !== 'offline' ? <Button type="button" variant="secondary" onClick={onRetry}>{retryLabel}</Button> : null}</div>;
 }
 const connectionBannerLabel = (status: ReturnType<typeof useConnectionState>['status']) => status === 'checking' ? 'Checking connection' : status === 'connection-issue' ? 'Connection issue' : 'Offline';
 function ConnectionBanner({ detail }: { detail: string }) {
@@ -72,14 +73,15 @@ function retryFor<T>(key: string, userId: string | undefined, identityFailure = 
   };
 }
 function ResourceNotice<T>({ resource, label, retry }: { resource: ResourceSnapshot<T>; label: string; retry?: () => void }) {
+  const connection = useConnectionState();
   // A no-data private resource cannot recover while the cached identity is stale.
   if (resource.data === undefined && getResourceSnapshot('identity').error !== undefined) return null;
   if (resource.data === undefined) {
-    if (resourceViewState(resource) === 'error') return <ErrorBox error={resource.error} onRetry={retry} id={`${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-error`} />;
+    if (resourceViewState(resource) === 'error') return <ErrorBox error={resource.error} onRetry={connection.status === 'offline' ? undefined : retry} id={`${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-error`} />;
     return resource.loading || resource.status === 'idle' ? <Loading /> : null;
   }
   if (resource.revalidating) return <p className="cache-status" role="status">Refreshing {label}…</p>;
-  if (resource.error || resource.stale || resource.offline) return <p className="cache-status" role="status">Showing cached {label}; it may be out of date. {retry ? <button className="inline-action" type="button" onClick={retry}>Retry</button> : null}</p>;
+  if (resource.error || resource.stale || resource.offline) return <p className="cache-status" role="status">Showing cached {label}; it may be out of date. {retry && connection.status !== 'offline' ? <button className="inline-action" type="button" onClick={retry}>Retry</button> : null}</p>;
   return null;
 }
 function CachedIdentityNotice({ resource, id }: { resource: ResourceSnapshot<unknown>; id: string }) {
@@ -114,45 +116,6 @@ function PendingInvitations({ userId, online }: { userId?: string; online: boole
   };
   if (!invitations.length && !error) return null;
   return <Surface className="invitations"><div className="section-title"><h2>Pending invitations</h2><span className="muted">Matched to your verified email</span></div>{invitations.map((invitation) => <div className="row" key={invitation.id}><span><strong>{invitation.email}</strong><small>Expires {new Date(invitation.expiresAt).toLocaleDateString()}</small></span><div className="actions"><Button type="button" disabled={!online || busyId === invitation.id} onClick={() => void respond(invitation, 'accept')}>{busyId === invitation.id ? 'Working…' : 'Accept'}</Button><Button type="button" variant="secondary" disabled={!online || busyId === invitation.id} onClick={() => void respond(invitation, 'reject')}>Reject</Button></div></div>)}{error ? <ErrorBox error={error} id="invitation-response-error" /> : null}{!online ? <p className="muted">Invitation responses require a connection.</p> : null}</Surface>;
-}
-
-function OwnerMemberManagement({ groupId, userId, members, online }: { groupId: string; userId: string; members: GroupMember[]; online: boolean }) {
-  const invitationsResource = useResource<{ invitations: GroupInvitation[] }>(resourceKeys.groupInvitations(userId, groupId), userId, (signal) => getOwnerInvitations(groupId, signal), RESOURCE_FRESHNESS.invitations);
-  const [email, setEmail] = useState('');
-  const [busy, setBusy] = useState<string>();
-  const [error, setError] = useState<unknown>();
-  const [inviteError, setInviteError] = useState<unknown>();
-  const activeInvitations = invitationsResource.data?.invitations || [];
-  const invite = async (event: FormEvent) => {
-    event.preventDefault(); if (!online || busy) return;
-    setBusy('invite'); setInviteError(undefined);
-    try { await createGroupInvitation(groupId, email.trim()); setEmail(''); await invalidateForMutation.invitationsChanged(groupId, userId); }
-    catch (cause) { setInviteError(cause); }
-    finally { setBusy(undefined); }
-  };
-  const revoke = async (invitation: GroupInvitation) => {
-    if (!online || busy || !confirm(`Revoke the invitation for ${invitation.email}?`)) return;
-    setBusy(invitation.id); setError(undefined);
-    try { await revokeGroupInvitation(groupId, invitation.id); await invalidateForMutation.invitationsChanged(groupId, userId); }
-    catch (cause) { setError(cause); }
-    finally { setBusy(undefined); }
-  };
-  const remove = async (member: GroupMember) => {
-    if (!online || busy || !confirm(`Remove ${member.name} from this group? Historical transactions remain visible.`)) return;
-    setBusy(member.personId); setError(undefined);
-    try { await removeGroupMember(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId); }
-    catch (cause) { setError(cause); }
-    finally { setBusy(undefined); }
-  };
-  const transfer = async (member: GroupMember) => {
-    if (!online || busy || !member.linked || member.role === 'owner' || !confirm(`Transfer ownership to ${member.name}? You will become a member.`)) return;
-    setBusy(`transfer:${member.personId}`); setError(undefined);
-    try { await transferGroupOwnership(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
-    catch (cause) { setError(cause); }
-    finally { setBusy(undefined); }
-  };
-  const eligible = members.filter((member) => member.role === 'member' && member.linked);
-  return <section className="member-management"><div className="section-title"><h3>Manage members</h3><span className="muted">Online-only</span></div><form onSubmit={invite} className="inline-form"><Field label="Invite by email"><input className="email" type="email" required value={email} onChange={(event) => { setInviteError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" disabled={!online || busy === 'invite'}>{busy === 'invite' ? 'Inviting…' : 'Invite'}</Button></form>{inviteError ? <ErrorBox error={inviteError} id="invite-error" /> : null}<div className="list">{activeInvitations.map((invitation) => { const pending = !invitation.revokedAt && !invitation.acceptedAt && !invitation.rejectedAt && Date.parse(invitation.expiresAt) > Date.now(); return <div className="row" key={invitation.id}><span>{invitation.email}<small>{invitation.acceptedAt ? 'Accepted' : invitation.revokedAt ? 'Revoked' : invitation.rejectedAt ? 'Rejected' : pending ? `Pending · expires ${new Date(invitation.expiresAt).toLocaleDateString()}` : 'Expired'}</small></span>{pending ? <Button type="button" variant="secondary" disabled={!online || busy === invitation.id} onClick={() => void revoke(invitation)}>Revoke</Button> : null}</div>; })}</div><div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.name}{member.role !== 'owner' ? <><Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void remove(member)}>Remove</Button>{member.linked ? <Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void transfer(member)}>Transfer ownership</Button> : null}</> : <small> · Owner</small>}</span>)}</div>{error ? <ErrorBox error={error} id="member-management-error" /> : null}<p className="muted">Removed people are excluded from new expenses and schedules. They remain available for settlement and historical names are retained where provided.</p>{eligible.length === 0 ? <p className="muted">Ownership can be transferred only to an active member with a linked account.</p> : null}</section>;
 }
 
 function GroupSettings({ group, groupId, userId, online, role, onDeleted, onLeft }: { group: Group; groupId: string; userId: string; online: boolean; role: 'owner' | 'member'; onDeleted: () => void; onLeft: () => void }) {
@@ -302,143 +265,170 @@ function Home() {
   </Layout>;
 }
 
-function GroupPage() {
+function MemberDirectory({ groupId, userId, members, online, owner }: { groupId: string; userId: string; members: GroupMember[]; online: boolean; owner: boolean }) {
+  const [busy, setBusy] = useState<string>();
+  const [error, setError] = useState<unknown>();
+  const remove = async (member: GroupMember) => {
+    if (!owner || !online || busy || !confirm(`Remove ${member.name} from this group? Historical transactions remain visible.`)) return;
+    setBusy(`remove:${member.personId}`); setError(undefined);
+    try { await removeGroupMember(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
+    catch (cause) { setError(cause); }
+    finally { setBusy(undefined); }
+  };
+  const transfer = async (member: GroupMember) => {
+    if (!owner || !online || busy || !member.linked || member.role === 'owner' || !confirm(`Transfer ownership to ${member.name}? You will become a member.`)) return;
+    setBusy(`transfer:${member.personId}`); setError(undefined);
+    try { await transferGroupOwnership(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
+    catch (cause) { setError(cause); }
+    finally { setBusy(undefined); }
+  };
+  return <>
+    <ul className="member-list" aria-label="Group members">{members.map((member) => <li className="member-row" key={member.personId}>
+      <div className="member-row__identity"><strong>{member.name}</strong>{member.email ? <span className="email">{member.email}</span> : <span className="muted">No email linked</span>}<span className="muted">Role: {member.role === 'owner' ? 'Owner' : 'Member'}{member.linked ? '' : ' · ledger-only'}</span></div>
+      {owner && member.role !== 'owner' ? <div className="member-row__actions" aria-label={`Actions for ${member.name}`}><Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void remove(member)}>Remove</Button>{member.linked ? <Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void transfer(member)}>Transfer ownership</Button> : null}</div> : null}
+    </li>)}</ul>{error ? <ErrorBox error={error} id="member-management-error" /> : null}
+  </>;
+}
+
+function OwnerMemberControls({ groupId, userId, online }: { groupId: string; userId: string; online: boolean }) {
+  const effectiveOnline = online && (typeof navigator === 'undefined' || navigator.onLine !== false);
+  const invitationsResource = useResource<{ invitations: GroupInvitation[] }>(resourceKeys.groupInvitations(userId, groupId), userId, (signal) => getOwnerInvitations(groupId, signal), RESOURCE_FRESHNESS.invitations, undefined, { skipWhenOffline: !effectiveOnline });
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState<string>();
+  const [error, setError] = useState<unknown>();
+  const [inviteError, setInviteError] = useState<unknown>();
+  const invitations = invitationsResource.data?.invitations || [];
+  const invite = async (event: FormEvent) => {
+    event.preventDefault(); if (!effectiveOnline || busy) return;
+    setBusy('invite'); setInviteError(undefined);
+    try { await createGroupInvitation(groupId, email.trim()); setEmail(''); await invalidateForMutation.invitationsChanged(groupId, userId); }
+    catch (cause) { setInviteError(cause); }
+    finally { setBusy(undefined); }
+  };
+  const revoke = async (invitation: GroupInvitation) => {
+    if (!effectiveOnline || busy || !confirm(`Revoke the invitation for ${invitation.email}?`)) return;
+    setBusy(invitation.id); setError(undefined);
+    try { await revokeGroupInvitation(groupId, invitation.id); await invalidateForMutation.invitationsChanged(groupId, userId); }
+    catch (cause) { setError(cause); }
+    finally { setBusy(undefined); }
+  };
+  const offlineWithoutCache = !effectiveOnline && invitationsResource.data === undefined;
+  return <section aria-labelledby="invitations-heading"><div className="section-title"><h2 id="invitations-heading">Invitations</h2><span className="muted">Owner · online-only</span></div><form onSubmit={invite} aria-describedby={inviteError ? 'invite-error' : undefined}><Field label="Invite by email"><input className="email" type="email" required value={email} onChange={(event) => { setInviteError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" disabled={!effectiveOnline || busy === 'invite'}>{busy === 'invite' ? 'Inviting…' : 'Invite'}</Button></form>{inviteError ? <ErrorBox error={inviteError} id="invite-error" /> : null}{offlineWithoutCache ? <p className="cache-status">Invitations aren’t cached on this device and need a connection.</p> : <ResourceNotice resource={invitationsResource} label="invitations" retry={retryFor(resourceKeys.groupInvitations(userId, groupId), userId)} />}{invitationsResource.data !== undefined ? invitations.length ? <div className="list">{invitations.map((invitation) => { const pending = !invitation.revokedAt && !invitation.acceptedAt && !invitation.rejectedAt && Date.parse(invitation.expiresAt) > Date.now(); return <div className="row" key={invitation.id}><span>{invitation.email}<small>{invitation.acceptedAt ? 'Accepted' : invitation.revokedAt ? 'Revoked' : invitation.rejectedAt ? 'Rejected' : pending ? `Pending · expires ${new Date(invitation.expiresAt).toLocaleDateString()}` : 'Expired'}</small></span>{pending ? <Button type="button" variant="secondary" disabled={!effectiveOnline || busy === invitation.id} onClick={() => void revoke(invitation)}>Revoke</Button> : null}</div>; })}</div> : <Empty>No invitations yet.</Empty> : null}{error ? <ErrorBox error={error} id="invitation-management-error" /> : null}{invitationsResource.data !== undefined && !effectiveOnline ? <p className="cache-status">Showing cached invitations; they may be out of date. Invitation changes require a connection.</p> : null}</section>;
+}
+
+function AddFriendForm({ groupId, userId, online }: { groupId: string; userId: string; online: boolean }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const submit = async (event: FormEvent) => {
+    event.preventDefault(); if (!online || busy) return;
+    if (!name.trim()) { setError(new Error('Enter a friend name.')); return; }
+    setBusy(true); setError(undefined);
+    try { await api(`/groups/${groupId}/people`, { method: 'POST', body: JSON.stringify({ name: name.trim(), email: email.trim() || undefined }) }); setName(''); setEmail(''); setOpen(false); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
+    catch (cause) { setError(cause); }
+    finally { setBusy(false); }
+  };
+  return <section aria-labelledby="add-friend-heading"><div className="section-title"><h2 id="add-friend-heading">Add friend</h2><Button type="button" variant="secondary" disabled={!online} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Cancel' : 'Add friend'}</Button></div>{open ? <form onSubmit={submit} aria-describedby={error ? 'add-person-error' : undefined}><Field label="Friend name"><input required value={name} onChange={(event) => { setError(undefined); setName(event.target.value); }} /></Field><Field label="Email (optional)"><input className="email" type="email" value={email} onChange={(event) => { setError(undefined); setEmail(event.target.value); }} /></Field>{error ? <ErrorBox error={error} id="add-person-error" /> : null}<Button type="submit" disabled={!online || busy}>{busy ? 'Adding…' : 'Add friend'}</Button></form> : <p className="muted">Add a ledger-only friend or link the email they use to sign in.</p>}</section>;
+}
+
+function ExpenseFilterDisclosure({ filterKey, filterCount, offline, children }: { filterKey: string; filterCount: number; offline: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(filterCount > 0);
+  useEffect(() => {
+    if (filterCount > 0) setOpen(true);
+  }, [filterCount, filterKey]);
+  return <details className="expense-filters-disclosure" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary id="expense-filter-heading">Find expenses{filterCount ? ` · ${filterCount} active filter${filterCount === 1 ? '' : 's'}` : ''}</summary>{offline ? <p className="cache-status">Server filtering is unavailable offline. Clear the URL filters or reconnect to search.</p> : null}{children}</details>;
+}
+
+function GroupManagementPage() {
   const online = useOnlineStatus();
   const { id = '' } = useParams();
   const nav = useNavigate();
+  const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
+  const userId = me.data?.id || 'pending';
+  const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(userId, id), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
+  const group = groupResource.data?.group;
+  const members = groupResource.data?.members || [];
+  const offline = Boolean(me.offline || groupResource.offline) || !online;
+  if ((me.error || groupResource.error) && !group) return <Layout><ErrorBox error={me.error || groupResource.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-manage-error" retryLabel={me.error ? 'Retry identity check' : 'Retry'} /><Link className="back" to={`/groups/${id}`}>← Back to group</Link></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+  const owner = group.role === 'owner';
+  return <Layout><Link className="back" to={`/groups/${id}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Group management</p><h1>Manage group</h1></div></div>{offline ? <ConnectionBanner detail="cached group data is available. Member changes, invitations, exports, and settings require a connection." /> : null}<ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /><section aria-labelledby="people-heading"><div className="section-title"><h2 id="people-heading">People</h2><span className="muted">{owner ? 'Owner controls' : 'Members can view this list'}</span></div><MemberDirectory groupId={id} userId={userId} members={members} online={!offline} owner={owner} /></section>{owner ? <AddFriendForm groupId={id} userId={userId} online={!offline} /> : null}{owner ? <OwnerMemberControls groupId={id} userId={userId} online={!offline} /> : null}<GroupExports groupId={id} online={!offline} /><GroupSettings group={group} groupId={id} userId={userId} online={!offline} role={owner ? 'owner' : 'member'} onDeleted={() => nav('/')} onLeft={() => nav('/')} /></Layout>;
+}
+
+function GroupPage() {
+  const online = useOnlineStatus();
+  const { id = '' } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const filters = useMemo(() => readExpenseFilters(searchParams), [searchParams]);
   const filterSignature = expenseFilterKey(filters);
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const userId = me.data?.id || 'pending';
   const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(userId, id), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
-     const expensesResource = useResource<{ expenses: Expense[]; nextCursor?: string }>(resourceKeys.expenses(userId, id, filterSignature), me.data?.id, (signal) => getExpenses(id, signal, filters), RESOURCE_FRESHNESS.expenses, me.data?.id && !hasExpenseFilters(filters) ? () => hydrateExpenses(me.data!.id, id) : undefined);
-   const categoriesResource = useResource<{ categories: string[] }>(resourceKeys.categories(userId), me.data?.id, (signal) => getCategories(signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateCategories(me.data!.id) : undefined);
-   const scheduledResource = useResource<{ scheduledExpenses: ScheduledExpense[]; nextCursor?: string }>(resourceKeys.scheduledExpenses(userId, id), me.data?.id, (signal) => getScheduledExpenses(id, signal), RESOURCE_FRESHNESS.scheduledExpenses);
+  const expensesResource = useResource<{ expenses: Expense[]; nextCursor?: string }>(resourceKeys.expenses(userId, id, filterSignature), me.data?.id, (signal) => getExpenses(id, signal, filters), RESOURCE_FRESHNESS.expenses, me.data?.id && !hasExpenseFilters(filters) ? () => hydrateExpenses(me.data!.id, id) : undefined);
+  const categoriesResource = useResource<{ categories: string[] }>(resourceKeys.categories(userId), me.data?.id, (signal) => getCategories(signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateCategories(me.data!.id) : undefined);
+  const scheduledResource = useResource<{ scheduledExpenses: ScheduledExpense[]; nextCursor?: string }>(resourceKeys.scheduledExpenses(userId, id), me.data?.id, (signal) => getScheduledExpenses(id, signal), RESOURCE_FRESHNESS.scheduledExpenses);
   const balancesResource = useResource<{ balances: Record<string, Balances> }>(resourceKeys.balances(userId, id), me.data?.id, (signal) => getBalances(id, signal), RESOURCE_FRESHNESS.balances, me.data?.id ? () => hydrateBalances(me.data!.id, id) : undefined);
-    const settlementsResource = useResource<{ settlements: Settlement[]; nextCursor?: string }>(resourceKeys.settlements(userId, id), me.data?.id, (signal) => getSettlements(id, signal), RESOURCE_FRESHNESS.settlements, me.data?.id ? () => hydrateSettlements(me.data!.id, id) : undefined);
+  const settlementsResource = useResource<{ settlements: Settlement[]; nextCursor?: string }>(resourceKeys.settlements(userId, id), me.data?.id, (signal) => getSettlements(id, signal), RESOURCE_FRESHNESS.settlements, me.data?.id ? () => hydrateSettlements(me.data!.id, id) : undefined);
   const group = groupResource.data?.group;
   const members = groupResource.data?.members || [];
-    const [expensePages, setExpensePages] = useState<Expense[]>([]);
-   const [settlementPages, setSettlementPages] = useState<Settlement[]>([]);
-   const [expenseCursor, setExpenseCursor] = useState<string>();
-   const [settlementCursor, setSettlementCursor] = useState<string>();
-   const [loadingMore, setLoadingMore] = useState<'expenses' | 'settlements'>();
-   const [pageError, setPageError] = useState<unknown>();
-    const [draftFilters, setDraftFilters] = useState<ExpenseFilters>(filters);
-    const pageScopeKey = `${id}:${filterSignature}`;
-    const pageScopeKeyRef = useRef(pageScopeKey);
-    pageScopeKeyRef.current = pageScopeKey;
-    const expensePageScope = useRef(createPageRequestScope());
-    const settlementPageScope = useRef(createPageRequestScope());
-    const expenseCursorRef = useRef<string>();
-    const settlementCursorRef = useRef<string>();
-    const expenses = expensePages;
-    const settlements = settlementPages;
   const balances = balancesResource.data?.balances || {};
   const currentPersonId = me.data?.personId || '';
   const currentUserId = me.data?.id || '';
-  const [personName, setPersonName] = useState('');
-  const [personEmail, setPersonEmail] = useState('');
-  const [addingPerson, setAddingPerson] = useState(false);
-  const [addingPersonSubmitting, setAddingPersonSubmitting] = useState(false);
-  const [addPersonError, setAddPersonError] = useState<unknown>();
-  const [pending, setPending] = useState<ExpenseOutboxItem[]>([]);
-  const error = groupResource.error || me.error;
-    const offline = Boolean(groupResource.offline || expensesResource.offline || balancesResource.offline || settlementsResource.offline || me.offline);
-   const refreshing = [groupResource, expensesResource, balancesResource, settlementsResource, scheduledResource].some((resource) => resource.revalidating);
-   const partialErrors = [groupResource, expensesResource, balancesResource, settlementsResource, scheduledResource].filter((resource) => resource.error);
-  useEffect(() => { setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id)); }, [id, currentUserId]);
-   useEffect(() => { const unsubscribe = subscribeOutbox(() => setPending(getOutboxSnapshot().filter((item) => item.userId === currentUserId && item.groupId === id))); return () => { unsubscribe(); }; }, [id, currentUserId]);
-   useEffect(() => {
-     expensePageScope.current.reset(pageScopeKey);
-     settlementPageScope.current.reset(pageScopeKey);
-     expenseCursorRef.current = undefined;
-     settlementCursorRef.current = undefined;
-     setExpensePages([]); setSettlementPages([]);
-     setExpenseCursor(undefined); setSettlementCursor(undefined);
-     setLoadingMore(undefined); setPageError(undefined);
-   }, [filterSignature, pageScopeKey]);
-   useEffect(() => {
-     const page = expensesResource.data; if (!page || pageScopeKeyRef.current !== pageScopeKey) return;
-     expensePageScope.current.reset(pageScopeKey);
-     expenseCursorRef.current = page.nextCursor;
-     setExpensePages(page.expenses); setExpenseCursor(page.nextCursor);
-   }, [expensesResource.data, pageScopeKey]);
-   useEffect(() => {
-     const page = settlementsResource.data; if (!page || pageScopeKeyRef.current !== pageScopeKey) return;
-     settlementPageScope.current.reset(pageScopeKey);
-     settlementCursorRef.current = page.nextCursor;
-     setSettlementPages(page.settlements); setSettlementCursor(page.nextCursor);
-   }, [pageScopeKey, settlementsResource.data]);
-   useEffect(() => () => { expensePageScope.current.dispose(); settlementPageScope.current.dispose(); }, []);
-   useEffect(() => { setDraftFilters(filters); }, [filterSignature]);
-
-  if (error && !group) return <Layout><ErrorBox error={error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-error" /><Link className="back" to="/">← Groups</Link></Layout>;
-   if (!group) return <Layout><Loading /></Layout>;
-  const offlineView = offline || !online;
-  const addPerson = async (event: FormEvent) => {
-    event.preventDefault();
-     if (addingPersonSubmitting) return;
-     if (!personName.trim()) { setAddPersonError(new Error('Enter a friend name.')); return; }
-     setAddPersonError(undefined);
-     setAddingPersonSubmitting(true);
-     const generation = captureSessionGeneration();
-     try { await api(`/groups/${id}/people`, { method: 'POST', body: JSON.stringify({ name: personName, email: personEmail.trim() || undefined }) }); setPersonName(''); setPersonEmail(''); setAddingPerson(false); await invalidateForMutation.groupChanged(id, currentUserId, generation); }
-    catch (cause) { setAddPersonError(cause); }
-    finally { setAddingPersonSubmitting(false); }
+  const [expensePages, setExpensePages] = useState<Expense[]>([]);
+  const [settlementPages, setSettlementPages] = useState<Settlement[]>([]);
+  const [expenseCursor, setExpenseCursor] = useState<string>();
+  const [settlementCursor, setSettlementCursor] = useState<string>();
+  const [loadingMore, setLoadingMore] = useState<'expenses' | 'settlements'>();
+  const [pageError, setPageError] = useState<unknown>();
+  const [draftFilters, setDraftFilters] = useState<ExpenseFilters>(filters);
+  const pageScopeKey = `${id}:${filterSignature}`;
+  const pageScopeKeyRef = useRef(pageScopeKey); pageScopeKeyRef.current = pageScopeKey;
+  const expensePageScope = useRef(createPageRequestScope());
+  const settlementPageScope = useRef(createPageRequestScope());
+  const expenseCursorRef = useRef<string>();
+  const settlementCursorRef = useRef<string>();
+  const expenses = expensePages;
+  const settlements = settlementPages;
+  const offline = Boolean(groupResource.offline || expensesResource.offline || balancesResource.offline || settlementsResource.offline || scheduledResource.offline || me.offline) || !online;
+  const refreshing = [groupResource, expensesResource, balancesResource, settlementsResource, scheduledResource].some((resource) => resource.revalidating);
+  const outbox = useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
+  const pending = outbox.filter((item) => item.userId === currentUserId && item.groupId === id);
+  useEffect(() => { expensePageScope.current.reset(pageScopeKey); settlementPageScope.current.reset(pageScopeKey); expenseCursorRef.current = undefined; settlementCursorRef.current = undefined; setExpensePages([]); setSettlementPages([]); setExpenseCursor(undefined); setSettlementCursor(undefined); setLoadingMore(undefined); setPageError(undefined); }, [pageScopeKey]);
+  useEffect(() => { const page = expensesResource.data; if (!page || pageScopeKeyRef.current !== pageScopeKey) return; expensePageScope.current.reset(pageScopeKey); expenseCursorRef.current = page.nextCursor; setExpensePages(page.expenses); setExpenseCursor(page.nextCursor); }, [expensesResource.data, pageScopeKey]);
+  useEffect(() => { const page = settlementsResource.data; if (!page || pageScopeKeyRef.current !== pageScopeKey) return; settlementPageScope.current.reset(pageScopeKey); settlementCursorRef.current = page.nextCursor; setSettlementPages(page.settlements); setSettlementCursor(page.nextCursor); }, [pageScopeKey, settlementsResource.data]);
+  useEffect(() => () => { expensePageScope.current.dispose(); settlementPageScope.current.dispose(); }, []);
+  useEffect(() => { setDraftFilters(filters); }, [filterSignature]);
+  if ((groupResource.error || me.error) && !group) return <Layout><ErrorBox error={groupResource.error || me.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-error" /><Link className="back" to="/">← Groups</Link></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+  const applyFilters = (event: FormEvent) => { event.preventDefault(); setSearchParams(writeExpenseFilters(searchParams, draftFilters)); };
+  const clearFilters = () => setSearchParams(writeExpenseFilters(searchParams, {}));
+  const loadMore = async (kind: 'expenses' | 'settlements') => {
+    const cursor = kind === 'expenses' ? expenseCursor : settlementCursor; if (!cursor || loadingMore) return;
+    const scope = kind === 'expenses' ? expensePageScope.current : settlementPageScope.current; const request = scope.begin(pageScopeKey, cursor); setLoadingMore(kind); setPageError(undefined);
+    try {
+      if (kind === 'expenses') { const page = await getExpensePage(id, { ...filters, cursor: request.cursor }, request.signal); if (!scope.isCurrent(request) || pageScopeKeyRef.current !== request.key || expenseCursorRef.current !== request.cursor) return; expenseCursorRef.current = page.nextCursor; setExpensePages((current) => appendUniquePage(current, page.expenses, (item) => item.id)); setExpenseCursor(page.nextCursor); }
+      else { const page = await getSettlementPage(id, { cursor: request.cursor }, request.signal); if (!scope.isCurrent(request) || pageScopeKeyRef.current !== request.key || settlementCursorRef.current !== request.cursor) return; settlementCursorRef.current = page.nextCursor; setSettlementPages((current) => appendUniquePage(current, page.settlements, (item) => item.id)); setSettlementCursor(page.nextCursor); }
+    } catch (cause) { if (scope.isCurrent(request) && !(cause instanceof DOMException && cause.name === 'AbortError')) setPageError(cause); }
+    finally { if (scope.isCurrent(request)) setLoadingMore(undefined); }
   };
-   const memberLabel = (personId: string) => personId === currentPersonId ? 'You' : nameOf(members, personId);
-    const applyFilters = (event: FormEvent) => {
-      event.preventDefault();
-      setSearchParams(writeExpenseFilters(searchParams, draftFilters));
-    };
-    const clearFilters = () => setSearchParams(writeExpenseFilters(searchParams, {}));
-     const loadMore = async (kind: 'expenses' | 'settlements') => {
-      const cursor = kind === 'expenses' ? expenseCursor : settlementCursor; if (!cursor || loadingMore) return;
-      const scope = kind === 'expenses' ? expensePageScope.current : settlementPageScope.current;
-      const request = scope.begin(pageScopeKey, cursor);
-      setLoadingMore(kind); setPageError(undefined);
-      try {
-         if (kind === 'expenses') {
-           const page = await getExpensePage(id, { ...filters, cursor: request.cursor }, request.signal);
-           if (!scope.isCurrent(request) || pageScopeKeyRef.current !== request.key || expenseCursorRef.current !== request.cursor) return;
-           expenseCursorRef.current = page.nextCursor;
-           setExpensePages((current) => appendUniquePage(current, page.expenses, (item) => item.id)); setExpenseCursor(page.nextCursor);
-         } else {
-           const page = await getSettlementPage(id, { cursor: request.cursor }, request.signal);
-           if (!scope.isCurrent(request) || pageScopeKeyRef.current !== request.key || settlementCursorRef.current !== request.cursor) return;
-           settlementCursorRef.current = page.nextCursor;
-           setSettlementPages((current) => appendUniquePage(current, page.settlements, (item) => item.id)); setSettlementCursor(page.nextCursor);
-         }
-      } catch (cause) {
-        if (scope.isCurrent(request) && !(cause instanceof DOMException && cause.name === 'AbortError')) setPageError(cause);
-      }
-      finally { if (scope.isCurrent(request)) setLoadingMore(undefined); }
-    };
-
-    const categoryChoices = [...new Set([...(categoriesResource.data?.categories || []), ...expenses.map((expense) => expense.category || '')].filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    return <Layout>
-     <Link to="/" className="back">← Groups</Link>
-         <div className="page-title"><div><p className="eyebrow">{group.memberCount === 2 ? 'Friend group' : `${group.currency} group`}</p><h1>{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</h1></div><div className="expense-heading__actions"><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link><Link className="button button--secondary" to={`/groups/${id}/settle`}>Settle up</Link></div></div>
-          <GroupExports groupId={id} online={!offlineView} />
-           {currentUserId ? <GroupSettings group={group} groupId={id} userId={currentUserId} online={!offlineView} role={group.role === 'owner' ? 'owner' : 'member'} onDeleted={() => nav('/')} onLeft={() => nav('/')} /> : null}
-        {offlineView ? <ConnectionBanner detail="stale data is available. Only new expenses can be captured; settle, activity, exports, and member changes require a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error && (!me.error || groupResource.data !== undefined) ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}{partialErrors.length ? <p className="cache-status" role="status">Some group data could not refresh; cached sections remain visible.</p> : null}
-         <div className="actions"><Link to={`/activity?group=${encodeURIComponent(id)}`}>Activity</Link></div>
-      <div className="group-overview-grid">
-           <section className="stack stack--content"><h2>Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
-      <section><div className="section-title"><h2>People</h2>{!offlineView && group.role === 'owner' && <Button variant="secondary" onClick={() => { setAddPersonError(undefined); setAddingPerson((current) => !current); }}>{addingPerson ? 'Cancel' : '+ Add friend'}</Button>}</div>{!offlineView && addingPerson && <form onSubmit={addPerson} aria-describedby={addPersonError ? 'add-person-error' : undefined}><Field label="Friend name"><input id="person-name" required aria-invalid={Boolean(addPersonError)} aria-describedby={addPersonError ? 'add-person-error' : undefined} value={personName} onChange={(event) => { setAddPersonError(undefined); setPersonName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="person-email" className="email" type="email" value={personEmail} onChange={(event) => { setAddPersonError(undefined); setPersonEmail(event.target.value); }} /></Field>{addPersonError ? <ErrorBox error={addPersonError} id="add-person-error" /> : null}<Button disabled={addingPersonSubmitting} type="submit">{addingPersonSubmitting ? 'Adding…' : 'Add friend'}</Button></form>}<div className="chips">{members.map((member) => <span className="chip" key={member.personId}>{member.personId === currentPersonId ? 'You' : member.name}{member.email ? <small className="email"> · {member.email}</small> : null}</span>)}</div>{group.role === 'owner' && currentUserId ? <OwnerMemberManagement groupId={id} userId={currentUserId} members={members} online={!offlineView} /> : null}</section>
-     </div>
-         <div className="group-ledger">
-           <ScheduleList groupId={id} schedules={scheduledResource.data?.scheduledExpenses || []} resource={scheduledResource} online={!offlineView} userId={currentUserId} />
-             <section aria-labelledby="expense-filter-heading"><div className="section-title"><h2 id="expense-filter-heading">Find expenses</h2><span className="muted">Server filters</span></div><form className="expense-filters" onSubmit={applyFilters}><Field label="Search description or notes"><input value={draftFilters.q || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} /></Field><Field label="Member"><select value={draftFilters.person || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, person: event.target.value || undefined }))}><option value="">All members</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Category"><select value={draftFilters.category || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, category: event.target.value || undefined }))}><option value="">All categories</option>{categoryChoices.map((category) => <option key={category} value={category}>{category}</option>)}</select></Field><Field label="From date"><input type="date" value={draftFilters.from || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, from: event.target.value || undefined }))} /></Field><Field label="To date"><input type="date" value={draftFilters.to || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, to: event.target.value || undefined }))} /></Field><Field label="Currency"><select value={draftFilters.currency || ''} disabled={offlineView} onChange={(event) => setDraftFilters((current) => ({ ...current, currency: event.target.value as Currency || undefined }))}><option value="">All currencies</option>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field><div className="actions"><Button type="submit" disabled={offlineView}>Apply filters</Button><Button type="button" variant="secondary" disabled={offlineView || !hasExpenseFilters(filters)} onClick={clearFilters}>Clear</Button></div></form>{offlineView ? <p className="offline-banner" role="status">Server filtering is unavailable offline because this device caches only the first unfiltered expense page.</p> : <p className="muted" role="status" aria-live="polite">{hasExpenseFilters(filters) ? 'Expense filters applied.' : 'No expense filters applied.'}</p>}</section>
-             <section><h2>Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id, filterSignature), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses match the current filters.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => { const path = expenseDetailPath(expense.groupId, expense.id); const content = <><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></>; return path ? <Link className="row" to={path} key={expense.id}>{content}</Link> : <div className="row" key={expense.id}>{content}</div>; })}</div> : null}{expenseCursor ? <Button type="button" variant="secondary" disabled={loadingMore === 'expenses' || offlineView} onClick={() => void loadMore('expenses')}>{loadingMore === 'expenses' ? 'Loading…' : 'Load more expenses'}</Button> : null}</section>
-          <section><h2>Recent settlements</h2>{!me.error || settlementsResource.data !== undefined ? <ResourceNotice resource={settlementsResource} label="settlements" retry={retryFor(resourceKeys.settlements(userId, id), me.data?.id)} /> : null}{settlementsResource.data !== undefined && settlements.length ? <div className="list">{settlements.map((settlement) => { const path = settlementDetailPath(settlement.groupId, settlement.id); const content = <><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></>; return path ? <Link className="row" to={path} key={settlement.id}>{content}</Link> : <div className="row" key={settlement.id}>{content}</div>; })}</div> : settlementsResource.data !== undefined ? <Empty>No settlements yet.</Empty> : null}{settlementCursor ? <Button type="button" variant="secondary" disabled={loadingMore === 'settlements' || offlineView} onClick={() => void loadMore('settlements')}>{loadingMore === 'settlements' ? 'Loading…' : 'Load more settlements'}</Button> : null}{pageError ? <ErrorBox error={pageError} id="group-page-error" /> : null}</section>
-     </div>
-   </Layout>;
+  const categoryChoices = [...new Set([...(categoriesResource.data?.categories || []), ...expenses.map((expense) => expense.category || '')].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const memberLabel = (personId: string) => personId === currentPersonId ? 'You' : nameOf(members, personId);
+  const filterCount = expenseFilterCount(filters);
+  return <Layout><Link to="/" className="back">← Groups</Link><div className="page-title"><div><p className="eyebrow">{group.memberCount === 2 ? 'Friend group' : `${group.currency} group`}</p><h1>{group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</h1></div><div className="expense-heading__actions"><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link><Link className="button button--secondary" to={`/groups/${id}/settle`}>Settle up</Link></div></div>{offline ? <ConnectionBanner detail="showing cached group data. New expenses can be captured; filters, settlements, schedules, and management need a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}
+     <section aria-labelledby="recent-expenses-heading"><h2 id="recent-expenses-heading">Recent expenses</h2>{!me.error || expensesResource.data !== undefined ? <ResourceNotice resource={expensesResource} label="expenses" retry={retryFor(resourceKeys.expenses(userId, id, filterSignature), me.data?.id)} /> : null}{expensesResource.data !== undefined && !expenses.length && !pending.length ? <Empty>No expenses match the current filters.</Empty> : expenses.length || pending.length ? <div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}{expenses.map((expense) => { const path = expenseDetailPath(expense.groupId, expense.id); const content = <><span>{expense.description}<small>{expense.date} · {expense.currency}</small></span><Money amountMinor={expense.amountMinor} currency={expense.currency} /></>; return path ? <Link className="row" to={path} key={expense.id}>{content}</Link> : <div className="row" key={expense.id}>{content}</div>; })}</div> : null}{expenseCursor ? <Button type="button" variant="secondary" disabled={loadingMore === 'expenses' || offline} onClick={() => void loadMore('expenses')}>{loadingMore === 'expenses' ? 'Loading…' : 'Load more expenses'}</Button> : null}</section>
+     <section aria-labelledby="balances-heading"><h2 id="balances-heading">Balances</h2>{!me.error || balancesResource.data !== undefined ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(userId, id), me.data?.id)} /> : null}{balancesResource.data !== undefined && !Object.keys(balances).length ? <Empty>Everyone is settled up.</Empty> : Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>)}</section>
+    <section className="expense-filters-disclosure" aria-labelledby="expense-filter-heading"><ExpenseFilterDisclosure filterKey={filterSignature} filterCount={filterCount} offline={offline}><form className="expense-filters" onSubmit={applyFilters}><Field label="Search description or notes"><input value={draftFilters.q || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} /></Field><Field label="Member"><select value={draftFilters.person || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, person: event.target.value || undefined }))}><option value="">All members</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Category"><select value={draftFilters.category || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, category: event.target.value || undefined }))}><option value="">All categories</option>{categoryChoices.map((category) => <option key={category} value={category}>{category}</option>)}</select></Field><Field label="From date"><input type="date" value={draftFilters.from || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, from: event.target.value || undefined }))} /></Field><Field label="To date"><input type="date" value={draftFilters.to || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, to: event.target.value || undefined }))} /></Field><Field label="Currency"><select value={draftFilters.currency || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, currency: event.target.value as Currency || undefined }))}><option value="">All currencies</option>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field><div className="actions"><Button type="submit" disabled={offline}>Apply filters</Button><Button type="button" variant="secondary" onClick={clearFilters}>Clear</Button></div></form></ExpenseFilterDisclosure></section>
+    <section aria-labelledby="recent-settlements-heading"><h2 id="recent-settlements-heading">Recent settlements</h2>{!me.error || settlementsResource.data !== undefined ? <ResourceNotice resource={settlementsResource} label="settlements" retry={retryFor(resourceKeys.settlements(userId, id), me.data?.id)} /> : null}{settlementsResource.data !== undefined && settlements.length ? <div className="list">{settlements.map((settlement) => { const path = settlementDetailPath(settlement.groupId, settlement.id); const content = <><span>{settlement.date}<small>{memberLabel(settlement.fromPersonId)} paid {memberLabel(settlement.toPersonId)}</small><Status tone="positive">Paid</Status></span><Money amountMinor={settlement.amountMinor} currency={settlement.currency} tone="positive" /></>; return path ? <Link className="row" to={path} key={settlement.id}>{content}</Link> : <div className="row" key={settlement.id}>{content}</div>; })}</div> : settlementsResource.data !== undefined ? <Empty>No settlements yet.</Empty> : null}{settlementCursor ? <Button type="button" variant="secondary" disabled={loadingMore === 'settlements' || offline} onClick={() => void loadMore('settlements')}>{loadingMore === 'settlements' ? 'Loading…' : 'Load more settlements'}</Button> : null}{pageError ? <ErrorBox error={pageError} id="group-page-error" /> : null}</section>
+    <ScheduleList groupId={id} schedules={scheduledResource.data?.scheduledExpenses || []} resource={scheduledResource} online={!offline} userId={currentUserId} />
+    <section aria-labelledby="people-summary-heading"><div className="section-title"><h2 id="people-summary-heading">People</h2><span className="muted">{members.length} {members.length === 1 ? 'person' : 'people'}</span></div><ul className="people-summary">{members.map((member) => <li key={member.personId}><strong>{member.personId === currentPersonId ? 'You' : member.name}</strong>{member.email ? <small className="email">{member.email}</small> : null}</li>)}</ul></section>
+    <nav className="actions" aria-label="Group links"><Link to={`/activity?group=${encodeURIComponent(id)}`}>Activity</Link><Link className="button button--secondary" to={`/groups/${id}/manage`}>Manage group</Link></nav>
+  </Layout>;
 }
 
 function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
+  const connection = useConnectionState();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const syncing = item.status === 'syncing' && (item.leaseExpiresAt === undefined || item.leaseExpiresAt > Date.now());
@@ -446,7 +436,7 @@ function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
   const explanation = syncing ? 'An in-flight server write cannot be safely cancelled.' : item.deliveryUncertain ? 'The server may have committed this expense; retry or wait for reconciliation.' : undefined;
   const retry = async () => { setError(undefined); setBusy(true); try { await retryOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
   const discard = async () => { if (!confirm('Discard this pending expense?')) return; setError(undefined); setBusy(true); try { await discardOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} /><Button disabled={syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button><Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
+  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} />{connection.status !== 'offline' ? <Button disabled={syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button> : null}<Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
 }
 
 function ScheduleStatus({ status }: { status: ScheduledExpenseStatus }) {
@@ -487,7 +477,7 @@ function ScheduleList({ groupId, schedules: initialSchedules, resource, online, 
     }
     finally { if (pageScope.current.isCurrent(request)) setLoadingMore(false); }
   };
-  return <><ScheduleListContent groupId={groupId} schedules={schedules} resource={resource} online={online} userId={userId} />{nextCursor ? <Button type="button" variant="secondary" disabled={!online || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading…' : 'Load more scheduled expenses'}</Button> : null}{pageError ? <ErrorBox error={pageError} id="scheduled-expense-page-error" /> : null}</>;
+  return <><ScheduleListContent groupId={groupId} schedules={schedules} resource={resource} online={online} userId={userId} />{nextCursor ? <Button type="button" variant="secondary" disabled={!online || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading…' : 'Load more scheduled expenses'}</Button> : null}{pageError && online ? <ErrorBox error={pageError} id="scheduled-expense-page-error" /> : pageError ? <p className="cache-status">Scheduled expenses could not be loaded while offline.</p> : null}</>;
 }
 
 function ScheduleListContent({ groupId, schedules, resource, online, userId }: ScheduleListProps) {
@@ -500,6 +490,8 @@ function ScheduleListContent({ groupId, schedules, resource, online, userId }: S
     catch (cause) { setError(cause); }
     finally { setBusyId(undefined); }
   };
+  const connection = useConnectionState();
+  if (resource.data === undefined && connection.status === 'offline') return <section aria-labelledby="scheduled-expenses-heading"><div className="section-title"><h2 id="scheduled-expenses-heading">Scheduled expenses</h2><span className="muted">Online-only</span></div><p className="cache-status">Scheduled expenses need a connection and are not cached on this device.</p></section>;
   return <section aria-labelledby="scheduled-expenses-heading"><div className="section-title"><h2 id="scheduled-expenses-heading">Scheduled expenses</h2><span className="muted">Online-only</span></div>{resource.data === undefined ? <ResourceNotice resource={resource} label="scheduled expenses" retry={retryFor(resourceKeys.scheduledExpenses(userId, groupId), userId)} /> : schedules.length ? <div className="list">{schedules.map((schedule) => <div className="row schedule-row" key={schedule.id}><span><strong>{schedule.description}</strong><small>{scheduleSummary(schedule.frequency, schedule.interval, schedule.weekdays)} · {schedule.timezone}</small><small>{schedule.nextOccurrenceDate ? `Next occurrence ${formatScheduleDate(schedule.nextOccurrenceDate)}` : 'No future occurrences'}</small><small><ScheduleStatus status={schedule.status} />{schedule.blockedReason ? ` ${schedule.blockedReason}` : null}</small></span><div className="schedule-row__actions"><Money amountMinor={schedule.amountMinor} currency={schedule.currency} /><Link className="button button--secondary" to={`/groups/${groupId}/scheduled-expense/${schedule.id}`}>Edit</Link>{schedule.status === 'active' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'pause')}>Pause</Button> : schedule.status === 'paused' || schedule.status === 'blocked' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'resume')}>Resume</Button> : null}{schedule.status !== 'cancelled' ? <Button type="button" variant="danger" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'cancel')}>Cancel</Button> : null}</div></div>)}</div> : <Empty>No recurring expenses yet.</Empty>}{error ? <ErrorBox error={error} id="scheduled-expense-mutation-error" /> : null}{!online ? <p className="cache-status">Schedule management requires a connection. Existing schedules are not stored for offline use.</p> : null}</section>;
 }
 
@@ -1032,7 +1024,7 @@ function LegacyScheduledExpenseRedirect() {
 
 function PrivateRoutes() {
   const identityEpoch = useResourceIdentityEpoch();
-  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/activity" element={<Activity />} /><Route path="/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/new" element={<LegacyScheduledExpenseRedirect />} /><Route path="/groups/:id/scheduled-expense/:scheduledExpenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/settlements/:settlementId" element={<SettlementDetail />} /><Route path="/groups/:id/activity" element={<LegacyActivityRedirect />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/activity" element={<Activity />} /><Route path="/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/manage" element={<GroupManagementPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/new" element={<LegacyScheduledExpenseRedirect />} /><Route path="/groups/:id/scheduled-expense/:scheduledExpenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/settlements/:settlementId" element={<SettlementDetail />} /><Route path="/groups/:id/activity" element={<LegacyActivityRedirect />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }
 
 export function App() {

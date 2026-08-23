@@ -27,6 +27,10 @@ export function hasExpenseFilters(filters: ExpenseFilters): boolean {
   return filterKeys.some((key) => Boolean(filters[key]));
 }
 
+export function expenseFilterCount(filters: ExpenseFilters): number {
+  return filterKeys.reduce((count, key) => count + (filters[key]?.trim() ? 1 : 0), 0);
+}
+
 export function expenseFilterKey(filters: ExpenseFilters): string {
   // JSON array encoding is unambiguous even when a value contains the old
   // delimiter or JSON punctuation.

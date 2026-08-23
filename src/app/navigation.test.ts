@@ -68,6 +68,7 @@ describe('getNavigationContext', () => {
 
   it.each([
     ['/groups/group-123', 'group-overview', 'groups'],
+    ['/groups/group-123/manage', 'group-manage', 'groups'],
     ['/groups/group-123/expense/new', 'new-expense', 'add'],
     ['/groups/group-123/scheduled-expense/new', 'new-expense', 'add'],
     ['/groups/group-123/expense/expense-1', 'edit-expense', 'add'],

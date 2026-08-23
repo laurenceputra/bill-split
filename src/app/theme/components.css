@@ -1087,6 +1087,12 @@ form > button {
 
 .error > span {
   min-width: 0;
+  flex: 1 1 auto;
+}
+
+.error > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .inline-action {
@@ -1102,6 +1108,79 @@ form > button {
 .inline-action:hover {
   background: transparent;
   color: var(--color-primary);
+}
+
+.expense-filters-disclosure {
+  margin: 0;
+}
+
+.expense-filters-disclosure > details > summary {
+  min-height: 2.75rem;
+  cursor: pointer;
+  color: var(--color-primary-strong);
+  font-weight: 800;
+}
+
+.expense-filters-disclosure > details[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
+.member-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.member-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+
+.member-row__identity {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.member-row__identity > * {
+  overflow-wrap: anywhere;
+}
+
+.member-row__actions {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.member-row__actions button {
+  white-space: nowrap;
+}
+
+.people-summary {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.people-summary li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.people-summary small {
+  display: block;
 }
 
 .form-row {
@@ -1705,6 +1784,23 @@ form > button {
   .landing-actions .install-control,
   .landing-actions .install-action {
     width: 100%;
+  }
+
+  .error {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .error > button {
+    align-self: flex-start;
+  }
+
+  .member-row {
+    flex-direction: column;
+  }
+
+  .member-row__actions {
+    justify-content: flex-start;
   }
 }
 

@@ -36,6 +36,7 @@ export interface ResourceSnapshot<T> {
 export type ResourceViewState = 'loading' | 'error' | 'ready';
 export type ResourceLoader<T> = (signal?: AbortSignal) => Promise<T>;
 export type ResourceHydrator<T> = () => Promise<{ data: T; fetchedAt?: number; offline?: boolean } | undefined>;
+export interface ResourceOptions { skipWhenOffline?: boolean }
 export type RevalidateReason = 'route' | 'focus' | 'online' | 'visibility' | 'mutation' | 'auth-restored' | 'identity-check';
 export interface RevalidateOptions { force?: boolean; reason?: RevalidateReason }
 
@@ -127,7 +128,7 @@ export function subscribeResource<T>(key: ResourceKey, listener: () => void, use
   };
 }
 
-export function useResource<T>(key: ResourceKey, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>) {
+export function useResource<T>(key: ResourceKey, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>, options: ResourceOptions = {}) {
   const resolvedUser = isIdentityKey(key) ? 'identity' : userId || activeUserId || '';
   const resource = entry<T>(key, resolvedUser, ttl);
   if (!resource.visible) resource.evicted = false;
@@ -158,13 +159,13 @@ export function useResource<T>(key: ResourceKey, userId: string | undefined, loa
         const missed = resource.snapshot.status === 'idle';
         if (missed) resource.snapshot = stable({ ...resource.snapshot });
         notify(resource);
-        if (missed && isVisible()) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
+        if (missed && isVisible() && !options.skipWhenOffline) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
       });
     }
-    if (resource.hydrationPromise) return;
+    if (resource.hydrationPromise || options.skipWhenOffline) return;
     const due = snapshot.fetchedAt !== undefined && !isResourceFresh(snapshot, resource.ttl);
     if (snapshot.status !== 'auth-blocked' && (snapshot.status === 'idle' || (due || snapshot.stale) && !snapshot.revalidating && !snapshot.error && (!snapshot.offline || online()))) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
-  }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource.ttl]);
+  }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource.ttl, options.skipWhenOffline]);
   return snapshot;
 }
 
@@ -267,7 +268,10 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
   if (!authLifecycleReady && (options.reason === 'focus' || options.reason === 'online' || options.reason === 'visibility' || options.reason === 'identity-check')) return resource.snapshot.data;
   if (resource.evicted || !resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
-  if (!online() && resource.snapshot.data !== undefined) return resource.snapshot.data;
+  // A cold offline visit has no useful request to make. Leave the resource
+  // idle so the route can render its expected unavailable state instead of a
+  // network error (cached resources still return their last value here).
+  if (!online()) return resource.snapshot.data;
   const force = options.force === true || (isIdentityKey(key) && options.reason === 'identity-check');
   if (!force && isResourceFresh(resource.snapshot, resource.ttl)) return resource.snapshot.data;
   if (resource.promise) { if (force) resource.forcePending = options; return resource.promise; }

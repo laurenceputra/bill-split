@@ -527,7 +527,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await loadingContext.close();
     }
 
-    const offlineScenario: Scenario = { name: 'state-offline', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'Europe trip · USD + EUR', content: 'Offline · stale data is available', apiPaths: groupApis(ids.rich) } };
+    const offlineScenario: Scenario = { name: 'state-offline', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'Europe trip · USD + EUR', content: 'showing cached group data', apiPaths: groupApis(ids.rich) } };
     const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
     const offlinePage = await offlineContext.newPage();
     const offlineObservations: ApiObservation[] = [];
