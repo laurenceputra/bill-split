@@ -124,7 +124,7 @@ export async function refreshOutbox() {
   try {
     const lifecycle = getAuthLifecycle().status;
     let trust;
-    if (lifecycle === 'trusted-offline') {
+    if (lifecycle === 'provisional' || lifecycle === 'trusted-offline') {
       const trustRead = await boundedResult(readOfflineTrust());
       if (trustRead.timedOut) { void trustRead.late.then(() => refreshOutbox()).catch(() => undefined); return; }
       trust = trustRead.value;
@@ -159,7 +159,7 @@ export async function initializeOutbox() {
 export async function enqueueExpense(input: { userId: string; groupId: string; payload: ExpenseInput; display: ExpenseOutboxItem['display']; clientOperationId: string }): Promise<ExpenseOutboxItem> {
   if (logoutQuiescing || getSessionLogoutInProgress()) throw new ApiError('Logout is in progress. Try again after signing in.', { code: 'AUTH_REQUIRED', status: 401 });
   const lifecycle = getAuthLifecycle().status;
-  const trustedUserId = lifecycle === 'trusted-offline' ? (await bounded(readOfflineTrust())) : undefined;
+  const trustedUserId = lifecycle === 'provisional' || lifecycle === 'trusted-offline' ? (await bounded(readOfflineTrust())) : undefined;
   const allowedUserId = lifecycle === 'authenticated' ? currentOutboxUserId() : trustedUserId && isOfflineTrustUsable(trustedUserId) ? trustedUserId.userId : undefined;
   if (allowedUserId !== input.userId) throw new ApiError('The verified account changed before this expense was queued.', { code: 'IDENTITY_MISMATCH', status: 401 });
    const generation = captureSessionGeneration();
@@ -458,7 +458,7 @@ subscribeConnectionState(() => {
 subscribeAuthLifecycle(() => {
   const lifecycleStatus = getAuthLifecycle().status;
   const authenticatedUserId = currentOutboxUserId();
-  const retainedTransition = (lifecycleStatus === 'restoring' || lifecycleStatus === 'reverifying') && hasRetainedPrivateSession();
+  const retainedTransition = (lifecycleStatus === 'provisional' || lifecycleStatus === 'restoring' || lifecycleStatus === 'reverifying') && hasRetainedPrivateSession();
   if ((lifecycleStatus === 'authenticated' && (!authenticatedUserId || snapshot.some((item) => item.userId !== authenticatedUserId))) || (!retainedTransition && lifecycleStatus !== 'authenticated' && lifecycleStatus !== 'trusted-offline')) {
     if (snapshot.length) { snapshot = []; notify(); }
   }

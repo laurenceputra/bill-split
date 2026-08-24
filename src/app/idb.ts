@@ -428,7 +428,21 @@ export async function invalidateCachedGroups(userId: string, generation = captur
   });
 }
 
-export async function updateGroupSnapshot(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }, generation = captureSessionGeneration()) {
+type GroupSnapshotPatch = Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string };
+const transactionResourceNames = ['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const;
+const preserveLargerTransactionPage = (current: GroupSnapshot | undefined, patch: GroupSnapshotPatch) => {
+  const currentLimit = current?.transactionsLimit;
+  const incomingLimit = patch.transactionsLimit;
+  return patch.transactions !== undefined && currentLimit !== undefined
+    && (incomingLimit === undefined || incomingLimit < currentLimit);
+};
+const mergeGroupSnapshotPatch = (current: GroupSnapshot | undefined, patch: GroupSnapshotPatch): { patch: Partial<GroupSnapshot>; transactionChanged: boolean } => {
+  if (!preserveLargerTransactionPage(current, patch)) return { patch, transactionChanged: patch.transactions !== undefined };
+  const { transactions: _transactions, transactionsNextCursor: _transactionsNextCursor, transactionsLimit: _transactionsLimit, ...rest } = patch;
+  return { patch: rest, transactionChanged: false };
+};
+
+export async function updateGroupSnapshot(userId: string, groupId: string, patch: GroupSnapshotPatch, generation = captureSessionGeneration()) {
   assertSessionGeneration(generation);
   const db = await open();
   return new Promise<GroupSnapshot>((resolve, reject) => {
@@ -438,9 +452,10 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
     let next: GroupSnapshot;
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      const resources = (['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const).filter((resource) => patch[resource] !== undefined);
+      const merged = mergeGroupSnapshotPatch(request.result as GroupSnapshot | undefined, patch);
+      const resources = transactionResourceNames.filter((resource) => merged.patch[resource] !== undefined && (resource !== 'transactions' || merged.transactionChanged));
       const fetchedAt = patch.cachedAt || new Date().toISOString();
-      next = { ...(request.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(request.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } };
+      next = { ...(request.result as GroupSnapshot | undefined), ...merged.patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(request.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } };
       store.put(next);
       for (const resource of resources) tx.objectStore('resourceFreshness').put({ userId, resource, resourceKey: `group:${groupId}:${resource}`, fetchedAt });
     };
@@ -456,7 +471,7 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
  * readwrite transaction, so an invalidation either wins before this check or
  * runs after this write and removes the stale snapshot.
  */
-export async function updateGroupSnapshotIfGenerationMatches(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }, mutationGeneration: number, generation = captureSessionGeneration()) {
+export async function updateGroupSnapshotIfGenerationMatches(userId: string, groupId: string, patch: GroupSnapshotPatch, mutationGeneration: number, generation = captureSessionGeneration()) {
   if (!isSessionGenerationCurrent(generation)) return false;
   const db = await open();
   return new Promise<boolean>((resolve, reject) => {
@@ -469,9 +484,10 @@ export async function updateGroupSnapshotIfGenerationMatches(userId: string, gro
       const currentSnapshot = snapshots.get([userId, groupId]);
       currentSnapshot.onsuccess = () => {
         if (!isSessionGenerationCurrent(generation)) return;
-        const resources = (['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const).filter((resource) => patch[resource] !== undefined);
+        const merged = mergeGroupSnapshotPatch(currentSnapshot.result as GroupSnapshot | undefined, patch);
+        const resources = transactionResourceNames.filter((resource) => merged.patch[resource] !== undefined && (resource !== 'transactions' || merged.transactionChanged));
         const fetchedAt = patch.cachedAt || new Date().toISOString();
-        const next = { ...(currentSnapshot.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(currentSnapshot.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } } satisfies GroupSnapshot;
+        const next = { ...(currentSnapshot.result as GroupSnapshot | undefined), ...merged.patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(currentSnapshot.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } } satisfies GroupSnapshot;
         snapshots.put(next);
         for (const resource of resources) tx.objectStore('resourceFreshness').put({ userId, resource, resourceKey: `group:${groupId}:${resource}`, fetchedAt });
         saved = true;

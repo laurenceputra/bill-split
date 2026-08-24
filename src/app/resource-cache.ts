@@ -60,6 +60,7 @@ const isVisible = () => typeof document === 'undefined' || document.visibilitySt
 const isIdentityKey = (key: ResourceKey) => key === 'identity';
 const stable = <T>(snapshot: ResourceSnapshot<T>) => Object.freeze(snapshot);
 const notify = <T>(entry: Entry<T>) => entry.listeners.forEach((listener) => listener());
+const signalResourceInvalidated = () => { if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-resource-invalidated')); };
 const idleSnapshot = <T>(userId: string): ResourceSnapshot<T> => stable({ userId, status: 'idle', loading: false, revalidating: false, stale: false, offline: !online() });
 
 /** A resource with no data is never an empty successful result. */
@@ -193,6 +194,7 @@ export function invalidateResource(key: ResourceKey, userId = activeUserId || ''
   resource.forcePending = { force: true, reason: 'mutation' };
   resource.snapshot = stable({ ...resource.snapshot, stale: true, error: undefined, revalidating: false, loading: false });
   notify(resource);
+  signalResourceInvalidated();
   if (options.revalidate !== false && resource.visible > 0) void revalidate(key, userId, resource.forcePending);
 }
 
@@ -212,6 +214,7 @@ export function evictResource(key: ResourceKey, userId = activeUserId || '') {
   resource.evicted = true;
   resource.snapshot = idleSnapshot(resource.snapshot.userId);
   notify(resource);
+  signalResourceInvalidated();
   if (!resource.visible && !resource.listeners.size) entries.delete(key);
 }
 

@@ -153,7 +153,7 @@ describe('user-scoped IndexedDB', () => {
   it('hydrates transactions only for the exact user and group scope', async () => {
     const transaction = { kind: 'settlement' as const, id: 's-a', groupId: 'group-a', amountMinor: 100, currency: 'USD' as const, date: '2026-01-01', note: null, fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'A', toName: 'B', createdAt: '2026-01-01T00:00:00.000Z' };
     await updateGroupSnapshot('user-a', 'group-a', { transactions: [transaction], transactionsNextCursor: 'next-a', transactionsLimit: 25 });
-    await updateGroupSnapshot('user-b', 'group-a', { transactions: [{ ...transaction, id: 's-b' }] });
+    await updateGroupSnapshot('user-b', 'group-a', { transactions: [{ ...transaction, id: 's-b' }], transactionsLimit: 25 });
     await updateGroupSnapshot('user-a', 'group-b', { transactions: [{ ...transaction, id: 's-other-group', groupId: 'group-b' }] });
 
     await expect(hydrateTransactions('user-a', 'group-a')).resolves.toMatchObject({ data: { transactions: [{ id: 's-a' }], nextCursor: 'next-a' } });

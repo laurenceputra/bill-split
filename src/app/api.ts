@@ -1,13 +1,13 @@
 import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
 import type { ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
-import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type OfflineTrustRecord } from './idb';
-import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
+import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { captureSessionGeneration, clearSessionLogout, getSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
 import type { ExpenseFilters } from './expense-filters';
 import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
-import { hasTransactionFilters, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
+import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
 
 export type CurrentUser = { id: string; email: string; personId: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -16,9 +16,10 @@ export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISM
 export type AuthState = { required: boolean; code?: AuthRequiredCode };
 export type ConnectionStatus = 'checking' | 'connected' | 'connection-issue' | 'offline';
 export type ConnectionState = { status: ConnectionStatus; reconnectRequired: boolean };
-export type AuthLifecycleStatus = 'checking' | 'restoring' | 'reverifying' | 'unauthenticated' | 'authenticated' | 'trusted-offline' | 'verification-unavailable';
-export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown };
+export type AuthLifecycleStatus = 'checking' | 'provisional' | 'restoring' | 'reverifying' | 'unauthenticated' | 'authenticated' | 'trusted-offline' | 'verification-unavailable';
+export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown; privateCacheAvailable?: boolean; privateCacheRouteKey?: string };
 export type ClerkAuthEvidence = { isLoaded: boolean; isSignedIn: boolean | undefined; userId?: string; sessionId?: string };
+export type AuthBootstrapRoute = { pathname: string; search?: string };
 export type ExpensePage = { expenses: Expense[]; nextCursor?: string };
 export type SettlementPage = { settlements: Settlement[]; nextCursor?: string };
 export type TransactionPage = { transactions: Transaction[]; nextCursor?: string };
@@ -26,6 +27,8 @@ export type ActivityPage = { activity: Activity[]; nextCursor?: string };
 export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
 export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
 export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
+const TRANSACTION_HISTORY_PAGE_LIMIT = 25;
+const isSufficientTransactionHistoryPage = (limit: number | undefined) => typeof limit === 'number' && limit >= TRANSACTION_HISTORY_PAGE_LIMIT;
 
 export class ClerkSignOutFailure extends Error {
   constructor(message: string) {
@@ -243,6 +246,9 @@ let clerkEvidenceEpoch = 0;
 const clerkProbeControllers = new Set<AbortController>();
 let trustRevocationRequest: Promise<boolean> | undefined;
 let trustRevocationRequired = false;
+let startupCacheToken = 0;
+let provisionalRouteGeneration = 0;
+let provisionalRestoreRequest: { key: string; route?: AuthBootstrapRoute; routeGeneration: number; promise: Promise<AuthLifecycle> } | undefined;
 let clerkEvidence: ClerkAuthEvidence = { isLoaded: false, isSignedIn: undefined };
 let clerkEvidenceKnown = false;
 let clerkEvidenceAuthoritative = false;
@@ -253,6 +259,7 @@ let clerkRestorationRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let clerkRestorationRetryAttempts = 0;
 let authIntentTimer: ReturnType<typeof setTimeout> | undefined;
 let authIntentNetworkOnly = false;
+let activeAuthRoute: AuthBootstrapRoute | undefined;
 const authIntentWaiters = new Set<(result: AuthLifecycle) => void>();
 const cancelAuthVerificationIntent = () => {
   if (authIntentTimer) clearTimeout(authIntentTimer);
@@ -288,12 +295,20 @@ export const isUsableConnection = () => connectionState.status === 'connected' &
 export const isServerMutationAllowed = () => authLifecycle.status === 'authenticated' && isUsableConnection() && !getSessionLogoutInProgress();
 export const getAuthLifecycle = () => authLifecycle;
 export const subscribeAuthLifecycle = (listener: () => void) => { authListeners.add(listener); return () => authListeners.delete(listener); };
-const setAuthLifecycle = (next: AuthLifecycle) => { if (authLifecycle.status === next.status && authLifecycle.error === next.error) return; authLifecycle = next; setResourceAuthLifecycleReady(next.status === 'authenticated' || next.status === 'trusted-offline'); authListeners.forEach((listener) => listener()); };
+const setAuthLifecycle = (next: AuthLifecycle) => {
+  const activeRestoreRouteKey = provisionalRestoreRequest?.route ? authRouteCacheKey(provisionalRestoreRequest.route.pathname, provisionalRestoreRequest.route.search || '') : undefined;
+  if (next.status !== 'authenticated' && next.privateCacheRouteKey && activeRestoreRouteKey && next.privateCacheRouteKey !== activeRestoreRouteKey) return;
+  if (next.status !== 'authenticated' && !next.privateCacheRouteKey && activeRestoreRouteKey && authLifecycle.privateCacheRouteKey) return;
+  if (authLifecycle.status === next.status && authLifecycle.error === next.error && authLifecycle.privateCacheAvailable === next.privateCacheAvailable && authLifecycle.privateCacheRouteKey === next.privateCacheRouteKey) return;
+  authLifecycle = next;
+  setResourceAuthLifecycleReady(next.status === 'authenticated' || next.status === 'trusted-offline');
+  authListeners.forEach((listener) => listener());
+};
 export const getAuthEpoch = () => authInvalidationGeneration;
 export const isAuthEpochCurrent = (epoch: number) => epoch === authInvalidationGeneration;
 export const getClerkEvidenceEpoch = () => clerkEvidenceEpoch;
 export const isClerkEvidenceEpochCurrent = (epoch: number) => epoch === clerkEvidenceEpoch;
-const advanceAuthEpoch = () => { authInvalidationGeneration += 1; identityRequest = undefined; authLifecycleRequest = undefined; return authInvalidationGeneration; };
+const advanceAuthEpoch = () => { authInvalidationGeneration += 1; startupCacheToken += 1; provisionalRouteGeneration += 1; provisionalRestoreRequest = undefined; identityRequest = undefined; authLifecycleRequest = undefined; return authInvalidationGeneration; };
 const cancelClerkProbes = () => { for (const controller of clerkProbeControllers) controller.abort(); clerkProbeControllers.clear(); };
 export const clearAuthRequired = () => { authBlocked = false; allowIdentityVerification(); if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
@@ -524,7 +539,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
 
   const finalUrl = (() => { try { return new URL(response.url); } catch { return undefined; } })();
   const contentType = response.headers.get('content-type') || '';
-  const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400) || response.redirected;
+  const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400 && path !== '/me') || (response.redirected && path !== '/me');
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
   const currentTransportEpoch = expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch);
   const authoritativePath = path === '/me';
@@ -557,6 +572,13 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   // application-level permission error. OWNER_REQUIRED/ORIGIN_FORBIDDEN are
   // meaningful API errors.
   const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN';
+  // A captive portal can turn a same-origin /me request into a redirect or an
+  // HTML response. It proves neither logout nor a new identity. Keep it on the
+  // retryable transport path so getMe may use only a matching, complete trust
+  // record; explicit 401/403 responses remain authoritative auth failures.
+  if (authoritativePath && !authResponse && !accessDenied && (response.redirected || (response.status >= 300 && response.status < 400) || unexpectedFormat)) {
+    throw new ApiError('The verification response was not a valid JSON session response.', { status: response.status, code: 'PROTOCOL_ERROR', networkFailure: true, reconnectRequired: true });
+  }
   if (authResponse || accessDenied) {
     // Authentication responses are still authoritative evidence that the
     // server was reached, even though they require a lifecycle transition.
@@ -619,7 +641,7 @@ type CacheIdentity = { user: CurrentUser; authoritative: boolean };
 async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdentity | undefined> {
   const identitySnapshot = getResourceSnapshot('identity');
   if (identitySnapshot.status === 'auth-blocked') throw new ApiError('Your secure session needs attention before private data can be refreshed.', { status: 401, code: 'AUTH_REQUIRED' });
-  if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && verifiedIdentity) return { user: verifiedIdentity, authoritative: true };
+  if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && verifiedIdentity) return { user: verifiedIdentity, authoritative: authLifecycle.status === 'authenticated' };
   const cachedTrust = await trustForCache();
   const cached = cachedTrust && isOfflineTrustUsable(cachedTrust) ? cachedTrust : undefined;
   if (authLifecycle.status === 'trusted-offline' && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId }, authoritative: false };
@@ -673,6 +695,7 @@ const boundedTrustWrite = (write: Promise<boolean>) => {
 };
 
 const requestTrustRevocation = () => {
+  startupCacheToken += 1;
   trustRevocationRequired = true;
   if (trustRevocationRequest) return trustRevocationRequest;
   const write = revokeOfflineTrust();
@@ -691,17 +714,35 @@ const ensureTrustRevoked = async () => {
   return revoked && !trustRevocationRequest;
 };
 
-const setVerificationUnavailable = (error: unknown = new ApiError('Verification is unavailable. Retry when the connection is available.', { code: 'VERIFICATION_UNAVAILABLE' })) => {
+const setVerificationUnavailable = (error: unknown = new ApiError('Verification is unavailable. Retry when the connection is available.', { code: 'VERIFICATION_UNAVAILABLE' }), route?: AuthBootstrapRoute) => {
   verifiedIdentity = undefined;
   blockResourceIdentity(error instanceof ApiError ? error : new ApiError('Verification is unavailable.', { code: 'VERIFICATION_UNAVAILABLE' }));
-  setAuthLifecycle({ status: 'verification-unavailable', error });
+  setAuthLifecycle({ status: 'verification-unavailable', error, ...(route ? { privateCacheRouteKey: provisionalRouteKey(route) } : {}) });
 };
 
 export const isIncompleteLoadedSignedInEvidence = (isLoaded: boolean, isSignedIn: boolean | undefined, userId?: string, sessionId?: string) => isLoaded && isSignedIn === true && (!userId || !sessionId);
 const isIncompleteSignedInEvidence = (evidence: ClerkAuthEvidence) => clerkEvidenceAuthoritative && isIncompleteLoadedSignedInEvidence(evidence.isLoaded, evidence.isSignedIn, evidence.userId, evidence.sessionId);
 
-const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenceEpoch = clerkEvidenceEpoch) => {
-  if (!isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) return authLifecycle;
+const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenceEpoch = clerkEvidenceEpoch, route?: AuthBootstrapRoute) => {
+  const effectiveRoute = route || provisionalRestoreRequest?.route;
+  const routeKey = effectiveRoute ? authRouteCacheKey(effectiveRoute.pathname, effectiveRoute.search || '') : undefined;
+  const routeRestore = routeKey && provisionalRestoreRequest?.route && provisionalRouteKey(provisionalRestoreRequest.route) === routeKey ? provisionalRestoreRequest : undefined;
+  if (effectiveRoute && effectiveRoute.pathname !== '/settings') {
+    if (provisionalRestoreRequest?.route && provisionalRouteKey(provisionalRestoreRequest.route) !== routeKey) return authLifecycle;
+    if (!routeRestore) {
+      setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
+      return authLifecycle;
+    }
+    const result = await routeRestore.promise;
+    if (result.status === 'authenticated') return result;
+    if (result.status === 'provisional') {
+      if (result.privateCacheRouteKey !== routeKey || result.privateCacheAvailable !== true) return result;
+    } else {
+      setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
+      return authLifecycle;
+    }
+  }
+  if (!isClerkEvidenceEpochCurrent(expectedEvidenceEpoch) || getSessionLogoutInProgress() || hasPendingAccountDeletion() || authBlocked) return authLifecycle;
   const user = { id: trust.userId, email: trust.email, personId: trust.personId };
   verifiedIdentity = user;
   verifiedClerkUserId = trust.clerkUserId;
@@ -709,7 +750,11 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
   setResourceIdentity(user.id);
   seedResource('identity', '', { ...offline(user), authoritative: false }, Date.now(), { offline: true });
   clearAuthRequired();
-  setAuthLifecycle({ status: 'trusted-offline' });
+  setAuthLifecycle({
+    status: 'trusted-offline',
+    privateCacheAvailable: effectiveRoute ? true : authLifecycle.privateCacheAvailable,
+    ...(routeKey ? { privateCacheRouteKey: routeKey } : authLifecycle.privateCacheRouteKey ? { privateCacheRouteKey: authLifecycle.privateCacheRouteKey } : {}),
+  });
   // Publish the connection result only after the lifecycle has settled. This
   // keeps connection listeners from observing a transient reverifying state.
   if (typeof navigator !== 'undefined' && navigator.onLine === false) signalOffline();
@@ -717,7 +762,183 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
   return authLifecycle;
 };
 
-const settleClerkRestorationDeadline = async (expectedEvidenceEpoch: number) => {
+export const authRouteCacheKey = (pathname: string, search = '') => {
+  const normalizedPathname = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+  const params = new URLSearchParams(search);
+  params.sort();
+  const normalizedSearch = params.toString();
+  return `${normalizedPathname}${normalizedSearch ? `?${normalizedSearch}` : ''}`;
+};
+export const isPrivateCacheRouteCurrent = (lifecycle: Pick<AuthLifecycle, 'privateCacheRouteKey'>, pathname: string, search = '') => pathname === '/settings' || lifecycle.privateCacheRouteKey === authRouteCacheKey(pathname, search);
+const provisionalRouteKey = (route: AuthBootstrapRoute | undefined) => route ? authRouteCacheKey(route.pathname, route.search || '') : '';
+const provisionalRestoreKey = (authEpoch: number, evidenceEpoch: number, route: AuthBootstrapRoute | undefined) => `${authEpoch}:${evidenceEpoch}:${provisionalRouteKey(route)}`;
+const provisionalRouteIsCurrent = (routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number) => routeGeneration === provisionalRouteGeneration && isAuthEpochCurrent(authEpoch) && isClerkEvidenceEpochCurrent(evidenceEpoch) && isSessionGenerationCurrent(generation) && !getSessionLogoutInProgress() && !authBlocked && !hasPendingAccountDeletion();
+const provisionalRestoreIsCurrent = (token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number) => token === startupCacheToken && provisionalRouteIsCurrent(routeGeneration, authEpoch, evidenceEpoch, generation);
+const seedProvisionalResource = <T>(key: string, userId: string, data: T, fetchedAt: number, token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number) => {
+  if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return false;
+  const current = getResourceSnapshot<T>(key, userId);
+  // A route hydrator, a mutation invalidation, or another request may have
+  // touched this entry while the bounded startup read was pending. Never let
+  // the late startup copy replace that newer state.
+  if (current.data !== undefined || current.status !== 'idle' || current.stale || current.error) return false;
+  seedResource(key, userId, data, fetchedAt, { offline: true });
+  return true;
+};
+
+/** Restore only the active route's persisted resources. This runs before the
+ * private tree is mounted so the first private render can use the same
+ * account-scoped keys and hydrators as a normal route visit. */
+async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrapRoute | undefined, token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number): Promise<boolean> {
+  if (!route) return provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation);
+  if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return false;
+  const pathname = route.pathname || '/';
+  const search = new URLSearchParams(route.search || '');
+  const groupMatch = pathname.match(/^\/groups\/([^/]+)/);
+  const decodeRoutePart = (value: string) => { try { return decodeURIComponent(value); } catch { return value; } };
+  const groupId = groupMatch ? decodeRoutePart(groupMatch[1]) : search.get('group') || undefined;
+  const snapshot = async (id: string) => cacheRead(() => readGroupSnapshot(userId, id));
+  const resourceReady = (key: string) => getResourceSnapshot(key, userId).data !== undefined;
+  const seedGroup = async (id: string, resources: Array<'group' | 'balances' | 'expenses' | 'settlements' | 'transactions'>) => {
+    const cached = await snapshot(id);
+    if (!cached || !provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return cached;
+    const timestamp = cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt);
+    if (resources.includes('group') && cached.group && cached.members) seedProvisionalResource(resourceKeys.group(userId, id), userId, { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) }, timestamp, token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    const resourceTimestamp = (resource: keyof NonNullable<GroupSnapshot['cachedAtByResource']>) => cacheTimestamp(cached.cachedAtByResource?.[resource] || cached.cachedAt);
+    if (resources.includes('balances') && cached.balances) seedProvisionalResource(resourceKeys.balances(userId, id), userId, { balances: cached.balances }, resourceTimestamp('balances'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    if (resources.includes('expenses') && cached.expenses) seedProvisionalResource(resourceKeys.expenses(userId, id), userId, { expenses: cached.expenses }, resourceTimestamp('expenses'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    if (resources.includes('settlements') && cached.settlements) seedProvisionalResource(resourceKeys.settlements(userId, id), userId, { settlements: cached.settlements }, resourceTimestamp('settlements'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    if (resources.includes('transactions') && cached.transactions) seedProvisionalResource(resourceKeys.transactions(userId, id, 'overview'), userId, { transactions: cached.transactions.slice(0, 5), nextCursor: cached.transactionsNextCursor }, resourceTimestamp('transactions'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    return cached;
+  };
+  const seedHome = async () => {
+    const cached = await cacheRead(() => readGroups(userId));
+    if (cached) seedProvisionalResource(resourceKeys.groups(userId), userId, { groups: cached.groups }, cacheTimestamp(cached.cachedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    return cached;
+  };
+  const seedActivity = async (id: string) => {
+    const cached = await cacheRead(() => readActivity(userId, id));
+    if (cached) seedProvisionalResource(resourceKeys.activity(userId, id), userId, { activity: cached.activity }, cacheTimestamp(cached.fetchedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    return cached;
+  };
+  const seedCategories = async () => {
+    const cached = await cacheRead(() => readCategories(userId));
+    if (cached) seedProvisionalResource(resourceKeys.categories(userId), userId, { categories: cached.categories }, cacheTimestamp(cached.fetchedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    };
+  const seedExpenseDetail = async (expenseId: string) => {
+    const cached = await cacheRead(() => readExpenseDetails(userId, expenseId));
+    if (!cached) return undefined;
+    seedProvisionalResource(resourceKeys.expenseDetail(userId, expenseId), userId, { expense: cached.expense, history: cached.history }, cacheTimestamp(cached.fetchedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    return cached.expense.groupId;
+  };
+
+  if (pathname === '/settings') return true;
+  if (pathname === '/') {
+    const cached = await seedHome();
+    return Boolean(cached && resourceReady(resourceKeys.groups(userId)));
+  }
+  if (pathname === '/activity' || (groupId && pathname.endsWith('/activity'))) {
+    const activityId = groupId || 'all';
+    const cached = await seedActivity(activityId);
+    return Boolean(cached && resourceReady(resourceKeys.activity(userId, activityId)));
+  }
+  if (groupId && (pathname === `/groups/${groupId}` || pathname === `/groups/${encodeURIComponent(groupId)}`)) {
+    const cached = await seedGroup(groupId, ['group', 'balances', 'transactions']);
+    return Boolean(cached?.group && cached.members && cached.balances !== undefined && cached.transactions !== undefined
+      && resourceReady(resourceKeys.group(userId, groupId))
+      && resourceReady(resourceKeys.balances(userId, groupId))
+      && resourceReady(resourceKeys.transactions(userId, groupId, 'overview')));
+  }
+  if (groupId && pathname.endsWith('/manage')) {
+    const cached = await seedGroup(groupId, ['group']);
+    return Boolean(cached?.group && cached.members && resourceReady(resourceKeys.group(userId, groupId)));
+  }
+  if (groupId && pathname.endsWith('/transactions')) {
+    const filters = readTransactionFilters(search);
+    const cached = await seedGroup(groupId, ['group']);
+    if (hasTransactionFilters(filters) || !cached?.group || !cached.members || cached.transactions === undefined || !isSufficientTransactionHistoryPage(cached.transactionsLimit)) return false;
+    seedProvisionalResource(resourceKeys.transactions(userId, groupId, transactionFilterKey(filters)), userId, { transactions: cached.transactions, nextCursor: cached.transactionsNextCursor }, cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    await seedCategories();
+    return resourceReady(resourceKeys.group(userId, groupId)) && resourceReady(resourceKeys.transactions(userId, groupId, transactionFilterKey(filters)));
+  }
+  if (groupId && pathname.endsWith('/settle')) {
+    const cached = await seedGroup(groupId, ['group', 'balances']);
+    return Boolean(cached?.group && cached.members && cached.balances && resourceReady(resourceKeys.group(userId, groupId)) && resourceReady(resourceKeys.balances(userId, groupId)));
+  }
+  const editMatch = pathname.match(/\/expense\/([^/]+)$/);
+  if (editMatch && editMatch[1] !== 'new') {
+    await seedHome(); await seedCategories();
+    const detailGroupId = await seedExpenseDetail(decodeRoutePart(editMatch[1]));
+    const cachedGroup = groupId || detailGroupId ? await seedGroup(groupId || detailGroupId!, ['group']) : undefined;
+    return Boolean(detailGroupId && cachedGroup?.group && cachedGroup.members && resourceReady(resourceKeys.expenseDetail(userId, decodeRoutePart(editMatch[1]))) && resourceReady(resourceKeys.group(userId, groupId || detailGroupId)));
+  }
+  const detailMatch = pathname.match(/\/expenses\/([^/]+)$/);
+  if (detailMatch) {
+    const detailGroupId = await seedExpenseDetail(decodeRoutePart(detailMatch[1]));
+    const cachedGroup = detailGroupId ? await seedGroup(detailGroupId, ['group']) : undefined;
+    return Boolean(detailGroupId && cachedGroup?.group && cachedGroup.members && resourceReady(resourceKeys.expenseDetail(userId, decodeRoutePart(detailMatch[1]))) && resourceReady(resourceKeys.group(userId, detailGroupId)));
+  }
+  if (pathname.includes('/scheduled-expense/')) {
+    await seedHome();
+    const cached = groupId ? await seedGroup(groupId, ['group']) : undefined;
+    return pathname.endsWith('/new') && Boolean(cached?.group && cached.members && resourceReady(resourceKeys.group(userId, groupId!)));
+  }
+  if (pathname.includes('/expense/') || pathname === '/expense/new') {
+    const groups = await seedHome(); await seedCategories();
+    const cached = groupId ? await seedGroup(groupId, ['group']) : undefined;
+    if (groupId) return Boolean(cached?.group && cached.members && resourceReady(resourceKeys.group(userId, groupId)));
+    return Boolean(groups && resourceReady(resourceKeys.groups(userId)));
+  }
+  // Unknown private routes must fail closed. A future route should opt into
+  // provisional startup with an explicit cache contract rather than silently
+  // mounting its private tree without restored essential data.
+  return false;
+}
+
+const activateProvisionalOffline = async (trust: OfflineTrustRecord, expectedEvidenceEpoch: number, route: AuthBootstrapRoute | undefined, authEpoch: number, token: number, routeGeneration: number, generation: number) => {
+  if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || !isOfflineTrustUsable(trust) || !cachedTrustMatches(clerkEvidence.userId, trust) || authLifecycle.status === 'authenticated') return authLifecycle;
+  const user = { id: trust.userId, email: trust.email, personId: trust.personId };
+  verifiedIdentity = user;
+  verifiedClerkUserId = trust.clerkUserId;
+  clerkUserIdHydrated = true;
+  setResourceIdentity(user.id);
+  seedResource('identity', '', { ...offline(user), authoritative: false }, Date.now(), { offline: true });
+  clearAuthRequired();
+  const restored = await deadline(
+    restoreProvisionalRouteCache(user.id, route, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation).then((ready) => ({ ready })),
+    2_000,
+    () => { if (token === startupCacheToken) startupCacheToken += 1; return { ready: false, timedOut: true }; },
+  );
+  if (!provisionalRouteIsCurrent(routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline') return authLifecycle;
+  setAuthLifecycle({ status: 'provisional', privateCacheAvailable: restored.ready, ...(route ? { privateCacheRouteKey: provisionalRouteKey(route) } : {}) });
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) signalOffline();
+  return authLifecycle;
+};
+
+const startProvisionalRestore = (route: AuthBootstrapRoute | undefined, authEpoch: number, evidenceEpoch: number, force = false) => {
+  const restoringProvisionalRoute = authLifecycle.status === 'provisional' || authLifecycle.status === 'trusted-offline' || authLifecycle.status === 'restoring' || authLifecycle.status === 'reverifying' || authLifecycle.status === 'checking';
+  const hasRouteContract = Boolean(route || provisionalRestoreRequest?.route);
+  if (isDevelopmentAuthBypass || (verifiedIdentity && (!restoringProvisionalRoute || !hasRouteContract)) || authBlocked || getSessionLogoutInProgress() || hasPendingAccountDeletion()) return Promise.resolve(authLifecycle);
+  const effectiveRoute = route || provisionalRestoreRequest?.route;
+  const key = provisionalRestoreKey(authEpoch, evidenceEpoch, effectiveRoute);
+  if (provisionalRestoreRequest?.key === key && !force) return provisionalRestoreRequest.promise;
+  if (provisionalRestoreRequest) startupCacheToken += 1;
+  if (effectiveRoute && authLifecycle.status !== 'authenticated') setAuthLifecycle({ ...authLifecycle, privateCacheAvailable: undefined, privateCacheRouteKey: provisionalRouteKey(effectiveRoute) });
+  const token = startupCacheToken;
+  const routeGeneration = ++provisionalRouteGeneration;
+  const generation = captureSessionGeneration();
+  const request = (async () => {
+    const trustRead = await boundedTrustRead();
+    if (trustRead.timedOut || !trustRead.record || !isOfflineTrustUsable(trustRead.record) || !cachedTrustMatches(clerkEvidence.userId, trustRead.record)) {
+      if (trustRead.record && clerkEvidence.userId && trustRead.record.clerkUserId !== clerkEvidence.userId) requestTrustRevocation();
+      return authLifecycle;
+    }
+    return activateProvisionalOffline(trustRead.record, evidenceEpoch, effectiveRoute, authEpoch, token, routeGeneration, generation);
+  })().catch(() => authLifecycle);
+  provisionalRestoreRequest = { key, route: effectiveRoute, routeGeneration, promise: request };
+  return request;
+};
+
+const settleClerkRestorationDeadline = async (expectedEvidenceEpoch: number, route?: AuthBootstrapRoute) => {
   if (!isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) return authLifecycle;
   if ((clerkEvidence.isLoaded && !isIncompleteSignedInEvidence(clerkEvidence)) || isDevelopmentAuthBypass) return authLifecycle;
   const trustRead = await boundedTrustRead();
@@ -729,21 +950,21 @@ const settleClerkRestorationDeadline = async (expectedEvidenceEpoch: number) => 
     requestTrustRevocation();
     await ensureTrustRevoked();
     if (!isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) return authLifecycle;
-    setVerificationUnavailable(new ApiError('The current Clerk account differs from the retained account. Complete verification before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }));
+    setVerificationUnavailable(new ApiError('The current Clerk account differs from the retained account. Complete verification before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }), route);
     return authLifecycle;
   }
-  if (!trustRead.timedOut && trustRead.record && isOfflineTrustUsable(trustRead.record) && !getSessionLogoutInProgress() && !authBlocked) {
-    return activateTrustedOffline(trustRead.record, expectedEvidenceEpoch);
+  if (!trustRead.timedOut && trustRead.record && isOfflineTrustUsable(trustRead.record) && !getSessionLogoutInProgress() && !hasPendingAccountDeletion() && !authBlocked) {
+    return activateTrustedOffline(trustRead.record, expectedEvidenceEpoch, route || provisionalRestoreRequest?.route);
   }
   if (!isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) return authLifecycle;
-  setVerificationUnavailable(new ApiError('Clerk did not finish restoring before the verification deadline. Retry verification.', { code: 'VERIFICATION_TIMEOUT', networkFailure: true }));
+  setVerificationUnavailable(new ApiError('Clerk did not finish restoring before the verification deadline. Retry verification.', { code: 'VERIFICATION_TIMEOUT', networkFailure: true }), route);
   scheduleClerkRestorationRetry(expectedEvidenceEpoch);
   return authLifecycle;
 };
 
 const clerkEvidenceKey = (evidence: ClerkAuthEvidence) => `${evidence.isLoaded}:${evidence.isSignedIn}:${evidence.userId || ''}:${evidence.sessionId || ''}`;
 
-const startClerkRestorationDeadline = (timeoutMs = AUTH_BOOTSTRAP_DEADLINE_MS, expectedEvidenceEpoch = clerkEvidenceEpoch) => {
+const startClerkRestorationDeadline = (timeoutMs = AUTH_BOOTSTRAP_DEADLINE_MS, expectedEvidenceEpoch = clerkEvidenceEpoch, route?: AuthBootstrapRoute) => {
   if (clerkRestorationPromise) return clerkRestorationPromise;
   let promise!: Promise<AuthLifecycle>;
   let resolvePromise!: (value: AuthLifecycle) => void;
@@ -753,7 +974,7 @@ const startClerkRestorationDeadline = (timeoutMs = AUTH_BOOTSTRAP_DEADLINE_MS, e
     clerkRestorationTimer = setTimeout(() => {
       clerkRestorationTimer = undefined;
       if (isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) clerkRestorationSettledKey = clerkEvidenceKey(clerkEvidence);
-      void settleClerkRestorationDeadline(expectedEvidenceEpoch).then((result) => {
+      void settleClerkRestorationDeadline(expectedEvidenceEpoch, route).then((result) => {
         if (clerkRestorationPromise !== promise) return;
         if (isClerkEvidenceEpochCurrent(expectedEvidenceEpoch)) clerkRestorationSettledKey = clerkEvidenceKey(clerkEvidence);
         clerkRestorationPromise = undefined;
@@ -794,7 +1015,7 @@ const cancelClerkRestorationDeadline = () => {
  * paths. Clerk restoration gets a real deadline; no network auth probe is
  * permitted before Clerk has supplied its final state.
  */
-function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { networkOnly?: boolean; startupFallbackMs?: number; force?: boolean } = {}) {
+function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { networkOnly?: boolean; startupFallbackMs?: number; force?: boolean; route?: AuthBootstrapRoute } = {}) {
   const nextEvidence = { ...evidence, userId: evidence.userId || undefined, sessionId: evidence.sessionId || undefined };
   const evidenceChanged = clerkEvidenceKnown && clerkEvidenceKey(clerkEvidence) !== clerkEvidenceKey(nextEvidence);
   if (evidenceChanged) {
@@ -835,6 +1056,7 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
   const evidenceEpoch = clerkEvidenceEpoch;
   const evidenceIncomplete = !clerkEvidence.isLoaded || isIncompleteSignedInEvidence(clerkEvidence);
   if (evidenceIncomplete && !isDevelopmentAuthBypass) {
+    void startProvisionalRestore(options.route, getAuthEpoch(), evidenceEpoch, options.force);
     if (clerkRestorationSettledKey === clerkEvidenceKey(clerkEvidence) && !options.force) return Promise.resolve(authLifecycle);
     if (options.force) { clerkRestorationSettledKey = undefined; clerkRestorationRetryAttempts = 0; if (clerkRestorationRetryTimer) { clearTimeout(clerkRestorationRetryTimer); clerkRestorationRetryTimer = undefined; } }
     // Incomplete evidence is retryable provider restoration. A retained
@@ -842,7 +1064,7 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
     // provider supplies complete evidence or trusted offline fallback wins.
     if (isIncompleteSignedInEvidence(clerkEvidence) && !hasRetainedPrivateSession()) setAuthLifecycle({ status: 'checking' });
     else if (authLifecycle.status !== 'trusted-offline' && hasRetainedPrivateSession()) setAuthLifecycle({ status: 'restoring' });
-    return startClerkRestorationDeadline(options.startupFallbackMs, evidenceEpoch);
+    return startClerkRestorationDeadline(options.startupFallbackMs, evidenceEpoch, options.route);
   }
   clerkRestorationSettledKey = undefined;
   clerkRestorationRetryAttempts = 0;
@@ -855,15 +1077,16 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
     return Promise.resolve(authLifecycle);
   }
   if (clerkEvidence.isLoaded && clerkEvidence.isSignedIn !== true && !isDevelopmentAuthBypass) {
-    setVerificationUnavailable(new ApiError('Clerk loaded without a usable signed-in identity.', { code: 'VERIFICATION_UNAVAILABLE' }));
+    setVerificationUnavailable(new ApiError('Clerk loaded without a usable signed-in identity.', { code: 'VERIFICATION_UNAVAILABLE' }), options.route);
     resolveDeadline?.(authLifecycle);
     return Promise.resolve(authLifecycle);
   }
   if (!isDevelopmentAuthBypass && !clerkEvidence.userId) {
-    setVerificationUnavailable(new ApiError('The current Clerk identity is unavailable for verification.', { code: 'VERIFICATION_UNAVAILABLE' }));
+    setVerificationUnavailable(new ApiError('The current Clerk identity is unavailable for verification.', { code: 'VERIFICATION_UNAVAILABLE' }), options.route);
     resolveDeadline?.(authLifecycle);
     return Promise.resolve(authLifecycle);
   }
+  void startProvisionalRestore(options.route, getAuthEpoch(), evidenceEpoch, options.force);
   const request = initializeAuthLifecycle({
     ...options,
     clerkLoaded: true,
@@ -875,27 +1098,33 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
   return request;
 }
 
-export function coordinateAuthBootstrap(evidence: ClerkAuthEvidence, options: { networkOnly?: boolean; startupFallbackMs?: number; force?: boolean } = {}) {
+export function coordinateAuthBootstrap(evidence: ClerkAuthEvidence, options: { networkOnly?: boolean; startupFallbackMs?: number; force?: boolean; route?: AuthBootstrapRoute } = {}) {
   // The React effect and connectivity listeners can observe the same
   // transition in either order. Claim a scheduled intent before doing any
   // work so a fast App bootstrap also settles the scheduler's waiters instead
   // of leaving its 50ms timer around to issue a second /me.
+  if (options.route) activeAuthRoute = { pathname: options.route.pathname, search: options.route.search || '' };
+  const route = options.route || activeAuthRoute;
   const intent = claimAuthVerificationIntent();
-  const mergedOptions = intent?.networkOnly ? { ...options, networkOnly: true } : options;
+  const routeOptions = route ? { ...options, route } : options;
+  const mergedOptions = intent?.networkOnly ? { ...routeOptions, networkOnly: true } : routeOptions;
   const request = coordinateAuthBootstrapImpl(evidence, mergedOptions);
   if (intent) void request.then((result) => intent.waiters.forEach((waiter) => waiter(result)), () => intent.waiters.forEach((waiter) => waiter(authLifecycle)));
   return request;
 }
 
 export const getClerkAuthEvidence = () => clerkEvidence;
-export function requestAuthProbe(options: { networkOnly?: boolean; startupFallbackMs?: number } = {}) {
+export function requestAuthProbe(options: { networkOnly?: boolean; startupFallbackMs?: number; route?: AuthBootstrapRoute } = {}) {
   if (!clerkEvidenceKnown) return Promise.resolve(authLifecycle);
-  return coordinateAuthBootstrap(clerkEvidence, options);
+  const route = options.route || activeAuthRoute;
+  return coordinateAuthBootstrap(clerkEvidence, route ? { ...options, route } : options);
 }
 
 /** Queue foreground/connectivity auth intent in one place. */
-export function scheduleAuthVerification(options: { networkOnly?: boolean; startupFallbackMs?: number } = {}) {
+export function scheduleAuthVerification(options: { networkOnly?: boolean; startupFallbackMs?: number; route?: AuthBootstrapRoute } = {}) {
   if (authLifecycle.status === 'unauthenticated' || authLifecycle.status === 'verification-unavailable' || (clerkEvidenceKnown && clerkEvidence.isLoaded && clerkEvidence.isSignedIn === false)) return Promise.resolve(authLifecycle);
+  if (options.route) activeAuthRoute = { pathname: options.route.pathname, search: options.route.search || '' };
+  const route = options.route || activeAuthRoute;
   authIntentNetworkOnly ||= options.networkOnly === true;
   if (authIntentTimer) clearTimeout(authIntentTimer);
   return new Promise<AuthLifecycle>((resolve) => {
@@ -906,7 +1135,7 @@ export function scheduleAuthVerification(options: { networkOnly?: boolean; start
       authIntentNetworkOnly = false;
       const waiters = [...authIntentWaiters];
       authIntentWaiters.clear();
-      void requestAuthProbe({ startupFallbackMs: options.startupFallbackMs, ...(networkOnly ? { networkOnly: true } : {}) }).then((result) => waiters.forEach((waiter) => waiter(result)), () => waiters.forEach((waiter) => waiter(authLifecycle)));
+      void requestAuthProbe({ startupFallbackMs: options.startupFallbackMs, ...(networkOnly ? { networkOnly: true } : {}), ...(route ? { route } : {}) }).then((result) => waiters.forEach((waiter) => waiter(result)), () => waiters.forEach((waiter) => waiter(authLifecycle)));
     }, 50);
   });
 }
@@ -931,7 +1160,7 @@ const awaitWithAbort = <T>(promise: Promise<T>, signal?: AbortSignal) => {
   });
 };
 
-export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string; expectedUserId?: string; expectedAuthEpoch?: number; expectedClerkEvidenceEpoch?: number; startupFallbackMs?: number; deferConnectionFailure?: boolean } = {}): Promise<CachedResult<CurrentUser>> {
+export async function getMe(options: { networkOnly?: boolean; signal?: AbortSignal; clerkUserId?: string; expectedUserId?: string; expectedAuthEpoch?: number; expectedClerkEvidenceEpoch?: number; startupFallbackMs?: number; deferConnectionFailure?: boolean; preserveAuthenticatedOnProtocolFailure?: boolean; route?: AuthBootstrapRoute } = {}): Promise<CachedResult<CurrentUser>> {
   if (clerkEvidenceKnown && (!clerkEvidence.isLoaded || isIncompleteSignedInEvidence(clerkEvidence)) && !isDevelopmentAuthBypass) {
     throw new ApiError('Clerk is still restoring; authoritative verification has not started.', { code: 'CLERK_LOADING', networkFailure: true });
   }
@@ -985,6 +1214,12 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       assertAuthEvidence(authGeneration, evidenceGeneration);
       assertRequestGeneration(generation);
       if (getSessionLogoutInProgress()) clearSessionLogout(generation);
+      // A pending provisional route read may still be inside IndexedDB after
+      // /me wins. Fence it before publishing the authoritative session so it
+      // cannot seed over the refresh that follows authentication.
+      startupCacheToken += 1;
+      provisionalRouteGeneration += 1;
+      provisionalRestoreRequest = undefined;
       verifiedIdentity = user;
       setResourceIdentity(user.id);
       seedResource('identity', '', user, Date.now(), { offline: false });
@@ -1003,6 +1238,10 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       if (authGeneration !== authInvalidationGeneration || !isClerkEvidenceEpochCurrent(evidenceGeneration) || getSessionLogoutInProgress() || authBlocked || !isSessionGenerationCurrent(generation)) throw error;
       const offlineCacheAllowed = cached && isOfflineTrustUsable(cached) && cachedTrustMatches(options.clerkUserId, cached);
       if (offlineCacheAllowed) {
+        if (options.route) {
+          await activateTrustedOffline(cached, evidenceGeneration, options.route);
+          return { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
+        }
         const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId }), authoritative: false };
         assertAuthEvidence(authGeneration, evidenceGeneration);
         verifiedIdentity = { id: cached.userId, email: cached.email, personId: cached.personId };
@@ -1010,7 +1249,11 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
         clerkUserIdHydrated = true;
         setResourceIdentity(cached.userId);
         seedResource('identity', '', result, Date.now(), { offline: true });
-        setAuthLifecycle({ status: 'trusted-offline' });
+        // A foreground revalidation of an already authenticated session may
+        // lose transport without losing its verified live identity. Preserve
+        // that lifecycle; cold/retained startup still promotes to trust.
+        if (options.preserveAuthenticatedOnProtocolFailure && error instanceof ApiError && error.code === 'PROTOCOL_ERROR') setAuthLifecycle({ status: 'authenticated' });
+        else if (authLifecycle.status !== 'authenticated') setAuthLifecycle({ status: 'trusted-offline' });
         if (browserOffline) signalOffline(); else signalReconnectRequired();
         return result;
       }
@@ -1029,7 +1272,7 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
   return await awaitWithAbort(tracked, options.signal);
 }
 
-export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number; clerkLoaded?: boolean; signedIn?: boolean; clerkEvidenceEpoch?: number } = {}): Promise<AuthLifecycle> {
+export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number; clerkLoaded?: boolean; signedIn?: boolean; clerkEvidenceEpoch?: number; route?: AuthBootstrapRoute } = {}): Promise<AuthLifecycle> {
   // Keep this lower-level helper safe for recovery callers too. Direct local
   // test/dev callers may supply a Clerk ID, but production callers with no
   // provider evidence must go through coordinateAuthBootstrap.
@@ -1046,7 +1289,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
   const providerRestoring = !isDevelopmentAuthBypass && (options.clerkLoaded === false || (clerkEvidenceKnown && !clerkEvidence.isLoaded));
   if (providerRestoring) {
     if (clerkEvidenceKnown && clerkRestorationSettledKey === clerkEvidenceKey(clerkEvidence)) return authLifecycle;
-    return startClerkRestorationDeadline(options.startupFallbackMs, options.clerkEvidenceEpoch ?? clerkEvidenceEpoch);
+    return startClerkRestorationDeadline(options.startupFallbackMs, options.clerkEvidenceEpoch ?? clerkEvidenceEpoch, options.route);
   }
   if (!isDevelopmentAuthBypass && options.clerkLoaded === true && options.signedIn === false) { markSignedOut(); return authLifecycle; }
   // This is deliberately captured before any await. Clerk transitions and
@@ -1055,14 +1298,14 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
   const evidenceEpoch = options.clerkEvidenceEpoch ?? clerkEvidenceEpoch;
   // A foreground hint and the React Clerk effect must share one probe. The
   // networkOnly bit changes the optimization, not the request identity.
-  const key = `${authEpoch}:${options.clerkUserId || ''}`;
+  const key = `${authEpoch}:${options.clerkUserId || ''}:${provisionalRouteKey(options.route)}`;
   if (authLifecycleRequest?.key === key) return authLifecycleRequest.promise;
   const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
   // `checking` is entered by the online transition. It must never take the
   // durable trust record fast path: only an authoritative /api/me response
   // may resolve this probe back to connected/authenticated.
   const forceReverify = options.networkOnly === true || (connectionState.status === 'checking' && browserOnline);
-  const previousUsableLifecycle = authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline' || authLifecycle.status === 'restoring' || authLifecycle.status === 'reverifying' ? authLifecycle.status : undefined;
+  const previousUsableLifecycle = authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline' || authLifecycle.status === 'provisional' || authLifecycle.status === 'restoring' || authLifecycle.status === 'reverifying' ? authLifecycle.status : undefined;
   const currentSessionMatches = Boolean(verifiedIdentity && verifiedClerkUserId && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId));
   if (options.networkOnly === true && currentSessionMatches && (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline')) setAuthLifecycle({ status: 'reverifying' });
   if ((authLifecycle.status === 'authenticated' || (authLifecycle.status === 'trusted-offline' && !browserOnline)) && !forceReverify && (options.clerkUserId === undefined || verifiedClerkUserId === options.clerkUserId)) {
@@ -1076,7 +1319,12 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
     if (!options.clerkUserId || !verifiedIdentity) return authLifecycle;
   }
   assertAuthEvidence(authEpoch, evidenceEpoch);
-  if (!currentSessionMatches) setAuthLifecycle({ status: 'checking' });
+  const requestedRouteKey = options.route ? provisionalRestoreKey(authEpoch, evidenceEpoch, options.route) : undefined;
+  const requestedRouteIsCurrent = () => !requestedRouteKey || !provisionalRestoreRequest || provisionalRestoreRequest.key === requestedRouteKey;
+  const setRouteScopedVerificationUnavailable = (error: unknown) => {
+    if (requestedRouteIsCurrent()) setVerificationUnavailable(error, options.route);
+  };
+  if (!currentSessionMatches && requestedRouteIsCurrent()) setAuthLifecycle({ status: 'checking', ...(options.route ? { privateCacheAvailable: undefined, privateCacheRouteKey: provisionalRouteKey(options.route) } : {}) });
   const request = (async () => {
     try {
       let trustRead = await boundedTrustRead();
@@ -1114,6 +1362,22 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
       // Online/unknown Clerk startup must first try the authoritative path.
       // A complete, active record is only the bounded-unavailability fallback.
       if (!browserOnline && !forceReverify && !getSessionLogoutInProgress() && !authBlocked && trust && isOfflineTrustUsable(trust) && cachedTrustMatches(options.clerkUserId, trust)) {
+        const routeKey = options.route ? provisionalRestoreKey(authEpoch, evidenceEpoch, options.route) : undefined;
+        const routeRequest = routeKey && provisionalRestoreRequest?.key === routeKey ? provisionalRestoreRequest : undefined;
+        if (options.route && routeRequest) {
+          await routeRequest.promise;
+          assertAuthEvidence(authEpoch, evidenceEpoch);
+          if (authLifecycle.status === 'provisional' || authLifecycle.status === 'trusted-offline') return authLifecycle;
+        }
+        // A route restore is authoritative for whether a provisional private
+        // tree may mount. Never fall through to the old trusted-offline fast
+        // path when this route's request is absent or has been superseded by
+        // a newer route generation.
+        if (options.route && options.route.pathname !== '/settings') {
+          if (provisionalRestoreRequest && provisionalRestoreRequest.key !== routeKey) return authLifecycle;
+          if (authLifecycle.status !== 'provisional') setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false });
+          return authLifecycle;
+        }
         signalOffline();
         assertAuthEvidence(authEpoch, evidenceEpoch);
         const user = { id: trust.userId, email: trust.email, personId: trust.personId };
@@ -1126,7 +1390,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         return authLifecycle;
       }
       const expectedUserId = currentSessionMatches ? verifiedIdentity?.id : undefined;
-      await getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, expectedClerkEvidenceEpoch: evidenceEpoch, startupFallbackMs: options.startupFallbackMs, deferConnectionFailure: true });
+      await getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, expectedClerkEvidenceEpoch: evidenceEpoch, startupFallbackMs: options.startupFallbackMs, deferConnectionFailure: true, preserveAuthenticatedOnProtocolFailure: previousUsableLifecycle === 'authenticated' && connectionState.status !== 'checking' && !options.route, route: options.route });
       assertAuthEvidence(authEpoch, evidenceEpoch);
       return authLifecycle;
     } catch (error) {
@@ -1136,7 +1400,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
       if (error instanceof ApiError && error.code === 'IDENTITY_MISMATCH') {
         assertAuthEvidence(authEpoch, evidenceEpoch);
         requestTrustRevocation();
-        setVerificationUnavailable(error);
+        setVerificationUnavailable(error, options.route);
       } else if (error instanceof ApiError && (error.status === 401 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID') && options.clerkLoaded !== true) {
         assertAuthEvidence(authEpoch, evidenceEpoch);
         setAuthLifecycle({ status: 'unauthenticated' });
@@ -1146,9 +1410,9 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         const trustRead = await boundedTrustRead();
         const trust = trustRead.timedOut ? undefined : trustRead.record;
         assertAuthEvidence(authEpoch, evidenceEpoch);
-        if (trust && isOfflineTrustUsable(trust) && cachedTrustMatches(options.clerkUserId, trust)) await activateTrustedOffline(trust, evidenceEpoch);
+        if (trust && isOfflineTrustUsable(trust) && cachedTrustMatches(options.clerkUserId, trust)) await activateTrustedOffline(trust, evidenceEpoch, options.route);
         else {
-          setVerificationUnavailable(error);
+          setRouteScopedVerificationUnavailable(error);
           if (browserOnline) signalReconnectRequired(); else signalOffline();
         }
       } else if (isRetryableConnectionError(error) && (currentSessionMatches || previousUsableLifecycle)) {
@@ -1159,11 +1423,12 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         const trustRead = await boundedTrustRead();
         assertAuthEvidence(authEpoch, evidenceEpoch);
         const trustedFallback = !trustRead.timedOut && trustRead.record && isOfflineTrustUsable(trustRead.record) && cachedTrustMatches(options.clerkUserId, trustRead.record);
-        if (previousUsableLifecycle && trustedFallback && authLifecycle.status !== previousUsableLifecycle) setAuthLifecycle({ status: previousUsableLifecycle });
-        else if (!trustedFallback) setVerificationUnavailable(error);
+        if (trustedFallback && previousUsableLifecycle === 'provisional') await activateTrustedOffline(trustRead.record!, evidenceEpoch, options.route);
+        else if (previousUsableLifecycle && trustedFallback && authLifecycle.status !== previousUsableLifecycle) setAuthLifecycle({ status: previousUsableLifecycle });
+        else if (!trustedFallback) setRouteScopedVerificationUnavailable(error);
       } else if (authLifecycle.status !== 'unauthenticated') {
          assertAuthEvidence(authEpoch, evidenceEpoch);
-        setAuthLifecycle({ status: 'verification-unavailable', error });
+         setRouteScopedVerificationUnavailable(error);
       }
       return authLifecycle;
     }
@@ -1412,10 +1677,28 @@ export async function getSettlementPage(groupId: string, options: { limit?: numb
 }
 
 export type TransactionPageOptions = TransactionFilters & { limit?: number; cursor?: string };
-export async function getTransactionPage(groupId: string, options: TransactionPageOptions = {}, signal?: AbortSignal): Promise<TransactionPage> {
+export async function getTransactionPage(groupId: string, options: TransactionPageOptions = {}, signal?: AbortSignal): Promise<CachedResult<TransactionPage>> {
+  const generation = captureSessionGeneration();
+  const authEpoch = getAuthEpoch();
+  const expectedUserId = getVerifiedUserId();
   const query = new URLSearchParams(pageParams({ limit: options.limit ?? 25, cursor: options.cursor }));
   for (const [key, value] of transactionFilterQuery(options).entries()) query.set(key, value);
-  try { return (await apiWithMeta<TransactionPage>(`/groups/${groupId}/transactions?${query}`, { signal })).data; }
+  try {
+    const result = await apiWithMeta<TransactionPage>(`/groups/${groupId}/transactions?${query}`, { signal });
+    assertRequestGeneration(generation);
+    if (!isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
+    if (result.userId && expectedUserId && result.userId !== expectedUserId) {
+      signalAuthRequired('IDENTITY_MISMATCH');
+      throw new ApiError('The verified identity changed; cached data was not used.', { status: 401, code: 'IDENTITY_MISMATCH' });
+    }
+    const firstUnfilteredPage = options.cursor === undefined && !hasTransactionFilters(options);
+    if (result.userId && firstUnfilteredPage) {
+      const mutationGeneration = await cacheRead(() => readMutationGeneration(result.userId!)) ?? 0;
+      const persisted = await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, groupId, { transactions: result.data.transactions, transactionsNextCursor: result.data.nextCursor, transactionsLimit: options.limit ?? 25 }, mutationGeneration, generation));
+      if (persisted === false || !isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
+    }
+    return result.data;
+  }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
 
@@ -1426,7 +1709,7 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
   const authEpoch = getAuthEpoch();
   const identity = await requireIdentityForCache(signal);
   const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
-  const limit = 25;
+  const limit = TRANSACTION_HISTORY_PAGE_LIMIT;
   const filtered = hasTransactionFilters(filters);
   const query = new URLSearchParams({ limit: String(limit) });
   for (const [key, value] of transactionFilterQuery(filters).entries()) query.set(key, value);
@@ -1447,7 +1730,7 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
     if (!isNetwork(error) || !identity) throw error;
     if (filtered) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, groupId));
-    if (cached?.transactions && (cached.transactionsLimit === undefined || cached.transactionsLimit === limit)) return offline({ transactions: cached.transactions, nextCursor: cached.transactionsNextCursor });
+    if (cached?.transactions && isSufficientTransactionHistoryPage(cached.transactionsLimit)) return offline({ transactions: cached.transactions, nextCursor: cached.transactionsNextCursor });
     throw error;
   }
 }
@@ -1658,7 +1941,14 @@ export async function hydrateSettlements(userId: string, id: string) {
 }
 export async function hydrateTransactions(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
-  return cached?.transactions ? { data: { transactions: cached.transactions, nextCursor: cached.transactionsNextCursor }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), offline: true } : undefined;
+  return cached?.transactions && isSufficientTransactionHistoryPage(cached.transactionsLimit) ? { data: { transactions: cached.transactions, nextCursor: cached.transactionsNextCursor }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), offline: true } : undefined;
+}
+/** The overview has its own exact resource key and only renders five rows.
+ * Keep it separate from the full history hydrator so the overview can use the
+ * same persisted group snapshot without inventing a second cache format. */
+export async function hydrateTransactionOverview(userId: string, id: string) {
+  const cached = await cacheRead(() => readGroupSnapshot(userId, id));
+  return cached?.transactions ? { data: { transactions: cached.transactions.slice(0, 5), nextCursor: cached.transactionsNextCursor }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateActivity(userId: string, id: string) {
   const cached = await cacheRead(() => readActivity(userId, id));
@@ -1677,5 +1967,6 @@ export async function hydrateExpenseDetails(userId: string, id: string) {
   return cached ? { data: { expense: cached.expense, history: cached.history }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
 }
 
-if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => { verifiedIdentity = undefined; verifiedClerkUserId = undefined; clerkUserIdHydrated = true; });
+if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => { startupCacheToken += 1; verifiedIdentity = undefined; verifiedClerkUserId = undefined; clerkUserIdHydrated = true; });
+if (typeof window !== 'undefined') window.addEventListener('billsplit-resource-invalidated', () => { startupCacheToken += 1; });
 subscribeSessionLogout((generation) => { void clearEverythingForLogout(false, generation); });

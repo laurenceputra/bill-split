@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -568,6 +568,39 @@ describe('frontend API errors and cache fallback', () => {
     clearSessionLogout();
   });
 
+  it.each(['html', 'redirect'])('treats a %s /me response as verification transport failure, not logout', async (kind) => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    await saveOfflineTrust({ userId: 'portal-user', email: 'portal@example.com', personId: 'portal-person', clerkUserId: 'clerk-stable', verifiedAt: new Date().toISOString() });
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const response = kind === 'html'
+        ? new Response('<html><body>Sign in to Wi-Fi</body></html>', { status: 503, headers: { 'Content-Type': 'text/html' } })
+        : new Response('<html><body>Sign in to Wi-Fi</body></html>', { status: 200, headers: { 'Content-Type': 'text/html' } });
+      if (kind === 'redirect') Object.defineProperty(response, 'redirected', { value: true });
+      return response;
+    }));
+
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-stable', sessionId: 'session-portal' }, { networkOnly: true })).resolves.toMatchObject({ status: 'trusted-offline' });
+    expect(getAuthState().required).toBe(false);
+  });
+
+  it('fails closed instead of using trust when a protocol failure follows a Clerk account change', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    await saveOfflineTrust({ userId: 'old-portal-user', email: 'old@example.com', personId: 'old-person', clerkUserId: 'clerk-old-portal', verifiedAt: new Date().toISOString() });
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html><body>Sign in to Wi-Fi</body></html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
+
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-new-portal', sessionId: 'session-new-portal' }, { networkOnly: true })).resolves.toMatchObject({ status: 'verification-unavailable' });
+    expect(getAuthLifecycle().status).toBe('verification-unavailable');
+    expect((await readOfflineTrust())?.state).toBe('revoked');
+    recoverAfterClerkSignOutFailure();
+    clearSessionLogout();
+  });
+
   it('authoritatively revalidates an authenticated session entering checking and settles after a failed probe', async () => {
     resetForClerkSessionChange();
     clearSessionLogout();
@@ -724,6 +757,53 @@ describe('frontend API errors and cache fallback', () => {
     await expect(getTransactions('group-a', undefined, { q: 'dinner' })).rejects.toThrow();
   });
 
+  it('persists a successful unfiltered transaction first page for overview restore', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({
+      transactions: [{ kind: 'expense', id: 'cached-transaction', groupId: 'group-a', description: 'Dinner', amountMinor: 1200, currency: 'USD', date: '2026-08-24', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-08-24T00:00:00.000Z', clientOperationId: null }],
+      nextCursor: 'next-page',
+    }, 200, 'user-a')));
+
+    const page = await getTransactionPage('group-a', { limit: 5 });
+
+    expect(page).toMatchObject({ transactions: [{ id: 'cached-transaction' }], nextCursor: 'next-page' });
+    expect(await readGroupSnapshot('user-a', 'group-a')).toMatchObject({
+      transactions: [{ id: 'cached-transaction' }],
+      transactionsNextCursor: 'next-page',
+      transactionsLimit: 5,
+    });
+  });
+
+  it('preserves a canonical history page when the overview fetches five rows afterward', async () => {
+    const transaction = (id: string) => ({ kind: 'expense', id, groupId: 'group-a', description: id, amountMinor: 100, currency: 'USD', date: '2026-08-24', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-08-24T00:00:00.000Z', clientOperationId: null });
+    const history = Array.from({ length: 25 }, (_, index) => transaction(`history-${index}`));
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      if (url.pathname.endsWith('/me')) return json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a');
+      return url.searchParams.get('limit') === '5'
+        ? json({ transactions: history.slice(0, 5), nextCursor: 'overview-next' }, 200, 'user-a')
+        : json({ transactions: history, nextCursor: 'history-next' }, 200, 'user-a');
+    }));
+
+    await getTransactions('group-a');
+    await getTransactionPage('group-a', { limit: 5 });
+
+    const snapshot = await readGroupSnapshot('user-a', 'group-a');
+    expect(snapshot?.transactions).toHaveLength(25);
+    expect(snapshot?.transactionsLimit).toBe(25);
+    expect(snapshot?.transactionsNextCursor).toBe('history-next');
+    await expect(hydrateTransactions('user-a', 'group-a')).resolves.toMatchObject({ data: { transactions: expect.arrayContaining([expect.objectContaining({ id: 'history-24' })]) } });
+  });
+
+  it('allows overview hydration from an overview-only cache without hydrating incomplete history', async () => {
+    const transactions = Array.from({ length: 5 }, (_, index) => ({ kind: 'expense', id: `overview-${index}`, groupId: 'group-a', description: `Overview ${index}`, amountMinor: 100, currency: 'USD', date: '2026-08-24', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-08-24T00:00:00.000Z', clientOperationId: null }));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ transactions, nextCursor: 'overview-next' }, 200, 'user-a')));
+
+    await getTransactionPage('group-a', { limit: 5 });
+
+    await expect(hydrateTransactionOverview('user-a', 'group-a')).resolves.toMatchObject({ data: { transactions: [{ id: 'overview-0' }, { id: 'overview-1' }, { id: 'overview-2' }, { id: 'overview-3' }, { id: 'overview-4' }] } });
+    await expect(hydrateTransactions('user-a', 'group-a')).resolves.toBeUndefined();
+  });
+
   it('removes persisted global activity and categories after an expense mutation', async () => {
     await saveGroups({ userId: 'user-a', groups: [], cachedAt: new Date().toISOString() });
     await saveActivity({ userId: 'user-a', groupId: 'all', activity: [], fetchedAt: new Date().toISOString() });
@@ -764,6 +844,7 @@ describe('frontend API errors and cache fallback', () => {
 
   it('reconciles a server expense carrying the normalized operation id', async () => {
     resetForClerkSessionChange();
+    clearSessionLogout();
     vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a', 'clerk-a')));
     await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });

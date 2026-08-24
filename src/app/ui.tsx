@@ -101,10 +101,11 @@ function AuthBanner() {
   const lifecycle = useAuthLifecycle();
   const restoring = lifecycle.status === 'restoring';
   const reverifying = lifecycle.status === 'reverifying';
+  const provisional = lifecycle.status === 'provisional';
   const trustedOffline = lifecycle.status === 'trusted-offline';
-  if (!auth.required && !restoring && !reverifying && !trustedOffline && connection.status !== 'connection-issue' && connection.status !== 'checking') return null;
-  if (restoring || reverifying || trustedOffline) {
-    const message = restoring ? 'Restoring your session…' : reverifying ? 'Checking your session…' : 'Trusted offline · New expenses can be saved on this device and will sync after verification.';
+  if (!auth.required && !restoring && !reverifying && !provisional && !trustedOffline && connection.status !== 'connection-issue' && connection.status !== 'checking') return null;
+  if (restoring || reverifying || provisional || trustedOffline) {
+    const message = restoring ? 'Restoring your session…' : reverifying ? 'Checking your session…' : provisional ? 'Showing your trusted cached data while your session is verified…' : 'Trusted offline · New expenses can be saved on this device and will sync after verification.';
     return <div className="auth-banner auth-banner--checking" role="status" aria-live="polite">{message}</div>;
   }
   const checking = !auth.required && connection.status === 'checking';
