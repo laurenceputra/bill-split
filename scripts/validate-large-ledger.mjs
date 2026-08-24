@@ -28,10 +28,12 @@ try {
   run(['d1', 'migrations', 'apply', database, '--local', '--persist-to', persist, '--config', config]);
   const statements = [
     'PRAGMA foreign_keys=ON;',
-    "INSERT INTO users(id,email,created_at,updated_at) VALUES('large-user','large-ledger.invalid','2026-01-01','2026-01-01');",
-    "INSERT INTO people(id,name,user_id,created_at) VALUES('large-person','Large ledger validator','large-user','2026-01-01');",
-    "INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('large-group','Local large-ledger validation','USD','2026-01-01','2026-01-01');",
-    "INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('large-group','large-person','large-user','2026-01-01','owner');",
+     "INSERT INTO users(id,email,created_at,updated_at) VALUES('large-user','large-ledger.invalid','2026-01-01','2026-01-01');",
+     "INSERT INTO people(id,name,user_id,created_at) VALUES('large-person','Large ledger validator','large-user','2026-01-01');",
+     "INSERT INTO people(id,name,created_at) VALUES('large-person-2','Removed ledger participant','2026-01-01');",
+     "INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('large-group','Local large-ledger validation','USD','2026-01-01','2026-01-01');",
+     "INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('large-group','large-person','large-user','2026-01-01','owner');",
+     "INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('large-group','large-person-2','2026-01-01','member');",
   ];
   for (let start = 1; start <= entries; start += 1_000) {
     const end = Math.min(entries, start + 999);
@@ -39,6 +41,7 @@ try {
     statements.push(`${sequence} INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version) SELECT printf('large-expense-%06d',n),'large-group','Validation entry',100,'USD','2026-01-01','large-user','2026-01-01','2026-01-01',1 FROM seq;`);
     statements.push(`${sequence} INSERT INTO payers(expense_id,person_id,amount_minor) SELECT printf('large-expense-%06d',n),'large-person',100 FROM seq;`);
     statements.push(`${sequence} INSERT INTO splits(expense_id,person_id,amount_minor) SELECT printf('large-expense-%06d',n),'large-person',100 FROM seq;`);
+    statements.push(`${sequence} INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,created_by,created_at,updated_at) SELECT printf('large-settlement-%06d',n),'large-group','large-person','large-person-2',1,'USD','2026-01-01','large-user','2026-01-01','2026-01-01' FROM seq;`);
   }
   statements.push("INSERT INTO ledger_totals(group_id,currency,gross_minor,updated_at) SELECT 'large-group','USD',SUM(amount_minor),'2026-01-01' FROM expenses WHERE group_id='large-group';");
   statements.push("INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('large-group','USD','large-person',0,'2026-01-01');");
@@ -48,8 +51,23 @@ try {
   const count = query("SELECT COUNT(*) AS count FROM expenses WHERE group_id='large-group';")[0]?.count;
   const page = query("SELECT id FROM expenses WHERE group_id='large-group' ORDER BY expense_date DESC,created_at DESC,id DESC LIMIT 100;").length;
   const gross = query("SELECT gross_minor FROM ledger_totals WHERE group_id='large-group' AND currency='USD';")[0]?.gross_minor;
-  if (Number(count) !== entries || page !== Math.min(entries, 100) || Number(gross) !== entries * 100) throw new Error(`Validation failed: count=${count}, page=${page}, gross_minor=${gross}`);
-  process.stdout.write(`Validated ${entries.toLocaleString()} local ledger entries: count, keyset-sized query, and gross projection passed.\n`);
+  const transactionCte = `WITH transaction_rows AS (
+    SELECT e.id,e.group_id,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,e.category,e.notes,NULL AS note,NULL AS from_person_id,NULL AS to_person_id,e.created_at,'expense' AS kind
+      FROM expenses e WHERE e.group_id='large-group' AND e.deleted_at IS NULL
+    UNION ALL
+    SELECT s.id,s.group_id,NULL,s.amount_minor,s.currency,s.settlement_date,NULL,NULL,s.note,s.from_person_id,s.to_person_id,s.created_at,'settlement' AS kind
+      FROM settlements s WHERE s.group_id='large-group' AND s.deleted_at IS NULL
+  )`;
+  const transactionSql = `${transactionCte} SELECT id,kind FROM transaction_rows ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`;
+  const continuationSql = `${transactionCte} SELECT id,kind FROM transaction_rows WHERE transaction_date='2026-01-01' AND created_at='2026-01-01' AND (kind>'expense' OR (kind='expense' AND id<'large-expense-000001')) ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`;
+  const explain = query(`EXPLAIN QUERY PLAN ${transactionSql}`);
+  const startedAt = performance.now();
+  const transactionPage = query(transactionSql);
+  const continuation = query(continuationSql);
+  const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
+  const kinds = new Set([...transactionPage, ...continuation].map((row) => row.kind));
+  if (Number(count) !== entries || page !== Math.min(entries, 100) || Number(gross) !== entries * 100 || transactionPage.length !== Math.min(entries, 101) || continuation.length !== Math.min(entries, 101) || !kinds.has('expense') || !kinds.has('settlement')) throw new Error(`Validation failed: count=${count}, page=${page}, gross_minor=${gross}, transactions=${transactionPage.length}, continuation=${continuation.length}`);
+  process.stdout.write(`Validated ${entries.toLocaleString()} expenses + ${entries.toLocaleString()} settlements: tie-heavy transaction pages=${transactionPage.length}+${continuation.length}, EXPLAIN steps=${explain.length}, elapsed=${elapsedMs}ms; count, keyset, and gross projection passed.\n`);
 } finally {
   if (!keep) await rm(persist, { recursive: true, force: true });
   else process.stdout.write(`Kept local validation state at ${persist}\n`);

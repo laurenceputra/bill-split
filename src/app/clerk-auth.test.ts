@@ -49,7 +49,7 @@ describe('Clerk authentication boundary', () => {
   it('withholds private routes while loaded signed-in Clerk evidence is incomplete', () => {
     expect(app).toContain('isIncompleteLoadedSignedInEvidence');
     expect(app).toContain('if (incompleteLoadedSignedInEvidence && auth.status !== \'verification-unavailable\')');
-    expect(api).toContain('if (isIncompleteSignedInEvidence(clerkEvidence) && authLifecycle.status !== \'checking\')');
+    expect(api).toContain('if (isIncompleteSignedInEvidence(clerkEvidence) && !hasRetainedPrivateSession())');
   });
 
   it('keeps the real-session bypass confined to the local E2E build and development Worker', () => {

@@ -57,23 +57,33 @@ test('member manage route hides owner controls but keeps export and leave action
   }
 });
 
-test('group page keeps transactions before management summaries on mobile', async ({ authenticatedPage: page }) => {
+test('group page keeps primary actions, balances, and transactions before management summaries on mobile', async ({ authenticatedPage: page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/groups/${richGroupId}`);
-  await expect(page.getByRole('heading', { name: 'Recent expenses' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Recent transactions' })).toBeVisible();
   const headings = await page.locator('main h2').allTextContents();
-  expect(headings.indexOf('Recent expenses')).toBeGreaterThanOrEqual(0);
-  expect(headings.indexOf('Balances')).toBeGreaterThanOrEqual(0);
-  expect(headings.indexOf('Recent expenses')).toBeLessThan(headings.indexOf('Balances'));
+  expect(headings.indexOf('Your balances')).toBeGreaterThanOrEqual(0);
+  expect(headings.indexOf('Recent transactions')).toBeGreaterThanOrEqual(0);
+  expect(headings.indexOf('Your balances')).toBeLessThan(headings.indexOf('Recent transactions'));
 });
 
-test('expense filter disclosure remains native and opens for URL filters', async ({ authenticatedPage: page }) => {
-  await page.goto(`/groups/${richGroupId}?expense_q=dinner`);
-  const disclosure = page.locator('section.expense-filters-disclosure > details');
+test('transaction filter disclosure remains native and opens for URL filters', async ({ authenticatedPage: page }) => {
+  await page.goto(`/groups/${richGroupId}/transactions?q=dinner`);
+  const disclosure = page.locator('details.transaction-filters-disclosure');
   await expect(disclosure).toHaveJSProperty('open', true);
   await expect(page.getByText('1 active filter')).toBeVisible();
   await disclosure.locator('summary').click();
   await expect(disclosure).toHaveJSProperty('open', false);
+});
+
+test('group overview exposes history and manage anchors', async ({ authenticatedPage: page }) => {
+  await page.goto(`/groups/${richGroupId}`);
+  await page.getByRole('link', { name: 'View all transactions' }).click();
+  await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
+  await page.getByRole('link', { name: 'Back to Europe trip' }).click();
+  await page.getByRole('link', { name: 'Manage people' }).click();
+  await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}/manage#people$`));
+  await expect(page.locator('#people')).toBeFocused();
 });
 
 test('member manage route renders an online retryable error without cached group data', async ({ browser }) => {
@@ -150,6 +160,55 @@ test('cold offline manage route does not fetch uncached owner invitations', asyn
     await expect(page.locator('#invitation-management-error')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Invite' })).toBeDisabled();
     expect(invitationRequests).toBe(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('cold offline history hydrates the scoped first page and disables server-only controls', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser);
+  const page = await context.newPage();
+  let transactionRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().includes(`/api/groups/${richGroupId}/transactions`)) transactionRequests += 1;
+  });
+  try {
+    await page.goto(`/groups/${richGroupId}/transactions`);
+    await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    await seedOfflineTrust(page);
+    await page.evaluate(() => new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('bill-split-local', 10);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const transaction = db.transaction('groupSnapshots', 'readwrite');
+        const get = transaction.objectStore('groupSnapshots').get(['00000000-0000-4000-8000-000000001001', '00000000-0000-4000-8000-000000003002']);
+        get.onsuccess = () => {
+          const snapshot = get.result;
+          snapshot.transactionsNextCursor = 'cold-next-page';
+          transaction.objectStore('groupSnapshots').put(snapshot);
+        };
+        transaction.oncomplete = () => { db.close(); resolve(); };
+        transaction.onerror = () => { db.close(); reject(transaction.error); };
+      };
+    }));
+    await page.waitForLoadState('networkidle');
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    });
+    transactionRequests = 0;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    await expect(page.getByText('Offline: showing the cached first page only. History is incomplete; filters and loading more need a connection.')).toBeVisible();
+    await expect(page.getByLabel('Search')).toBeDisabled();
+    await expect(page.locator('.transaction-filters select').first()).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Load more transactions' })).toBeDisabled();
+    expect(transactionRequests).toBe(0);
   } finally {
     await context.close();
   }

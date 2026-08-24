@@ -29,6 +29,17 @@ export interface ScheduledExpense {
   clientOperationId?: string | null; payers: Payer[]; splits: Split[];
 }
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
+/** The deliberately small row returned by the unified transaction list. */
+export interface ExpenseTransaction {
+    kind: 'expense'; id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
+    date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
+    clientOperationId?: string | null;
+}
+export interface SettlementTransaction {
+    kind: 'settlement'; id: string; groupId: string; amountMinor: number; currency: Currency; date: string;
+    note?: string | null; fromPersonId: string; toPersonId: string; fromName: string; toName: string; createdAt: string;
+}
+export type Transaction = ExpenseTransaction | SettlementTransaction;
 export type AuditAction = 'create' | 'update' | 'delete' | 'restore';
 export interface AuditEvent { id: string; groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: AuditAction; actorId: string; actorPersonId?: string; actorName: string; occurredAt: string; before?: unknown; after?: unknown }
 export interface CursorPage<T> { items: T[]; nextCursor?: string }

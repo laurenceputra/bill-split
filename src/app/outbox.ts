@@ -1,4 +1,4 @@
-import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getVerifiedUserId, requestAuthProbe, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
+import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getVerifiedUserId, hasRetainedPrivateSession, requestAuthProbe, scheduleAuthVerification, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
 import {
   claimOutboxItem, discardOutboxIfIdle, isOfflineTrustUsable, listOutbox, markOutboxAuthRequired, readOfflineTrust, readOutboxItem,
   reactivateAuthRequired, recoverStaleSyncing, releaseOutboxClaimIfOwned, removeOutboxIfOwned, resetOutboxIfIdle, saveOutboxItem, updateOutboxIfOwned,
@@ -99,7 +99,7 @@ export async function recoverConnection() {
       return;
     }
     try {
-      await requestAuthProbe({ startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
+      await requestAuthProbe({ networkOnly: true, startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
       if (getAuthLifecycle().status === 'authenticated' && isUsableConnection()) {
         connectionRecoveryAttempts = 0;
         await flushOutbox();
@@ -116,6 +116,9 @@ export async function recoverConnection() {
 }
 export async function refreshOutbox() {
   if (logoutQuiescing || getSessionLogoutInProgress()) return;
+  // Keep the matching queue visible while Clerk is waking, but never reload
+  // or send it until the lifecycle is authenticated again.
+  if ((getAuthLifecycle().status === 'restoring' || getAuthLifecycle().status === 'reverifying') && hasRetainedPrivateSession()) return;
   let next: ExpenseOutboxItem[] = [];
   const capturedEpoch = getAuthEpoch();
   try {
@@ -432,10 +435,9 @@ function resumeAfterFailedLogout() {
 registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
-  if (typeof window !== 'undefined') {
-  window.addEventListener('billsplit-connection-restored', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
-  window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void flushOutbox(); });
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void scheduleAuthVerification({ networkOnly: true }); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void scheduleAuthVerification({ networkOnly: true }); });
   window.addEventListener('billsplit-outbox-changed', () => void refreshOutbox());
   window.addEventListener('billsplit-cache-cleared', (event) => { if ((event as CustomEvent<{ clearOutbox?: boolean }>).detail?.clearOutbox) { snapshot = []; notify(); } void refreshOutbox(); });
   window.addEventListener('billsplit-authenticated', (event) => { const detail = (event as CustomEvent<{ userId?: string; authEpoch?: number }>).detail; if (detail?.userId && detail.authEpoch !== undefined && !logoutQuiescing) void handleAuthenticatedUser(detail.userId, detail.authEpoch); });
@@ -456,14 +458,15 @@ subscribeConnectionState(() => {
 subscribeAuthLifecycle(() => {
   const lifecycleStatus = getAuthLifecycle().status;
   const authenticatedUserId = currentOutboxUserId();
-  if ((lifecycleStatus === 'authenticated' && (!authenticatedUserId || snapshot.some((item) => item.userId !== authenticatedUserId))) || (lifecycleStatus !== 'authenticated' && lifecycleStatus !== 'trusted-offline')) {
+  const retainedTransition = (lifecycleStatus === 'restoring' || lifecycleStatus === 'reverifying') && hasRetainedPrivateSession();
+  if ((lifecycleStatus === 'authenticated' && (!authenticatedUserId || snapshot.some((item) => item.userId !== authenticatedUserId))) || (!retainedTransition && lifecycleStatus !== 'authenticated' && lifecycleStatus !== 'trusted-offline')) {
     if (snapshot.length) { snapshot = []; notify(); }
   }
   if (getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline') {
-    void refreshOutbox().then(() => {
-      if (!isUsableConnection()) scheduleConnectionRecovery();
-      else if (typeof document === 'undefined' || document.visibilityState === 'visible') void flushOutbox();
-    }).catch(() => scheduleConnectionRecovery());
+    // Authenticated writes start from the stable authenticated lifecycle
+    // event below.  Starting a flush from this transition as well races that
+    // event and can trigger reconnect verification twice.
+    void refreshOutbox().then(() => { if (!isUsableConnection() && getAuthLifecycle().status === 'trusted-offline') scheduleConnectionRecovery(); }).catch(() => scheduleConnectionRecovery());
     return;
   }
   flushAgain = false;

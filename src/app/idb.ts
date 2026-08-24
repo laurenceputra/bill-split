@@ -1,4 +1,4 @@
-import type { Activity, Balances, Expense, Group, GroupMember, HistoricalParticipant, Settlement } from '../shared/types';
+import type { Activity, Balances, Expense, Group, GroupMember, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
@@ -70,8 +70,11 @@ export interface GroupSnapshot {
   expenses?: Expense[];
   balances?: Record<string, Balances>;
   settlements?: Settlement[];
+  transactions?: Transaction[];
+  transactionsNextCursor?: string;
+  transactionsLimit?: number;
   cachedAt: string;
-  cachedAtByResource?: Partial<Record<'group' | 'members' | 'expenses' | 'balances' | 'settlements', string>>;
+  cachedAtByResource?: Partial<Record<'group' | 'members' | 'expenses' | 'balances' | 'settlements' | 'transactions', string>>;
 }
 
 export interface ResourceFreshness {
@@ -367,12 +370,12 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutatio
 }
 
 /** Keep the home snapshot available offline, but make it immediately stale online. */
-export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string } = {}) {
+export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
   assertSessionGeneration(generation);
   const staleAt = new Date(0).toISOString();
   const db = await open();
   await new Promise<void>((resolve, reject) => {
-    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId ? ['groupSnapshots', 'resourceFreshness', 'expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
+    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.groupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
     const tx = db.transaction(stores, 'readwrite');
     const generations = tx.objectStore('mutationGenerations');
     const current = generations.get(userId);
@@ -407,6 +410,17 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         const details = tx.objectStore('expenseDetails').getAll();
         details.onsuccess = () => { for (const row of details.result as CachedExpenseDetails[]) if (row.userId === userId && row.expense?.groupId === options.groupId) tx.objectStore('expenseDetails').delete([row.userId, row.expenseId]); };
       }
+      if (options.transactions) {
+        const snapshots = tx.objectStore('groupSnapshots').getAll();
+        snapshots.onsuccess = () => {
+          for (const row of snapshots.result as GroupSnapshot[]) {
+            if (row.userId !== userId || (options.transactionGroupId && row.groupId !== options.transactionGroupId)) continue;
+            const next = { ...row, transactions: undefined, transactionsNextCursor: undefined, transactionsLimit: undefined, cachedAtByResource: { ...row.cachedAtByResource, transactions: staleAt } };
+            tx.objectStore('groupSnapshots').put(next);
+            tx.objectStore('resourceFreshness').put({ userId, resource: 'transactions', resourceKey: `group:${row.groupId}:transactions`, fetchedAt: staleAt });
+          }
+        };
+      }
     };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -424,13 +438,46 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
     let next: GroupSnapshot;
     request.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
-      const resources = (['group', 'members', 'expenses', 'balances', 'settlements'] as const).filter((resource) => patch[resource] !== undefined);
+      const resources = (['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const).filter((resource) => patch[resource] !== undefined);
       const fetchedAt = patch.cachedAt || new Date().toISOString();
       next = { ...(request.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(request.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } };
       store.put(next);
       for (const resource of resources) tx.objectStore('resourceFreshness').put({ userId, resource, resourceKey: `group:${groupId}:${resource}`, fetchedAt });
     };
     tx.oncomplete = () => { db.close(); resolve(next); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
+
+/**
+ * Persist a response only when no mutation invalidated the resource after the
+ * request started. The generation read and snapshot write share one
+ * readwrite transaction, so an invalidation either wins before this check or
+ * runs after this write and removes the stale snapshot.
+ */
+export async function updateGroupSnapshotIfGenerationMatches(userId: string, groupId: string, patch: Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string }, mutationGeneration: number, generation = captureSessionGeneration()) {
+  if (!isSessionGenerationCurrent(generation)) return false;
+  const db = await open();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(['groupSnapshots', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
+    const currentGeneration = tx.objectStore('mutationGenerations').get(userId);
+    const snapshots = tx.objectStore('groupSnapshots');
+    let saved = false;
+    currentGeneration.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation) || ((currentGeneration.result as MutationGeneration | undefined)?.generation ?? 0) !== mutationGeneration) return;
+      const currentSnapshot = snapshots.get([userId, groupId]);
+      currentSnapshot.onsuccess = () => {
+        if (!isSessionGenerationCurrent(generation)) return;
+        const resources = (['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const).filter((resource) => patch[resource] !== undefined);
+        const fetchedAt = patch.cachedAt || new Date().toISOString();
+        const next = { ...(currentSnapshot.result as GroupSnapshot | undefined), ...patch, userId, groupId, cachedAt: fetchedAt, cachedAtByResource: { ...(currentSnapshot.result as GroupSnapshot | undefined)?.cachedAtByResource, ...Object.fromEntries(resources.map((resource) => [resource, fetchedAt])) } } satisfies GroupSnapshot;
+        snapshots.put(next);
+        for (const resource of resources) tx.objectStore('resourceFreshness').put({ userId, resource, resourceKey: `group:${groupId}:${resource}`, fetchedAt });
+        saved = true;
+      };
+    };
+    tx.oncomplete = () => { db.close(); resolve(saved); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
   });
@@ -701,7 +748,7 @@ export async function markOutboxAuthRequired(userId: string, lastError: ExpenseO
   });
 }
 
-export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Expense[], generation = captureSessionGeneration(), expectedAuthEpoch?: number) {
+export async function reconcileOutboxItems(userId: string, groupId: string, expenses: Array<Pick<Expense, 'groupId' | 'createdBy'> & { clientOperationId?: string | null }>, generation = captureSessionGeneration(), expectedAuthEpoch?: number) {
   assertSessionGeneration(generation);
   const operations = new Set(expenses.filter((expense) => expense.groupId === groupId && expense.createdBy === userId && expense.clientOperationId).map((expense) => expense.clientOperationId));
   if (!operations.size) return 0;

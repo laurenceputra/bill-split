@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, refreshVisiblePrivateResources, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
 
 afterEach(() => { setResourceAuthLifecycleReady(true); resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
@@ -127,6 +127,49 @@ describe('resource cache', () => {
     expect(calls).toBe(0);
     await revalidate('identity', 'identity', { reason: 'identity-check' });
     expect(calls).toBe(1);
+  });
+
+  it('force refreshes every visible private resource after auth without refreshing identity', async () => {
+    setResourceIdentity('user-a');
+    let identityCalls = 0;
+    let privateCalls = 0;
+    let secondPrivateCalls = 0;
+    seedResource('identity', 'identity', { id: 'user-a' });
+    configureResource('identity', 'identity', async () => { identityCalls += 1; return { id: 'user-a' }; });
+    const key = resourceKeys.groups('user-a');
+    seedResource(key, 'user-a', { version: 1 });
+    configureResource(key, 'user-a', async () => { privateCalls += 1; return { version: 2 }; });
+    const secondKey = resourceKeys.balances('user-a', 'group-1');
+    seedResource(secondKey, 'user-a', { version: 1 });
+    configureResource(secondKey, 'user-a', async () => { secondPrivateCalls += 1; return { version: 2 }; });
+    const stop = trackVisibleResource(key, 'user-a');
+    const stopSecond = trackVisibleResource(secondKey, 'user-a');
+
+    await refreshVisiblePrivateResources();
+    stop();
+    stopSecond();
+
+    expect(privateCalls).toBe(1);
+    expect(secondPrivateCalls).toBe(1);
+    expect(identityCalls).toBe(0);
+    expect(getResourceSnapshot<{ version: number }>(key, 'user-a').data?.version).toBe(2);
+  });
+
+  it('does not commit a forced private refresh after the cache identity generation changes', async () => {
+    setResourceIdentity('user-a');
+    seedResource('identity', 'identity', { id: 'user-a' });
+    const key = resourceKeys.groups('user-a');
+    seedResource(key, 'user-a', { version: 1 });
+    let resolve!: (value: { version: number }) => void;
+    configureResource(key, 'user-a', () => new Promise((done) => { resolve = done; }));
+    const stop = trackVisibleResource(key, 'user-a');
+    const refresh = refreshVisiblePrivateResources();
+    setResourceIdentity('user-b');
+    resolve({ version: 2 });
+    await refresh;
+    stop();
+
+    expect(getResourceSnapshot(key, 'user-a').data).toBeUndefined();
   });
 
   it('blocks focus revalidation until the auth lifecycle is confirmed', async () => {
@@ -263,6 +306,16 @@ describe('resource cache', () => {
     [resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].forEach((key) => seedResource(key, 'user-a', { cached: true }));
     await invalidateForMutation.settlementChanged('group-1', 'user-a');
     expect([resourceKeys.groups('user-a'), resourceKeys.settlements('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')].every((key) => getResourceSnapshot(key, 'user-a').stale)).toBe(true);
+  });
+
+  it('invalidates the unified transaction resource and filtered variants', async () => {
+    setResourceIdentity('user-a');
+    const first = resourceKeys.transactions('user-a', 'group-1');
+    const filtered = resourceKeys.transactions('user-a', 'group-1', '["expense","dinner"]');
+    [first, filtered].forEach((key) => seedResource(key, 'user-a', { cached: true }));
+    await invalidateForMutation.settlementChanged('group-1', 'user-a');
+    expect(getResourceSnapshot(first, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(filtered, 'user-a').stale).toBe(true);
   });
 
   it('invalidates every filtered expense resource for the mutated group', async () => {

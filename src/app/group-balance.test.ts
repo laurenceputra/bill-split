@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupBalanceDisplays } from './group-balance';
+import { groupBalanceDisplays, personalBalanceDisplay, personalBalances } from './group-balance';
 
 describe('home group balance formatting', () => {
   it('distinguishes unavailable legacy data, settled groups, and signed balances', () => {
@@ -25,6 +25,21 @@ describe('home group balance formatting', () => {
     ]);
     expect(groupBalanceDisplays([{ currency: 'EUR', netMinor: 0 }, { currency: 'USD', netMinor: 300 }], 'GBP')).toEqual([
       { kind: 'balance', label: 'You are owed', amountMinor: 300, currency: 'USD' },
+    ]);
+  });
+});
+
+describe('personal balance labels', () => {
+  it('uses positive raw net as owed and negative raw net as owing', () => {
+    expect(personalBalanceDisplay({ personId: 'me', name: 'Me', netMinor: 1250, currency: 'USD' }, 'USD')).toMatchObject({ label: 'You are owed', amountMinor: 1250 });
+    expect(personalBalanceDisplay({ personId: 'me', name: 'Me', netMinor: -300, currency: 'EUR' }, 'USD')).toMatchObject({ label: 'You owe', amountMinor: 300, currency: 'EUR' });
+    expect(personalBalanceDisplay({ personId: 'me', name: 'Me', netMinor: 0, currency: 'USD' }, 'USD')).toMatchObject({ label: 'Settled up' });
+  });
+
+  it('selects the current person from every currency raw balance', () => {
+    expect(personalBalances({ USD: { raw: [{ personId: 'me', name: 'Me', netMinor: 100, currency: 'USD' }] }, EUR: { raw: [{ personId: 'me', name: 'Me', netMinor: -50, currency: 'EUR' }] } }, 'me', 'USD')).toEqual([
+      { kind: 'balance', label: 'You are owed', amountMinor: 100, currency: 'USD' },
+      { kind: 'balance', label: 'You owe', amountMinor: 50, currency: 'EUR' },
     ]);
   });
 });

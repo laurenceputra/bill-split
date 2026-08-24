@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as idb from './idb';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
 import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
-import { clearEverythingForLogout, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
+import { clearEverythingForLogout, coordinateAuthBootstrap, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 import { clearSessionLogout } from './session';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
@@ -33,6 +33,25 @@ describe('durable expense outbox', () => {
     await flushOutbox();
     expect(calls).toEqual([]);
     expect(await readOutboxItem('auth-gated')).toMatchObject({ status: 'pending' });
+  });
+
+  it('keeps queued work pending while a matching Clerk session is reverified', async () => {
+    await queue('reverify-gated');
+    const calls: string[] = [];
+    let resolveMe!: (result: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      calls.push(String(request));
+      if (String(request).endsWith('/me')) return new Promise<Response>((resolve) => { resolveMe = resolve; });
+      return response({ expense: { id: 'should-not-send' } }, 201);
+    }));
+    const reverify = coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-a', sessionId: 'rotated-session' });
+    await vi.waitFor(() => expect(calls.some((url) => url.endsWith('/me'))).toBe(true));
+    expect(getAuthLifecycle().status).toBe('reverifying');
+    await flushOutbox();
+    expect(calls.filter((url) => url.includes('/expenses'))).toEqual([]);
+    expect((await readOutboxItem('reverify-gated'))?.status).toBe('pending');
+    resolveMe(response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200));
+    await reverify;
   });
 
   it('persists before sending and removes only after success, replaying the exact operation', async () => {

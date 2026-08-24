@@ -4,7 +4,7 @@ import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthState, subscribeConnectionState, type ConnectionState } from './api';
+import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -37,7 +37,13 @@ export function useConnectionState(): ConnectionState {
 
 /** Compatibility helper for controls: only a verified usable connection is online. */
 export function useOnlineStatus() {
-  return useConnectionState().status === 'connected';
+  const connection = useConnectionState();
+  const auth = useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
+  return connection.status === 'connected' && auth.status === 'authenticated';
+}
+
+export function useAuthLifecycle(): AuthLifecycle {
+  return useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
 }
 
 export const connectionStatusLabel = (status: ConnectionState['status']) => ({
@@ -92,11 +98,19 @@ export function InstallAction({ showStatus = false, label = 'Install' }: { showS
 function AuthBanner() {
   const connection = useConnectionState();
   const auth = useAuthRequired();
-  if (!auth.required && connection.status !== 'connection-issue' && connection.status !== 'checking') return null;
+  const lifecycle = useAuthLifecycle();
+  const restoring = lifecycle.status === 'restoring';
+  const reverifying = lifecycle.status === 'reverifying';
+  const trustedOffline = lifecycle.status === 'trusted-offline';
+  if (!auth.required && !restoring && !reverifying && !trustedOffline && connection.status !== 'connection-issue' && connection.status !== 'checking') return null;
+  if (restoring || reverifying || trustedOffline) {
+    const message = restoring ? 'Restoring your session…' : reverifying ? 'Checking your session…' : 'Trusted offline · New expenses can be saved on this device and will sync after verification.';
+    return <div className="auth-banner auth-banner--checking" role="status" aria-live="polite">{message}</div>;
+  }
   const checking = !auth.required && connection.status === 'checking';
   const message = auth.required ? 'Your secure session has expired. Sign in again to continue syncing; queued expenses remain on this device.' : checking ? 'Checking connection before resuming sync; queued expenses remain on this device.' : 'Connection issue. Retry to revalidate; queued expenses remain on this device.';
   const returnTo = sanitizeReturnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`);
-  const retry = () => { void requestAuthProbe(); };
+   const retry = () => { void requestAuthProbe({ networkOnly: true }); };
   return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 

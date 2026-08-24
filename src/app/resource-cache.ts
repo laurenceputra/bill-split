@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { invalidateCachedGroups } from './idb';
-import { captureSessionGeneration } from './session';
+import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 /** The shortest freshness window used by the application. */
 export const MIN_RESOURCE_FRESHNESS_MS = 30_000;
@@ -11,6 +11,7 @@ export const RESOURCE_FRESHNESS = Object.freeze({
   expenses: 30_000,
   balances: 30_000,
   settlements: 30_000,
+  transactions: 30_000,
   scheduledExpenses: 30_000,
   activity: 30_000,
   expenseDetail: 30_000,
@@ -223,12 +224,14 @@ export function evictGroupResources(groupId: string, userId: string) {
     resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId),
     resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId),
     resourceKeys.settlements(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId),
+    resourceKeys.transactions(userId, groupId),
     resourceKeys.activity(userId, groupId), resourceKeys.audit(userId, groupId),
     resourceKeys.groupInvitations(userId, groupId),
     resourceKeys.invitations(userId),
   ];
   for (const key of exact) evictResource(key, userId);
   evictResourcePrefix(`expenses:${userId}:${groupId}:`, userId);
+  evictResourcePrefix(`transactions:${userId}:${groupId}:`, userId);
   // Detail resources do not include a group ID in their key. Evict details
   // whose loaded payload identifies this group, as well as schedule details.
   for (const [key, resource] of entries) {
@@ -265,7 +268,7 @@ export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
 
 export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '', options: RevalidateOptions = {}): Promise<T | undefined> {
   const resource = entry<T>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
-  if (!authLifecycleReady && (options.reason === 'focus' || options.reason === 'online' || options.reason === 'visibility' || options.reason === 'identity-check')) return resource.snapshot.data;
+  if (!authLifecycleReady && options.reason !== 'auth-restored') return resource.snapshot.data;
   if (resource.evicted || !resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
   // A cold offline visit has no useful request to make. Leave the resource
@@ -277,6 +280,10 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
   if (resource.promise) { if (force) resource.forcePending = options; return resource.promise; }
   if (!isVisible()) return resource.snapshot.data;
   const generation = resource.generation;
+  const requestIdentityEpoch = identityEpoch;
+  const requestSessionGeneration = captureSessionGeneration();
+  const requestUserId = userId;
+  const requestIsCurrent = () => generation === resource.generation && requestIdentityEpoch === identityEpoch && isSessionGenerationCurrent(requestSessionGeneration) && (isIdentityKey(key) || activeUserId === undefined || activeUserId === requestUserId);
   const retryingFromAuthBlocked = isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason === 'auth-restored';
   resource.forcePending = undefined;
   const hasData = resource.snapshot.data !== undefined;
@@ -284,13 +291,13 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
   notify(resource);
   resource.controller = new AbortController();
   resource.promise = (async () => { if (!isVisible()) throw new DOMException('Hidden document', 'AbortError'); return resource.loader!(resource.controller!.signal); })().then((data) => {
-    if (generation !== resource.generation) return data;
+    if (!requestIsCurrent()) return data;
     const metadata = data && typeof data === 'object' ? data as { offline?: boolean; stale?: boolean } : {};
     resource.snapshot = stable({ userId, data, fetchedAt: now(), status: 'ready', loading: false, revalidating: false, stale: metadata.stale === true, offline: metadata.offline === true });
     notify(resource);
     return data;
   }).catch((error: unknown) => {
-    if (generation !== resource.generation) return resource.snapshot.data as T;
+    if (!requestIsCurrent()) return resource.snapshot.data as T;
     if (retryingFromAuthBlocked) {
       resource.snapshot = stable({ ...resource.snapshot, status: 'auth-blocked', loading: false, revalidating: false, stale: true, offline: !online(), error });
       notify(resource);
@@ -302,7 +309,7 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
     notify(resource);
     if (!hasCurrent) throw error;
     return resource.snapshot.data as T;
-  }).finally(() => { if (generation === resource.generation) resource.controller = undefined; const pending = resource.forcePending; resource.promise = undefined; if (pending && resource.visible > 0 && isVisible()) void revalidate(key, resource.snapshot.userId, pending); });
+  }).finally(() => { if (requestIsCurrent()) resource.controller = undefined; const pending = resource.forcePending; resource.promise = undefined; if (pending && resource.visible > 0 && isVisible() && requestIsCurrent()) void revalidate(key, resource.snapshot.userId, pending); });
   return resource.promise;
 }
 
@@ -313,19 +320,26 @@ export function trackVisibleResource(key: ResourceKey, userId = activeUserId || 
   return () => { resource.visible = Math.max(0, resource.visible - 1); };
 }
 
-function foregroundRefresh(identityCheck = false) {
-  if (!authLifecycleReady || !isVisible() || !online()) return;
+function foregroundRefresh(identityCheck = false, forcePrivate = false) {
+  if (!authLifecycleReady || !isVisible() || !online()) return Promise.resolve();
   const identity = entries.get('identity');
   const identityDue = identity && identity.snapshot.status !== 'auth-blocked' && (identityCheck || !isResourceFresh(identity.snapshot, identity.ttl) || identity.snapshot.stale || identity.snapshot.status === 'idle');
+  const refreshStartedAt = identityEpoch;
   const refreshPrivate = () => {
-    if (!identity || identity.snapshot.status !== 'ready' || identity.snapshot.error) return;
+    if (!identity || identity.snapshot.status !== 'ready' || identity.snapshot.error || refreshStartedAt !== identityEpoch) return;
+    const requests: Promise<unknown>[] = [];
     for (const [key, resource] of entries) {
-    if (key === 'identity' || resource.visible <= 0 || resource.snapshot.status === 'auth-blocked') continue;
-    if (resource.forcePending || (resource.snapshot.fetchedAt !== undefined && now() - resource.snapshot.fetchedAt >= resource.ttl) || (resource.snapshot.stale && (!resource.snapshot.offline || online())) || resource.snapshot.status === 'idle' || resource.snapshot.status === 'error') void revalidate(key, resource.snapshot.userId, resource.forcePending || { reason: 'focus' });
+      if (key === 'identity' || resource.visible <= 0 || resource.snapshot.status === 'auth-blocked') continue;
+      if (forcePrivate || resource.forcePending || (resource.snapshot.fetchedAt !== undefined && now() - resource.snapshot.fetchedAt >= resource.ttl) || (resource.snapshot.stale && (!resource.snapshot.offline || online())) || resource.snapshot.status === 'idle' || resource.snapshot.status === 'error') requests.push(revalidate(key, resource.snapshot.userId, forcePrivate ? { force: true, reason: 'auth-restored' } : resource.forcePending || { reason: 'focus' }).catch(() => undefined));
     }
+    return Promise.all(requests).then(() => undefined);
   };
-  if (identityDue && identity?.visible) void revalidate('identity', 'identity', { reason: identityCheck ? 'identity-check' : 'focus' }).finally(refreshPrivate); else if (!identityDue) refreshPrivate();
+  if (identityDue && identity?.visible) return revalidate('identity', 'identity', { reason: identityCheck ? 'identity-check' : 'focus' }).then(refreshPrivate, refreshPrivate);
+  if (!identityDue) return refreshPrivate();
+  return Promise.resolve();
 }
+/** Force every currently visible private resource after a successful /me. */
+export const refreshVisiblePrivateResources = () => foregroundRefresh(false, true);
 export function initializeForegroundCoordinator() {
   if (coordinatorInstalled || typeof window === 'undefined') return;
   coordinatorInstalled = true;
@@ -338,10 +352,10 @@ export function initializeForegroundCoordinator() {
         resource.snapshot = stable({ ...resource.snapshot, status: resource.snapshot.data === undefined ? 'idle' : 'ready', loading: false, revalidating: false, stale: true, error: undefined });
         notify(resource);
       }
-    } else schedule(true);
+    } else schedule();
   });
-  window.addEventListener('focus', () => { if (isVisible()) schedule(true); });
-  window.addEventListener('pageshow', () => { if (isVisible()) schedule(true); });
+  window.addEventListener('focus', () => { if (isVisible()) schedule(); });
+  window.addEventListener('pageshow', () => { if (isVisible()) schedule(); });
   window.addEventListener('online', () => { if (isVisible()) schedule(); });
   window.addEventListener('billsplit-connection-restored', () => { if (isVisible()) schedule(); });
 }
@@ -354,6 +368,7 @@ export const resourceKeys = Object.freeze({
   group: (userId: string, groupId: string) => resourceKey('group', `${userId}:${groupId}`),
   members: (userId: string, groupId: string) => resourceKey('members', `${userId}:${groupId}`),
   expenses: (userId: string, groupId: string, filterKey = '') => resourceKey('expenses', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
+  transactions: (userId: string, groupId: string, filterKey = '') => resourceKey('transactions', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
   balances: (userId: string, groupId: string) => resourceKey('balances', `${userId}:${groupId}`),
   settlements: (userId: string, groupId: string) => resourceKey('settlements', `${userId}:${groupId}`),
   scheduledExpenses: (userId: string, groupId: string) => resourceKey('scheduled-expenses', `${userId}:${groupId}`),
@@ -379,7 +394,7 @@ export const resourceCache = Object.freeze({
   evictPrefix: evictResourcePrefix,
   clear: clearResourceCache,
 });
-const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string } = {}) => {
+const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) => {
   try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 };
 export const invalidateForMutation = {
@@ -388,12 +403,18 @@ export const invalidateForMutation = {
   groupDeleted: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
   groupLeft: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
   groupAccessRevoked: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true }); },
-  settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId)] : [])], userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true }); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`transactions:${userId}:${groupId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true, transactions: true, transactionGroupId: groupId }); },
+  settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId)] : [])], userId); invalidateResourcePrefix(`transactions:${userId}:${groupId}:`, userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true, transactions: true, transactionGroupId: groupId }); },
   invitationsChanged: async (groupId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.invitations(userId), ...(groupId ? [resourceKeys.groupInvitations(userId, groupId)] : [])], userId); },
   scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), resourceKeys.categories(userId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { categories: true, groups: false }); },
 };
 
 initializeForegroundCoordinator();
 if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => clearResourceCache());
-if (typeof window !== 'undefined') window.addEventListener('billsplit-auth-restored', () => allowIdentityVerification());
+if (typeof window !== 'undefined') window.addEventListener('billsplit-authenticated', () => {
+  allowIdentityVerification();
+  // /api/me has just established the identity. Refresh visible stale private
+  // resources, but do not force identity itself (that would issue a second
+  // /me immediately after authentication).
+  void refreshVisiblePrivateResources();
+});

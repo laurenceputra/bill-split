@@ -79,19 +79,22 @@ const apiPaths = {
   expenses: (id: string) => `/api/groups/${id}/expenses`,
   balances: (id: string) => `/api/groups/${id}/balances`,
   settlements: (id: string) => `/api/groups/${id}/settlements`,
+  transactions: (id: string) => `/api/groups/${id}/transactions`,
   scheduledExpenses: (id: string) => `/api/groups/${id}/scheduled-expenses`,
+  categories: '/api/categories',
   expense: (id: string) => `/api/expenses/${id}`,
   activity: (_id: string) => '/api/activity',
 };
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups];
-const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.expenses(id), apiPaths.balances(id), apiPaths.settlements(id), apiPaths.scheduledExpenses(id)];
+const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id)];
 const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
   { name: 'empty-home', path: '/', auth: EMPTY_EMAIL, context: 'Home / empty groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'No groups yet', apiPaths: privateHomeApis } },
   { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
-  { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'GroupPage / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent expenses', apiPaths: groupApis(ids.large) } },
+  { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, auth: DEV_EMAIL, context: 'Transaction history / mixed cursor page fixture', expected: { mode: 'normal', heading: 'All transactions', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.transactions(ids.rich), apiPaths.categories] } },
+  { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with history fixture', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] } },
@@ -527,7 +530,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await loadingContext.close();
     }
 
-    const offlineScenario: Scenario = { name: 'state-offline', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'Europe trip · USD + EUR', content: 'showing cached group data', apiPaths: groupApis(ids.rich) } };
+    const offlineScenario: Scenario = { name: 'state-offline', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'Group overview / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'Europe trip · USD + EUR', content: 'showing cached group data', apiPaths: groupApis(ids.rich) } };
     const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
     const offlinePage = await offlineContext.newPage();
     const offlineObservations: ApiObservation[] = [];
@@ -538,7 +541,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await offlinePage.goto(`${BASE_URL}${offlineScenario.path}`, { waitUntil: 'domcontentloaded' });
       await offlinePage.waitForTimeout(900);
       assertAuthenticatedRequest(offlineRequests, DEV_EMAIL);
-      await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Recent expenses' } }, offlineObservations);
+      await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Recent transactions' } }, offlineObservations);
       await offlineContext.setOffline(true);
       await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
       await offlinePage.waitForTimeout(150);

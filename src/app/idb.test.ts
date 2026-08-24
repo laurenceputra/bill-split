@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot } from './idb';
-import { hydrateActivity } from './api';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { hydrateActivity, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -137,6 +137,53 @@ describe('user-scoped IndexedDB', () => {
     await saveExpenseDetails({ userId: 'user-a', expenseId: 'e-1', expense: { id: 'e-1', groupId: 'group-a', description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: timestamp, updatedAt: timestamp, version: 1, payers: [], splits: [] }, history: [], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].label).toBe('Lunch');
     expect((await readExpenseDetails('user-a', 'e-1'))?.expense.id).toBe('e-1');
+  });
+
+  it('adds the first transaction page without replacing older snapshot fields', async () => {
+    await updateGroupSnapshot('user-a', 'group-a', { group: { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }, balances: {} });
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [{ kind: 'settlement', id: 's-1', groupId: 'group-a', amountMinor: 100, currency: 'USD', date: '2026-01-01', note: 'Paid', fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'Former A', toName: 'Former B', createdAt: '2026-01-01T00:00:00.000Z' }], transactionsNextCursor: 'cursor-1', transactionsLimit: 25 });
+    const snapshot = await readGroupSnapshot('user-a', 'group-a');
+    expect(snapshot?.group?.id).toBe('group-a');
+    expect(snapshot?.balances).toEqual({});
+    expect(snapshot?.transactions?.[0]).toMatchObject({ kind: 'settlement', fromName: 'Former A' });
+    expect(snapshot?.transactionsNextCursor).toBe('cursor-1');
+    expect((await readResourceFreshness('user-a', 'group:group-a:transactions'))?.fetchedAt).toBeTruthy();
+  });
+
+  it('hydrates transactions only for the exact user and group scope', async () => {
+    const transaction = { kind: 'settlement' as const, id: 's-a', groupId: 'group-a', amountMinor: 100, currency: 'USD' as const, date: '2026-01-01', note: null, fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'A', toName: 'B', createdAt: '2026-01-01T00:00:00.000Z' };
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [transaction], transactionsNextCursor: 'next-a', transactionsLimit: 25 });
+    await updateGroupSnapshot('user-b', 'group-a', { transactions: [{ ...transaction, id: 's-b' }] });
+    await updateGroupSnapshot('user-a', 'group-b', { transactions: [{ ...transaction, id: 's-other-group', groupId: 'group-b' }] });
+
+    await expect(hydrateTransactions('user-a', 'group-a')).resolves.toMatchObject({ data: { transactions: [{ id: 's-a' }], nextCursor: 'next-a' } });
+    await expect(hydrateTransactions('user-b', 'group-a')).resolves.toMatchObject({ data: { transactions: [{ id: 's-b' }] } });
+    await expect(hydrateTransactions('user-a', 'group-c')).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [{ groupId: 'group-a' }, 'group leave/delete/access revocation'],
+    [{ transactions: true, transactionGroupId: 'group-a' }, 'expense/settlement mutation invalidation'],
+  ] as const)('rejects a transaction response captured before %s and cannot repopulate the deleted snapshot', async (options, _description) => {
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [{ kind: 'settlement', id: 'old', groupId: 'group-a', amountMinor: 100, currency: 'USD', date: '2026-01-01', note: null, fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'Former A', toName: 'Former B', createdAt: '2026-01-01T00:00:00.000Z' }], transactionsLimit: 25 });
+    const requestMutationGeneration = await readMutationGeneration('user-a');
+    await invalidateCachedGroups('user-a', undefined, options);
+    expect(await updateGroupSnapshotIfGenerationMatches('user-a', 'group-a', { transactions: [{ kind: 'settlement', id: 'late', groupId: 'group-a', amountMinor: 200, currency: 'USD', date: '2026-01-02', note: null, fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'Former A', toName: 'Former B', createdAt: '2026-01-02T00:00:00.000Z' }], transactionsLimit: 25 }, requestMutationGeneration)).toBe(false);
+    const snapshot = await readGroupSnapshot('user-a', 'group-a');
+    expect('groupId' in options ? snapshot : snapshot?.transactions).toBeUndefined();
+  });
+
+  it('rejects a transaction response after the session generation changes', async () => {
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [] });
+    const { captureSessionGeneration, rollbackSessionLogout, startSessionLogout } = await import('./session');
+    const requestGeneration = captureSessionGeneration();
+    const logoutGeneration = startSessionLogout(false);
+    try {
+      expect(await updateGroupSnapshotIfGenerationMatches('user-a', 'group-a', { transactions: [{ kind: 'expense', id: 'late', groupId: 'group-a', description: 'Late', amountMinor: 100, currency: 'USD', date: '2026-01-01', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-01-01T00:00:00.000Z', clientOperationId: null }] }, await readMutationGeneration('user-a'), requestGeneration)).toBe(false);
+    } finally {
+      rollbackSessionLogout(logoutGeneration, false);
+    }
+    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
   });
 
   it('persists home balance summaries without requiring an IndexedDB migration', async () => {

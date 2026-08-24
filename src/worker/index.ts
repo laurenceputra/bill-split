@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, date, expenseInput, friendInput, groupInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
+import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
@@ -103,7 +103,7 @@ const allowsMutation = (c: any) => {
   return exactOrigin || trustedFetchSite || (!hasBrowserMetadata && explicitBearer);
 };
 const repositoryError = (c: any, error: unknown) => {
-  if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' ? 400 : 500, error.code, error.message, error.details);
+   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' ? 400 : 500, error.code, error.message, error.details);
   throw error;
 };
 export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
@@ -285,6 +285,20 @@ api.post('/api/invitations/:invitationId/accept', async (c) => { try { return c.
 api.post('/api/invitations/:invitationId/reject', async (c) => { const rejected = await getRepo(c).rejectInvitation(c.req.param('invitationId'), c.get('auth').id); if (!rejected) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
 
 api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); } catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } try { const result = await x.repo.expensePage(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor }); return c.json({ expenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/transactions', async (c) => {
+  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
+  const offsetError = rejectOffset(c); if (offsetError) return offsetError;
+  const q = c.req.query(), limit = page(q.limit, 25, 100);
+  if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
+  if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense or settlement');
+  if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Currency filter is invalid');
+  try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); }
+  catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); }
+  try {
+    const result = await x.repo.transactionPage(c.req.param('groupId'), { kind: q.kind as 'expense' | 'settlement' | undefined, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
+    return c.json({ transactions: result.items, nextCursor: result.nextCursor });
+  } catch (error) { return repositoryError(c, error); }
+});
 api.get('/api/groups/:groupId/scheduled-expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 100, 100); const offset = q.offset === undefined ? undefined : page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || (offset !== undefined && offset < 0) || (q.cursor && q.offset !== undefined)) return jsonError(c, 400, 'INVALID_PAGINATION', q.cursor && q.offset !== undefined ? 'Use either cursor or offset pagination' : 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.scheduledExpenses(c.req.param('groupId'), { limit, offset, cursor: q.cursor }); return c.json({ scheduledExpenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/scheduled-expenses', zValidator('json', scheduledExpenseInput), async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;

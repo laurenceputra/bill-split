@@ -1,6 +1,6 @@
 import type { ExpenseInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, ScheduledExpense, ScheduledExpenseStatus, Settlement } from '../shared/types';
+import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, ScheduledExpense, ScheduledExpenseStatus, Settlement, Transaction } from '../shared/types';
 import { checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
@@ -17,7 +17,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -45,6 +45,26 @@ export const decodeLedgerCursor = (value: string | undefined): LedgerCursor | un
     return { date: parsed.date, createdAt: parsed.createdAt, id: parsed.id };
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The pagination cursor is invalid'); }
 };
+export type TransactionCursor = { version: 1; date: string; createdAt: string; kind: Transaction['kind']; id: string };
+const isCalendarDate = (value: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  try {
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return parsed.toISOString().slice(0, 10) === value;
+  } catch { return false; }
+};
+export const encodeTransactionCursor = (value: Omit<TransactionCursor, 'version'> | TransactionCursor) => cursorText({ ...value, version: 1 });
+export const decodeTransactionCursor = (value: string | undefined): TransactionCursor | undefined => {
+  if (!value) return undefined;
+  try {
+    if (!/^[A-Za-z0-9_-]{1,512}$/.test(value)) throw new Error('invalid cursor');
+    const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
+    const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)))) as Partial<TransactionCursor>;
+    const keys = Object.keys(parsed).sort().join(','), expectedKeys = 'createdAt,date,id,kind,version';
+    if (keys !== expectedKeys || parsed.version !== 1 || typeof parsed.date !== 'string' || !isCalendarDate(parsed.date) || typeof parsed.createdAt !== 'string' || !parsed.createdAt || parsed.createdAt.length > 128 || !Number.isFinite(Date.parse(parsed.createdAt)) || (parsed.kind !== 'expense' && parsed.kind !== 'settlement') || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200) throw new Error('invalid cursor');
+    return { version: 1, date: parsed.date, createdAt: parsed.createdAt, kind: parsed.kind, id: parsed.id };
+  } catch { throw new RepositoryError('INVALID_CURSOR', 'The transaction pagination cursor is invalid'); }
+};
 type ScheduledExpenseCursor = { createdAt: string; id: string };
 const encodeScheduledExpenseCursor = (value: ScheduledExpenseCursor) => cursorText(value);
 const decodeScheduledExpenseCursor = (value: string | undefined): ScheduledExpenseCursor | undefined => {
@@ -63,6 +83,7 @@ export const assertLikeSearch = (value: string | undefined) => {
   // wildcards added by the repository.
   if (new TextEncoder().encode(`%${value}%`).byteLength > 50) throw new RepositoryError('INVALID_SEARCH', 'Search text must be at most 48 UTF-8 bytes');
 };
+const escapedLike = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 
 type ExportCursor = { groupId: string; expenseCursor?: string | null; settlementCursor?: string | null };
 const encodeExportCursor = (value: ExportCursor) => {
@@ -1128,6 +1149,64 @@ export class Repository {
     const items = await this.hydrateExpenses(pageRows);
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.expense_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
+  }
+  async transactionPage(groupId: string, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
+    if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
+    assertLikeSearch(opts.q);
+    for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates');
+    if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
+    const cursor = decodeTransactionCursor(opts.cursor);
+    const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
+    const args: unknown[] = [groupId, groupId];
+    let sql = `WITH transaction_rows AS (
+      SELECT e.id,e.group_id,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,
+        e.category,e.notes,NULL AS note,NULL AS from_person_id,NULL AS to_person_id,NULL AS from_name,NULL AS to_name,
+        e.created_by,e.created_at,e.client_operation_id,'expense' AS kind
+      FROM expenses e WHERE e.group_id=? AND e.deleted_at IS NULL
+      UNION ALL
+      SELECT s.id,s.group_id,NULL,s.amount_minor,s.currency,s.settlement_date AS transaction_date,
+        NULL,NULL,s.note,s.from_person_id,s.to_person_id,
+        COALESCE(from_person.name,'Deleted account'),COALESCE(to_person.name,'Deleted account'),
+        s.created_by,s.created_at,s.client_operation_id,'settlement' AS kind
+      FROM settlements s
+      LEFT JOIN people from_person ON from_person.id=s.from_person_id
+      LEFT JOIN people to_person ON to_person.id=s.to_person_id
+      WHERE s.group_id=? AND s.deleted_at IS NULL
+    ) SELECT * FROM transaction_rows tr WHERE 1=1`;
+    if (opts.kind) { sql += ' AND tr.kind=?'; args.push(opts.kind); }
+    if (opts.q) { const escaped = escapedLike(opts.q); assertLikeSearch(escaped); const pattern = `%${escaped}%`; sql += " AND (tr.description LIKE ? ESCAPE '\\' OR tr.notes LIKE ? ESCAPE '\\' OR tr.note LIKE ? ESCAPE '\\')"; args.push(pattern, pattern, pattern); }
+    if (opts.category) { sql += " AND tr.kind='expense' AND tr.category=?"; args.push(opts.category); }
+    if (opts.currency) { sql += ' AND tr.currency=?'; args.push(opts.currency); }
+    if (opts.from) { sql += ' AND tr.transaction_date>=?'; args.push(opts.from); }
+    if (opts.to) { sql += ' AND tr.transaction_date<=?'; args.push(opts.to); }
+    if (opts.person) {
+      sql += ` AND ((tr.kind='expense' AND (tr.id IN (SELECT expense_id FROM payers WHERE person_id=?) OR tr.id IN (SELECT expense_id FROM splits WHERE person_id=?)))
+        OR (tr.kind='settlement' AND (tr.from_person_id=? OR tr.to_person_id=?)))`;
+      args.push(opts.person, opts.person, opts.person, opts.person);
+    }
+    if (cursor) {
+      sql += ` AND (tr.transaction_date<? OR (tr.transaction_date=? AND tr.created_at<?)
+        OR (tr.transaction_date=? AND tr.created_at=? AND (tr.kind>? OR (tr.kind=? AND tr.id<?))))`;
+      args.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.kind, cursor.kind, cursor.id);
+    }
+    sql += ' ORDER BY tr.transaction_date DESC,tr.created_at DESC,tr.kind ASC,tr.id DESC LIMIT ?'; args.push(limit + 1);
+    const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
+    const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const items: Transaction[] = pageRows.map((row) => {
+      if (text(row.kind) === 'settlement') return {
+        kind: 'settlement', id: text(row.id), groupId: text(row.group_id), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
+        date: text(row.transaction_date), note: row.note == null ? null : text(row.note), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id),
+        fromName: text(row.from_name), toName: text(row.to_name), createdAt: text(row.created_at),
+      };
+      const operation = row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })();
+      return {
+        kind: 'expense', id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
+        date: text(row.transaction_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
+        createdBy: text(row.created_by), createdAt: text(row.created_at), clientOperationId: operation,
+      };
+    });
+    const last = pageRows[pageRows.length - 1];
+    return { items, nextCursor: hasMore && last ? encodeTransactionCursor({ date: text(last.transaction_date), createdAt: text(last.created_at), kind: text(last.kind) as Transaction['kind'], id: text(last.id) }) : undefined };
   }
   async expense(id: string, includeDeleted = false) { const row = await this.rawExpense(id); return row && (includeDeleted || !row.deleted_at) ? this.hydrateExpense(row) : null; }
   private withinRestoreWindow(deletedAt: unknown) { return deletedAt != null && Date.now() - Date.parse(text(deletedAt)) <= 30 * 24 * 60 * 60 * 1000; }

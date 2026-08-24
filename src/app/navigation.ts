@@ -2,6 +2,7 @@ export type NavigationRoute =
   | 'home'
   | 'settings'
   | 'group-overview'
+  | 'transactions'
   | 'group-manage'
   | 'activity'
   | 'settle'
@@ -97,6 +98,7 @@ export function getNavigationContext(pathname: string): NavigationContext {
   else if (path === '/expense/new') route = 'new-expense';
   else if (group && segments.length === 2) route = 'group-overview';
   else if (group && segments[2] === 'manage' && segments.length === 3) route = 'group-manage';
+  else if (group && segments[2] === 'transactions' && segments.length === 3) route = 'transactions';
   else if (group && segments[2] === 'activity' && segments.length === 3) route = 'activity';
   else if (group && segments[2] === 'settle' && segments.length === 3) route = 'settle';
   else if (group && ((segments[2] === 'expense' && segments[3] === 'new') || (segments[2] === 'scheduled-expense' && segments[3] === 'new')) && segments.length === 4) route = 'new-expense';

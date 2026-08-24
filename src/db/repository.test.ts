@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { Repository, assertLikeSearch, decodeLedgerCursor, encodeLedgerCursor } from './repository';
+import { Repository, assertLikeSearch, decodeLedgerCursor, decodeTransactionCursor, encodeLedgerCursor, encodeTransactionCursor } from './repository';
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
+import type { Transaction } from '../shared/types';
 
 const IDENTITY_TOMBSTONE_TEST_KEY = 'test-identity-tombstone-key';
 
@@ -405,6 +406,64 @@ class CategoriesDb {
   async all<T>() { return { results: [{ category: 'Custom rent' }, { category: 'Dining' }] as T[] }; }
 }
 
+type TransactionTestRow = Record<string, unknown> & { personIds: string[]; deleted?: boolean };
+class TransactionPageDb {
+  lastSql = '';
+  constructor(readonly rows: TransactionTestRow[]) {}
+  prepare(sql: string) { this.lastSql = sql; return new TransactionPageStatement(this.rows, sql); }
+}
+class TransactionPageStatement {
+  private args: unknown[] = [];
+  constructor(private readonly source: TransactionTestRow[], private readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async all<T>() {
+    let index = 2;
+    let rows = this.source.filter((row) => row.deleted !== true);
+    if (this.sql.includes('AND tr.kind=?')) {
+      const kind = String(this.args[index++]);
+      rows = rows.filter((row) => row.kind === kind);
+    }
+    if (this.sql.includes('tr.description LIKE ?')) {
+      const query = String(this.args[index++]).slice(1, -1).replaceAll('\\%', '%').replaceAll('\\_', '_').replaceAll('\\\\', '\\');
+      index += 2;
+      rows = rows.filter((row) => [row.description, row.notes, row.note].some((value) => String(value ?? '').toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+    }
+    if (this.sql.includes('tr.category=?')) {
+      const category = String(this.args[index++]);
+      rows = rows.filter((row) => row.kind === 'expense' && row.category === category);
+    }
+    if (this.sql.includes('AND tr.currency=?')) { const currency = this.args[index++]; rows = rows.filter((row) => row.currency === currency); }
+    if (this.sql.includes('AND tr.transaction_date>=?')) { const from = String(this.args[index++]); rows = rows.filter((row) => String(row.transaction_date) >= from); }
+    if (this.sql.includes('AND tr.transaction_date<=?')) { const to = String(this.args[index++]); rows = rows.filter((row) => String(row.transaction_date) <= to); }
+    if (this.sql.includes('payers WHERE person_id=?')) {
+      const personIds = this.args.slice(-5, -1).map(String);
+      rows = rows.filter((row) => row.personIds.some((personId) => personIds.includes(personId)));
+    }
+    if (this.args.length === 7 && this.sql.includes('payers WHERE person_id=?')) {
+      const personIds = this.args.slice(2, 6).map(String);
+      rows = rows.filter((row) => row.personIds.some((personId) => personIds.includes(personId)));
+    }
+    if (this.sql.includes('tr.transaction_date<?')) {
+      const [date, , createdAt, , , kind, , id] = this.args.slice(-9, -1).map(String);
+      rows = rows.filter((row) => String(row.transaction_date) < date || (String(row.transaction_date) === date && String(row.created_at) < createdAt) || (String(row.transaction_date) === date && String(row.created_at) === createdAt && (String(row.kind) > kind || (String(row.kind) === kind && String(row.id) < id))));
+    }
+    rows.sort((left, right) => String(right.transaction_date).localeCompare(String(left.transaction_date)) || String(right.created_at).localeCompare(String(left.created_at)) || String(left.kind).localeCompare(String(right.kind)) || String(right.id).localeCompare(String(left.id)));
+    const limit = Number(this.args[this.args.length - 1]);
+    return { results: rows.slice(0, limit) as T[] };
+  }
+}
+
+const transactionRows: TransactionTestRow[] = [
+  { id: 'expense-new', kind: 'expense', group_id: 'group-1', description: 'New dinner', amount_minor: 900, currency: 'USD', transaction_date: '2026-01-04', category: 'Dining', notes: 'team', created_by: 'user-1', created_at: '2026-01-04T02:00:00.000Z', client_operation_id: null, personIds: ['person-payer'] },
+  { id: 'expense-z', kind: 'expense', group_id: 'group-1', description: 'Dinner', amount_minor: 800, currency: 'USD', transaction_date: '2026-01-03', category: 'Dining', notes: 'shared', created_by: 'user-1', created_at: '2026-01-03T01:00:00.000Z', client_operation_id: null, personIds: ['person-split'] },
+  { id: 'expense-a', kind: 'expense', group_id: 'group-1', description: 'Dinner', amount_minor: 700, currency: 'EUR', transaction_date: '2026-01-03', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-03T01:00:00.000Z', client_operation_id: null, personIds: ['person-payer'] },
+  { id: 'settlement-z', kind: 'settlement', group_id: 'group-1', description: null, amount_minor: 600, currency: 'USD', transaction_date: '2026-01-03', category: null, note: 'Paid dinner', created_by: 'user-1', created_at: '2026-01-03T01:00:00.000Z', from_person_id: 'person-from', to_person_id: 'person-to', from_name: 'Former payer', to_name: 'Removed participant', personIds: ['person-from', 'person-to'] },
+  { id: 'settlement-a', kind: 'settlement', group_id: 'group-1', description: null, amount_minor: 500, currency: 'USD', transaction_date: '2026-01-03', category: null, note: 'Paid dinner', created_by: 'user-1', created_at: '2026-01-03T01:00:00.000Z', from_person_id: 'person-from', to_person_id: 'person-to', from_name: 'Former payer', to_name: 'Removed participant', personIds: ['person-from', 'person-to'] },
+  { id: 'expense-deleted', kind: 'expense', group_id: 'group-1', description: 'Deleted', amount_minor: 400, currency: 'USD', transaction_date: '2026-01-02', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-02T01:00:00.000Z', client_operation_id: null, personIds: ['person-payer'], deleted: true },
+  { id: 'settlement-old', kind: 'settlement', group_id: 'group-1', description: null, amount_minor: 300, currency: 'GBP', transaction_date: '2026-01-02', category: null, note: 'Old payment', created_by: 'user-1', created_at: '2026-01-02T01:00:00.000Z', from_person_id: 'person-from', to_person_id: 'person-to', from_name: 'Former payer', to_name: 'Removed participant', personIds: ['person-to'] },
+  { id: 'expense-other', kind: 'expense', group_id: 'group-1', description: 'Rent', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-01', category: 'Housing', notes: null, created_by: 'user-1', created_at: '2026-01-01T01:00:00.000Z', client_operation_id: null, personIds: ['person-payer'] },
+];
+
 class PreferenceDb {
   sql = '';
   args: unknown[] = [];
@@ -615,6 +674,61 @@ describe('repository pagination guards', () => {
     const page = await new Repository(new AuditPageDb() as never).auditPage('group-1', { limit: 10 });
     expect(page.items[0]).toMatchObject({ actorId: 'user-1', actorPersonId: 'person-1', actorName: 'Alex' });
     expect(page.items[0]).not.toHaveProperty('email');
+  });
+});
+
+describe('repository transaction pagination', () => {
+  it('walks a mixed ledger without duplicates or omissions across date, created-at, kind, and ID ties', async () => {
+    const repository = new Repository(new TransactionPageDb(transactionRows) as never);
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.transactionPage('group-1', { limit: 2, cursor });
+      ids.push(...page.items.map((item) => item.id));
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    expect(ids).toEqual(['expense-new', 'expense-z', 'expense-a', 'settlement-z', 'settlement-a', 'settlement-old', 'expense-other']);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(decodeTransactionCursor(encodeTransactionCursor({ date: '2026-01-03', createdAt: '2026-01-03T01:00:00.000Z', kind: 'expense', id: 'expense-z' }))).toMatchObject({ kind: 'expense', id: 'expense-z' });
+  });
+
+  it('continues from either kind at an equal date and created-at, preserving descending IDs', async () => {
+    const repository = new Repository(new TransactionPageDb(transactionRows) as never);
+    const afterExpense = await repository.transactionPage('group-1', { limit: 10, cursor: encodeTransactionCursor({ date: '2026-01-03', createdAt: '2026-01-03T01:00:00.000Z', kind: 'expense', id: 'expense-z' }) });
+    expect(afterExpense.items.map((item) => item.id)).toEqual(['expense-a', 'settlement-z', 'settlement-a', 'settlement-old', 'expense-other']);
+    const afterSettlement = await repository.transactionPage('group-1', { limit: 10, cursor: encodeTransactionCursor({ date: '2026-01-03', createdAt: '2026-01-03T01:00:00.000Z', kind: 'settlement', id: 'settlement-z' }) });
+    expect(afterSettlement.items.map((item) => item.id)).toEqual(['settlement-a', 'settlement-old', 'expense-other']);
+  });
+
+  it('retains q/category/kind/date/currency filters and person payer, split, from, and to matches', async () => {
+    const db = new TransactionPageDb(transactionRows);
+    const repository = new Repository(db as never);
+    await expect(repository.transactionPage('group-1', { q: 'Paid dinner', kind: 'settlement', from: '2026-01-03', to: '2026-01-03', currency: 'USD', person: 'person-to', limit: 10 })).resolves.toMatchObject({ items: [{ id: 'settlement-z' }, { id: 'settlement-a' }] });
+    await expect(repository.transactionPage('group-1', { category: 'Dining', currency: 'EUR', limit: 10 })).resolves.toMatchObject({ items: [{ id: 'expense-a' }] });
+    const payerPage = await repository.transactionPage('group-1', { person: 'person-payer', limit: 10 });
+    expect(payerPage.items.map((item) => item.id)).toEqual(['expense-new', 'expense-a', 'expense-other']);
+    expect(db.lastSql).toContain('payers WHERE person_id=?');
+    const splitPage = await repository.transactionPage('group-1', { person: 'person-split', limit: 10 });
+    expect(splitPage.items.map((item) => item.id)).toEqual(['expense-z']);
+    expect(db.lastSql).toContain('splits WHERE person_id=?');
+    const fromPage = await repository.transactionPage('group-1', { person: 'person-from', limit: 10 });
+    expect(fromPage.items.map((item) => item.id)).toEqual(['settlement-z', 'settlement-a']);
+    expect(db.lastSql).toContain('tr.from_person_id=? OR tr.to_person_id=?');
+  });
+
+  it('excludes deleted transactions and keeps historical settlement names', async () => {
+    const repository = new Repository(new TransactionPageDb(transactionRows) as never);
+    const page = await repository.transactionPage('group-1', { limit: 100 });
+    expect(page.items.some((item) => item.id === 'expense-deleted')).toBe(false);
+    expect(page.items.filter((item): item is Extract<Transaction, { kind: 'settlement' }> => item.kind === 'settlement')[0]).toMatchObject({ fromName: 'Former payer', toName: 'Removed participant' });
+  });
+
+  it('rejects invalid cursors, dates, and offset pagination', async () => {
+    const repository = new Repository(new TransactionPageDb(transactionRows) as never);
+    await expect(repository.transactionPage('group-1', { cursor: 'not-a-cursor' })).rejects.toMatchObject({ code: 'INVALID_CURSOR' });
+    await expect(repository.transactionPage('group-1', { from: '2026-02-30' })).rejects.toMatchObject({ code: 'INVALID_DATE' });
+    await expect(repository.transactionPage('group-1', { offset: 1 })).rejects.toMatchObject({ code: 'INVALID_PAGINATION' });
   });
 });
 

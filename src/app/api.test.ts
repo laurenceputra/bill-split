@@ -1,13 +1,30 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
+import { readGroupSnapshot, updateGroupSnapshot } from './idb';
 import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
 import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
 import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
 
+const markerKey = 'billsplit-pending-account-deletion';
+const storageFor = (values: Map<string, string>, setItem: (key: string, value: string) => void = (key, value) => { values.set(key, value); }) => ({
+  getItem: (key: string) => values.get(key) || null,
+  setItem,
+  removeItem: (key: string) => values.delete(key),
+});
+
 const json = (body: unknown, status = 200, userId?: string, clerkUserId?: string) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...(userId ? { 'X-BillSplit-User-Id': userId } : {}), ...(clerkUserId ? { 'X-BillSplit-Clerk-User-Id': clerkUserId } : {}) } });
+
+const establishAuthenticatedMutationSession = async (clerkUserId = 'clerk-original') => {
+  clearSessionLogout();
+  clearAuthRequired();
+  vi.stubGlobal('navigator', { onLine: true });
+  vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'mutation-user', email: 'mutation@example.com', personId: 'mutation-person' }, 200, 'mutation-user', clerkUserId)));
+  await initializeAuthLifecycle({ clerkUserId });
+};
 
 beforeEach(async () => {
   vi.unstubAllGlobals();
@@ -128,6 +145,17 @@ describe('frontend API errors and cache fallback', () => {
     expect(calls).toEqual([{ path: '/api/groups/group-a', method: 'PUT', body: JSON.stringify({ name: 'Renamed', currency: 'EUR' }) }, { path: '/api/groups/group-a', method: 'DELETE' }]);
   });
 
+  it('binds every authenticated mutation to the verified internal user', async () => {
+    await establishAuthenticatedMutationSession('clerk-bound');
+    const fetchSpy = vi.fn(async () => json({ ok: true }, 200, 'mutation-user'));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await api('/groups', { method: 'POST', body: '{}' });
+
+    const call = ((fetchSpy as ReturnType<typeof vi.fn>).mock.calls[0] as [RequestInfo, RequestInit?] | undefined);
+    expect(new Headers(call?.[1]?.headers).get('X-BillSplit-Expected-User-Id')).toBe('mutation-user');
+  });
+
   it('uses the typed account deletion endpoint and keeps Clerk deletion capability explicit', async () => {
      const calls: Array<{ path: string; method: string; body?: string; expectedClerkUserId?: string }> = [];
     const storage = new Map<string, string>();
@@ -139,7 +167,28 @@ describe('frontend API errors and cache fallback', () => {
     await expect(deleteClerkUserIfSupported(undefined)).resolves.toBe('unsupported');
     const deleteUser = vi.fn(async () => undefined);
     await expect(deleteClerkUserIfSupported({ delete: deleteUser })).resolves.toBe('deleted');
-    expect(deleteUser).toHaveBeenCalledOnce();
+     expect(deleteUser).toHaveBeenCalledOnce();
+  });
+
+  it('treats successful Clerk deletion as complete when the provider marker write fails', async () => {
+    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-deleted', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', storageFor(storage, (key, value) => {
+      if (key === markerKey && JSON.parse(value).phase === 'provider-deleted') throw new Error('provider marker write failed');
+      storage.set(key, value);
+    }));
+    const providerDelete = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original', delete: providerDelete }, vi.fn(async () => undefined), { clearLocal: vi.fn(async () => undefined), clerkEvidence: { isLoaded: true, isSignedIn: true, userId: 'clerk-original' } })).resolves.toEqual({ clerkStatus: 'deleted' });
+    expect(providerDelete).toHaveBeenCalledOnce();
+    expect(storage.has(markerKey)).toBe(false);
+  });
+
+  it('clears the nonblocking marker when Clerk deletion is unsupported', async () => {
+    const storage = new Map([[markerKey, JSON.stringify({ version: 1, phase: 'local-cleared', clerkUserId: 'clerk-original' })]]);
+    vi.stubGlobal('localStorage', storageFor(storage));
+    const signOut = vi.fn(async () => undefined);
+    await expect(completePendingAccountDeletion({ id: 'clerk-original' }, signOut, { clerkEvidence: { isLoaded: true, isSignedIn: true, userId: 'clerk-original' } })).resolves.toEqual({ clerkStatus: 'unsupported' });
+    expect(signOut).toHaveBeenCalledOnce();
+    expect(storage.has(markerKey)).toBe(false);
   });
 
   it('resumes provider deletion after a first local cleanup failure without repeating server deletion', async () => {
@@ -170,7 +219,8 @@ describe('frontend API errors and cache fallback', () => {
   });
 
   it('recovers when the server committed before the phase marker update', async () => {
-    const storage = new Map<string, string>();
+     await establishAuthenticatedMutationSession();
+     const storage = new Map<string, string>();
     let phaseWriteCount = 0;
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => storage.get(key) || null,
@@ -193,7 +243,8 @@ describe('frontend API errors and cache fallback', () => {
   });
 
   it('keeps cleanup blocked when a retry fails before the server commit, then completes on a later retry', async () => {
-    const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+     await establishAuthenticatedMutationSession();
+     const storage = new Map<string, string>([['billsplit-pending-account-deletion', JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
     vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) || null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'ACCOUNT_DELETION_BLOCKED', message: 'owned group' } }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
@@ -278,7 +329,25 @@ describe('frontend API errors and cache fallback', () => {
     expect(clearLocal).toHaveBeenCalledOnce();
     expect(signOut).not.toHaveBeenCalled();
      expect(hasPendingAccountDeletion()).toBe(true);
-     vi.unstubAllGlobals();
+    vi.unstubAllGlobals();
+   });
+
+   it('allows confirmed local cleanup after external provider deletion', async () => {
+     const storage = new Map([[markerKey, JSON.stringify({ version: 1, phase: 'server-deleted', clerkUserId: 'clerk-original' })]]);
+     vi.stubGlobal('localStorage', storageFor(storage));
+     const clearLocal = vi.fn(async () => undefined);
+     await expect(finishLocalCleanupAfterExternalProviderDeletion({ confirmed: true, clearLocal, clerkEvidence: { isLoaded: true, isSignedIn: false } })).resolves.toEqual({ clerkStatus: 'externally-deleted' });
+     expect(clearLocal).toHaveBeenCalledOnce();
+     expect(storage.has(markerKey)).toBe(false);
+   });
+
+   it('does not allow the local cleanup escape for an unconfirmed server deletion', async () => {
+     const storage = new Map([[markerKey, JSON.stringify({ version: 1, phase: 'server-pending', clerkUserId: 'clerk-original' })]]);
+     vi.stubGlobal('localStorage', storageFor(storage));
+     const clearLocal = vi.fn(async () => undefined);
+     await expect(finishLocalCleanupAfterExternalProviderDeletion({ confirmed: true, clearLocal, clerkEvidence: { isLoaded: true, isSignedIn: false } })).rejects.toThrow('server-confirmed');
+     expect(clearLocal).not.toHaveBeenCalled();
+     expect(storage.has(markerKey)).toBe(true);
    });
 
    it('completes retained local-cleared recovery after the original Clerk account signs in', async () => {
@@ -513,7 +582,7 @@ describe('frontend API errors and cache fallback', () => {
       return json({ groups: [] }, 200, 'checking-user');
     }));
     await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-checking' });
-    expect(getAuthLifecycle().status).toBe('authenticated');
+    await vi.waitFor(() => expect(getAuthLifecycle().status).toBe('authenticated'));
 
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
       if (String(request).endsWith('/me')) { meCalls += 1; throw new TypeError('probe unavailable'); }
@@ -530,8 +599,40 @@ describe('frontend API errors and cache fallback', () => {
     }));
     signalConnectionChecking();
     await vi.waitFor(() => expect(getConnectionState().status).toBe('connected'));
-    expect(getAuthLifecycle().status).toBe('authenticated');
+    await vi.waitFor(() => expect(getAuthLifecycle().status).toBe('authenticated'));
     expect(meCalls).toBe(3);
+  });
+
+  it('settles failed reconnect verification before publishing the connection error and does not re-enter reverifying', async () => {
+    resetForClerkSessionChange();
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: true });
+    let meCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) {
+        meCalls += 1;
+        if (meCalls > 1) throw new TypeError('probe unavailable');
+        return json({ id: 'ordered-user', email: 'ordered@example.com', personId: 'ordered-person' }, 200, 'ordered-user', 'clerk-ordered');
+      }
+      return json({ groups: [] }, 200, 'ordered-user');
+    }));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-ordered' });
+    const events: string[] = [];
+    const stopAuth = subscribeAuthLifecycle(() => events.push(`auth:${getAuthLifecycle().status}`));
+    const stopConnection = subscribeConnectionState(() => events.push(`connection:${getConnectionState().status}`));
+
+    signalConnectionChecking();
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-ordered', sessionId: 'session-ordered' }, { networkOnly: true });
+    stopAuth();
+    stopConnection();
+
+    expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(getConnectionState().status).toBe('connection-issue');
+    expect(meCalls).toBe(2);
+    expect(events.indexOf('auth:trusted-offline')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('auth:trusted-offline')).toBeLessThan(events.indexOf('connection:connection-issue'));
+    expect(events.filter((event) => event === 'auth:reverifying')).toHaveLength(1);
   });
 
   it('retains stable server details and distinguishes network failures', async () => {
@@ -587,6 +688,40 @@ describe('frontend API errors and cache fallback', () => {
     expect((await readGroups('user-a'))?.groups[0].id).toBe('old');
     expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
     expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
+  });
+
+  it.each([
+    ['leave', (groupId: string, userId: string) => invalidateForMutation.groupLeft(groupId, userId)],
+    ['delete', (groupId: string, userId: string) => invalidateForMutation.groupDeleted(groupId, userId)],
+    ['access revocation', (groupId: string, userId: string) => invalidateForMutation.groupAccessRevoked(groupId, userId)],
+  ])('does not let an in-flight transaction response repopulate after %s', async (_name, invalidate) => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [] });
+    let resolveTransactions!: (response: Response) => void;
+    let transactionsStarted!: () => void;
+    const started = new Promise<void>((resolve) => { transactionsStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a');
+      transactionsStarted();
+      return new Promise<Response>((resolve) => { resolveTransactions = resolve; });
+    }));
+
+    const request = getTransactions('group-a');
+    await started;
+    await invalidate('group-a', 'user-a');
+    resolveTransactions(json({ transactions: [{ kind: 'expense', id: 'late', groupId: 'group-a', description: 'Late', amountMinor: 100, currency: 'USD', date: '2026-01-01', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-01-01T00:00:00.000Z', clientOperationId: null }] }, 200, 'user-a'));
+
+    await expect(request).resolves.toMatchObject({ transactions: [{ id: 'late' }], stale: true });
+    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+  });
+
+  it('keeps filtered transaction requests on the API path instead of using the unfiltered cache', async () => {
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [] });
+    const fetchSpy = vi.fn(async (_request: RequestInfo | URL) => { throw new TypeError('network unavailable'); });
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(getTransactionPage('group-a', { q: 'dinner', kind: 'expense' })).rejects.toThrow('Connection issue');
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/api/groups/group-a/transactions?limit=25&kind=expense&q=dinner');
+    await expect(getTransactions('group-a', undefined, { q: 'dinner' })).rejects.toThrow();
   });
 
   it('removes persisted global activity and categories after an expense mutation', async () => {
@@ -850,7 +985,8 @@ describe('frontend API errors and cache fallback', () => {
   });
 
   it('waits for a foreground mutation to settle after abort before logout clears data', async () => {
-    clearAuthRequired();
+     await establishAuthenticatedMutationSession('clerk-mutation');
+     clearAuthRequired();
     let started!: () => void;
     let resolveMutation!: (response: Response) => void;
     let aborted = false;

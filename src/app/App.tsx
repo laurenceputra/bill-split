@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { SignInButton, SignUpButton, useAuth, useClerk, useUser } from '@clerk/react';
-import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Weekday } from '../shared/types';
+import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Transaction, Weekday } from '../shared/types';
 import { currencyOptions, scheduledExpenseInput, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
- import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, discardInvalidPendingAccountDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, leaveGroup, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, isMeaningfulClerkSessionTransition, isTrustedOfflineClerkUserIdHydrated, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+ import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactions, leaveGroup, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { ACCOUNT_DELETION_CONFIRMATION } from '../shared/schemas';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
-import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useConnectionState, useOnlineStatus } from './ui';
+import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
-import { groupBalanceDisplays } from './group-balance';
+import { groupBalanceDisplays, personalBalances } from './group-balance';
 import { expenseDetailPath, getNavigationContext, settlementDetailPath, transactionActivityPath } from './navigation';
 import { captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
 import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOptions, timezoneSelectValue as timezoneSelectValueForState, timezoneValueFromSelection, weekdayLabels } from './scheduled-expense';
@@ -20,6 +20,8 @@ import { localDateForTimeZone } from '../domain/recurrence';
 import { appendUniquePage, createPageRequestScope } from './pagination';
 import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collectPagedGroupExport } from './export';
 import { expenseFilterCount, expenseFilterKey, hasExpenseFilters, readExpenseFilters, writeExpenseFilters, type ExpenseFilters } from './expense-filters';
+import { hasTransactionFilters, readTransactionFilters, transactionFilterCount, transactionFilterKey, writeTransactionFilters, type TransactionFilters } from './transaction-filters';
+import { transactionDate, transactionKey, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -28,10 +30,10 @@ function Loading() { return <p className="muted" role="status" aria-live="polite
 function VerificationUnavailable({ onRetry }: { onRetry: () => void }) {
   const connection = useConnectionState();
   const title = connection.status === 'offline' ? 'You are offline' : connection.status === 'connection-issue' ? 'Connection issue' : 'Verification is unavailable';
-  return <PublicShell showAuthActions={false}><div className="public-status" role="status" aria-live="polite"><h1>{title}</h1><p className="muted">BillSplit could not verify this browser for private access. Retry when the connection is available; the app will not treat an unverified account as signed out.</p><Button type="button" variant="secondary" onClick={onRetry}>Retry verification</Button></div></PublicShell>;
+  return <PublicShell showAuthActions={false}><div className="public-status" role="alert" aria-live="assertive"><h1>{title}</h1><p className="muted">BillSplit could not verify this browser for private access. Retry when the connection is available; the app will not treat an unverified account as signed out.</p><Button type="button" variant="secondary" onClick={onRetry}>Retry verification</Button></div></PublicShell>;
 }
 
-function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
+function PublicLanding({ logoutError, accountDeletionNotice }: { logoutError?: unknown; accountDeletionNotice?: boolean } = {}) {
   const location = useLocation();
   const { signOut } = useClerk();
   const [retryingSignOut, setRetryingSignOut] = useState(false);
@@ -48,7 +50,7 @@ function PublicLanding({ logoutError }: { logoutError?: unknown } = {}) {
         <div className="ledger-preview" aria-hidden="true"><div className="ledger-preview__top"><span>Weekend away</span><span>USD</span></div><div className="ledger-preview__row"><span>Alex paid dinner</span><strong>$84.00</strong></div><div className="ledger-preview__row"><span>Sam owes Alex</span><strong className="ledger-preview__positive">$28.00</strong></div><div className="ledger-preview__line" /><div className="ledger-preview__total"><span>Still owed</span><strong>$28.00</strong></div></div>
       </section>
       <section className="landing-proof" aria-label="Why BillSplit"><div><strong>Clear ledgers</strong><span>See payments, splits, and balances together.</span></div><div><strong>Less chasing</strong><span>Know the next fair payment at a glance.</span></div><div><strong>Works offline</strong><span>Capture a new expense when signal drops.</span></div></section>
-       {logoutError ? <div className="error" role="alert"><strong>Logout needs another try.</strong> <span>{errorText(logoutError)}</span> <Button type="button" variant="secondary" disabled={retryingSignOut} onClick={() => void retrySignOut}>{retryingSignOut ? 'Retrying…' : 'Retry logout'}</Button></div> : null}<section className="landing-note"><h2>Private, even when offline</h2><p>Your signed-in browser may keep recent group data and queued expenses locally for trusted-device offline use. Clerk session tokens are never stored by BillSplit, and syncing still requires an active Clerk session. Clear everything from Settings before handing off a device.</p></section>
+        {logoutError ? <div className="error" role="alert"><strong>Logout needs another try.</strong> <span>{errorText(logoutError)}</span> <Button type="button" variant="secondary" disabled={retryingSignOut} onClick={() => void retrySignOut}>{retryingSignOut ? 'Retrying…' : 'Retry logout'}</Button></div> : null}{accountDeletionNotice ? <p className="cache-status" role="status">BillSplit data and local cleanup are complete. This Clerk client could not delete the Clerk account; manage that Clerk account separately.</p> : null}<section className="landing-note"><h2>Private, even when offline</h2><p>Your signed-in browser may keep recent group data and queued expenses locally for trusted-device offline use. Clerk session tokens are never stored by BillSplit, and syncing still requires an active Clerk session. Clear everything from Settings before handing off a device.</p></section>
     </div>
   </PublicShell>;
 }
@@ -351,10 +353,111 @@ function GroupManagementPage() {
   const group = groupResource.data?.group;
   const members = groupResource.data?.members || [];
   const offline = Boolean(me.offline || groupResource.offline) || !online;
+  useEffect(() => {
+    if (!group || typeof window === 'undefined' || !window.location.hash) return;
+    const target = document.getElementById(window.location.hash.slice(1));
+    if (target instanceof HTMLElement) window.requestAnimationFrame(() => target.focus({ preventScroll: true }));
+  }, [group, id]);
   if ((me.error || groupResource.error) && !group) return <Layout><ErrorBox error={me.error || groupResource.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-manage-error" retryLabel={me.error ? 'Retry identity check' : 'Retry'} /><Link className="back" to={`/groups/${id}`}>← Back to group</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
   const owner = group.role === 'owner';
-  return <Layout><Link className="back" to={`/groups/${id}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Group management</p><h1>Manage group</h1></div></div>{offline ? <ConnectionBanner detail="cached group data is available. Member changes, invitations, exports, and settings require a connection." /> : null}<ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /><section aria-labelledby="people-heading"><div className="section-title"><h2 id="people-heading">People</h2><span className="muted">{owner ? 'Owner controls' : 'Members can view this list'}</span></div><MemberDirectory groupId={id} userId={userId} members={members} online={!offline} owner={owner} /></section>{owner ? <AddFriendForm groupId={id} userId={userId} online={!offline} /> : null}{owner ? <OwnerMemberControls groupId={id} userId={userId} online={!offline} /> : null}<GroupExports groupId={id} online={!offline} /><GroupSettings group={group} groupId={id} userId={userId} online={!offline} role={owner ? 'owner' : 'member'} onDeleted={() => nav('/')} onLeft={() => nav('/')} /></Layout>;
+  return <Layout><Link className="back" to={`/groups/${id}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Group management</p><h1>Manage group</h1></div></div>{offline ? <ConnectionBanner detail="cached group data is available. Member changes, invitations, exports, and settings require a connection." /> : null}<ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /><section id="people" tabIndex={-1} aria-labelledby="people-heading"><div className="section-title"><h2 id="people-heading">People</h2><span className="muted">{owner ? 'Owner controls' : 'Members can view this list'}</span></div><MemberDirectory groupId={id} userId={userId} members={members} online={!offline} owner={owner} /></section>{owner ? <AddFriendForm groupId={id} userId={userId} online={!offline} /> : null}{owner ? <OwnerMemberControls groupId={id} userId={userId} online={!offline} /> : null}<GroupExports groupId={id} online={!offline} /><div id="settings" tabIndex={-1}><GroupSettings group={group} groupId={id} userId={userId} online={!offline} role={owner ? 'owner' : 'member'} onDeleted={() => nav('/')} onLeft={() => nav('/')} /></div></Layout>;
+}
+
+function GroupOverview() {
+  const online = useOnlineStatus();
+  const { id = '' } = useParams();
+  const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
+  const userId = me.data?.id || 'pending';
+  const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(userId, id), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
+  const transactionsResource = useResource<{ transactions: Transaction[]; nextCursor?: string }>(resourceKeys.transactions(userId, id, 'overview'), me.data?.id, (signal) => getTransactionPage(id, { limit: 5 }, signal), RESOURCE_FRESHNESS.transactions);
+  const scheduledResource = useResource<{ scheduledExpenses: ScheduledExpense[]; nextCursor?: string }>(resourceKeys.scheduledExpenses(userId, id), me.data?.id, (signal) => getScheduledExpenses(id, signal), RESOURCE_FRESHNESS.scheduledExpenses);
+  const balancesResource = useResource<{ balances: Record<string, Balances> }>(resourceKeys.balances(userId, id), me.data?.id, (signal) => getBalances(id, signal), RESOURCE_FRESHNESS.balances, me.data?.id ? () => hydrateBalances(me.data!.id, id) : undefined);
+  const group = groupResource.data?.group;
+  const members = groupResource.data?.members || [];
+  const balances = balancesResource.data?.balances || {};
+  const currentPersonId = me.data?.personId || '';
+  const currentUserId = me.data?.id || '';
+  const outbox = useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
+  const pending = outbox.filter((item) => item.userId === currentUserId && item.groupId === id);
+  const transactions = transactionsResource.data?.transactions || [];
+  const offline = Boolean(groupResource.offline || transactionsResource.offline || balancesResource.offline || scheduledResource.offline || me.offline) || !online;
+  const refreshing = [groupResource, transactionsResource, balancesResource, scheduledResource].some((resource) => resource.revalidating);
+  if ((groupResource.error || me.error) && !group) return <Layout><ErrorBox error={groupResource.error || me.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-error" /><Link className="back" to="/">← Groups</Link></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+  const displayName = group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name;
+  const balanceDisplays = personalBalances(balances, currentPersonId, group.currency);
+  return <Layout><Link to="/" className="back">← Groups</Link><div className="page-title"><div><p className="eyebrow">{group.memberCount === 2 ? 'Friend group' : `${group.currency} group`}</p><h1>{displayName}</h1></div><div className="expense-heading__actions"><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link><Link className="button button--secondary" to={`/groups/${id}/settle`}>Settle up</Link></div></div>{offline ? <ConnectionBanner detail="showing cached group data. New expenses can be captured; history, schedules, and management need a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}
+    <section aria-labelledby="balances-heading" className="compact-balances"><h2 id="balances-heading">Your balances</h2><div className="balance-cards">{balanceDisplays.map((display, index) => <div className={`balance-card balance-card--${display.kind}`} key={`${display.currency}-${index}`}><span className="balance-card__currency">{display.currency}</span><strong>{display.label}</strong>{display.kind === 'balance' ? <Money amountMinor={display.amountMinor} currency={display.currency} tone={display.label === 'You are owed' ? 'positive' : 'debt'} /> : null}</div>)}</div><details className="balance-breakdown"><summary>View full group breakdown</summary>{balancesResource.data !== undefined && Object.keys(balances).length ? Object.entries(balances).map(([currencyKey, balance]) => <div key={currencyKey}><h3>{currencyKey}</h3>{balance.simplified.length ? <div className="list">{balance.simplified.map((item) => <div className="row" key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}<Status tone="debt">Debt</Status></span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></div>)}</div> : <Empty>Everyone is settled up.</Empty>}</div>) : <Empty>Everyone is settled up.</Empty>}</details></section>
+    <section aria-labelledby="recent-transactions-heading"><div className="section-title"><h2 id="recent-transactions-heading">Recent transactions</h2><Link className="inline-action" to={`/groups/${id}/transactions`}>View all transactions</Link></div>{!me.error || transactionsResource.data !== undefined ? <ResourceNotice resource={transactionsResource} label="transactions" retry={retryFor(resourceKeys.transactions(userId, id, 'overview'), me.data?.id)} /> : null}{pending.length ? <section className="pending-transactions" aria-labelledby="pending-transactions-heading"><h3 id="pending-transactions-heading">Waiting to sync · {pending.length}</h3><div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}</div></section> : null}{transactionsResource.data !== undefined && !transactions.length && !pending.length ? <Empty>No transactions yet.</Empty> : transactions.length ? <div className="list transaction-list">{transactions.map((transaction) => <TransactionRow key={transactionKey(transaction)} groupId={id} transaction={transaction} />)}</div> : null}</section>
+    <CompactScheduleList groupId={id} schedules={scheduledResource.data?.scheduledExpenses || []} resource={scheduledResource} online={!offline} userId={currentUserId} />
+    <section aria-labelledby="people-summary-heading"><div className="section-title"><h2 id="people-summary-heading">People</h2><span className="muted">{members.length} {members.length === 1 ? 'person' : 'people'}</span></div><p className="people-summary-compact">{members.slice(0, 4).map((member) => member.personId === currentPersonId ? 'You' : member.name).join(', ')}{members.length > 4 ? ` +${members.length - 4} more` : ''}</p><Link className="inline-action" to={`/groups/${id}/manage#people`}>Manage people</Link></section>
+    <nav className="actions group-tools" aria-label="Group tools"><Link className="button button--secondary" to={`/groups/${id}/activity`}>Group activity</Link><Link className="button button--secondary" to={`/groups/${id}/manage#settings`}>Group settings</Link></nav>
+  </Layout>;
+}
+
+function TransactionRow({ groupId, transaction }: { groupId: string; transaction: Transaction }) {
+  const path = transaction.kind === 'expense' ? expenseDetailPath(groupId, transaction.id) : settlementDetailPath(groupId, transaction.id);
+  const content = <><span><strong>{transactionTypeLabel(transaction)} · {transactionTitle(transaction)}</strong><small>{transactionDate(transaction)}{transactionPeople(transaction) ? ` · ${transactionPeople(transaction)}` : ''}</small></span><Money amountMinor={transaction.amountMinor} currency={transaction.currency} tone={transaction.kind === 'settlement' ? 'positive' : undefined} /></>;
+  return path ? <Link className="row transaction-row" to={path}>{content}</Link> : <div className="row transaction-row">{content}</div>;
+}
+
+function TransactionFilterDisclosure({ filterKey, filterCount, offline, children }: { filterKey: string; filterCount: number; offline: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(filterCount > 0);
+  useEffect(() => { if (filterCount > 0) setOpen(true); }, [filterCount, filterKey]);
+  return <details className="transaction-filters-disclosure" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}><summary>Search and filters{filterCount ? ` · ${filterCount} active filter${filterCount === 1 ? '' : 's'}` : ''}</summary>{offline ? <p className="cache-status">Server filters are unavailable offline. Reconnect to search history.</p> : null}{children}</details>;
+}
+
+function TransactionHistoryPage() {
+  const online = useOnlineStatus();
+  const { id = '' } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters = useMemo(() => readTransactionFilters(searchParams), [searchParams]);
+  const filterSignature = transactionFilterKey(filters);
+  const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
+  const userId = me.data?.id || 'pending';
+  const groupResource = useResource<{ group: Group; members: GroupMember[] }>(resourceKeys.group(userId, id), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
+  const transactionsResource = useResource<{ transactions: Transaction[]; nextCursor?: string }>(resourceKeys.transactions(userId, id, filterSignature), me.data?.id, (signal) => getTransactions(id, signal, filters), RESOURCE_FRESHNESS.transactions, me.data?.id && !hasTransactionFilters(filters) ? () => hydrateTransactions(me.data!.id, id) : undefined);
+  const categoriesResource = useResource<{ categories: string[] }>(resourceKeys.categories(userId), me.data?.id, (signal) => getCategories(signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateCategories(me.data!.id) : undefined);
+  const group = groupResource.data?.group;
+  const members = groupResource.data?.members || [];
+  const currentUserId = me.data?.id || '';
+  const outbox = useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
+  const pending = outbox.filter((item) => item.userId === currentUserId && item.groupId === id);
+  const [rows, setRows] = useState<Transaction[]>([]);
+  const [cursor, setCursor] = useState<string>();
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<unknown>();
+  const [draftFilters, setDraftFilters] = useState<TransactionFilters>(filters);
+  const scopeKey = `${id}:${filterSignature}`;
+  const scopeKeyRef = useRef(scopeKey); scopeKeyRef.current = scopeKey;
+  const pageScope = useRef(createPageRequestScope());
+  const cursorRef = useRef<string>();
+  const offline = Boolean(groupResource.offline || transactionsResource.offline || me.offline) || !online;
+  useEffect(() => { pageScope.current.reset(scopeKey); cursorRef.current = undefined; setRows([]); setCursor(undefined); setLoadingMore(false); setPageError(undefined); }, [scopeKey]);
+  useEffect(() => { const page = transactionsResource.data; if (!page || scopeKeyRef.current !== scopeKey) return; pageScope.current.reset(scopeKey); cursorRef.current = page.nextCursor; setRows(page.transactions); setCursor(page.nextCursor); }, [scopeKey, transactionsResource.data]);
+  useEffect(() => () => pageScope.current.dispose(), []);
+  useEffect(() => { setDraftFilters(filters); }, [filterSignature]);
+  useEffect(() => {
+    if (searchParams.get('category') && filters.kind !== 'expense') setSearchParams(writeTransactionFilters(searchParams, filters), { replace: true });
+  }, [filters, searchParams, setSearchParams]);
+  if ((groupResource.error || me.error) && !group) return <Layout><ErrorBox error={groupResource.error || me.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="transactions-group-error" /><Link className="back" to={`/groups/${id}`}>← Back to group</Link></Layout>;
+  if (!group) return <Layout><Loading /></Layout>;
+  const filterCount = transactionFilterCount(filters);
+  const categoryChoices = [...new Set([...(categoriesResource.data?.categories || []), ...rows.filter((row): row is Extract<Transaction, { kind: 'expense' }> => row.kind === 'expense').map((row) => row.category || '')].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const applyFilters = (event: FormEvent) => { event.preventDefault(); setSearchParams(writeTransactionFilters(searchParams, draftFilters)); };
+  const clearFilters = () => setSearchParams(writeTransactionFilters(searchParams, {}));
+  const loadMore = async () => {
+    if (!cursor || loadingMore || offline) return;
+    const request = pageScope.current.begin(scopeKey, cursor); setLoadingMore(true); setPageError(undefined);
+    try {
+      const page = await getTransactionPage(id, { ...filters, limit: 25, cursor: request.cursor }, request.signal);
+      if (!pageScope.current.isCurrent(request) || scopeKeyRef.current !== request.key || cursorRef.current !== request.cursor) return;
+      cursorRef.current = page.nextCursor; setRows((current) => appendUniquePage(current, page.transactions, transactionKey)); setCursor(page.nextCursor);
+    } catch (cause) { if (pageScope.current.isCurrent(request) && !(cause instanceof DOMException && cause.name === 'AbortError')) setPageError(cause); }
+    finally { if (pageScope.current.isCurrent(request)) setLoadingMore(false); }
+  };
+  return <Layout><Link className="back" to={`/groups/${id}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Transaction history</p><h1>All transactions</h1></div></div>{offline && transactionsResource.offline ? <p className="offline-banner" role="status">Offline: showing the cached first page only. History is incomplete; filters and loading more need a connection.</p> : offline ? <ConnectionBanner detail="transaction history and server filters need a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="transactions-identity-error" /> : null}<TransactionFilterDisclosure filterKey={filterSignature} filterCount={filterCount} offline={offline}><form className="transaction-filters" onSubmit={applyFilters}><Field label="Search"><input type="search" value={draftFilters.q || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value || undefined }))} /></Field><Field label="Kind"><select value={draftFilters.kind || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, kind: (event.target.value || undefined) as TransactionFilters['kind'], category: event.target.value === 'expense' ? current.category : undefined }))}><option value="">All transaction types</option><option value="expense">Expenses</option><option value="settlement">Settlements</option></select></Field><Field label="Person"><select value={draftFilters.person || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, person: event.target.value || undefined }))}><option value="">All people</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field>{draftFilters.kind === 'expense' ? <Field label="Category"><select value={draftFilters.category || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, category: event.target.value || undefined }))}><option value="">All categories</option>{categoryChoices.map((category) => <option key={category} value={category}>{category}</option>)}</select></Field> : null}<Field label="From date"><input type="date" value={draftFilters.from || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, from: event.target.value || undefined }))} /></Field><Field label="To date"><input type="date" value={draftFilters.to || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, to: event.target.value || undefined }))} /></Field><Field label="Currency"><select value={draftFilters.currency || ''} disabled={offline} onChange={(event) => setDraftFilters((current) => ({ ...current, currency: (event.target.value || undefined) as Currency }))}><option value="">All currencies</option>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field><div className="actions"><Button type="submit" disabled={offline}>Apply filters</Button><Button type="button" variant="secondary" disabled={offline || filterCount === 0} onClick={clearFilters}>Clear</Button></div></form></TransactionFilterDisclosure>{!me.error || transactionsResource.data !== undefined ? <ResourceNotice resource={transactionsResource} label="transactions" retry={retryFor(resourceKeys.transactions(userId, id, filterSignature), me.data?.id)} /> : null}{pending.length ? <section className="pending-transactions" aria-labelledby="history-pending-heading"><h2 id="history-pending-heading">Waiting to sync · {pending.length}</h2><div className="list">{pending.map((item) => <PendingExpenseRow key={item.clientOperationId} item={item} />)}</div></section> : null}{transactionsResource.data !== undefined && !rows.length && !pending.length ? <Empty>No transactions match these filters.</Empty> : rows.length ? <section aria-labelledby="transaction-list-heading"><h2 id="transaction-list-heading" className="sr-only">Committed transactions</h2><div className="list transaction-list">{rows.map((transaction) => <TransactionRow key={transactionKey(transaction)} groupId={id} transaction={transaction} />)}</div></section> : null}{cursor ? <Button type="button" variant="secondary" disabled={offline || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading…' : 'Load more transactions'}</Button> : null}{pageError && !offline ? <ErrorBox error={pageError} id="transaction-page-error" /> : null}</Layout>;
 }
 
 function GroupPage() {
@@ -429,6 +532,7 @@ function GroupPage() {
 
 function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
   const connection = useConnectionState();
+  const canMutate = useOnlineStatus();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const syncing = item.status === 'syncing' && (item.leaseExpiresAt === undefined || item.leaseExpiresAt > Date.now());
@@ -436,7 +540,7 @@ function PendingExpenseRow({ item }: { item: ExpenseOutboxItem }) {
   const explanation = syncing ? 'An in-flight server write cannot be safely cancelled.' : item.deliveryUncertain ? 'The server may have committed this expense; retry or wait for reconciliation.' : undefined;
   const retry = async () => { setError(undefined); setBusy(true); try { await retryOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
   const discard = async () => { if (!confirm('Discard this pending expense?')) return; setError(undefined); setBusy(true); try { await discardOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} />{connection.status !== 'offline' ? <Button disabled={syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button> : null}<Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
+  return <div className="row pending-row"><span>{item.display.description}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'positive'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} />{connection.status !== 'offline' ? <Button disabled={!canMutate || syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button> : null}<Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></div>;
 }
 
 function ScheduleStatus({ status }: { status: ScheduledExpenseStatus }) {
@@ -445,6 +549,12 @@ function ScheduleStatus({ status }: { status: ScheduledExpenseStatus }) {
 }
 
 type ScheduleListProps = { groupId: string; schedules: ScheduledExpense[]; resource: ResourceSnapshot<{ scheduledExpenses: ScheduledExpense[]; nextCursor?: string }>; online: boolean; userId: string };
+function CompactScheduleList(props: ScheduleListProps) {
+  const active = props.schedules.filter((schedule) => schedule.status === 'active');
+  const next = active.map((schedule) => schedule.nextOccurrenceDate).filter((date): date is string => Boolean(date)).sort()[0];
+  return <section className="scheduled-summary" aria-labelledby="scheduled-summary-heading"><div className="section-title"><h2 id="scheduled-summary-heading">Scheduled expenses</h2><span className="muted">{active.length} active{next ? ` · Next ${formatScheduleDate(next)}` : ''}</span></div><details><summary>View scheduled expenses and actions</summary><ScheduleList {...props} /></details></section>;
+}
+
 function ScheduleList({ groupId, schedules: initialSchedules, resource, online, userId }: ScheduleListProps) {
   const [schedules, setSchedules] = useState(initialSchedules);
   const [nextCursor, setNextCursor] = useState(resource.data?.nextCursor);
@@ -926,7 +1036,8 @@ function LegacyActivityRedirect() {
 
 function Settings() {
   const connection = useConnectionState();
-  const online = connection.status === 'connected';
+  const lifecycle = useAuthLifecycle();
+  const online = connection.status === 'connected' && lifecycle.status === 'authenticated';
   const [outbox, setOutbox] = useState<ExpenseOutboxItem[]>(getOutboxSnapshot());
   const [outboxReady, setOutboxReady] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -937,9 +1048,10 @@ function Settings() {
   const [exportProgress, setExportProgress] = useState('');
   const [exportError, setExportError] = useState<unknown>();
   const [deletionConfirmation, setDeletionConfirmation] = useState('');
-  const [deletingAccount, setDeletingAccount] = useState(false);
-  const [accountDeletionMessage, setAccountDeletionMessage] = useState('');
-  const [accountDeletionError, setAccountDeletionError] = useState<unknown>();
+   const [deletingAccount, setDeletingAccount] = useState(false);
+   const [accountDeletionMessage, setAccountDeletionMessage] = useState('');
+   const [accountDeletionError, setAccountDeletionError] = useState<unknown>();
+   const [accountDeletionNotice, setAccountDeletionNotice] = useState(false);
   const exportController = useRef<AbortController>();
   const { signOut } = useClerk();
    const { user: clerkUser } = useUser();
@@ -984,7 +1096,7 @@ function Settings() {
        if (!clerkUser?.id || !userId || clerkUser.id !== userId) throw new Error('Clerk is still loading this account. Retry account deletion when the identity is available.');
        await deleteAccount(clerkUser.id);
        const result = await completePendingAccountDeletion(clerkUser, signOut, { clerkEvidence: { isLoaded: clerkLoaded === true, isSignedIn, userId } });
-      if (result.clerkStatus === 'unsupported') setAccountDeletionMessage('BillSplit data was deleted. This installed Clerk client cannot delete the Clerk account; manage that account separately.');
+       if (result.clerkStatus === 'unsupported') { setAccountDeletionMessage('BillSplit data was deleted. This installed Clerk client cannot delete the Clerk account; manage that account separately.'); setAccountDeletionNotice(true); }
       else window.location.assign('/');
     } catch (cause) {
       setAccountDeletionError(cause);
@@ -1024,7 +1136,7 @@ function LegacyScheduledExpenseRedirect() {
 
 function PrivateRoutes() {
   const identityEpoch = useResourceIdentityEpoch();
-  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/activity" element={<Activity />} /><Route path="/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id" element={<GroupPage />} /><Route path="/groups/:id/manage" element={<GroupManagementPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/new" element={<LegacyScheduledExpenseRedirect />} /><Route path="/groups/:id/scheduled-expense/:scheduledExpenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/settlements/:settlementId" element={<SettlementDetail />} /><Route path="/groups/:id/activity" element={<LegacyActivityRedirect />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
+  return <Routes key={identityEpoch}><Route path="/" element={<Home />} /><Route path="/settings" element={<Settings />} /><Route path="/activity" element={<Activity />} /><Route path="/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id" element={<GroupOverview />} /><Route path="/groups/:id/transactions" element={<TransactionHistoryPage />} /><Route path="/groups/:id/manage" element={<GroupManagementPage />} /><Route path="/groups/:id/expense/new" element={<ExpenseForm />} /><Route path="/groups/:id/expense/:expenseId" element={<ExpenseForm />} /><Route path="/groups/:id/scheduled-expense/new" element={<LegacyScheduledExpenseRedirect />} /><Route path="/groups/:id/scheduled-expense/:scheduledExpenseId" element={<ExpenseForm />} /><Route path="/groups/:id/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/expenses/:expenseId" element={<ExpenseDetail />} /><Route path="/groups/:id/settle" element={<Settle />} /><Route path="/groups/:id/settlements/:settlementId" element={<SettlementDetail />} /><Route path="/groups/:id/activity" element={<LegacyActivityRedirect />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>;
 }
 
 export function App() {
@@ -1036,15 +1148,15 @@ export function App() {
   const auth = useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
   const logoutInProgress = useSyncExternalStore(subscribeSessionState, getSessionLogoutInProgress, () => false);
   const clerkSessionRef = useRef<string>();
-  const offlineStartedBeforeClerkRef = useRef(false);
   const previousOnlineRef = useRef<boolean>();
   const previousClerkEvidenceRef = useRef<string>();
   const connection = useConnectionState();
   const online = connection.status === 'connected';
   const offline = connection.status === 'offline';
-  const [pendingDeletion, setPendingDeletion] = useState(hasPendingAccountDeletion);
-  const [pendingDeletionError, setPendingDeletionError] = useState<unknown>();
-  const [pendingDeletionRetry, setPendingDeletionRetry] = useState(0);
+   const [pendingDeletion, setPendingDeletion] = useState(hasPendingAccountDeletion);
+   const [pendingDeletionError, setPendingDeletionError] = useState<unknown>();
+   const [pendingDeletionRetry, setPendingDeletionRetry] = useState(0);
+   const [accountDeletionNotice, setAccountDeletionNotice] = useState(false);
   useEffect(() => {
     const onGroupRevoked = (event: Event) => {
       const groupId = (event as CustomEvent<{ groupId?: string }>).detail?.groupId;
@@ -1055,9 +1167,19 @@ export function App() {
   }, [location.pathname, navigate]);
    const retryPendingDeletion = () => { setPendingDeletionError(undefined); setPendingDeletion(true); setPendingDeletionRetry((value) => value + 1); };
    const discardInvalidDeletionMarker = () => {
-     if (!discardInvalidPendingAccountDeletion()) return;
+      if (!discardInvalidPendingAccountDeletion()) return;
+      setPendingDeletionError(undefined);
+      setPendingDeletion(false);
+   };
+   const finishExternalProviderCleanup = () => {
+     const phase = getPendingAccountDeletionPhase();
+     if (phase !== 'server-deleted' && phase !== 'local-cleared') return;
+     if (!confirm('This only clears BillSplit data remaining in this browser. It does not delete or manage your Clerk account. Continue because the original Clerk account was deleted elsewhere?')) return;
      setPendingDeletionError(undefined);
-     setPendingDeletion(false);
+     void finishLocalCleanupAfterExternalProviderDeletion({ confirmed: true, clerkEvidence: { isLoaded: isLoaded === true, isSignedIn, ...(userId ? { userId } : {}) } }).then(() => {
+       setPendingDeletion(false);
+       window.location.assign('/');
+     }).catch((cause) => setPendingDeletionError(cause));
    };
   useEffect(() => {
     const onPending = () => setPendingDeletion(true);
@@ -1071,13 +1193,14 @@ export function App() {
        return completePendingAccountDeletion(clerkUser, signOut, { clerkEvidence: { isLoaded: isLoaded === true, isSignedIn, ...(userId ? { userId } : {}) } });
      })().then((result) => {
       if (!active) return;
-       if (result.clerkStatus === 'signed-out') {
-         setPendingDeletion(true);
-         setPendingDeletionError(undefined);
-       } else if (result.clerkStatus === 'unsupported') {
-         setPendingDeletion(true);
-         setPendingDeletionError(new Error('The installed Clerk client cannot delete the provider account. Update Clerk support before retrying.'));
-       } else {
+        if (result.clerkStatus === 'signed-out') {
+          setPendingDeletion(true);
+          setPendingDeletionError(undefined);
+        } else if (result.clerkStatus === 'unsupported') {
+          setPendingDeletion(false);
+          setPendingDeletionError(undefined);
+          setAccountDeletionNotice(true);
+        } else {
          setPendingDeletion(false);
          window.location.assign('/');
        }
@@ -1089,7 +1212,6 @@ export function App() {
     // the old `!isLoaded && !online` branch must never gate it, and this is
     // the only code path from React which can request an auth probe.
     if (pendingDeletion || (!shouldStartAuthCheck(online, isLoaded) && !isDevelopmentAuthBypass)) return;
-    if (!isLoaded) offlineStartedBeforeClerkRef.current = true;
     const sessionKey = userId && sessionId ? `${userId}:${sessionId}` : undefined;
     const currentClerkUserId = typeof userId === 'string' ? userId : undefined;
     const clerkEvidence = `${isLoaded}:${isSignedIn}:${currentClerkUserId || ''}:${sessionId || ''}`;
@@ -1097,31 +1219,32 @@ export function App() {
     const clerkEvidenceChanged = previousClerkEvidenceRef.current !== undefined && previousClerkEvidenceRef.current !== clerkEvidence;
     previousOnlineRef.current = online;
     previousClerkEvidenceRef.current = clerkEvidence;
-    const providerChangedAfterOfflineStart = offlineStartedBeforeClerkRef.current;
-    const providerTransitionPending = providerChangedAfterOfflineStart && auth.status === 'checking';
-    if (!providerTransitionPending) offlineStartedBeforeClerkRef.current = false;
     // A failed verification is stable UI, not a reason to immediately start
     // another request when the effect rerenders. Explicit retry and the
     // evidence/connectivity listeners below are the retry edges.
     if (auth.status === 'verification-unavailable' && !connectivityChanged && !clerkEvidenceChanged) return;
-    const sessionChanged = isMeaningfulClerkSessionTransition(clerkSessionRef.current, sessionKey);
-    const clerkUserIdHydrated = isTrustedOfflineClerkUserIdHydrated();
-    const cachedOfflineClerkUserId = providerChangedAfterOfflineStart && clerkUserIdHydrated ? getTrustedOfflineClerkUserId() : undefined;
-    const offlineAccountChanged = shouldRevokeForOfflineClerkUser(providerChangedAfterOfflineStart, isSignedIn === true, currentClerkUserId, cachedOfflineClerkUserId, clerkUserIdHydrated);
-    const sessionTransition = sessionChanged || offlineAccountChanged;
-    if (online && sessionTransition) resetForClerkSessionChange();
-    else if (offline && sessionTransition) revokeForClerkSessionChange();
+    if (auth.status === 'unauthenticated' && !connectivityChanged && !clerkEvidenceChanged) return;
+    const completeAccountMismatch = Boolean(isLoaded && isSignedIn === true && currentClerkUserId && getVerifiedClerkUserId() && currentClerkUserId !== getVerifiedClerkUserId());
+    // Session rotation for the same Clerk user is a reverify, not an
+    // account switch. Only complete positive user-ID mismatch is destructive.
+    if (online && completeAccountMismatch) resetForClerkSessionChange();
+    else if (offline && completeAccountMismatch) revokeForClerkSessionChange();
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
     if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
       clerkSessionRef.current = undefined;
       void coordinateAuthBootstrap({ isLoaded: true, isSignedIn: false });
       return;
     }
-    if (!(sessionTransition && offline)) void coordinateAuthBootstrap({ isLoaded: isLoaded === true, isSignedIn, ...(currentClerkUserId ? { userId: currentClerkUserId } : {}), ...(sessionId ? { sessionId } : {}) }, { startupFallbackMs: auth.status === 'checking' ? 2500 : undefined, ...((connection.status === 'checking' || (connectivityChanged || clerkEvidenceChanged) && (shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) || auth.status === 'authenticated')) ? { networkOnly: true } : {}) });
+    if (!(completeAccountMismatch && offline)) void coordinateAuthBootstrap({ isLoaded: isLoaded === true, isSignedIn, ...(currentClerkUserId ? { userId: currentClerkUserId } : {}), ...(sessionId ? { sessionId } : {}) }, { ...((connection.status === 'checking' || clerkEvidenceChanged && (shouldReverifyTrustedOffline(online, isLoaded === true, isSignedIn === true, auth.status) || auth.status === 'authenticated')) ? { networkOnly: true } : {}) });
    }, [auth.status, connection.status, isLoaded, isSignedIn, offline, online, pendingDeletion, sessionId, userId]);
   const returnTo = `${location.pathname}${location.search}${location.hash}`;
-  const sessionTransitionPending = Boolean(clerkSessionRef.current && userId && sessionId && clerkSessionRef.current !== `${userId}:${sessionId}`);
-  const incompleteLoadedSignedInEvidence = isIncompleteLoadedSignedInEvidence(isLoaded === true, isSignedIn, userId || undefined, sessionId || undefined);
+   const sessionTransitionPending = Boolean(clerkSessionRef.current && userId && sessionId && clerkSessionRef.current !== `${userId}:${sessionId}`);
+   const incompleteLoadedSignedInEvidence = isIncompleteLoadedSignedInEvidence(isLoaded === true, isSignedIn, userId || undefined, sessionId || undefined);
+   // Clerk can expose B's user before it exposes B's session.  Do not render
+   // A's private tree during that partial transition; the coordinator also
+   // evicts A and revokes its offline trust in the same evidence epoch.
+   const knownClerkIdentityMismatch = Boolean(isLoaded && isSignedIn === true && userId && getVerifiedClerkUserId() && userId !== getVerifiedClerkUserId());
+   const retainedPrivateView = hasRetainedPrivateSession(incompleteLoadedSignedInEvidence ? undefined : (userId || undefined));
   // An authoritative /api/me response is sufficient for the live identity;
   // durable trust is an optional offline capability, not a second Loading
   // gate (a bounded IDB write may fail without invalidating the session).
@@ -1131,16 +1254,20 @@ export function App() {
      const pendingIdentity = getPendingAccountDeletionClerkUserId();
      const signedInToDifferentAccount = Boolean(isSignedIn && userId && pendingIdentity && userId !== pendingIdentity);
      const canSignInToRecover = pendingPhase === 'server-pending' || pendingPhase === 'server-deleted' || pendingPhase === 'local-cleared';
-     return <PublicShell showAuthActions={false}><div className="public-status" aria-live="polite"><h1>Finishing account deletion…</h1><p className="muted">Private data will not be restored while this identity-bound deletion is pending.</p>{signedInToDifferentAccount ? <><p className="muted">This browser is signed in to a different Clerk account. Sign out, then sign in to the original account to continue.</p><Button type="button" variant="secondary" onClick={() => void signOut({ redirectUrl: '/' })}>Sign out this account</Button></> : canSignInToRecover && isLoaded && isSignedIn === false ? <><p className="muted">Sign in to the same Clerk account that started deletion. BillSplit data is already cleared; provider deletion will not be claimed until that account is verified.</p><SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button className="button" type="button">Sign in to finish deletion</button></SignInButton></> : null}{pendingDeletionError ? <><ErrorBox error={pendingDeletionError} id="account-deletion-recovery-error" />{hasInvalidPendingAccountDeletion() ? <Button type="button" variant="secondary" onClick={discardInvalidDeletionMarker}>Discard invalid recovery marker</Button> : <Button type="button" variant="secondary" onClick={retryPendingDeletion}>Retry cleanup</Button>}</> : <Loading />}</div></PublicShell>;
+      return <PublicShell showAuthActions={false}><div className="public-status" aria-live="polite"><h1>Finishing account deletion…</h1><p className="muted">Private data will not be restored while this identity-bound deletion is pending.</p>{signedInToDifferentAccount ? <><p className="muted">This browser is signed in to a different Clerk account. Sign out, then sign in to the original account to continue.</p><Button type="button" variant="secondary" onClick={() => void signOut({ redirectUrl: '/' })}>Sign out this account</Button></> : canSignInToRecover && isLoaded && isSignedIn === false ? <><p className="muted">Sign in to the same Clerk account that started deletion. BillSplit data is already cleared; provider deletion will not be claimed until that account is verified.</p><SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button className="button" type="button">Sign in to finish deletion</button></SignInButton>{pendingPhase !== 'server-pending' ? <><p className="muted">If that original Clerk account was deleted elsewhere, you may finish local cleanup here. This does not delete or manage Clerk.</p><Button type="button" variant="secondary" onClick={finishExternalProviderCleanup}>Finish local cleanup</Button></> : null}</> : null}{pendingDeletionError ? <><ErrorBox error={pendingDeletionError} id="account-deletion-recovery-error" />{hasInvalidPendingAccountDeletion() ? <Button type="button" variant="secondary" onClick={discardInvalidDeletionMarker}>Discard invalid recovery marker</Button> : <Button type="button" variant="secondary" onClick={retryPendingDeletion}>Retry cleanup</Button>}</> : <Loading />}</div></PublicShell>;
    }
-   if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
-  if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+    if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
+   if (knownClerkIdentityMismatch) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+   if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   // Clerk can report signed-in before it has supplied both pieces of
   // session evidence. Keep the private route tree out of that bounded window
   // even if a previously trusted offline lifecycle is still visible.
-  if (incompleteLoadedSignedInEvidence && auth.status !== 'verification-unavailable') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
-  if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} />;
+  if (incompleteLoadedSignedInEvidence && auth.status !== 'verification-unavailable') {
+    if (!retainedPrivateView) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+  }
+   if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} accountDeletionNotice={accountDeletionNotice} />;
   if (auth.status === 'verification-unavailable') return <VerificationUnavailable onRetry={() => void coordinateAuthBootstrap({ isLoaded: isLoaded === true, isSignedIn, ...(typeof userId === 'string' ? { userId } : {}), ...(sessionId ? { sessionId } : {}) }, { networkOnly: false, force: true })} />;
+  if ((auth.status === 'restoring' || auth.status === 'reverifying') && !retainedPrivateView) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   if (auth.status === 'authenticated' && (sessionTransitionPending || !authoritativeClerkIdentityReady)) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
   return <PrivateRoutes />;
 }
