@@ -1,0 +1,62 @@
+# Copy this file to wrangler.deploy.toml, replace every placeholder value,
+# and keep the copied file untracked. This is the production configuration.
+name = "replace-with-your-worker-name"
+account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+main = "src/worker/index.ts"
+compatibility_date = "2025-08-01"
+workers_dev = false
+
+[observability]
+enabled = true
+head_sampling_rate = 0.1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.1
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+# Use the name returned by `wrangler d1 create`.
+database_name = "replace-with-your-d1-database-name"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+ENVIRONMENT = "production"
+# Set this to the exact HTTPS origin configured in Clerk.
+CLERK_AUTHORIZED_PARTIES = "https://your-bill-split.example"
+# These two non-secret values are required by the Worker. The publishable key
+# must match VITE_CLERK_PUBLISHABLE_KEY in .env.production.local. For a PEM
+# JWT key, replace the placeholder with a TOML multiline string if needed.
+CLERK_PUBLISHABLE_KEY = "pk_live_replace_with_your_clerk_publishable_key"
+CLERK_JWT_KEY = """REPLACE_WITH_CLERK_JWT_PUBLIC_KEY"""
+
+# Declarations only; values must be uploaded with `wrangler secret put`.
+[secrets]
+required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY"]
+
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "REPLACE_WITH_RATE_LIMIT_NAMESPACE_ID"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[routes]]
+pattern = "your-bill-split.example"
+custom_domain = true

@@ -13,12 +13,12 @@
     "test:e2e:audit": "playwright test tests/e2e/audit.spec.ts",
     "e2e:prepare": "node tests/e2e/prepare-db.mjs",
     "e2e:server": "node tests/e2e/start-server.mjs",
-    "deploy": "npm run build && wrangler deploy --env=\"\"",
-    "deploy:dry-run": "npm run build && wrangler deploy --env=\"\" --dry-run",
+    "deploy": "npm run build && wrangler deploy --config=wrangler.deploy.toml --keep-vars",
+    "deploy:dry-run": "npm run build && wrangler deploy --config=wrangler.deploy.toml --keep-vars --dry-run",
     "cf:types": "wrangler types",
-    "db:migrate:local": "wrangler d1 migrations apply bill-split --local",
-    "db:migrate:remote": "wrangler d1 migrations apply bill-split --remote",
-    "db:seed": "wrangler d1 execute bill-split --local --file=./seed/seed.sql",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local --config=wrangler.toml",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config=wrangler.deploy.toml",
+    "db:seed": "wrangler d1 execute DB --local --config=wrangler.toml --file=./seed/seed.sql",
     "validate:large-ledger": "node scripts/validate-large-ledger.mjs"
   },
   "dependencies": {

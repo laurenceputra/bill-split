@@ -165,7 +165,7 @@ describe('worker boundary', () => {
   });
   it('parses the explicit Clerk authorized-party allowlist', async () => {
     const { parseAuthorizedParties } = await import('./index');
-    expect(parseAuthorizedParties('https://billsplit.laurenceputra.com')).toEqual(['https://billsplit.laurenceputra.com']);
+    expect(parseAuthorizedParties('https://app.example.test')).toEqual(['https://app.example.test']);
     expect(parseAuthorizedParties(' https://one.example, ,https://two.example ')).toEqual(['https://one.example', 'https://two.example']);
   });
   it('rejects API requests without verified production auth', async () => {
@@ -273,10 +273,10 @@ describe('worker boundary', () => {
     expect(response.headers.get('X-Request-ID')).toBeTruthy();
   });
   it('derives the production FAPI host from the encoded publishable key only', async () => {
-    const publishableKey = 'pk_live_YmlsbHNwbGl0LmxhdXJlbmNlcHV0cmEuY29tJA';
+    const publishableKey = 'pk_live_Y2xlcmsuZXhhbXBsZS50ZXN0JA';
     const response = await worker.fetch(new Request('https://split.example/'), env({ CLERK_PUBLISHABLE_KEY: publishableKey }), {} as ExecutionContext);
     const csp = response.headers.get('Content-Security-Policy') || '';
-    expect(csp).toContain('https://billsplit.laurenceputra.com');
+    expect(csp).toContain('https://clerk.example.test');
     expect(csp).not.toContain('https://evil.example');
     expect(csp).not.toContain('https://split.example');
   });

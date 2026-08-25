@@ -1,9 +1,11 @@
-name = "bill-split"
-account_id = "ef5da8772e934578524c5b4bf80d3e4b"
+name = "bill-split-local"
 main = "src/worker/index.ts"
 compatibility_date = "2025-08-01"
+# This file is intentionally local-only. Use wrangler.deploy.toml for any
+# Cloudflare deployment; it is ignored and must be created from the example.
+workers_dev = false
 
-# Keep traces useful without making a small production workload expensive.
+# Keep local traces useful without making development noisy.
 # Invocation logs remain enabled for the structured, intentionally PII-free
 # application logs emitted by the Worker.
 [observability]
@@ -28,47 +30,16 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "bill-split"
-database_id = "625080f5-ce8d-45a3-9a65-ed264dbf25c3"
+# A local-only placeholder. Wrangler uses the local D1 state for this config.
+database_id = "00000000-0000-4000-8000-000000000000"
 migrations_dir = "migrations"
 
 [vars]
-ENVIRONMENT = "production"
-# Configure CLERK_PUBLISHABLE_KEY, CLERK_JWT_KEY, and
-# CLERK_AUTHORIZED_PARTIES as production Worker variables; set the required
-# CLERK_SECRET_KEY and IDENTITY_TOMBSTONE_KEY as encrypted secrets with
-# `wrangler secret put`. IDENTITY_TOMBSTONE_KEY must be stable and must not be
-# derived from or rotated with a Clerk secret.
-# R2 is optional: add an [[r2_buckets]] binding named RECEIPTS when enabled.
-
-# Native Cloudflare rate limiting for authenticated high-risk operations. The
-# namespace IDs are account-scoped and intentionally distinct from the local
-# development namespace below. Five calls per user and operation bucket per
-# minute is deliberately conservative for this private application.
-[[ratelimits]]
-name = "RATE_LIMITER"
-namespace_id = "510001"
-
-  [ratelimits.simple]
-  limit = 5
-  period = 60
-
-[triggers]
-crons = ["*/15 * * * *"]
-
-[[routes]]
-pattern = "billsplit.laurenceputra.com"
-custom_domain = true
+ENVIRONMENT = "development"
+# No production Clerk values or resources belong in this config.
 
 [env.dev]
 name = "bill-split-dev"
-
-[[env.dev.ratelimits]]
-name = "RATE_LIMITER"
-namespace_id = "510002"
-
-  [env.dev.ratelimits.simple]
-  limit = 5
-  period = 60
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -81,6 +52,6 @@ migrations_dir = "migrations"
 
 [env.dev.vars]
 ENVIRONMENT = "development"
-# Explicit deterministic local-only fallback; never use this value in production.
-IDENTITY_TOMBSTONE_KEY = "billsplit-development-identity-tombstone-key-v1"
 # Local development only. Do not use this environment for a public hostname.
+# Development intentionally has no rate-limit resource; a missing limiter is
+# permitted only when ENVIRONMENT is exactly development or test.

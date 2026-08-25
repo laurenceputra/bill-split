@@ -14,6 +14,16 @@ npm test
 npm run build
 ```
 
+For a Clerk-backed Vite build, copy `.env.example` to the mode-specific local
+file and set the publishable key from your Clerk instance:
+
+```sh
+cp .env.example .env.production.local
+```
+
+The `.env.production.local` file is ignored. Do not put Worker secrets in Vite
+environment files.
+
 The browser checks include the existing Chromium geometry audit plus focused
 keyboard and accessibility-semantic checks:
 
@@ -55,35 +65,112 @@ npm run db:seed
 npx wrangler dev
 ```
 
-Production defaults to `ENVIRONMENT=production` and has no development bypass. For local Worker development use the named Wrangler environment (`npx wrangler dev --env dev`) or explicitly provide `ENVIRONMENT=development`; only that exact value enables the local `X-Dev-Email` helper. The browser adds this helper only in a Vite development build. The `env.dev` D1 binding in `wrangler.toml` uses a clearly non-production placeholder UUID: local Wrangler creates isolated D1 state under the E2E `--persist-to` directory, while an accidental deploy of the dev environment cannot bind the production database. Keep `env.dev` local-only and do not replace that placeholder with a real resource ID. Production uses same-origin Clerk session cookies; BillSplit does not persist a bearer token.
+The production config sets `ENVIRONMENT=production` and has no development
+bypass. The tracked `wrangler.toml` defaults to `ENVIRONMENT=development`; use
+the named Wrangler environment (`npx wrangler dev --env dev`) or explicitly
+provide that value for local Worker development. Only the exact development
+value enables the local `X-Dev-Email` helper, and the browser adds this helper
+only in a Vite development build. The tracked config is deliberately local-only:
+it has no Cloudflare account, production D1, rate-limit, or custom-domain
+configuration. Its `env.dev` D1 binding uses a non-production placeholder UUID,
+and local Wrangler creates isolated D1 state under the E2E `--persist-to`
+directory. It also deliberately has no Cloudflare rate-limit binding; the Worker
+permits a missing limiter only when `ENVIRONMENT` is exactly `development` or
+`test`. Keep `env.dev` local-only. Production uses same-origin Clerk session
+cookies; BillSplit does not persist a bearer token.
 
 ## Cloudflare setup and deployment
 
-1. Use the provisioned D1 database configured in `wrangler.toml` and apply its migrations:
+Production commands require the ignored `wrangler.deploy.toml`; the tracked
+`wrangler.toml` must not be used for production. A clone can create its own
+Cloudflare resources without changing tracked files:
+
+1. Clone the repository, install dependencies, and authenticate Wrangler:
+
+   ```sh
+   git clone <repository-url>
+   cd bill-split
+   npm install
+   npx wrangler login
+   ```
+
+2. Create a D1 database for the installation. Keep the returned database name
+   and ID for the production config:
 
    ```sh
    npx wrangler d1 create bill-split
-   # copy its database_id into wrangler.toml
+   ```
+
+3. Create the ignored production config and replace every placeholder with the
+   Worker name, account ID, D1 name and ID from the previous command, native
+   rate-limit namespace ID, and your chosen custom-domain hostname:
+
+   ```sh
+   cp wrangler.deploy.toml.example wrangler.deploy.toml
+   # edit wrangler.deploy.toml
+   ```
+
+   Create the account-scoped native rate-limit namespace in the Cloudflare
+   dashboard or API and copy its ID into the config; the installed Wrangler
+   does not provide a rate-limit namespace creation command.
+
+   The selected Cloudflare account must have an active zone for the custom
+   domain. The chosen hostname must not already have a conflicting DNS record,
+   such as a CNAME; remove or replace conflicting DNS before provisioning the
+   Wrangler custom domain route.
+
+   Set `CLERK_AUTHORIZED_PARTIES` to the exact chosen HTTPS origin, such as
+   `https://your-bill-split.example`, and set the required
+   `CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_KEY` values in the ignored config.
+   `CLERK_JWT_KEY` is a public verification key, not a secret; preserve its PEM
+   formatting when pasting it. Configure that origin in Clerk, including email
+   verification-code sign-in, public signup, the custom session claim
+   `{"primaryEmail":"{{user.primary_email_address}}"}`, and the allowed web
+   origins. Do not enable social sign-in unless the deployment is changed to
+   support it.
+
+4. Set the encrypted Clerk secrets with the production config selected. The
+   `[secrets].required` declaration in the example names the required secrets
+   but never contains their values:
+
+   ```sh
+   npx wrangler secret put CLERK_SECRET_KEY --config wrangler.deploy.toml
+   npx wrangler secret put IDENTITY_TOMBSTONE_KEY --config wrangler.deploy.toml
+   ```
+
+   `IDENTITY_TOMBSTONE_KEY` is a stable production secret used only for keyed
+   HMAC-SHA-256 deletion tombstones; do not derive it from or rotate it with a
+   Clerk secret. `CLERK_SECRET_KEY` is required by the installed Clerk backend
+   client even when `CLERK_JWT_KEY` enables networkless token verification.
+   Set the same `VITE_CLERK_PUBLISHABLE_KEY` in `.env.production.local` before
+   building. Never put keys, credentials, tokens, or additional domains in
+   tracked files.
+
+5. Apply and verify all remote migrations before deploying:
+
+   ```sh
    npm run db:migrate:remote
    ```
 
-2. Configure Clerk for the production origin `https://billsplit.laurenceputra.com`. Enable email verification-code sign-in and public signup; do not enable social sign-in for this application. Configure the custom session claim `{"primaryEmail":"{{user.primary_email_address}}"}`. Set these Worker configuration names outside this repository: `CLERK_PUBLISHABLE_KEY`, encrypted `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`, `CLERK_AUTHORIZED_PARTIES` (a comma-delimited allowlist containing the exact app origin), and the required encrypted `IDENTITY_TOMBSTONE_KEY`. `IDENTITY_TOMBSTONE_KEY` is a stable production secret used only for keyed HMAC-SHA-256 deletion tombstones; do not use a rotating Clerk secret. `CLERK_SECRET_KEY` is required by the installed Clerk backend client even when `CLERK_JWT_KEY` enables networkless token verification. Set `VITE_CLERK_PUBLISHABLE_KEY` in the Vite production build environment. The Worker derives the Clerk FAPI CSP source from `CLERK_PUBLISHABLE_KEY` using Clerk's supported publishable-key parser; no extra FAPI binding is required. Missing or malformed keys fail closed for external CSP sources while same-origin assets remain available. The Worker verifies session tokens locally with the Clerk JWT key and rejects tokens from unauthorized parties. Never place keys, credentials, tokens, or additional domains in this repository.
+   The migration script explicitly selects `wrangler.deploy.toml`; it fails if
+   that ignored file has not been created.
 
-3. Deploy:
+6. Validate the production bundle and bindings, then deploy:
 
-    Apply and verify all D1 migrations, including the latest `0021_deleted_identity_tombstones.sql`, **before** deploying this Worker. The deploy command does not apply migrations automatically; do not skip this ordering because the Worker references the Clerk identity, account-deletion, identity-tombstone, audit snapshot, private category preference, and collaboration lifecycle schema. Before deployment, set the required secret with `npx wrangler secret put IDENTITY_TOMBSTONE_KEY`; this repository intentionally does not contain its value.
+   The deploy commands build the client first and use only the ignored
+   production config. They pass `--keep-vars` deliberately: config values are
+   updated from the file, while any additional dashboard-managed plaintext
+   variables are not deleted. Secrets are never deleted by a deployment.
 
    ```sh
-    npm run deploy
-    # equivalent explicit production/default environment:
-    npx wrangler deploy --env=""
-    # inspect the bundle and bindings without uploading:
-    npm run deploy:dry-run
+   npm run deploy:dry-run
+   npm run deploy
    ```
 
    Deploy only after remote migrations are applied and verified. The Worker
-   expects the complete schema, including projection and audit actor-snapshot
-   migrations; deployment does not apply D1 migrations.
+   expects the complete schema, including the latest identity-tombstone
+   migration; deployment does not apply D1 migrations. The production config
+   is ignored and must be recreated locally when needed; never commit it.
 
 Wrangler serves `dist` through the Workers Static Assets binding and routes `/api/*` to Hono. API errors are returned by Hono and are not hidden by SPA fallback. Do not put secrets in `wrangler.toml`; use `wrangler secret put` or the dashboard. Add this optional binding when receipts are enabled:
 
@@ -93,7 +180,12 @@ Wrangler serves `dist` through the Workers Static Assets binding and routes `/ap
 
 The schema already includes attachment metadata. Receipt upload/download is deliberately not part of the core UI; an implementation should generate short-lived authorized object URLs only after checking group membership.
 
-Keep production Clerk values in Wrangler encrypted secrets or dashboard encrypted settings; in particular, set `CLERK_SECRET_KEY` with `wrangler secret put CLERK_SECRET_KEY`, and set `IDENTITY_TOMBSTONE_KEY` separately. Keep local values in the ignored `.dev.vars` file. OAuth credentials must live outside this repository. The account and D1 IDs in `wrangler.toml` are non-secret resource identifiers, not credentials.
+Keep production Clerk secrets in Wrangler encrypted secrets; the required
+non-secret publishable key, JWT verification key, and authorized-party origin
+belong in the ignored production config. Keep local-only values in ignored
+files. OAuth credentials must live outside this repository. Account, D1,
+rate-limit, and domain settings belong in the ignored production config, not in
+`wrangler.toml`.
 
 ## Data and API
 
@@ -138,11 +230,12 @@ Remaining intentional MVP limitations are no offline editing/deletion/settlement
 The Worker uses Wrangler 4.86's native `[[ratelimits]]` binding; it does not use
 D1 or a third-party limiter. Cloudflare native limits are enforced per location
 and are eventually consistent, so they provide best-effort abuse mitigation,
-not a hard global invariant. The default production binding is `RATE_LIMITER`
-with account-scoped namespace `510001`, and the explicitly repeated `env.dev`
-binding uses namespace `510002` because rate-limit bindings are not inherited by
-named Wrangler environments. Each authenticated internal user ID gets a
-separate operation bucket, limited to five calls per minute at each location, for group creation,
+not a hard global invariant. The production binding is `RATE_LIMITER` with an
+account-scoped namespace configured in the ignored production file. Local
+development has no rate-limit binding; a missing limiter is permitted only when
+`ENVIRONMENT` is exactly `development` or `test`. Each authenticated internal
+user ID gets a separate operation bucket, limited to five calls per minute at
+each location, for group creation,
 friend creation, invitation creation, and invitation accept/reject. The Worker
 returns structured `429 RATE_LIMITED` JSON with `Retry-After: 60` when a limit
 is exceeded.
