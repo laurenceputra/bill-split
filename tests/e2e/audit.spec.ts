@@ -310,7 +310,7 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
     return;
   }
   if (expected.mode === 'loading') {
-    if (await visibleCount(page, '.public-shell') !== 1 || await visibleCount(page, '.app-shell') !== 0) throw new Error('Loading fixture did not remain in the public authentication shell');
+    if (await visibleCount(page, '.auth-loading-shell') !== 1 || await visibleCount(page, '.app-shell') !== 1 || await visibleCount(page, '.public-shell') !== 0) throw new Error('Loading fixture did not render the private-shaped auth loading shell');
     if (await visibleCount(page, '[role="status"]') === 0 || !(await page.locator('body').innerText()).includes('Loading')) throw new Error('Loading fixture did not render Loading status');
     return;
   }
@@ -560,4 +560,82 @@ test('intercepted loading, API error, offline, and modal states render their int
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The intercepted-state audit must not contain critical or major geometry findings').toEqual([]);
   expect(failures, 'Intercepted-state screenshots should complete without harness failures').toEqual([]);
+});
+
+test('auth refresh keeps private shell geometry stable while identity and groups load', async ({ browser }) => {
+  for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const page = await context.newPage();
+    await page.route('**/api/me', async (route) => { await new Promise((resolve) => setTimeout(resolve, 600)); await route.continue(); });
+    await page.route('**/api/groups*', async (route) => { await new Promise((resolve) => setTimeout(resolve, 600)); await route.continue(); });
+    await page.addInitScript(() => {
+      let value = 0;
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const shift = entry as PerformanceEntry & { hadRecentInput?: boolean; value?: number };
+          if (!shift.hadRecentInput) value += shift.value || 0;
+        }
+      });
+      observer.observe({ type: 'layout-shift', buffered: false });
+      (window as Window & { __billSplitRefreshLayoutShift?: () => number }).__billSplitRefreshLayoutShift = () => value;
+    });
+    try {
+      await page.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(100);
+      await expect(page.locator('.auth-loading-shell')).toBeVisible();
+      await page.evaluate(() => {
+        let value = 0;
+        const observer = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            const shift = entry as PerformanceEntry & { hadRecentInput?: boolean; value?: number };
+            if (!shift.hadRecentInput) value += shift.value || 0;
+          }
+        });
+        observer.observe({ type: 'layout-shift', buffered: false });
+        (window as Window & { __billSplitLayoutShift?: () => number }).__billSplitLayoutShift = () => value;
+      });
+      const loadingGeometry = await page.evaluate(() => {
+        const topbar = document.querySelector('.top-bar')?.getBoundingClientRect();
+        const main = document.querySelector('.app-main')?.getBoundingClientRect();
+        const bottom = document.querySelector('.bottom-nav');
+        return { topbarHeight: topbar?.height || 0, mainTop: main?.top || 0, bottomDisplay: bottom ? getComputedStyle(bottom).display : 'none', bottomHeight: bottom?.getBoundingClientRect().height || 0 };
+      });
+      const homePlaceholder = page.locator('.route-loading--home');
+      await expect(homePlaceholder).toBeVisible({ timeout: 15_000 });
+      await expect(homePlaceholder).toBeHidden({ timeout: 15_000 });
+      await expect(page.locator('.cards')).toBeVisible({ timeout: 15_000 });
+      await page.waitForTimeout(100);
+      const result = await page.evaluate(() => {
+        const topbar = document.querySelector('.top-bar')?.getBoundingClientRect();
+        const main = document.querySelector('.app-main')?.getBoundingClientRect();
+        const bottom = document.querySelector('.bottom-nav');
+        const layoutShift = (window as Window & { __billSplitLayoutShift?: () => number }).__billSplitLayoutShift?.() || 0;
+        return { topbarHeight: topbar?.height || 0, mainTop: main?.top || 0, bottomDisplay: bottom ? getComputedStyle(bottom).display : 'none', bottomHeight: bottom?.getBoundingClientRect().height || 0, layoutShift };
+      });
+      expect(Math.abs(result.topbarHeight - loadingGeometry.topbarHeight)).toBeLessThanOrEqual(1);
+      expect(Math.abs(result.mainTop - loadingGeometry.mainTop)).toBeLessThanOrEqual(1);
+      expect(result.bottomDisplay).toBe(loadingGeometry.bottomDisplay);
+      expect(Math.abs(result.bottomHeight - loadingGeometry.bottomHeight)).toBeLessThanOrEqual(1);
+      expect(result.layoutShift).toBeLessThan(0.1);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      const refreshedPlaceholder = page.locator('.route-loading--home');
+      await expect(refreshedPlaceholder).toBeHidden({ timeout: 15_000 });
+      await expect(page.locator('.cards')).toBeVisible({ timeout: 15_000 });
+      await page.waitForTimeout(100);
+      const refreshed = await page.evaluate(() => {
+        const topbar = document.querySelector('.top-bar')?.getBoundingClientRect();
+        const main = document.querySelector('.app-main')?.getBoundingClientRect();
+        const bottom = document.querySelector('.bottom-nav');
+        const layoutShift = (window as Window & { __billSplitRefreshLayoutShift?: () => number }).__billSplitRefreshLayoutShift?.() || 0;
+        return { topbarHeight: topbar?.height || 0, mainTop: main?.top || 0, bottomDisplay: bottom ? getComputedStyle(bottom).display : 'none', bottomHeight: bottom?.getBoundingClientRect().height || 0, layoutShift };
+      });
+      expect(Math.abs(refreshed.topbarHeight - result.topbarHeight)).toBeLessThanOrEqual(1);
+      expect(Math.abs(refreshed.mainTop - result.mainTop)).toBeLessThanOrEqual(1);
+      expect(refreshed.bottomDisplay).toBe(result.bottomDisplay);
+      expect(Math.abs(refreshed.bottomHeight - result.bottomHeight)).toBeLessThanOrEqual(1);
+      expect(refreshed.layoutShift).toBeLessThan(0.1);
+    } finally {
+      await context.close();
+    }
+  }
 });

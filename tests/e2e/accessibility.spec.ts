@@ -1,4 +1,4 @@
-import { test, expect, newAuthenticatedContext, REGISTERED_EMAIL, BASE_URL, seedOfflineTrust } from './fixtures';
+import { test, expect, newAuthenticatedContext, DEV_EMAIL, REGISTERED_EMAIL, BASE_URL, seedOfflineTrust } from './fixtures';
 
 const richGroupId = '00000000-0000-4000-8000-000000003002';
 
@@ -65,6 +65,99 @@ test('group page keeps primary actions, balances, and transactions before manage
   expect(headings.indexOf('Your balances')).toBeGreaterThanOrEqual(0);
   expect(headings.indexOf('Recent transactions')).toBeGreaterThanOrEqual(0);
   expect(headings.indexOf('Your balances')).toBeLessThan(headings.indexOf('Recent transactions'));
+});
+
+test('active auth banner stays clear of tablet navigation controls', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 768, height: 1024 });
+  const page = await context.newPage();
+  await page.route('**/api/groups*', async (route) => {
+    // Let auth/bootstrap requests settle before publishing the outage; their
+    // successful responses otherwise clear the connection-issue banner.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Fixture outage' } }) });
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Friends & groups' })).toBeVisible();
+  try {
+    const banner = page.locator('.auth-banner');
+    await expect(banner).toContainText('Connection issue');
+    const nav = page.locator('.bottom-nav[aria-label="Primary navigation"]');
+    await expect(page.locator('.auth-loading-shell')).toHaveCount(0);
+    await expect(nav).toBeVisible();
+    await expect(nav.getByRole('link')).toHaveCount(4);
+    await expect(nav.getByRole('link', { name: 'Groups' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Activity' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Add expense' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Settings' })).toBeVisible();
+    await expect(banner).toContainText('Connection issue');
+    const geometry = await page.evaluate(() => {
+      const banner = document.querySelector('.auth-banner')?.getBoundingClientRect();
+      const nav = document.querySelector('.bottom-nav[aria-label="Primary navigation"]')?.getBoundingClientRect();
+      const controls = [...document.querySelectorAll<HTMLAnchorElement>('.bottom-nav[aria-label="Primary navigation"] a')].map((element) => {
+        const box = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return { visible: box.width > 0 && box.height > 0, accessible: hit === element || element.contains(hit), top: box.top, bottom: box.bottom };
+      });
+      return { bannerBottom: banner?.bottom || 0, navTop: nav?.top || 0, controls };
+    });
+    expect(geometry.bannerBottom).toBeLessThanOrEqual(geometry.navTop - 4);
+    expect(geometry.controls).toHaveLength(4);
+    expect(geometry.controls.every((control) => control.visible && control.accessible && control.bottom <= 1024)).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test('group route cold loading keeps mobile anchors stable and actions horizontal', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    let value = 0;
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const shift = entry as PerformanceEntry & { hadRecentInput?: boolean; value?: number };
+        if (!shift.hadRecentInput) value += shift.value || 0;
+      }
+    });
+    observer.observe({ type: 'layout-shift', buffered: false });
+    (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift = () => value;
+  });
+  await page.route(`${BASE_URL}/api/groups/${richGroupId}`, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await route.continue();
+  });
+  try {
+    await page.goto(`/groups/${richGroupId}`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('.route-loading--group')).toBeVisible();
+    const loading = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return rect ? { top: rect.top, height: rect.height } : undefined;
+      };
+      return { back: box('.route-loading--group .skeleton--back'), title: box('.route-loading--group .page-title'), actions: box('.route-loading--group .route-loading__actions'), direction: getComputedStyle(document.querySelector('.route-loading--group .route-loading__actions')!).flexDirection };
+    });
+    expect(loading.back?.height).toBeGreaterThanOrEqual(44);
+    expect(loading.actions?.height).toBeGreaterThanOrEqual(44);
+    expect(loading.direction).toBe('row');
+
+    await expect(page.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible({ timeout: 10_000 });
+    const rendered = await page.evaluate(() => {
+      const box = (selector: string) => {
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return rect ? { top: rect.top, height: rect.height } : undefined;
+      };
+      return { back: box('.back'), title: box('.page-title'), actions: box('.expense-heading__actions'), direction: getComputedStyle(document.querySelector('.expense-heading__actions')!).flexDirection, layoutShift: (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift?.() || 0 };
+    });
+    expect(rendered.direction).toBe('row');
+    expect(Math.abs((rendered.back?.top || 0) - (loading.back?.top || 0))).toBeLessThanOrEqual(8);
+    expect(Math.abs((rendered.title?.top || 0) - (loading.title?.top || 0))).toBeLessThanOrEqual(8);
+    expect(Math.abs((rendered.actions?.height || 0) - (loading.actions?.height || 0))).toBeLessThanOrEqual(8);
+    expect(rendered.layoutShift).toBeLessThan(0.1);
+  } finally {
+    await context.close();
+  }
 });
 
 test('transaction filter disclosure remains native and opens for URL filters', async ({ authenticatedPage: page }) => {

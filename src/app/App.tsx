@@ -7,7 +7,7 @@ import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
  import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { ACCOUNT_DELETION_CONFIRMATION } from '../shared/schemas';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
-import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
+import { AuthLoadingShell, Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Skeleton, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
@@ -27,6 +27,34 @@ const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection issue. Retry when the connection is available; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <p className="muted" role="status" aria-live="polite">Loading…</p>; }
+function HomeLoadingPlaceholder() {
+  return <div className="route-loading route-loading--home">
+    <div className="route-loading__visual" aria-hidden="true">
+      <div className="page-title"><div className="route-loading__title"><Skeleton className="skeleton--eyebrow" /><Skeleton className="skeleton--title" /></div><div className="route-loading__actions"><Skeleton /><Skeleton /></div></div>
+      <div className="route-loading__cards"><div className="route-loading__card"><div className="route-loading__card-copy"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--line-short" /></div><div className="route-loading__card-side"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--line-short" /></div></div><div className="route-loading__card"><div className="route-loading__card-copy"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--line-short" /></div><div className="route-loading__card-side"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--line-short" /></div></div></div>
+    </div>
+    <p className="auth-loading-status" role="status" aria-live="polite">Loading groups…</p>
+  </div>;
+}
+function GroupOverviewLoadingPlaceholder() {
+  return <div className="route-loading route-loading--group">
+    <div className="route-loading__visual" aria-hidden="true">
+      <Skeleton className="skeleton--back" />
+      <div className="page-title"><div className="route-loading__title"><Skeleton className="skeleton--eyebrow" /><Skeleton className="skeleton--title" /></div><div className="route-loading__actions route-loading__actions--expense"><Skeleton /><Skeleton /></div></div>
+      <section className="route-loading__section"><Skeleton className="route-loading__section-title" /><div className="route-loading__balances"><div className="route-loading__balance"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--amount" /></div><div className="route-loading__balance"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--amount" /></div><div className="route-loading__balance"><Skeleton className="skeleton--line" /><Skeleton className="skeleton--amount" /></div></div></section>
+      <section className="route-loading__section"><Skeleton className="route-loading__section-title" /><Skeleton className="skeleton--row" /><Skeleton className="skeleton--row" /><Skeleton className="skeleton--row" /></section>
+    </div>
+    <p className="auth-loading-status" role="status" aria-live="polite">Loading group…</p>
+  </div>;
+}
+function GroupOverviewUnavailable({ connectionStatus }: { connectionStatus: ReturnType<typeof useConnectionState>['status'] }) {
+  const offline = connectionStatus === 'offline';
+  return <div className="empty" role="status" aria-live="polite">
+    <h1>{offline ? 'Group unavailable offline' : 'Group unavailable'}</h1>
+    <p className="muted">{offline ? 'This group is not cached on this device. Reconnect to load it.' : 'This group is unavailable while the connection is being checked or repaired. Reconnect to load it.'}</p>
+    <Link className="back" to="/">← Groups</Link>
+  </div>;
+}
 function VerificationUnavailable({ onRetry }: { onRetry: () => void }) {
   const connection = useConnectionState();
   const title = connection.status === 'offline' ? 'You are offline' : connection.status === 'connection-issue' ? 'Connection issue' : 'Verification is unavailable';
@@ -260,7 +288,9 @@ function Home() {
     finally { submitLock.current = false; setSubmitting(false); }
   };
 
-   return <Layout>
+   const coldHomeLoading = online && !offline && groupsResource.data === undefined && !me.error && !groupsResource.error && (me.status === 'idle' || me.status === 'loading' || groupsResource.status === 'idle' || groupsResource.status === 'loading');
+   if (coldHomeLoading) return <Layout><HomeLoadingPlaceholder /></Layout>;
+    return <Layout>
      <div className="page-title"><div><p className="eyebrow">Private expenses</p><h1>Friends &amp; groups</h1></div><div className="home-actions"><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'friend' ? undefined : 'friend'); }}>+ Add friend</Button><Button disabled={offlineView || submitting} onClick={() => { setCreateError(undefined); setFormMode((current) => current === 'group' ? undefined : 'group'); }} variant="secondary">New group</Button></div></div>
       <PendingInvitations userId={me.data?.id} online={online && !offlineView} />
       {formMode === 'friend' && <Surface><h2>Add friend</h2><p className="muted">Use the exact email your friend uses to sign in with Clerk to link them to this shared group ledger. Clerk verifies and asserts their identity; it does not grant group access. Leave it blank for a ledger-only friend; no email means they cannot log in to this ledger.</p><form onSubmit={createFriend} aria-describedby={createError ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required aria-invalid={Boolean(createError)} aria-describedby={createError ? 'create-friend-error' : undefined} value={friendName} onChange={(event) => { setCreateError(undefined); setFriendName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={friendEmail} onChange={(event) => { setCreateError(undefined); setFriendEmail(event.target.value); }} /></Field><Field label="Default currency"><CurrencySelect value={friendCurrency} onChange={(value) => { setCreateError(undefined); setFriendCurrency(value); }} /></Field>{createError ? <ErrorBox error={createError} id="create-friend-error" /> : null}<Button disabled={offlineView || submitting} type="submit">{submitting ? 'Adding…' : 'Add friend'}</Button></form></Surface>}
@@ -369,6 +399,7 @@ function GroupManagementPage() {
 
 function GroupOverview() {
   const online = useOnlineStatus();
+  const connection = useConnectionState();
   const { id = '' } = useParams();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const userId = me.data?.id || 'pending';
@@ -387,7 +418,9 @@ function GroupOverview() {
   const offline = Boolean(groupResource.offline || transactionsResource.offline || balancesResource.offline || scheduledResource.offline || me.offline) || !online;
   const refreshing = [groupResource, transactionsResource, balancesResource, scheduledResource].some((resource) => resource.revalidating);
   if ((groupResource.error || me.error) && !group) return <Layout><ErrorBox error={groupResource.error || me.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-error" /><Link className="back" to="/">← Groups</Link></Layout>;
-  if (!group) return <Layout><Loading /></Layout>;
+  const coldGroupLoading = online && !offline && !group && !me.error && !groupResource.error && (me.status === 'idle' || me.status === 'loading' || groupResource.status === 'idle' || groupResource.status === 'loading');
+  if (coldGroupLoading) return <Layout><GroupOverviewLoadingPlaceholder /></Layout>;
+  if (!group) return <Layout><GroupOverviewUnavailable connectionStatus={connection.status} /></Layout>;
   const displayName = group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name;
   const balanceDisplays = personalBalances(balances, currentPersonId, group.currency);
   return <Layout><Link to="/" className="back">← Groups</Link><div className="page-title"><div><p className="eyebrow">{group.memberCount === 2 ? 'Friend group' : `${group.currency} group`}</p><h1>{displayName}</h1></div><div className="expense-heading__actions"><Link className="button" to={`/groups/${id}/expense/new`}>+ Add expense</Link><Link className="button button--secondary" to={`/groups/${id}/settle`}>Settle up</Link></div></div>{offline ? <ConnectionBanner detail="showing cached group data. New expenses can be captured; history, schedules, and management need a connection." /> : null}{me.error ? <CachedIdentityNotice resource={me} id="group-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /> : null}{refreshing ? <p className="cache-status" role="status">Refreshing group data…</p> : null}
@@ -1273,13 +1306,13 @@ export function App() {
      if (signOutRetryError) return <PublicLanding logoutError={signOutRetryError} accountDeletionNotice={accountDeletionNotice} />;
       if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
     if (definitiveSignedOut) return <PublicLanding accountDeletionNotice={accountDeletionNotice} />;
-    if (knownClerkIdentityMismatch) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
-   if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+      if (knownClerkIdentityMismatch) return <AuthLoadingShell />;
+    if (auth.status === 'checking') return <AuthLoadingShell />;
   // Clerk can report signed-in before it has supplied both pieces of
   // session evidence. Keep the private route tree out of that bounded window
   // even if a previously trusted offline lifecycle is still visible.
   if (incompleteLoadedSignedInEvidence && auth.status !== 'verification-unavailable') {
-    if (!retainedPrivateView) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+     if (!retainedPrivateView) return <AuthLoadingShell />;
   }
    if (auth.status === 'unauthenticated') return <PublicLanding logoutError={auth.error instanceof Error && auth.error.name === 'ClerkSignOutFailure' ? auth.error : undefined} accountDeletionNotice={accountDeletionNotice} />;
    if (cachedAuthLifecycle && location.pathname !== '/settings' && !privateCacheRouteMatches) {
@@ -1287,12 +1320,12 @@ export function App() {
      // Keep this synchronous guard ahead of PrivateRoutes while the new route
      // restore is in flight; an unspecified contract is fail-closed.
      if (!auth.privateCacheRouteKey) return <PrivateCacheUnavailable onRetry={retryVerification} />;
-     return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+      return <AuthLoadingShell />;
    }
-   if (cachedAuthLifecycle && location.pathname !== '/settings' && auth.privateCacheAvailable === undefined) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+    if (cachedAuthLifecycle && location.pathname !== '/settings' && auth.privateCacheAvailable === undefined) return <AuthLoadingShell />;
    if (cachedAuthLifecycle && auth.privateCacheAvailable === false) return <PrivateCacheUnavailable onRetry={retryVerification} />;
    if (auth.status === 'verification-unavailable') return <VerificationUnavailable onRetry={retryVerification} />;
-  if ((auth.status === 'restoring' || auth.status === 'reverifying') && !retainedPrivateView) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
-  if (auth.status === 'authenticated' && (sessionTransitionPending || !authoritativeClerkIdentityReady)) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
+   if ((auth.status === 'restoring' || auth.status === 'reverifying') && !retainedPrivateView) return <AuthLoadingShell />;
+   if (auth.status === 'authenticated' && (sessionTransitionPending || !authoritativeClerkIdentityReady)) return <AuthLoadingShell />;
   return <PrivateRoutes />;
 }

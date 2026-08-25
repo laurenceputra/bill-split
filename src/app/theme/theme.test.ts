@@ -117,6 +117,38 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);
   });
 
+  it('uses a data-free private-shaped auth loading shell and stable notification geometry', () => {
+    expect(uiSource).toContain('export function AuthLoadingShell()');
+    expect(uiSource).toContain('aria-live="polite">Loading…</p>');
+    expect(appSource).toContain('return <AuthLoadingShell />;');
+    expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*position: fixed;[\s\S]*max-height:/);
+    expect(baseCss).toContain('scrollbar-gutter: stable;');
+  });
+
+  it('keeps cold route placeholders visual-only while preserving cached resources', () => {
+    expect(appSource).toContain('function HomeLoadingPlaceholder()');
+    expect(appSource).toContain('function GroupOverviewLoadingPlaceholder()');
+    expect(appSource).toContain('const coldHomeLoading = online && !offline');
+    expect(appSource).toContain("me.status === 'idle' || me.status === 'loading'");
+    expect(appSource).toContain('const coldGroupLoading = online && !offline');
+    expect(appSource).toContain('if (coldGroupLoading) return <Layout><GroupOverviewLoadingPlaceholder /></Layout>;');
+    expect(appSource).toContain('function GroupOverviewUnavailable');
+    expect(appSource).toContain('Group unavailable offline');
+    expect(appSource).toContain('This group is not cached on this device. Reconnect to load it.');
+    expect(appSource).toContain('<Link className="back" to="/">← Groups</Link>');
+    expect(uiSource).toContain('aria-hidden="true"');
+    expect(css).toContain('.skeleton {');
+  });
+
+  it('keeps the tablet auth banner above the fixed navigation and mirrors group actions', () => {
+    expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--space-4\) \+ var\(--safe-bottom\)\);/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--nav-height\)[\s\S]*var\(--safe-bottom\)\);/);
+    expect(css).toMatch(/\.skeleton--back\s*\{[\s\S]*min-height: 2\.75rem;/);
+    expect(css).toMatch(/\.route-loading__actions--expense\s*\{[\s\S]*flex-wrap: nowrap;/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.route-loading__actions--expense\s*\{[\s\S]*flex-direction: row;/);
+    expect(appSource).toContain('className="route-loading__actions route-loading__actions--expense"');
+  });
+
   it('keeps public sign-up hover readable and reduces landing-page whitespace', () => {
     expect(css).toMatch(/\.public-sign-up:hover\s*\{[\s\S]*background: var\(--color-secondary-hover\);[\s\S]*color: var\(--color-primary-strong\);/);
     expect(css).toMatch(/\.public-main\s*\{\s*padding-top: clamp\(var\(--space-8\), 5vw, var\(--space-12\)\);/);

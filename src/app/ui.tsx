@@ -22,6 +22,34 @@ export function Button({ children, variant = 'primary', className = '', ...props
   return <button className={`${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} {...props}>{children}</button>;
 }
 
+export function Skeleton({ className = '' }: { className?: string }) {
+  return <span className={`skeleton ${className}`.trim()} aria-hidden="true" />;
+}
+
+/**
+ * A data-free private-shaped shell for the short interval before auth is
+ * authoritative. It intentionally does not use AppShell: TopBar and
+ * AuthBanner can read private/session state and expose controls while that
+ * state is still being verified.
+ */
+export function AuthLoadingShell() {
+  return <div className="app-shell auth-loading-shell">
+    <a className="skip-link" href="#main-content">Skip to main content</a>
+    <header className="top-bar"><div className="top-bar__inner">
+      <span className="brand" aria-hidden="true"><span className="brand-mark">B</span>BillSplit</span>
+      <div className="auth-loading-nav" aria-hidden="true"><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-add" /><Skeleton className="skeleton--nav-link" /></div>
+      <div className="auth-loading-actions" aria-hidden="true"><Skeleton className="skeleton--status" /><Skeleton className="skeleton--install" /></div>
+    </div></header>
+    <main className="app-main" id="main-content" tabIndex={-1} aria-busy="true">
+      <div className="auth-loading-content">
+        <div className="auth-loading-visual" aria-hidden="true"><Skeleton className="skeleton--eyebrow" /><Skeleton className="skeleton--title" /><Skeleton className="skeleton--paragraph" /><div className="skeleton--surface"><Skeleton className="skeleton--section-title" /><Skeleton className="skeleton--row" /><Skeleton className="skeleton--row" /></div></div>
+        <p className="auth-loading-status" role="status" aria-live="polite">Loading…</p>
+      </div>
+    </main>
+    <nav className="bottom-nav" aria-hidden="true"><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span><span className="nav-item nav-item--add"><span className="nav-item__capsule"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span></span><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span></nav>
+  </div>;
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className="app-main" id="main-content" tabIndex={-1}>{children}</main><BottomNav /></div>;
 }
