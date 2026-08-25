@@ -594,16 +594,17 @@ export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> 
 }
 
 
-export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: number) {
+export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: number, rebindAuthEpoch?: number, allowed: () => boolean = () => true) {
   const db = await open();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
     const request = store.getAll();
-    request.onsuccess = () => {
-      const now = Date.now();
-       for (const item of request.result as ExpenseOutboxItem[]) {
-         if ((!userId || item.userId === userId) && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch) && item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)) store.put({ ...item, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date().toISOString() });
+      request.onsuccess = () => {
+        if (!allowed()) return;
+        const now = Date.now();
+        for (const item of request.result as ExpenseOutboxItem[]) {
+          if ((!userId || item.userId === userId) && (expectedAuthEpoch === undefined || item.authEpoch === expectedAuthEpoch) && item.status === 'syncing' && (!item.leaseExpiresAt || item.leaseExpiresAt <= now)) store.put({ ...item, ...(rebindAuthEpoch === undefined ? {} : { authEpoch: rebindAuthEpoch }), status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date().toISOString() });
       }
     };
     tx.oncomplete = () => { db.close(); resolve(); };
@@ -648,7 +649,7 @@ export async function updateOutboxIfOwned(clientOperationId: string, owner: stri
       if (!isSessionGenerationCurrent(generation)) return;
        const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
        if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.leaseOwner !== owner || (item.leaseExpiresAt !== undefined && item.leaseExpiresAt <= now)) return;
-      updated = { ...item, ...patch, updatedAt: new Date(now).toISOString() };
+       updated = { ...item, ...(scope?.rebindAuthEpoch === undefined ? {} : { authEpoch: scope.rebindAuthEpoch }), ...patch, updatedAt: new Date(now).toISOString() };
       store.put(updated);
     };
     tx.oncomplete = () => { db.close(); resolve(updated); };
@@ -670,7 +671,7 @@ export async function releaseOutboxClaimIfOwned(clientOperationId: string, owner
       if (!isSessionGenerationCurrent(generation)) return;
       const item = (scope ? request.result : (request.result as ExpenseOutboxItem[] | undefined)?.find((candidate) => candidate.clientOperationId === clientOperationId)) as ExpenseOutboxItem | undefined;
       if (!item || (scope && (item.userId !== scope.userId || (scope.expectedAuthEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch))) || item.status !== 'syncing' || item.leaseOwner !== owner || item.leaseExpiresAt !== leaseExpiresAt || item.attempts !== attempts || leaseExpiresAt <= now) return;
-      released = { ...item, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date(now).toISOString() };
+       released = { ...item, ...(scope?.rebindAuthEpoch === undefined ? {} : { authEpoch: scope.rebindAuthEpoch }), status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: new Date(now).toISOString() };
       store.put(released);
     };
     tx.oncomplete = () => { db.close(); resolve(released); };
@@ -744,6 +745,30 @@ export async function reactivateAuthRequired(userId: string, allowed: () => bool
     const store = tx.objectStore('expenseOutbox');
     const request = store.getAll();
      request.onsuccess = () => { if (!allowed()) return; for (const item of request.result as ExpenseOutboxItem[]) if (item.userId === userId && item.status === 'auth-required') { store.put({ ...item, authEpoch: authEpoch ?? item.authEpoch ?? 0, status: 'pending', lastError: undefined, updatedAt: new Date().toISOString() }); changed += 1; } };
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+  return changed;
+}
+
+/** Rebind durable unsent work to a newly verified auth epoch. Active leases
+ * remain untouched; their existing lease/expiry rules own stale syncing rows. */
+export async function rebindOutboxAuthEpoch(userId: string, authEpoch: number, allowed: () => boolean = () => true) {
+  const db = await open();
+  let changed = 0;
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction('expenseOutbox', 'readwrite');
+    const store = tx.objectStore('expenseOutbox');
+    const request = store.getAll();
+    request.onsuccess = () => {
+      if (!allowed()) return;
+      for (const item of request.result as ExpenseOutboxItem[]) {
+        if (item.userId !== userId || (item.status !== 'pending' && item.status !== 'auth-required' && item.status !== 'failed') || item.authEpoch === authEpoch) continue;
+        store.put({ ...item, authEpoch, updatedAt: new Date().toISOString() });
+        changed += 1;
+      }
+    };
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };

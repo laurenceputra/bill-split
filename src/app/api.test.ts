@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -560,7 +560,7 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'stable-user', email: 'stable@example.com', personId: 'stable-person' }, 200, 'stable-user', 'clerk-stable')));
     await expect(initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-stable' })).resolves.toMatchObject({ status: 'authenticated' });
 
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>temporarily unavailable</html>', { status: 503, headers: { 'Content-Type': 'text/html' } })));
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: { code: 'UPSTREAM_UNAVAILABLE' } }, 503)));
     await expect(initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-stable' })).resolves.toMatchObject({ status: 'authenticated' });
     expect(getAuthLifecycle()).toMatchObject({ status: 'authenticated' });
     expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
@@ -1003,18 +1003,64 @@ describe('frontend API errors and cache fallback', () => {
     expect(getTrustedOfflineClerkUserId()).toBeUndefined();
   });
 
-  it('releases a failed Clerk sign-out barrier without rolling back the protected generation', async () => {
+  it('automatically resolves a cleaned logout barrier on definitive signed-out evidence', async () => {
+    finalizeSuccessfulClerkSignOut();
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'old-user', email: 'old@example.com', personId: 'old-person' }, 200, 'old-user', 'old-clerk')));
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'old-clerk', sessionId: 'old-session' });
     await clearEverythingForLogout(false);
     expect(getSessionLogoutInProgress()).toBe(true);
     expect(isMutationBarrierActive()).toBe(true);
     const before = captureSessionGeneration();
-    recoverAfterClerkSignOutFailure();
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'old-clerk', sessionId: 'old-session' });
+    expect(getSessionLogoutInProgress()).toBe(true);
+    expect(isMutationBarrierActive()).toBe(true);
+    expect(captureSessionGeneration()).toBe(before);
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: false });
     expect(getSessionLogoutInProgress()).toBe(false);
     expect(isMutationBarrierActive()).toBe(false);
-    expect(captureSessionGeneration()).toBe(before);
-    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'retry-user', email: 'retry@example.com', personId: 'retry-person' }, 200, 'retry-user')));
-    await expect(initializeAuthLifecycle()).resolves.toMatchObject({ status: 'authenticated' });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'retry-user', email: 'retry@example.com', personId: 'retry-person' }, 200, 'retry-user', 'retry-clerk')));
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'retry-clerk', sessionId: 'retry-session' })).resolves.toMatchObject({ status: 'authenticated' });
     await clearEverythingForLogout(false);
+  });
+
+  it('explicitly broadcasts logout-clear after successful local cleanup', async () => {
+    await clearEverythingForLogout(false);
+    expect(getSessionLogoutInProgress()).toBe(true);
+    expect(finalizeSuccessfulClerkSignOut()).toBe(true);
+    expect(getSessionLogoutInProgress()).toBe(false);
+    expect(isMutationBarrierActive()).toBe(false);
+  });
+
+  it('releases only its own barrier when Clerk sign-out fails after local cleanup', async () => {
+    await establishAuthenticatedMutationSession('clerk-local-logout');
+    await clearEverythingForLogout(false);
+    expect(getSessionLogoutInProgress()).toBe(true);
+
+    recoverAfterClerkSignOutFailure(new Error('provider unavailable'));
+
+    expect(getSessionLogoutInProgress()).toBe(false);
+    expect(isMutationBarrierActive()).toBe(false);
+    expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+    expect(getAuthLifecycle()).toMatchObject({ status: 'unauthenticated' });
+  });
+
+  it('keeps the old wake blocked but automatically recovers for a complete new Clerk session', async () => {
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ id: 'rotation-user', email: 'rotation@example.com', personId: 'rotation-person' }, 200, 'rotation-user', 'clerk-rotation')));
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-rotation', sessionId: 'logout-session-old' });
+    await clearEverythingForLogout(false);
+
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-rotation', sessionId: 'logout-session-old' });
+    expect(getSessionLogoutInProgress()).toBe(true);
+
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-rotation', sessionId: 'logout-session-new' });
+    expect(getSessionLogoutInProgress()).toBe(false);
+    expect(isMutationBarrierActive()).toBe(false);
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-rotation', sessionId: 'logout-session-new' });
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: false });
   });
 
   it('invalidates prior identity memory before re-verifying a changed Clerk session', async () => {
@@ -1092,12 +1138,35 @@ describe('frontend API errors and cache fallback', () => {
     await logout;
   });
 
+  it('rejects a stale /me commit after an adopted logout fences trust and identity', async () => {
+    clearSessionLogout();
+    clearAuthRequired();
+    let resolveMe!: (result: Response) => void;
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+      ? new Promise<Response>((resolve) => { resolveMe = resolve; })
+      : json({})));
+    const probe = coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-stale', sessionId: 'stale-session' }, { force: true });
+    await vi.waitFor(() => expect(resolveMe).toBeTypeOf('function'));
+    const adoptedGeneration = captureSessionGeneration() + 1;
+    adoptSessionGeneration(adoptedGeneration);
+    resolveMe(json({ id: 'stale-user', email: 'stale@example.com', personId: 'stale-person' }, 200, 'stale-user', 'clerk-stale'));
+    await probe;
+    expect(getResourceSnapshot('identity').data).toBeUndefined();
+    expect(getSessionLogoutInProgress()).toBe(true);
+    clearSessionLogout(adoptedGeneration, true, true);
+    releaseMutationBarrier(adoptedGeneration);
+  });
+
   it('blocks a new mutation after a cross-tab logout barrier is adopted', async () => {
     const fetch = vi.fn(async () => json({ ok: true }));
     vi.stubGlobal('fetch', fetch);
     adoptSessionGeneration(captureSessionGeneration() + 1);
     await expect(api('/groups', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'LOGOUT_IN_PROGRESS' });
     expect(fetch).not.toHaveBeenCalled();
+    recoverAfterClerkSignOutFailure(new Error('local sign-out callback raced a remote barrier'));
+    expect(getSessionLogoutInProgress()).toBe(true);
+    clearSessionLogout(captureSessionGeneration(), true, true);
     releaseMutationBarrier();
   });
 });

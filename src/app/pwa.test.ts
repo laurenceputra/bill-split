@@ -31,10 +31,10 @@ describe('standalone PWA contract', () => {
     expect(main).toContain("typeof navigator === 'undefined'");
   });
 
-  it('does not start authenticated work at outbox import time and gates focus flushes', () => {
+  it('does not start authenticated work at outbox import time and gates foreground recovery', () => {
     expect(outbox).not.toContain("if (typeof window !== 'undefined') {\n  void initializeOutbox();");
     expect(outbox).toContain("getAuthLifecycle().status === 'authenticated'");
-    expect(outbox).toContain("window.addEventListener('focus'");
+    expect(outbox).toContain("window.addEventListener('billsplit-auth-resumed'");
     expect(outbox).toContain("window.addEventListener('billsplit-authenticated'");
     expect(outbox).toContain('handleAuthenticatedUser(userId)');
   });

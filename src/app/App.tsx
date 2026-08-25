@@ -4,7 +4,7 @@ import { SignInButton, SignUpButton, useAuth, useClerk, useUser } from '@clerk/r
 import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Transaction, Weekday } from '../shared/types';
 import { currencyOptions, scheduledExpenseInput, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
- import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, discardInvalidPendingAccountDeletion, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+ import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { ACCOUNT_DELETION_CONFIRMATION } from '../shared/schemas';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
 import { Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
@@ -13,7 +13,7 @@ import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 import { groupBalanceDisplays, personalBalances } from './group-balance';
 import { expenseDetailPath, getNavigationContext, settlementDetailPath, transactionActivityPath } from './navigation';
-import { captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
+import { broadcastSessionCoordination, captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
 import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOptions, timezoneSelectValue as timezoneSelectValueForState, timezoneValueFromSelection, weekdayLabels } from './scheduled-expense';
 import { categoryOptions } from './categories';
 import { localDateForTimeZone } from '../domain/recurrence';
@@ -43,7 +43,7 @@ function PublicLanding({ logoutError, accountDeletionNotice }: { logoutError?: u
    const returnTo = `${location.pathname}${location.search}${location.hash}`;
   const retrySignOut = async () => {
     setRetryingSignOut(true);
-    try { await signOut({ redirectUrl: '/' }); }
+    try { await signOut({ redirectUrl: '/' }); finalizeSuccessfulClerkSignOut(); }
     catch (cause) { recoverAfterClerkSignOutFailure(cause); setRetryingSignOut(false); }
   };
   return <PublicShell returnTo={returnTo}>
@@ -1072,6 +1072,7 @@ function Settings() {
     try {
       await clearCachedData();
       window.dispatchEvent(new Event('billsplit-cache-cleared'));
+      broadcastSessionCoordination({ type: 'cache-clear', reason: 'cache-clear', clerkUserId: clerkUser?.id || undefined, userId: userId || undefined });
       setMessage('Cached account and group data cleared. Pending expenses were preserved.');
     } catch (cause) { setError(cause); }
     finally { setClearing(false); }
@@ -1084,6 +1085,7 @@ function Settings() {
       await clearEverythingForLogout();
       try {
         await signOut({ redirectUrl: '/' });
+        finalizeSuccessfulClerkSignOut();
       } catch (cause) {
         recoverAfterClerkSignOutFailure(cause);
         throw cause;
@@ -1230,7 +1232,7 @@ export function App() {
     const completeAccountMismatch = Boolean(isLoaded && isSignedIn === true && currentClerkUserId && getVerifiedClerkUserId() && currentClerkUserId !== getVerifiedClerkUserId());
     // Session rotation for the same Clerk user is a reverify, not an
     // account switch. Only complete positive user-ID mismatch is destructive.
-    if (online && completeAccountMismatch) resetForClerkSessionChange();
+    if (online && completeAccountMismatch) resetForClerkSessionChange(false, currentClerkUserId);
     else if (offline && completeAccountMismatch) revokeForClerkSessionChange();
     if (isSignedIn && sessionKey) clerkSessionRef.current = sessionKey;
     if (!isDevelopmentAuthBypass && isDefinitivelySignedOut(isLoaded === true, isSignedIn)) {
@@ -1264,12 +1266,12 @@ export function App() {
      const canSignInToRecover = pendingPhase === 'server-pending' || pendingPhase === 'server-deleted' || pendingPhase === 'local-cleared';
       return <PublicShell showAuthActions={false}><div className="public-status" aria-live="polite"><h1>Finishing account deletion…</h1><p className="muted">Private data will not be restored while this identity-bound deletion is pending.</p>{signedInToDifferentAccount ? <><p className="muted">This browser is signed in to a different Clerk account. Sign out, then sign in to the original account to continue.</p><Button type="button" variant="secondary" onClick={() => void signOut({ redirectUrl: '/' })}>Sign out this account</Button></> : canSignInToRecover && isLoaded && isSignedIn === false ? <><p className="muted">Sign in to the same Clerk account that started deletion. BillSplit data is already cleared; provider deletion will not be claimed until that account is verified.</p><SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button className="button" type="button">Sign in to finish deletion</button></SignInButton>{pendingPhase !== 'server-pending' ? <><p className="muted">If that original Clerk account was deleted elsewhere, you may finish local cleanup here. This does not delete or manage Clerk.</p><Button type="button" variant="secondary" onClick={finishExternalProviderCleanup}>Finish local cleanup</Button></> : null}</> : null}{pendingDeletionError ? <><ErrorBox error={pendingDeletionError} id="account-deletion-recovery-error" />{hasInvalidPendingAccountDeletion() ? <Button type="button" variant="secondary" onClick={discardInvalidDeletionMarker}>Discard invalid recovery marker</Button> : <Button type="button" variant="secondary" onClick={retryPendingDeletion}>Retry cleanup</Button>}</> : <Loading />}</div></PublicShell>;
      }
-     if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
-    // Clerk's loaded signed-out evidence is synchronous input to this render.
-    // Do not wait for the coordinator effect before masking a private tree.
-    // A failed provider sign-out has an explicit retry lifecycle and must keep
-    // its existing error UI instead of being replaced by this fast path.
-    if (signOutRetryError) return <PublicLanding logoutError={signOutRetryError} accountDeletionNotice={accountDeletionNotice} />;
+     // Clerk's loaded signed-out evidence is synchronous input to this render.
+     // Do not wait for the coordinator effect before masking a private tree.
+     // A failed provider sign-out has an explicit retry lifecycle and must keep
+     // its existing error UI instead of being replaced by this fast path.
+     if (signOutRetryError) return <PublicLanding logoutError={signOutRetryError} accountDeletionNotice={accountDeletionNotice} />;
+      if (logoutInProgress) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><p className="muted">Signing out securely…</p></div></PublicShell>;
     if (definitiveSignedOut) return <PublicLanding accountDeletionNotice={accountDeletionNotice} />;
     if (knownClerkIdentityMismatch) return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;
    if (auth.status === 'checking') return <PublicShell returnTo={returnTo}><div className="public-status" aria-live="polite"><Loading /></div></PublicShell>;

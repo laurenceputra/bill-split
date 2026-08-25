@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, authRouteCacheKey, clearAuthRequired, clearEverythingForLogout, coordinateAuthBootstrap, getAuthLifecycle, getMe, getVerifiedClerkUserId, getVerifiedUserId, isIncompleteLoadedSignedInEvidence, isPrivateCacheRouteCurrent, recoverAfterClerkSignOutFailure, requestAuthProbe, scheduleAuthVerification, signalConnectionChecking, subscribeAuthLifecycle } from './api';
-import { DB_NAME, listOutbox, readOfflineTrust, saveActivity, saveCategories, saveOfflineTrust, updateGroupSnapshot } from './idb';
+import { ApiError, api, authRouteCacheKey, clearAuthRequired, clearEverythingForLogout, coordinateAuthBootstrap, getAuthLifecycle, getMe, getVerifiedClerkUserId, getVerifiedUserId, isIncompleteLoadedSignedInEvidence, isPrivateCacheRouteCurrent, isRetryableAuthFailure, recoverAfterClerkSignOutFailure, requestAuthProbe, resumeAuthVerification, scheduleAuthVerification, setForegroundRetrySchedulerForTests, signalConnectionChecking, subscribeAuthLifecycle } from './api';
+import { DB_NAME, listOutbox, readOfflineTrust, revokeOfflineTrust, saveActivity, saveCategories, saveOfflineTrust, updateGroupSnapshot } from './idb';
 import * as idb from './idb';
 import { getResourceSnapshot, resourceKeys } from './resource-cache';
 import { clearSessionLogout } from './session';
@@ -216,6 +216,63 @@ describe('Clerk auth bootstrap coordinator', () => {
     calls = 0;
     await Promise.all([scheduleAuthVerification({ networkOnly: true }), scheduleAuthVerification(), scheduleAuthVerification({ networkOnly: true })]);
     expect(calls).toBe(1);
+  });
+
+  it('coalesces foreground events that arrive after the debounce while resume verification is in flight', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => { calls += 1; return json({ id: 'resume-user', email: 'resume@example.com', personId: 'resume-person' }, 200, 'resume-user', 'clerk-resume'); }));
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-resume', sessionId: 'session-resume' });
+    calls = 0;
+    let resolveProbe!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveProbe = resolve; })));
+    const started = vi.fn();
+    vi.stubGlobal('CustomEvent', class { constructor(public type: string) {} });
+    vi.stubGlobal('window', { dispatchEvent: (event: Event) => { if (event.type === 'billsplit-auth-resume-started') started(event); return true; } });
+    const first = scheduleAuthVerification({ networkOnly: true });
+    await vi.waitFor(() => expect(resolveProbe).toBeTypeOf('function'));
+    const second = scheduleAuthVerification({ networkOnly: true });
+    expect(started).toHaveBeenCalledTimes(1);
+    expect(resolveProbe).toBeTypeOf('function');
+    resolveProbe(json({ id: 'resume-user', email: 'resume@example.com', personId: 'resume-person' }, 200, 'resume-user', 'clerk-resume'));
+    await Promise.all([first, second]);
+    await Promise.resolve();
+    expect(started).toHaveBeenCalledTimes(1);
+    vi.stubGlobal('window', undefined);
+    vi.stubGlobal('CustomEvent', undefined);
+  });
+
+  it('retains the live same-user view when wake verification and durable trust are both unavailable, then recovers on foreground resume', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    const fetch = vi.fn(async () => json({ id: 'burst-user', email: 'burst@example.com', personId: 'burst-person' }, 200, 'burst-user', 'clerk-burst'));
+    vi.stubGlobal('fetch', fetch);
+     await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-burst', sessionId: 'session-live-wake' });
+     await revokeOfflineTrust();
+     const retryDelays: number[] = [];
+     let retryCallback!: () => void;
+     const restoreRetryScheduler = setForegroundRetrySchedulerForTests((callback, delay) => { retryCallback = callback; retryDelays.push(delay); return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+     fetch.mockImplementation(async () => { throw new TypeError('phone wake transport failure'); });
+
+     await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-burst', sessionId: 'session-live-wake' }, { networkOnly: true })).resolves.toMatchObject({ status: 'authenticated' });
+     expect(getVerifiedUserId()).toBe('burst-user');
+      expect(retryDelays[0]).toBeGreaterThan(0);
+      expect(retryDelays[0]).toBeLessThanOrEqual(250);
+     vi.stubGlobal('document', { visibilityState: 'hidden' });
+     retryCallback();
+     expect(retryDelays).toHaveLength(1);
+     vi.stubGlobal('document', undefined);
+     restoreRetryScheduler();
+
+     fetch.mockImplementation(async () => json({ id: 'burst-user', email: 'burst@example.com', personId: 'burst-person' }, 200, 'burst-user', 'clerk-burst'));
+     await expect(resumeAuthVerification({ networkOnly: true, force: true })).resolves.toMatchObject({ status: 'authenticated' });
+     expect(fetch).toHaveBeenCalledTimes(3);
+   });
+
+  it('classifies transport restoration for automatic resume but not definitive identity outcomes', () => {
+    expect(isRetryableAuthFailure(new ApiError('offline', { networkFailure: true }))).toBe(true);
+    expect(isRetryableAuthFailure(new ApiError('mismatch', { code: 'IDENTITY_MISMATCH', status: 401 }))).toBe(false);
+    expect(isRetryableAuthFailure(new ApiError('timeout', { code: 'VERIFICATION_TIMEOUT', networkFailure: true }))).toBe(true);
+    expect(isRetryableAuthFailure(new ApiError('provider unavailable', { code: 'VERIFICATION_UNAVAILABLE' }))).toBe(false);
   });
 
   it('keeps the active route contract for route-less foreground probes', async () => {

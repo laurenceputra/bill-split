@@ -2,8 +2,8 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as idb from './idb';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
-import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
-import { clearEverythingForLogout, coordinateAuthBootstrap, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
+import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OUTBOX_LEASE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import { clearEverythingForLogout, coordinateAuthBootstrap, getAuthEpoch, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 import { clearSessionLogout } from './session';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
@@ -130,7 +130,7 @@ describe('durable expense outbox', () => {
     }));
 
     await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a', startupFallbackMs: 10 });
-    expect(getAuthLifecycle().status).toBe('trusted-offline');
+    expect(getAuthLifecycle().status).toBe('authenticated');
     expect(calls.filter((url) => url.includes('/expenses'))).toEqual([]);
 
     await recoverConnection();
@@ -161,7 +161,33 @@ describe('durable expense outbox', () => {
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({ error: { code: 'INVALID_MEMBER', message: 'Bad member' } }, 400); }));
      await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
      await retryOutboxItem('auth');
-    expect((await listOutbox('user-a'))[0].status).toBe('failed');
+     expect((await listOutbox('user-a'))[0].status).toBe('failed');
+  });
+
+  it('rebinds failed rows on same-user rotation but sends them only after explicit retry', async () => {
+    await queue('failed-rotation');
+    const oldEpoch = getAuthEpoch();
+    await saveOutboxItem({ ...(await readOutboxItem('failed-rotation'))!, status: 'failed', authEpoch: oldEpoch });
+
+    resetForClerkSessionChange();
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
+    const currentEpoch = getAuthEpoch();
+    await handleAuthenticatedUser('user-a', currentEpoch);
+
+    expect(await readOutboxItem('failed-rotation')).toMatchObject({ status: 'failed', authEpoch: currentEpoch });
+    const expenseCalls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls.push(url);
+      return response({ error: { code: 'INVALID_MEMBER', message: 'Bad member' } }, 400);
+    }));
+    await flushOutbox();
+    expect(expenseCalls).toEqual([]);
+
+    await retryOutboxItem('failed-rotation');
+    expect(expenseCalls).toHaveLength(1);
+    expect(await readOutboxItem('failed-rotation')).toMatchObject({ status: 'failed', authEpoch: currentEpoch });
   });
 
   it('supports explicit retry and confirmed discard operations', async () => {
@@ -299,6 +325,69 @@ describe('durable expense outbox', () => {
     expect(await listOutbox('user-a')).toEqual([]);
   });
 
+  it('rebinds a network-failed pending row across same-user session rotation and sends it once', async () => {
+    await queue('rotated-pending');
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      throw new TypeError('temporary network failure');
+    }));
+    await flushOutbox();
+    const beforeRotation = await readOutboxItem('rotated-pending');
+    expect(beforeRotation?.status).toBe('pending');
+    const previousEpoch = beforeRotation?.authEpoch;
+
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return response({ expense: { id: 'rotated-server-id' } }, 201);
+    }));
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-a', sessionId: 'rotated-session' }, { networkOnly: true });
+    const rotatedEpoch = getAuthEpoch();
+    expect(rotatedEpoch).not.toBe(previousEpoch);
+    await handleAuthenticatedUser('user-a', rotatedEpoch);
+    expect(expenseCalls).toBe(2);
+    expect(await readOutboxItem('rotated-pending')).toBeUndefined();
+    await handleAuthenticatedUser('user-a', rotatedEpoch);
+    expect(expenseCalls).toBe(2);
+  });
+
+  it('rebinds a late in-flight completion to the current same-user epoch before retrying once', async () => {
+    await queue('rotated-inflight');
+    let resolveOldSend!: (response: Response) => void;
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+      if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return new Promise<Response>((resolve) => {
+        resolveOldSend = resolve;
+        actual.signal?.addEventListener('abort', () => { /* The old transport may settle after rotation. */ });
+      });
+    }));
+    const oldFlush = flushOutbox(5_000);
+    await vi.waitFor(() => expect(expenseCalls).toBe(1));
+    const oldItem = await readOutboxItem('rotated-inflight');
+    const oldEpoch = oldItem?.authEpoch;
+
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return response({ expense: { id: 'rotated-inflight-server-id' } }, 201);
+    }));
+    await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-a', sessionId: 'rotated-inflight-session' }, { networkOnly: true });
+    const currentEpoch = getAuthEpoch();
+    expect(currentEpoch).not.toBe(oldEpoch);
+
+    resolveOldSend(response({ expense: { id: 'late-old-response' } }, 201));
+    await oldFlush;
+    await vi.waitFor(async () => expect(await readOutboxItem('rotated-inflight')).toBeUndefined());
+    expect(expenseCalls).toBe(2);
+    expect(await readOutboxItem('rotated-inflight')).toBeUndefined();
+  });
+
   it('starts the first outbox flush from confirmed authentication and recovers an expired lease', async () => {
     const item = await queue('startup-flush');
     await saveOutboxItem({ ...item, status: 'syncing', leaseOwner: 'old-tab', leaseExpiresAt: Date.now() - 1 });
@@ -319,12 +408,116 @@ describe('durable expense outbox', () => {
     try {
       vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); calls.push(actual.url); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({}, 503); }));
       await queue('backoff');
-      await flushOutbox();
-      expect(calls.filter((url) => url.includes('/expenses')).length).toBe(1);
-      expect(scheduledDelay).toBe(1_000);
+       await flushOutbox();
+       expect(calls.filter((url) => url.includes('/expenses')).length).toBe(1);
+       expect(scheduledDelay).toBe(1_000);
+       const firstAttempt = await readOutboxItem('backoff');
+       expect(firstAttempt?.attempts).toBe(1);
+       expect(retryDelay((firstAttempt?.attempts || 0) + 1)).toBe(2_000);
+       await saveOutboxItem({ ...firstAttempt!, status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined });
+       const secondClaim = await idb.claimOutboxItem('backoff', 'retry-tab');
+       expect(secondClaim?.attempts).toBe(2);
+       expect(retryDelay((secondClaim?.attempts || 0) + 1)).toBe(4_000);
+     } finally { restoreScheduler(); }
+   });
+
+  it('recovers a timed-out syncing lease at its expiry without a reload', async () => {
+    let scheduledCallback: (() => void) | undefined;
+    let scheduledDelay = 0;
+    const restoreScheduler = setRetrySchedulerForTests((callback, delay) => { scheduledCallback = callback; scheduledDelay = delay; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+    try {
+      vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+        const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+        if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+        return new Promise<Response>((_resolve, reject) => actual.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))));
+      }));
+      await queue('lease-expiry-timer');
+      await flushOutbox(10);
+      expect((await readOutboxItem('lease-expiry-timer'))?.status).toBe('syncing');
+      expect(scheduledDelay).toBeGreaterThanOrEqual(OUTBOX_LEASE_MS - 100);
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + OUTBOX_LEASE_MS + 10);
       scheduledCallback?.();
-      await Promise.resolve();
+      await vi.waitFor(async () => expect((await readOutboxItem('lease-expiry-timer'))?.status).toBe('pending'));
     } finally { restoreScheduler(); }
+  });
+
+  it('rebinds an expired syncing lease to the rotated auth epoch before sending once', async () => {
+    let scheduledCallback: (() => void) | undefined;
+    const restoreScheduler = setRetrySchedulerForTests((callback) => { scheduledCallback = callback; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+    try {
+      await queue('rotated-expired-lease');
+      let expenseAttempts = 0;
+      vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+        const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
+        if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+        expenseAttempts += 1;
+        return new Promise<Response>((_resolve, reject) => actual.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))));
+      }));
+      await flushOutbox(10);
+      const beforeRotation = await readOutboxItem('rotated-expired-lease');
+      expect(beforeRotation?.status).toBe('syncing');
+      const oldEpoch = beforeRotation?.authEpoch;
+
+      vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
+        ? response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' })
+        : response({ expense: { id: 'rotated-expired-server-id' } }, 201)));
+      await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-a', sessionId: 'rotated-expired-session' }, { networkOnly: true });
+      const rotatedEpoch = getAuthEpoch();
+      expect(rotatedEpoch).not.toBe(oldEpoch);
+
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + OUTBOX_LEASE_MS + 10);
+      scheduledCallback?.();
+      await vi.waitFor(async () => expect(await readOutboxItem('rotated-expired-lease')).toBeUndefined());
+      expect(expenseAttempts).toBe(1);
+    } finally { restoreScheduler(); }
+  });
+
+  it('orders resume reactivation before one shared refresh and flush', async () => {
+    const item = await queue('resume-order');
+    await saveOutboxItem({ ...item, status: 'auth-required', lastError: { code: 'AUTH_REQUIRED', message: 'Sign in', status: 401 } });
+    const originalReactivate = idb.reactivateAuthRequired;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(idb, 'reactivateAuthRequired').mockImplementation(async (...args) => { await gate; return originalReactivate(...args); });
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return response({ expense: { id: 'resume-order-server-id' } }, 201);
+    }));
+    const first = handleAuthenticatedUser('user-a', undefined, 700);
+    await vi.waitFor(() => expect(idb.reactivateAuthRequired).toHaveBeenCalled());
+    const second = handleAuthenticatedUser('user-a', undefined, 700);
+    release();
+    await Promise.all([first, second]);
+    expect(expenseCalls).toBe(1);
+    expect(await readOutboxItem('resume-order')).toBeUndefined();
+  });
+
+  it('waits for late resume reactivation instead of flushing or consuming the resume early', async () => {
+    const item = await queue('late-resume-reactivation');
+    await saveOutboxItem({ ...item, status: 'auth-required', lastError: { code: 'AUTH_REQUIRED', message: 'Sign in', status: 401 } });
+    const originalReactivate = idb.reactivateAuthRequired;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(idb, 'reactivateAuthRequired').mockImplementation(async (...args) => { await gate; return originalReactivate(...args); });
+    let expenseCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
+      expenseCalls += 1;
+      return response({ expense: { id: 'late-resume-server-id' } }, 201);
+    }));
+    const recovery = handleAuthenticatedUser('user-a', undefined, 701);
+    await vi.waitFor(() => expect(idb.reactivateAuthRequired).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, OUTBOX_IDB_DEADLINE_MS + 50));
+    expect(expenseCalls).toBe(0);
+    expect((await readOutboxItem('late-resume-reactivation'))?.status).toBe('auth-required');
+    release();
+    await recovery;
+    expect(expenseCalls).toBe(1);
+    expect(await readOutboxItem('late-resume-reactivation')).toBeUndefined();
   });
 
   it('quiesces an in-flight sync during logout and does not restart it', async () => {

@@ -50,6 +50,7 @@ let visible = typeof document === 'undefined' || document.visibilityState === 'v
 let coordinatorInstalled = false;
 let coordinatorTimer: ReturnType<typeof setTimeout> | undefined;
 let coordinatorIdentityCheck = false;
+let authResumeSuppressedUntil = 0;
 // A browser foreground refresh must wait for Clerk and /api/me. Node tests
 // have no provider, so direct cache tests retain their existing behavior.
 let authLifecycleReady = typeof window === 'undefined';
@@ -326,7 +327,10 @@ export function trackVisibleResource(key: ResourceKey, userId = activeUserId || 
 function foregroundRefresh(identityCheck = false, forcePrivate = false) {
   if (!authLifecycleReady || !isVisible() || !online()) return Promise.resolve();
   const identity = entries.get('identity');
-  const identityDue = identity && identity.snapshot.status !== 'auth-blocked' && (identityCheck || !isResourceFresh(identity.snapshot, identity.ttl) || identity.snapshot.stale || identity.snapshot.status === 'idle');
+  // Identity verification is owned by the auth coordinator. Foreground cache
+  // refresh may update private resources, but must never start a second /me
+  // probe during the same wake event.
+  const identityDue = identity && Date.now() >= authResumeSuppressedUntil && identity.snapshot.status !== 'auth-blocked' && (identityCheck || !isResourceFresh(identity.snapshot, identity.ttl) || identity.snapshot.stale || identity.snapshot.status === 'idle');
   const refreshStartedAt = identityEpoch;
   const refreshPrivate = () => {
     if (!identity || identity.snapshot.status !== 'ready' || identity.snapshot.error || refreshStartedAt !== identityEpoch) return;
@@ -346,6 +350,8 @@ export const refreshVisiblePrivateResources = () => foregroundRefresh(false, tru
 export function initializeForegroundCoordinator() {
   if (coordinatorInstalled || typeof window === 'undefined') return;
   coordinatorInstalled = true;
+  window.addEventListener('billsplit-auth-resume-started', () => { authResumeSuppressedUntil = Date.now() + 15_000; });
+  window.addEventListener('billsplit-auth-resumed', () => { authResumeSuppressedUntil = Date.now() + 500; });
   const schedule = (identityCheck = false) => { coordinatorIdentityCheck ||= identityCheck; if (coordinatorTimer) clearTimeout(coordinatorTimer); coordinatorTimer = setTimeout(() => { coordinatorTimer = undefined; const check = coordinatorIdentityCheck; coordinatorIdentityCheck = false; foregroundRefresh(check); }, 100); };
   document.addEventListener('visibilitychange', () => {
     visible = isVisible();

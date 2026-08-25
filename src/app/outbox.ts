@@ -1,6 +1,6 @@
-import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getVerifiedUserId, hasRetainedPrivateSession, requestAuthProbe, scheduleAuthVerification, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
+import { api, ApiError, getAuthEpoch, getAuthLifecycle, getConnectionState, getVerifiedUserId, hasRetainedPrivateSession, resumeAuthVerification, isAuthEpochCurrent, isUsableConnection, subscribeAuthLifecycle, subscribeConnectionState } from './api';
 import {
-  claimOutboxItem, discardOutboxIfIdle, isOfflineTrustUsable, listOutbox, markOutboxAuthRequired, readOfflineTrust, readOutboxItem,
+  claimOutboxItem, discardOutboxIfIdle, isOfflineTrustUsable, listOutbox, markOutboxAuthRequired, readOfflineTrust, readOutboxItem, rebindOutboxAuthEpoch,
   reactivateAuthRequired, recoverStaleSyncing, releaseOutboxClaimIfOwned, removeOutboxIfOwned, resetOutboxIfIdle, saveOutboxItem, updateOutboxIfOwned,
   type ExpenseOutboxItem, type OutboxOperationScope, type OutboxStatus,
 } from './idb';
@@ -26,10 +26,13 @@ let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let connectionRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
 let connectionRecoveryPromise: Promise<void> | undefined;
 let connectionRecoveryAttempts = 0;
+const resumeRecoveryPromises = new Map<number, Promise<void>>();
+const completedResumeIds = new Set<number>();
 let flushAgain = false;
 let logoutQuiescing = getSessionLogoutInProgress();
 const activeControllers = new Set<AbortController>();
 const activeClaims = new Set<string>();
+const leaseRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let scheduleTimer = (callback: () => void, delay: number) => setTimeout(callback, delay);
 let clearTimer = (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer);
 export const RETRY_BASE_DELAY_MS = 1_000;
@@ -64,6 +67,30 @@ export const cancelScheduledRetry = () => {
 };
 export function setRetrySchedulerForTests(schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>, clear: (timer: ReturnType<typeof setTimeout>) => void) { const previous = { schedule: scheduleTimer, clear: clearTimer }; scheduleTimer = schedule; clearTimer = clear; return () => { scheduleTimer = previous.schedule; clearTimer = previous.clear; }; }
 
+const leaseKey = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientOperationId'>) => `${item.userId}:${item.clientOperationId}`;
+const clearLeaseRecovery = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientOperationId'>) => {
+  const key = leaseKey(item);
+  const timer = leaseRecoveryTimers.get(key);
+  if (timer) clearTimer(timer);
+  leaseRecoveryTimers.delete(key);
+};
+const scheduleLeaseRecovery = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientOperationId' | 'leaseExpiresAt'>) => {
+  clearLeaseRecovery(item);
+  if (item.leaseExpiresAt === undefined) return;
+  const key = leaseKey(item);
+  const timer = scheduleTimer(() => {
+    leaseRecoveryTimers.delete(key);
+    if (logoutQuiescing || getSessionLogoutInProgress()) return;
+    const authEpoch = getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === item.userId ? getAuthEpoch() : undefined;
+    const allowed = authEpoch === undefined ? undefined : () => isAuthEpochCurrent(authEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === item.userId;
+    void recoverStaleSyncing(item.userId, undefined, authEpoch, allowed || (() => true)).then(() => refreshOutbox()).then(() => {
+      if (canFlush() && (typeof document === 'undefined' || document.visibilityState === 'visible')) return flushOutbox();
+      return undefined;
+    }).catch(() => undefined);
+  }, Math.max(0, item.leaseExpiresAt - Date.now()) + 1);
+  leaseRecoveryTimers.set(key, timer);
+};
+
 const hasQueuedWork = () => snapshot.some((item) => item.status === 'pending' || item.status === 'syncing' || item.status === 'auth-required');
 const scheduleConnectionRecovery = (delay = retryDelay(connectionRecoveryAttempts + 1)) => {
   // The in-memory snapshot is intentionally cleared while authentication is
@@ -81,8 +108,12 @@ const scheduleConnectionRecovery = (delay = retryDelay(connectionRecoveryAttempt
  * used as a polling fallback: browsers and embedded webviews do not always
  * deliver an `online` event when connectivity returns.
  */
-export async function recoverConnection() {
+export async function recoverConnection(options: { resumeId?: number; alreadyVerified?: boolean } = {}) {
   if (connectionRecoveryPromise || logoutQuiescing || getSessionLogoutInProgress()) return;
+  // Auth-resume completion is ordered through handleAuthenticatedUser. Do not
+  // consume its ID here: the authenticated event may still be reactivating
+  // auth-required rows in IndexedDB.
+  if (options.resumeId !== undefined && options.alreadyVerified) return;
   // Rebuild the queue from its durable per-user store first. In particular,
   // this handles authenticated/trusted-offline -> checking -> failed probe ->
   // trusted-offline, where the visible snapshot is deliberately revoked while
@@ -99,7 +130,7 @@ export async function recoverConnection() {
       return;
     }
     try {
-      await requestAuthProbe({ networkOnly: true, startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
+      if (!options.alreadyVerified) await resumeAuthVerification({ networkOnly: true, startupFallbackMs: OUTBOX_REQUEST_TIMEOUT_MS });
       if (getAuthLifecycle().status === 'authenticated' && isUsableConnection()) {
         connectionRecoveryAttempts = 0;
         await flushOutbox();
@@ -139,9 +170,11 @@ export async function refreshOutbox() {
       if (!isAuthEpochCurrent(capturedEpoch) || (lifecycle === 'authenticated' && currentOutboxUserId() !== userId)) return;
     }
   } catch { /* Keep an unavailable cache from breaking the shell. */ }
+  for (const item of next) item.status === 'syncing' ? scheduleLeaseRecovery(item) : clearLeaseRecovery(item);
+  for (const item of snapshot) if (!next.some((current) => leaseKey(current) === leaseKey(item))) clearLeaseRecovery(item);
   if (JSON.stringify(next) !== JSON.stringify(snapshot)) { snapshot = next; notify(); }
 }
-const updateSnapshot = (item: ExpenseOutboxItem | undefined) => { if (!item || (getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() !== item.userId)) return; snapshot = snapshot.some((current) => current.userId === item.userId && current.clientOperationId === item.clientOperationId) ? snapshot.map((current) => current.userId === item.userId && current.clientOperationId === item.clientOperationId ? item : current) : [...snapshot, item]; notify(); };
+const updateSnapshot = (item: ExpenseOutboxItem | undefined) => { if (!item || (getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() !== item.userId)) return; item.status === 'syncing' ? scheduleLeaseRecovery(item) : clearLeaseRecovery(item); snapshot = snapshot.some((current) => current.userId === item.userId && current.clientOperationId === item.clientOperationId) ? snapshot.map((current) => current.userId === item.userId && current.clientOperationId === item.clientOperationId ? item : current) : [...snapshot, item]; notify(); };
 export const subscribeOutbox = (listener: OutboxListener) => { listeners.add(listener); void initializeOutbox(); return () => { listeners.delete(listener); }; };
 export const getOutboxSnapshot = () => snapshot;
 export const pendingCount = () => snapshot.length;
@@ -150,7 +183,7 @@ export async function initializeOutbox() {
   if (logoutQuiescing || getSessionLogoutInProgress()) return;
   if (!initialized) {
     initialized = true;
-    initializationPromise = (async () => { try { const userId = currentOutboxUserId(); await bounded(recoverStaleSyncing(userId, getAuthEpoch())); } catch { /* surfaced when enqueueing; UI remains usable online. */ } await refreshOutbox(); })();
+    initializationPromise = (async () => { try { const userId = currentOutboxUserId(); await bounded(recoverStaleSyncing(userId)); } catch { /* surfaced when enqueueing; UI remains usable online. */ } await refreshOutbox(); })();
   }
   if (initializationPromise) await initializationPromise;
   return flushOutbox();
@@ -176,13 +209,20 @@ export async function enqueueExpense(input: { userId: string; groupId: string; p
 const errorDetails = (error: ApiError) => ({ code: error.code, message: error.message, status: error.status });
 const isRetryable = (error: ApiError) => error.networkFailure || error.code === 'NETWORK_TIMEOUT' || error.status === 408 || error.status === 429 || (error.status !== undefined && error.status >= 500);
 const scopeFor = (item: Pick<ExpenseOutboxItem, 'userId'>, expectedAuthEpoch: number): OutboxOperationScope => ({ userId: item.userId, expectedAuthEpoch });
+const scopeForCurrentAuthenticatedUser = (item: Pick<ExpenseOutboxItem, 'userId'>, scope: OutboxOperationScope): OutboxOperationScope => {
+  const currentEpoch = getAuthEpoch();
+  return getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === item.userId && currentEpoch !== scope.expectedAuthEpoch
+    ? { ...scope, rebindAuthEpoch: currentEpoch }
+    : scope;
+};
 
-const reconcileLateClaim = async (claim: ExpenseOutboxItem, generation: number, scope: OutboxOperationScope, authEpoch: number) => {
+const reconcileLateClaim = async (claim: ExpenseOutboxItem, generation: number, scope: OutboxOperationScope) => {
   try {
-    const released = await releaseOutboxClaimIfOwned(claim.clientOperationId, owner, claim.leaseExpiresAt ?? 0, claim.attempts, Date.now(), generation, scope);
+    const releaseScope = scopeForCurrentAuthenticatedUser(claim, scope);
+    const released = await releaseOutboxClaimIfOwned(claim.clientOperationId, owner, claim.leaseExpiresAt ?? 0, claim.attempts, Date.now(), generation, releaseScope);
     if (!released) { await refreshOutbox(); return; }
     updateSnapshot(released);
-    if (isAuthEpochCurrent(authEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === claim.userId && canFlush() && !logoutQuiescing && !getSessionLogoutInProgress() && (typeof document === 'undefined' || document.visibilityState === 'visible')) void flushOutbox();
+    if (getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === claim.userId && canFlush() && !logoutQuiescing && !getSessionLogoutInProgress() && (typeof document === 'undefined' || document.visibilityState === 'visible')) void flushOutbox();
     else await refreshOutbox();
   } catch { await refreshOutbox(); }
 };
@@ -194,13 +234,13 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
   if (!isAuthEpochCurrent(authEpoch) || !canFlush()) return undefined;
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return undefined;
    const claimResult = await boundedResult(claimOutboxItem(item.clientOperationId, owner, Date.now(), OUTBOX_LEASE_MS, generation, scopeFor(item, authEpoch)));
-    if (claimResult.timedOut) { void claimResult.late.then((lateClaim) => lateClaim ? reconcileLateClaim(lateClaim, generation, scopeFor(item, authEpoch), authEpoch) : undefined).catch(() => undefined); return undefined; }
+    if (claimResult.timedOut) { void claimResult.late.then((lateClaim) => lateClaim ? reconcileLateClaim(lateClaim, generation, scopeFor(item, authEpoch)) : undefined).catch(() => undefined); return undefined; }
    const claimed = claimResult.value;
    if (!claimed) return undefined;
    const scope = scopeFor(claimed, authEpoch);
   activeClaims.add(claimed.clientOperationId);
    if (logoutQuiescing || getSessionLogoutInProgress() || !isAuthEpochCurrent(authEpoch) || !canFlush()) {
-     await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scope));
+      await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scopeForCurrentAuthenticatedUser(claimed, scope)));
      activeClaims.delete(claimed.clientOperationId);
      return undefined;
    }
@@ -211,13 +251,13 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-       await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scope));
+       await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scopeForCurrentAuthenticatedUser(claimed, scope)));
       return undefined;
     }
      // This second check is immediately before dispatch. A trusted-offline
      // lifecycle can queue rows, but it can never send them.
       if (!isAuthEpochCurrent(authEpoch) || getAuthLifecycle().status !== 'authenticated' || currentOutboxUserId() !== claimed.userId || logoutQuiescing || getSessionLogoutInProgress()) {
-        await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scope));
+         await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scopeForCurrentAuthenticatedUser(claimed, scope)));
        return undefined;
      }
       const request = api(`/groups/${claimed.groupId}/expenses`, { method: 'POST', body: JSON.stringify(claimed.payload), signal: controller.signal, headers: { 'X-BillSplit-Expected-User-Id': claimed.userId } }, authEpoch);
@@ -226,12 +266,16 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
      const timeout = new Promise<never>((_resolve, reject) => setTimeout(() => reject(new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true })), timeoutMs));
      void request.catch(() => undefined);
      await Promise.race([request, timeout]);
-       if (!isAuthEpochCurrent(authEpoch)) {
-         // The transport has settled now, so another tab may safely claim it.
-         // Until this point the old lease deliberately remains in place.
-           if (!logoutQuiescing && !getSessionLogoutInProgress()) await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, scope));
-         return undefined;
-       }
+        if (!isAuthEpochCurrent(authEpoch)) {
+          // The transport has settled now, so another tab may safely claim it.
+          // Until this point the old lease deliberately remains in place.
+            if (!logoutQuiescing && !getSessionLogoutInProgress()) {
+              const settledScope = scopeForCurrentAuthenticatedUser(claimed, scope);
+              const updated = await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, { status: 'pending', leaseOwner: undefined, leaseExpiresAt: undefined }, Date.now(), generation, settledScope));
+              if (updated && settledScope.rebindAuthEpoch !== undefined && canFlush()) void flushOutbox();
+            }
+          return undefined;
+        }
       await bounded(invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId, generation));
        const removedResult = await boundedResult(removeOutboxIfOwned(claimed.clientOperationId, owner, Date.now(), generation, scope));
        if (removedResult.timedOut) { void removedResult.late.then(() => refreshOutbox()).catch(() => undefined); await refreshOutbox(); return undefined; }
@@ -248,9 +292,13 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
         const settledPatch = currentAuthWasRevoked
           ? { status: 'auth-required' as const, lastError: { code: 'AUTH_REQUIRED', message: 'Sign in to sync this expense.', status: 401 }, leaseOwner: undefined, leaseExpiresAt: undefined }
           : { status: 'pending' as const, leaseOwner: undefined, leaseExpiresAt: undefined };
-          const updated = await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, settledPatch, Date.now(), generation, scope));
-        if (updated) updateSnapshot(updated);
-        return currentAuthWasRevoked ? 'auth-required' as const : undefined;
+          const settledScope = scopeForCurrentAuthenticatedUser(claimed, scope);
+          const updated = await bounded(updateOutboxIfOwned(claimed.clientOperationId, owner, settledPatch, Date.now(), generation, settledScope));
+         if (updated) {
+           updateSnapshot(updated);
+           if (settledScope.rebindAuthEpoch !== undefined && canFlush() && !logoutQuiescing && !getSessionLogoutInProgress()) void flushOutbox();
+         }
+         return currentAuthWasRevoked ? 'auth-required' as const : undefined;
       }
      const apiError = timedOut ? new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true }) : error instanceof ApiError ? error : new ApiError('Unable to sync expense.', { networkFailure: true, code: 'NETWORK_ERROR' });
      const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
@@ -299,9 +347,13 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
        if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
         if (!isAuthEpochCurrent(flushEpoch)) return;
-         const userId = lifecycle === 'authenticated' ? currentOutboxUserId() : trust && isOfflineTrustUsable(trust) ? trust.userId : undefined;
-         if (!userId || !isAuthEpochCurrent(flushEpoch)) return;
-          const listed = await boundedResult(listOutbox(userId));
+          const userId = lifecycle === 'authenticated' ? currentOutboxUserId() : trust && isOfflineTrustUsable(trust) ? trust.userId : undefined;
+          if (!userId || !isAuthEpochCurrent(flushEpoch)) return;
+          if (lifecycle === 'authenticated') {
+            const rebound = await boundedResult(rebindOutboxAuthEpoch(userId, flushEpoch, () => isAuthEpochCurrent(flushEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === userId));
+            if (rebound.timedOut) { try { await rebound.late; } catch { return; } }
+          }
+           const listed = await boundedResult(listOutbox(userId));
           if (listed.timedOut) { void listed.late.then(() => refreshOutbox()).catch(() => undefined); return; }
           const items = listed.value.filter((item) => item.status === 'pending' || item.status === 'syncing');
       for (const item of items) {
@@ -345,7 +397,7 @@ export async function retryOutboxItem(clientOperationId: string) {
      item = unboundResult.value;
    }
    if (!item) return;
-  if (item.authEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch && item.status === 'auth-required') {
+   if (item.authEpoch !== undefined && item.authEpoch !== scope.expectedAuthEpoch && (item.status === 'auth-required' || item.status === 'failed')) {
     scope = { userId, expectedAuthEpoch: item.authEpoch, rebindAuthEpoch: getAuthEpoch() };
   }
   if (item.status === 'syncing' && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > Date.now()) throw new OutboxBusyError();
@@ -403,12 +455,45 @@ export function statusLabel(status: OutboxStatus, deliveryUncertain = false) {
   return deliveryUncertain ? 'Delivery uncertain · Retry' : status === 'syncing' ? 'Syncing' : status === 'auth-required' ? 'Sign in to sync' : status === 'failed' ? 'Sync failed' : 'Waiting to sync';
 }
 
-export async function handleAuthenticatedUser(userId: string, eventEpoch = getAuthEpoch()) {
+export async function handleAuthenticatedUser(userId: string, eventEpoch = getAuthEpoch(), resumeId?: number) {
+  if (resumeId !== undefined) {
+    if (completedResumeIds.has(resumeId)) return;
+    const existing = resumeRecoveryPromises.get(resumeId);
+    if (existing) return existing;
+    const ordered = (async () => {
+      if (getSessionLogoutInProgress() || !isAuthEpochCurrent(eventEpoch) || getAuthLifecycle().status !== 'authenticated' || currentOutboxUserId() !== userId) return;
+      logoutQuiescing = false;
+      const rebound = await boundedResult(rebindOutboxAuthEpoch(userId, eventEpoch, () => isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === userId));
+      if (rebound.timedOut) { try { await rebound.late; } catch { return; } }
+      const reactivation = await boundedResult(reactivateAuthRequired(userId, () => isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated', eventEpoch));
+      // A bounded IDB wait is only a caller deadline. Reactivation may still
+      // be committing auth-required rows; do not mark this resume complete or
+      // flush the old snapshot until that late transaction has settled.
+      if (reactivation.timedOut) {
+        try { await reactivation.late; } catch { return; }
+      }
+      if (!isAuthEpochCurrent(eventEpoch) || getAuthLifecycle().status !== 'authenticated') return;
+      await refreshOutbox();
+      if (isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated') await flushOutbox();
+    })().finally(() => {
+      resumeRecoveryPromises.delete(resumeId);
+      completedResumeIds.add(resumeId);
+      if (completedResumeIds.size > 64) completedResumeIds.delete(completedResumeIds.values().next().value!);
+    });
+    resumeRecoveryPromises.set(resumeId, ordered);
+    return ordered;
+  }
   // A successful, newly verified session is the only event that may release
   // the logout barrier and allow queued writes to resume.
   if (getSessionLogoutInProgress() || !isAuthEpochCurrent(eventEpoch) || getAuthLifecycle().status !== 'authenticated' || currentOutboxUserId() !== userId) return;
   logoutQuiescing = false;
-  const changed = await bounded(reactivateAuthRequired(userId, () => isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated', eventEpoch));
+  const rebound = await boundedResult(rebindOutboxAuthEpoch(userId, eventEpoch, () => isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === userId));
+  if (rebound.timedOut) { try { await rebound.late; } catch { return; } }
+  const reactivation = await boundedResult(reactivateAuthRequired(userId, () => isAuthEpochCurrent(eventEpoch) && getAuthLifecycle().status === 'authenticated', eventEpoch));
+  if (reactivation.timedOut) {
+    try { await reactivation.late; } catch { return; }
+  }
+  const changed = reactivation.timedOut ? undefined : reactivation.value;
   if (!isAuthEpochCurrent(eventEpoch) || getAuthLifecycle().status !== 'authenticated') return;
   // This is deliberately reached from the post-verification lifecycle event,
   // not during module evaluation. It recovers stale leases and starts the
@@ -436,11 +521,16 @@ registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('focus', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void scheduleAuthVerification({ networkOnly: true }); });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !logoutQuiescing) void scheduleAuthVerification({ networkOnly: true }); });
+  // Foreground signals are owned by the auth coordinator.  This event is the
+  // completion edge of that one operation, so pageshow/focus/visibility storms
+  // cannot create a second probe or flush loop.
+  window.addEventListener('billsplit-auth-resumed', (event) => {
+    const detail = (event as CustomEvent<{ status?: string; resumeId?: number; userId?: string; authEpoch?: number }>).detail;
+    if (detail?.status === 'authenticated' && detail.resumeId !== undefined && detail.userId && detail.authEpoch !== undefined && document.visibilityState === 'visible' && !logoutQuiescing) void handleAuthenticatedUser(detail.userId, detail.authEpoch, detail.resumeId);
+  });
   window.addEventListener('billsplit-outbox-changed', () => void refreshOutbox());
   window.addEventListener('billsplit-cache-cleared', (event) => { if ((event as CustomEvent<{ clearOutbox?: boolean }>).detail?.clearOutbox) { snapshot = []; notify(); } void refreshOutbox(); });
-  window.addEventListener('billsplit-authenticated', (event) => { const detail = (event as CustomEvent<{ userId?: string; authEpoch?: number }>).detail; if (detail?.userId && detail.authEpoch !== undefined && !logoutQuiescing) void handleAuthenticatedUser(detail.userId, detail.authEpoch); });
+  window.addEventListener('billsplit-authenticated', (event) => { const detail = (event as CustomEvent<{ userId?: string; authEpoch?: number; resumeId?: number }>).detail; if (detail?.userId && detail.authEpoch !== undefined && !logoutQuiescing) void handleAuthenticatedUser(detail.userId, detail.authEpoch, detail.resumeId); });
 }
 
 subscribeConnectionState(() => {
