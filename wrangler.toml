@@ -53,5 +53,5 @@ migrations_dir = "migrations"
 [env.dev.vars]
 ENVIRONMENT = "development"
 # Local development only. Do not use this environment for a public hostname.
-# Development intentionally has no rate-limit resource; the Worker bypasses
-# rate limiting only for this exact local environment.
+# Development intentionally has no rate-limit resource; a missing limiter is
+# permitted only when ENVIRONMENT is exactly development or test.

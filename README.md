@@ -75,9 +75,9 @@ it has no Cloudflare account, production D1, rate-limit, or custom-domain
 configuration. Its `env.dev` D1 binding uses a non-production placeholder UUID,
 and local Wrangler creates isolated D1 state under the E2E `--persist-to`
 directory. It also deliberately has no Cloudflare rate-limit binding; the Worker
-bypasses rate limiting only for this exact development environment. Keep
-`env.dev` local-only. Production uses same-origin Clerk session cookies;
-BillSplit does not persist a bearer token.
+permits a missing limiter only when `ENVIRONMENT` is exactly `development` or
+`test`. Keep `env.dev` local-only. Production uses same-origin Clerk session
+cookies; BillSplit does not persist a bearer token.
 
 ## Cloudflare setup and deployment
 
@@ -232,9 +232,10 @@ D1 or a third-party limiter. Cloudflare native limits are enforced per location
 and are eventually consistent, so they provide best-effort abuse mitigation,
 not a hard global invariant. The production binding is `RATE_LIMITER` with an
 account-scoped namespace configured in the ignored production file. Local
-development has no rate-limit binding and uses the narrowly scoped development
-bypass described above. Each authenticated internal user ID gets a
-separate operation bucket, limited to five calls per minute at each location, for group creation,
+development has no rate-limit binding; a missing limiter is permitted only when
+`ENVIRONMENT` is exactly `development` or `test`. Each authenticated internal
+user ID gets a separate operation bucket, limited to five calls per minute at
+each location, for group creation,
 friend creation, invitation creation, and invitation accept/reject. The Worker
 returns structured `429 RATE_LIMITED` JSON with `Retry-After: 60` when a limit
 is exceeded.
