@@ -100,10 +100,6 @@ build as follows:
   ignored and must never be committed)
 - Build variable: `VITE_CLERK_PUBLISHABLE_KEY`, set to the matching Clerk
   publishable key
-- Build variable: `PRODUCTION_WORKER_NAME`, set to the exact Worker `name` in
-  the production config and the connected existing Worker
-- Build variable: `PRODUCTION_ORIGIN`, set to the exact HTTPS origin used by
-  `CLERK_AUTHORIZED_PARTIES` (without a path, query, or fragment)
 - Builds API token: select the already-created custom Cloudflare API token in
   the dashboard's **API token** setting for Builds. Scope it to the account
   with Workers Scripts Edit and D1 Edit permissions; do not add it as a build
@@ -130,9 +126,11 @@ The preparer checks the required production fields but deliberately does not
 parse all TOML syntax; Wrangler's inherited-output dry-run is the authoritative
 malformed-TOML check and runs before any migration. The deploy wrapper also
 removes `WRANGLER_CI_OVERRIDE_NAME`, so Wrangler cannot replace the Worker name
-from `wrangler.deploy.toml`. `PRODUCTION_WORKER_NAME`, config-name, and Workers
-CI override mismatches fail during preparation, before the dry-run or any
-migration. On a guarded `main` build, preparation writes the validated config to
+from `wrangler.deploy.toml`. Any Workers CI override mismatch fails during
+preparation, before the dry-run or any migration. Worker name and production
+origin are derived from the decoded TOML;
+the origin is cross-checked against `CLERK_AUTHORIZED_PARTIES` and the route
+hostname. On a guarded `main` build, preparation writes the validated config to
 both ignored `wrangler.deploy.toml` and the ephemeral root `wrangler.toml` that
 Workers Builds reads, allowing the connected Worker name check to use the
 validated config; the tracked local config is never changed in the repository.

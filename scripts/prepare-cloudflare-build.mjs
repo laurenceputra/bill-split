@@ -121,7 +121,7 @@ export function decodeWranglerConfig(value) {
   return decoded;
 }
 
-export function validateProductionConfig(source, { expectedClerkPublishableKey, expectedWorkerName, expectedOrigin } = {}) {
+export function validateProductionConfig(source, { expectedClerkPublishableKey } = {}) {
   if (typeof source !== 'string' || !source.trim()) throw new Error('The production Wrangler config is empty.');
 
   // Ignore comments while checking for development/example values. This keeps
@@ -141,9 +141,6 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey, 
   }
 
   const workerName = safeWorkerName(quotedValue(source, 'name'), 'Production config name');
-  if (expectedWorkerName !== undefined && workerName !== expectedWorkerName) {
-    throw new Error('PRODUCTION_WORKER_NAME must exactly match the production config name.');
-  }
   requireNonPlaceholderValue(source, 'account_id', 'account_id');
   if (quotedValue(source, 'main') !== 'src/worker/index.ts') {
     throw new Error('Production config must point main at src/worker/index.ts.');
@@ -172,9 +169,6 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey, 
   const vars = sectionContents(source, 'vars');
   const authorizedParties = requireNonPlaceholderValue(vars, 'CLERK_AUTHORIZED_PARTIES', 'CLERK_AUTHORIZED_PARTIES');
   const authorizedUrl = httpsOrigin(authorizedParties, 'CLERK_AUTHORIZED_PARTIES');
-  if (expectedOrigin !== undefined && authorizedUrl.origin !== httpsOrigin(expectedOrigin, 'PRODUCTION_ORIGIN').origin) {
-    throw new Error('PRODUCTION_ORIGIN must exactly match CLERK_AUTHORIZED_PARTIES.');
-  }
 
   const clerkPublishableKey = requireNonPlaceholderValue(vars, 'CLERK_PUBLISHABLE_KEY', 'CLERK_PUBLISHABLE_KEY');
   if (!/^pk_live_[A-Za-z0-9_-]+$/.test(clerkPublishableKey)) {
@@ -213,16 +207,6 @@ export function validateFrontendBuildEnvironment(env = process.env) {
   return true;
 }
 
-export function validateProductionBuildEnvironment(env = process.env) {
-  const workerName = safeWorkerName(env.PRODUCTION_WORKER_NAME, 'PRODUCTION_WORKER_NAME');
-  const origin = httpsOrigin(env.PRODUCTION_ORIGIN, 'PRODUCTION_ORIGIN');
-  if (env.WRANGLER_CI_OVERRIDE_NAME !== undefined && env.WRANGLER_CI_OVERRIDE_NAME !== workerName) {
-    throw new Error('WRANGLER_CI_OVERRIDE_NAME must match PRODUCTION_WORKER_NAME.');
-  }
-  validateFrontendBuildEnvironment(env);
-  return { frontendPublishableKey: env.VITE_CLERK_PUBLISHABLE_KEY.trim(), workerName, origin: origin.origin };
-}
-
 async function writeSecureConfig(outputPath, source) {
   const temporaryPath = `${outputPath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   let handle;
@@ -245,9 +229,14 @@ export async function prepareDeployConfig({ env = process.env, outputPath = DEPL
   const resolvedOutputPath = resolve(outputPath);
   const workersBuildPreparation = rootConfigPath !== undefined || resolvedOutputPath === DEPLOY_CONFIG_PATH;
   if (workersBuildPreparation) assertWorkersBuildMainBranch(env);
-  const { frontendPublishableKey, workerName, origin } = validateProductionBuildEnvironment(env);
+  validateFrontendBuildEnvironment(env);
+  const frontendPublishableKey = env.VITE_CLERK_PUBLISHABLE_KEY.trim();
   const config = decodeWranglerConfig(env.WRANGLER_DEPLOY_TOML_BASE64);
-  validateProductionConfig(config, { expectedClerkPublishableKey: frontendPublishableKey, expectedWorkerName: workerName, expectedOrigin: origin });
+  validateProductionConfig(config, { expectedClerkPublishableKey: frontendPublishableKey });
+  const workerName = quotedValue(config, 'name');
+  if (env.WRANGLER_CI_OVERRIDE_NAME !== undefined && env.WRANGLER_CI_OVERRIDE_NAME !== workerName) {
+    throw new Error('WRANGLER_CI_OVERRIDE_NAME must match the Worker name in the production config.');
+  }
   await writeSecureConfig(resolvedOutputPath, config);
   if (workersBuildPreparation) {
     const resolvedRootConfigPath = resolve(rootConfigPath ?? ROOT_CONFIG_PATH);

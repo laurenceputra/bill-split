@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 // @ts-expect-error Node types are not shipped to the browser build.
 import { resolve } from 'node:path';
 // @ts-expect-error The Node build script has no browser declaration.
-import { decodeWranglerConfig, prepareDeployConfig, validateFrontendBuildEnvironment, validateProductionBuildEnvironment, validateProductionConfig } from './prepare-cloudflare-build.mjs';
+import { decodeWranglerConfig, prepareDeployConfig, validateFrontendBuildEnvironment, validateProductionConfig } from './prepare-cloudflare-build.mjs';
 // @ts-expect-error The Node deploy script has no browser declaration.
 import { assertProductionBuild, deployProduction, runWrangler } from './deploy-cloudflare-build.mjs';
 
@@ -51,8 +51,6 @@ describe('Cloudflare Workers Builds preparation', () => {
   const productionBuildEnv = {
     WORKERS_CI: '1',
     WORKERS_CI_BRANCH: 'main',
-    PRODUCTION_WORKER_NAME: 'bill-split',
-    PRODUCTION_ORIGIN: 'https://split.test',
     VITE_CLERK_PUBLISHABLE_KEY: ' pk_live_abc123 ',
   };
 
@@ -81,8 +79,7 @@ describe('Cloudflare Workers Builds preparation', () => {
     expect(() => validateProductionConfig(productionConfig.replace('namespace_id = "0123456789abcdef0123456789abcdef"', 'namespace_id = ""'))).toThrow(/RATE_LIMITER/);
     expect(() => validateProductionConfig(productionConfig.replace('custom_domain = true', 'custom_domain = false'))).toThrow(/custom-domain/);
     expect(() => validateProductionConfig(productionConfig, { expectedClerkPublishableKey: 'pk_live_other' })).toThrow(/match/);
-    expect(() => validateProductionConfig(productionConfig, { expectedWorkerName: 'different-worker' })).toThrow(/PRODUCTION_WORKER_NAME/);
-    expect(() => validateProductionConfig(productionConfig, { expectedOrigin: 'https://other.test' })).toThrow(/PRODUCTION_ORIGIN/);
+    expect(() => validateProductionConfig(productionConfig.replace('pattern = "split.test"', 'pattern = "other.test"'))).toThrow(/custom-domain/);
   });
 
   it('writes a validated config with restrictive permissions without printing it', async () => {
@@ -97,10 +94,15 @@ describe('Cloudflare Workers Builds preparation', () => {
       expect((await stat(rootConfigPath)).mode & 0o777).toBe(0o600);
       expect(() => validateFrontendBuildEnvironment({})).toThrow(/VITE_CLERK/);
       expect(() => validateFrontendBuildEnvironment({ VITE_CLERK_PUBLISHABLE_KEY: 'pk_test_abc123' })).toThrow(/live/);
-      expect(() => validateProductionBuildEnvironment({ ...productionBuildEnv, PRODUCTION_WORKER_NAME: 'bill-split dev' })).toThrow(/safe/);
-      expect(() => validateProductionBuildEnvironment({ ...productionBuildEnv, PRODUCTION_ORIGIN: 'https://split.test/path' })).toThrow(/origin/);
       await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfig, VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_other' }, outputPath })).rejects.toThrow(/match/);
       await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WORKERS_CI_BRANCH: 'preview', WRANGLER_DEPLOY_TOML_BASE64: encodedConfig } })).rejects.toThrow(/main branch/);
+      await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfig, WRANGLER_CI_OVERRIDE_NAME: 'wrong-worker' }, outputPath })).rejects.toThrow(/Worker name/);
+      const remoteCommands: string[] = [];
+      await expect(deployProduction({
+        env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfig, WRANGLER_CI_OVERRIDE_NAME: 'wrong-worker' },
+        run: async (args: string[]) => { remoteCommands.push(args.join(' ')); },
+      })).rejects.toThrow(/Worker name/);
+      expect(remoteCommands).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -111,9 +113,6 @@ describe('Cloudflare Workers Builds deployment guards and ordering', () => {
   const buildEnv = {
     WORKERS_CI: '1',
     WORKERS_CI_BRANCH: 'main',
-    PRODUCTION_WORKER_NAME: 'bill-split',
-    PRODUCTION_ORIGIN: 'https://split.test',
-    VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_abc123',
   };
 
   it('requires the Workers Builds main production branch', () => {
@@ -135,7 +134,6 @@ describe('Cloudflare Workers Builds deployment guards and ordering', () => {
     expect(invocation?.env.WRANGLER_DEPLOY_TOML_BASE64).toBeUndefined();
     expect(invocation?.env.VITE_CLERK_PUBLISHABLE_KEY).toBeUndefined();
     expect(invocation?.env.WRANGLER_CI_OVERRIDE_NAME).toBeUndefined();
-    expect(() => runWrangler(['deploy'], { env: { ...buildEnv, WRANGLER_CI_OVERRIDE_NAME: 'wrong-worker' }, execute: () => {} })).toThrow(/match/);
   });
 
   it('prepares, dry-runs, migrates, and deploys in order without rebuilding', async () => {

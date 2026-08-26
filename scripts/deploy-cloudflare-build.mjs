@@ -12,16 +12,13 @@ function sanitizedEnvironment(env) {
   delete childEnv.WRANGLER_DEPLOY_TOML_BASE64;
   delete childEnv.VITE_CLERK_PUBLISHABLE_KEY;
   // Do not let Workers Builds override the production Worker name from the
-  // validated config. Wrangler's dry-run must catch a dashboard/config name
-  // mismatch before the migration step.
+  // validated config. The connected Worker's name is checked against that
+  // config by Wrangler before the migration step.
   delete childEnv.WRANGLER_CI_OVERRIDE_NAME;
   return childEnv;
 }
 
 export function runWrangler(args, { cwd = ROOT, env = process.env, execute = execFileSync } = {}) {
-  if (env.WRANGLER_CI_OVERRIDE_NAME !== undefined && env.WRANGLER_CI_OVERRIDE_NAME !== env.PRODUCTION_WORKER_NAME) {
-    throw new Error('WRANGLER_CI_OVERRIDE_NAME must match PRODUCTION_WORKER_NAME.');
-  }
   try {
     // npx --no-install resolves only the Wrangler version installed by this
     // checkout and never downloads or activates an unpinned global CLI.
