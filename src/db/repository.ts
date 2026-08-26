@@ -1542,14 +1542,6 @@ export class Repository {
         UNION ALL
         SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
         FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
-        UNION ALL
-        SELECT r.entity_type||'_revision',
-          r.id,r.entity_id,CASE WHEN r.entity_type='expense' AND e.deleted_at IS NULL THEN 1 ELSE 0 END,
-          COALESCE(e.group_id,s.group_id),CASE WHEN r.entity_type='expense' THEN json_extract(r.snapshot_json,'$.description') ELSE json_extract(r.snapshot_json,'$.note') END,
-          json_extract(r.snapshot_json,'$.amountMinor'),json_extract(r.snapshot_json,'$.currency'),json_extract(r.snapshot_json,'$.date'),p_from.name,p_to.name,r.created_at
-        FROM revisions r LEFT JOIN expenses e ON r.entity_type='expense' AND e.id=r.entity_id LEFT JOIN settlements s ON r.entity_type='settlement' AND s.id=r.entity_id
-        LEFT JOIN people p_from ON p_from.id=json_extract(r.snapshot_json,'$.fromPersonId') LEFT JOIN people p_to ON p_to.id=json_extract(r.snapshot_json,'$.toPersonId')
-        WHERE (r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL)
       ) activity JOIN groups g ON g.id=activity.group_id JOIN group_members gm ON gm.group_id=g.id
        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL${groupId ? ' AND activity.group_id=?' : ''}${boundary}
        ORDER BY activity.created_at DESC,activity.id DESC LIMIT ?

@@ -14,7 +14,12 @@ describe('transaction filter helpers', () => {
     expect(transactionFilterQuery({ q: '  ' }).toString()).toBe('');
   });
 
-  it('counts and clears categories that are incompatible with settlement filters', () => {
+  it('keeps categories with All and clears them only for settlement filters', () => {
+    expect(normalizeTransactionFilters({ category: 'Dinner', q: 'paid' })).toEqual({ category: 'Dinner', q: 'paid' });
+    expect(readTransactionFilters(new URLSearchParams('category=Dinner'))).toEqual({ category: 'Dinner' });
+    expect(transactionFilterQuery({ category: 'Dinner' }).toString()).toBe('category=Dinner');
+    expect(writeTransactionFilters(new URLSearchParams('kind=expense'), { category: 'Dinner' }).toString()).toBe('category=Dinner');
+
     const filters = normalizeTransactionFilters({ kind: 'settlement', category: 'Dinner', q: 'paid' });
     expect(filters).toEqual({ kind: 'settlement', q: 'paid' });
     expect(transactionFilterCount(filters)).toBe(2);

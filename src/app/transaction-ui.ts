@@ -15,3 +15,14 @@ export function transactionTitle(transaction: Transaction): string {
 export function transactionPeople(transaction: Transaction): string | undefined {
   return transaction.kind === 'settlement' ? `${transaction.fromName} → ${transaction.toName}` : undefined;
 }
+
+export function transactionCategory(transaction: Transaction): string | undefined {
+  if (transaction.kind !== 'expense') return undefined;
+  const category = transaction.category?.trim();
+  return category || undefined;
+}
+
+export function transactionNote(transaction: Transaction): string | undefined {
+  const note = transaction.kind === 'expense' ? transaction.notes : transaction.note;
+  return note?.trim() || undefined;
+}

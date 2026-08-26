@@ -60,17 +60,17 @@ describe('frontend API errors and cache fallback', () => {
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', undefined, true)).toBe(true);
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', 'clerk-fast', true)).toBe(false);
   });
-  it('caches the typed activity payload without losing entity context', async () => {
+  it('filters revision rows from the activity cache without losing current rows', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
       ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')
       : json({ activity: [{ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', entity_active: 1, amountMinor: 1250, currency: 'USD', transactionDate: '2026-01-02', label: 'Lunch', createdAt: '2026-01-03T00:00:00Z' }] }, 200, 'user-a')));
     const result = await getActivity('group-a');
-    expect(result.activity[0]).toMatchObject({ type: 'expense_revision', id: 'revision-1', entityId: 'expense-1', entityActive: true, amountMinor: 1250 });
-    expect((await readActivity('user-a', 'group-a'))?.activity[0].entityId).toBe('expense-1');
+    expect(result.activity).toEqual([]);
+    expect((await readActivity('user-a', 'group-a'))?.activity).toEqual([]);
   });
 
-  it('does not display deleted activity or inactive cached revisions from an API response', async () => {
+  it('does not display deleted or revision activity from an API response', async () => {
     await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me')
       ? json({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }, 200, 'user-a')
@@ -88,7 +88,7 @@ describe('frontend API errors and cache fallback', () => {
   it('normalizes activity pages without losing a server cursor', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ activity: [{ type: 'expense_deleted', id: 'deleted-1' }, { type: 'settlement_revision', id: 'revision-1', entityId: 'settlement-1', entityActive: false, fromName: 'A', toName: 'B' }], nextCursor: 'next-page' })));
     const page = await getActivityPage(undefined, { limit: 1 });
-    expect(page.activity.map((item) => item.id)).toEqual(['revision-1']);
+    expect(page.activity).toEqual([]);
     expect(page.nextCursor).toBe('next-page');
   });
 
@@ -754,6 +754,11 @@ describe('frontend API errors and cache fallback', () => {
     vi.stubGlobal('fetch', fetchSpy);
     await expect(getTransactionPage('group-a', { q: 'dinner', kind: 'expense' })).rejects.toThrow('Connection issue');
     expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/api/groups/group-a/transactions?limit=25&kind=expense&q=dinner');
+    await expect(getTransactionPage('group-a', { category: 'Dining' })).rejects.toThrow('Connection issue');
+    expect(String(fetchSpy.mock.calls[1]?.[0])).toContain('/api/groups/group-a/transactions?limit=25&category=Dining');
+    await expect(getTransactionPage('group-a', { kind: 'settlement', category: 'Dining' })).rejects.toThrow('Connection issue');
+    expect(String(fetchSpy.mock.calls[2]?.[0])).toContain('/api/groups/group-a/transactions?limit=25&kind=settlement');
+    expect(String(fetchSpy.mock.calls[2]?.[0])).not.toContain('category=');
     await expect(getTransactions('group-a', undefined, { q: 'dinner' })).rejects.toThrow();
   });
 

@@ -129,7 +129,7 @@ export function normalizeActivity(value: unknown): Activity[] {
   return value.flatMap((candidate) => {
     if (!candidate || typeof candidate !== 'object') return [];
     const row = candidate as Record<string, unknown>;
-    if (!isActivityType(row.type) || !validActivityEntityId(row.id) || row.type.endsWith('_deleted')) return [];
+    if (!isActivityType(row.type) || !validActivityEntityId(row.id) || row.type.endsWith('_deleted') || row.type.endsWith('_revision')) return [];
     const settlement = row.type.startsWith('settlement');
     const amountValue = row.amountMinor ?? row.amount_minor ?? row.amount;
     const amount = typeof amountValue === 'number' && Number.isSafeInteger(amountValue) && amountValue >= 0 ? amountValue : null;
@@ -138,10 +138,7 @@ export function normalizeActivity(value: unknown): Activity[] {
     const explicitEntityId = row.entityId ?? row.entity_id;
     const entityId = validActivityEntityId(explicitEntityId) ? explicitEntityId.trim() : row.type === 'expense' ? row.id.trim() : '';
     const parsedEntityActive = activityEntityActive(row.entityActive ?? row.entity_active);
-    const expenseEntity = row.type === 'expense' || row.type === 'expense_revision';
-    // A revision with an explicit inactive parent belongs to a transaction
-    // which has since been deleted. Do not let an old cache resurrect it.
-    if (row.type === 'expense_revision' && parsedEntityActive === false) return [];
+    const expenseEntity = row.type === 'expense';
     // A legacy direct expense row already represents the current entity, so its
     // event ID is a safe fallback for display/refetch. It is not an eligibility
     // assertion: only an explicit active flag can make an expense linkable.
