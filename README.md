@@ -85,6 +85,63 @@ Production commands require the ignored `wrangler.deploy.toml`; the tracked
 `wrangler.toml` must not be used for production. A clone can create its own
 Cloudflare resources without changing tracked files:
 
+### Workers Builds dashboard setup
+
+For the initial production setup, connect the existing Cloudflare Worker to the
+GitHub repository in **Workers & Pages → the Worker → Builds**. Configure the
+build as follows:
+
+- Production branch: `main`
+- Root directory: the repository root (`/`)
+- Build command: `npm run cf:build`
+- Deploy command: `npm run cf:deploy`
+- Build secret: `WRANGLER_DEPLOY_TOML_BASE64`, containing the base64 encoding of
+  the complete production `wrangler.deploy.toml` (the file itself remains
+  ignored and must never be committed)
+- Build variable: `VITE_CLERK_PUBLISHABLE_KEY`, set to the matching Clerk
+  publishable key
+- Build variable: `PRODUCTION_WORKER_NAME`, set to the exact Worker `name` in
+  the production config and the connected existing Worker
+- Build variable: `PRODUCTION_ORIGIN`, set to the exact HTTPS origin used by
+  `CLERK_AUTHORIZED_PARTIES` (without a path, query, or fragment)
+- Builds API token: select the already-created custom Cloudflare API token in
+  the dashboard's **API token** setting for Builds. Scope it to the account
+  with Workers Scripts Edit and D1 Edit permissions; do not add it as a build
+  variable or build secret.
+
+Keep non-production branch builds disabled while these production build
+secrets and the selected API token are attached. A preview cannot safely share
+them: previews require a separately isolated Worker, D1 database, config,
+Clerk setup, and credentials. Branch code cannot be trusted with production
+credentials. Only the `main` production build is allowed to run `cf:deploy`; the
+wrapper also enforces both Cloudflare's `WORKERS_CI=1` marker and
+`WORKERS_CI_BRANCH=main`, so preview and other branch builds cannot apply
+production migrations or deploy the production Worker.
+
+Keep runtime secrets such as `CLERK_SECRET_KEY` and
+`IDENTITY_TOMBSTONE_KEY` managed by the Worker dashboard/Wrangler secrets, not
+as build variables and never in the base64 config secret. `cf:build` validates
+the supplied config and frontend key, runs tests, and builds the bundle;
+`cf:deploy` validates the config again, dry-runs Wrangler, applies remote D1
+migrations, and deploys the already-built `dist/` without rebuilding.
+The base64 config must contain the existing `[secrets].required` declaration for
+both runtime secrets, but must not contain assignments for either secret.
+The preparer checks the required production fields but deliberately does not
+parse all TOML syntax; Wrangler's inherited-output dry-run is the authoritative
+malformed-TOML check and runs before any migration. The deploy wrapper also
+removes `WRANGLER_CI_OVERRIDE_NAME`, so Wrangler cannot replace the Worker name
+from `wrangler.deploy.toml`. `PRODUCTION_WORKER_NAME`, config-name, and Workers
+CI override mismatches fail during preparation, before the dry-run or any
+migration. On a guarded `main` build, preparation writes the validated config to
+both ignored `wrangler.deploy.toml` and the ephemeral root `wrangler.toml` that
+Workers Builds reads, allowing the connected Worker name check to use the
+validated config; the tracked local config is never changed in the repository.
+
+To create the single-line build secret value on Linux, use
+`base64 -w0 wrangler.deploy.toml` and paste the result into the dashboard (use
+`base64 wrangler.deploy.toml | tr -d '\n'` on systems whose `base64` has no
+`-w` option).
+
 1. Clone the repository, install dependencies, and authenticate Wrangler:
 
    ```sh
