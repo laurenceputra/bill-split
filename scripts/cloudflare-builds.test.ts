@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error Node types are not shipped to the browser build.
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 // @ts-expect-error Node types are not shipped to the browser build.
 import { tmpdir } from 'node:os';
 // @ts-expect-error Node types are not shipped to the browser build.
@@ -9,6 +9,8 @@ import { resolve } from 'node:path';
 import { decodeWranglerConfig, prepareDeployConfig, validateFrontendBuildEnvironment, validateProductionConfig } from './prepare-cloudflare-build.mjs';
 // @ts-expect-error The Node deploy script has no browser declaration.
 import { assertProductionBuild, deployProduction, runWrangler } from './deploy-cloudflare-build.mjs';
+// @ts-expect-error The local deploy validation script has no browser declaration.
+import { validateLocalDeployConfig } from './validate-cloudflare-deploy.mjs';
 
 const productionConfig = `name = "bill-split"
 account_id = "0123456789abcdef0123456789abcdef"
@@ -30,8 +32,6 @@ migrations_dir = "migrations"
 [vars]
 ENVIRONMENT = "production"
 CLERK_AUTHORIZED_PARTIES = "https://split.test"
-CLERK_PUBLISHABLE_KEY = "pk_live_abc123"
-CLERK_JWT_KEY = "jwt-public-key"
 
 [secrets]
 required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY"]
@@ -45,7 +45,22 @@ pattern = "split.test"
 custom_domain = true
 `;
 
+const clerkJwtPublicKey = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyCB7w92OYReZZwedlkp6
+I/4tPPP0QmeD/PxDeTf1xxMamW/7o0CwhhTPdEELLeNthHHNfg/7BoudcRX1GJGI
+F7WvJgUKpAamWYKBEnll8IPVBPQn2gI2Y8e39ND0Z7L9qhdDH5+GG21auKb+E5nh
+rk9kUaSVnvcVOju172my0a9wiO+iD2yqKuk7usGYxVl1+02XPv9XGrS6X/36I/cp
+L4j7YUdY8y7rUPle8G9Vn6KK56NJmhUNqOFay0hdCCbPqYtW01NlgpcMkcw2tM04
+LnuhV6BD6/i4uu0qlly8URx8IPDX9zAV9xiUZiGlPR/NU+bSz24kb9onLCCJgVhp
+DQIDAQAB
+-----END PUBLIC KEY-----`;
+
+const configuredProductionConfig = productionConfig.replace(
+  'CLERK_AUTHORIZED_PARTIES = "https://split.test"',
+  `CLERK_AUTHORIZED_PARTIES = "https://split.test"\nCLERK_PUBLISHABLE_KEY = "pk_live_abc123"\nCLERK_JWT_KEY = """${clerkJwtPublicKey}"""`,
+);
 const encodedConfig = Buffer.from(productionConfig).toString('base64');
+const encodedConfiguredConfig = Buffer.from(configuredProductionConfig).toString('base64');
 
 describe('Cloudflare Workers Builds preparation', () => {
   const productionBuildEnv = {
@@ -53,6 +68,70 @@ describe('Cloudflare Workers Builds preparation', () => {
     WORKERS_CI_BRANCH: 'main',
     VITE_CLERK_PUBLISHABLE_KEY: ' pk_live_abc123 ',
   };
+
+  it('accepts dashboard-managed Clerk runtime variables omitted from TOML', () => {
+    expect(productionConfig).not.toMatch(/^CLERK_(?:PUBLISHABLE_KEY|JWT_KEY)\s*=/m);
+    expect(validateProductionConfig(productionConfig, { expectedClerkPublishableKey: 'pk_live_abc123' })).toBe(true);
+  });
+
+  it('validates optional Clerk runtime values with bare and quoted TOML keys', () => {
+    for (const publishableKey of ['CLERK_PUBLISHABLE_KEY', '"CLERK_PUBLISHABLE_KEY"', "'CLERK_PUBLISHABLE_KEY'"]) {
+      for (const jwtKey of ['CLERK_JWT_KEY', '"CLERK_JWT_KEY"', "'CLERK_JWT_KEY'"]) {
+        const config = productionConfig.replace(
+          'CLERK_AUTHORIZED_PARTIES = "https://split.test"',
+          `CLERK_AUTHORIZED_PARTIES = "https://split.test"\n${publishableKey} = "pk_live_abc123"\n${jwtKey} = """${clerkJwtPublicKey}"""`,
+        );
+        expect(validateProductionConfig(config, { expectedClerkPublishableKey: 'pk_live_abc123' })).toBe(true);
+      }
+    }
+
+    const quotedConfig = productionConfig.replace(
+      'CLERK_AUTHORIZED_PARTIES = "https://split.test"',
+      `CLERK_AUTHORIZED_PARTIES = "https://split.test"\n"CLERK_PUBLISHABLE_KEY" = "pk_live_abc123"\n'CLERK_JWT_KEY' = """${clerkJwtPublicKey}"""`,
+    );
+    expect(() => validateProductionConfig(quotedConfig.replace('pk_live_abc123', 'pk_live_other'), { expectedClerkPublishableKey: 'pk_live_abc123' })).toThrow(/match/);
+    expect(() => validateProductionConfig(quotedConfig.replace(clerkJwtPublicKey, 'jwt-public-key'))).toThrow(/PEM/);
+    expect(() => validateProductionConfig(quotedConfig.replace(clerkJwtPublicKey, '-----BEGIN PUBLIC KEY-----\nQUFBQQ==\n-----END PUBLIC KEY-----'))).toThrow(/PEM/);
+  });
+
+  it('does not let lowercase Clerk decoys shadow exact uppercase values', () => {
+    const publishableCollision = productionConfig.replace(
+      'CLERK_AUTHORIZED_PARTIES = "https://split.test"',
+      'CLERK_AUTHORIZED_PARTIES = "https://split.test"\nclerk_publishable_key = "pk_live_abc123"\nCLERK_PUBLISHABLE_KEY = "pk_live_other"',
+    );
+    expect(() => validateProductionConfig(publishableCollision, { expectedClerkPublishableKey: 'pk_live_abc123' })).toThrow(/match/);
+
+    const jwtCollision = productionConfig.replace(
+      'CLERK_AUTHORIZED_PARTIES = "https://split.test"',
+      `CLERK_AUTHORIZED_PARTIES = "https://split.test"\nclerk_jwt_key = """${clerkJwtPublicKey}"""\nCLERK_JWT_KEY = "not-a-pem"`,
+    );
+    expect(() => validateProductionConfig(jwtCollision)).toThrow(/PEM/);
+  });
+
+  it('rejects Clerk runtime table and array-of-table bindings', () => {
+    for (const key of ['CLERK_PUBLISHABLE_KEY', 'CLERK_JWT_KEY', '"CLERK_PUBLISHABLE_KEY"', '"CLERK_JWT_KEY"', "'CLERK_PUBLISHABLE_KEY'", "'CLERK_JWT_KEY'"]) {
+      const dottedConfig = productionConfig.replace('[secrets]', `${key} . value = "not-a-string-binding"\n\n[secrets]`);
+      expect(() => validateProductionConfig(dottedConfig)).toThrow(new RegExp(`${key.replace(/["']/g, '')}.*table binding`));
+      for (const parent of ['vars', '"vars"', "'vars'"]) {
+        for (const [opening, closing] of [['[', ']'], ['[[', ']]']]) {
+          const header = `${opening} ${parent} . ${key} ${closing} # unsupported table binding`;
+          const config = productionConfig.replace('[secrets]', `${header}\nvalue = "not-a-string-binding"\n\n[secrets]`);
+          expect(() => validateProductionConfig(config)).toThrow(new RegExp(`${key.replace(/["']/g, '')}.*table binding`));
+        }
+      }
+    }
+  });
+
+  it('rejects protected secret dotted and table bindings without rejecting required declarations', () => {
+    expect(validateProductionConfig(productionConfig)).toBe(true);
+    for (const key of ['CLERK_SECRET_KEY', 'IDENTITY_TOMBSTONE_KEY', '"CLERK_SECRET_KEY"', '"IDENTITY_TOMBSTONE_KEY"', "'CLERK_SECRET_KEY'", "'IDENTITY_TOMBSTONE_KEY'"]) {
+      const dottedConfig = productionConfig.replace('[secrets]', `${key} . value = "runtime-secret"\n\n[secrets]`);
+      expect(() => validateProductionConfig(dottedConfig)).toThrow(/must not embed/);
+
+      const tableConfig = productionConfig.replace('[secrets]', `[ vars . ${key} ] # unsupported table binding\nvalue = "runtime-secret"\n\n[secrets]`);
+      expect(() => validateProductionConfig(tableConfig)).toThrow(/must not embed/);
+    }
+  });
 
   it('strictly decodes non-empty base64 and rejects malformed input', () => {
     expect(decodeWranglerConfig(encodedConfig)).toBe(productionConfig);
@@ -63,8 +142,9 @@ describe('Cloudflare Workers Builds preparation', () => {
 
   it('accepts production invariants and rejects development or incomplete configs', () => {
     expect(validateProductionConfig(productionConfig)).toBe(true);
+    expect(validateProductionConfig(configuredProductionConfig)).toBe(true);
     expect(validateProductionConfig(`# CLERK_SECRET_KEY = "comment-only"\n${productionConfig}`)).toBe(true);
-    expect(validateProductionConfig(productionConfig.replace('CLERK_JWT_KEY = "jwt-public-key"', 'CLERK_JWT_KEY = """-----BEGIN PUBLIC KEY-----\npublic-key\n-----END PUBLIC KEY-----"""'))).toBe(true);
+    expect(validateProductionConfig(configuredProductionConfig.replace(clerkJwtPublicKey, `${clerkJwtPublicKey}\n`))).toBe(true);
     expect(() => validateProductionConfig(productionConfig.replace('production', 'development'))).toThrow(/production/);
     expect(() => validateProductionConfig(productionConfig.replace('binding = "ASSETS"', 'binding = "WRONG"'))).toThrow(/assets/i);
     expect(() => validateProductionConfig(productionConfig.replace('database_id = "01234567-89ab-4cde-8123-456789abcdef"', 'database_id = "00000000-0000-4000-8000-000000000000"'))).toThrow(/D1/);
@@ -74,11 +154,12 @@ describe('Cloudflare Workers Builds preparation', () => {
     expect(() => validateProductionConfig(`${productionConfig}\nvars.IDENTITY_TOMBSTONE_KEY = "runtime-secret"`)).toThrow(/must not embed/i);
     expect(() => validateProductionConfig(`${productionConfig}\n"CLERK\\u005fSECRET_KEY" = "runtime-secret"`)).toThrow(/Unicode escape/);
     expect(() => validateProductionConfig(productionConfig.replace('https://split.test', 'http://split.test'))).toThrow(/HTTPS/);
-    expect(() => validateProductionConfig(productionConfig.replace('pk_live_abc123', 'pk_test_abc123'))).toThrow(/placeholder|live Clerk/);
-    expect(() => validateProductionConfig(productionConfig.replace('CLERK_JWT_KEY = "jwt-public-key"', 'CLERK_JWT_KEY = ""'))).toThrow(/JWT/);
+    expect(() => validateProductionConfig(configuredProductionConfig.replace('pk_live_abc123', 'pk_test_abc123'))).toThrow(/placeholder|live Clerk/);
+    expect(() => validateProductionConfig(configuredProductionConfig.replace(clerkJwtPublicKey, ''))).toThrow(/JWT/);
+    expect(() => validateProductionConfig(configuredProductionConfig.replace(clerkJwtPublicKey, 'jwt-public-key'))).toThrow(/PEM/);
     expect(() => validateProductionConfig(productionConfig.replace('namespace_id = "0123456789abcdef0123456789abcdef"', 'namespace_id = ""'))).toThrow(/RATE_LIMITER/);
     expect(() => validateProductionConfig(productionConfig.replace('custom_domain = true', 'custom_domain = false'))).toThrow(/custom-domain/);
-    expect(() => validateProductionConfig(productionConfig, { expectedClerkPublishableKey: 'pk_live_other' })).toThrow(/match/);
+    expect(() => validateProductionConfig(configuredProductionConfig, { expectedClerkPublishableKey: 'pk_live_other' })).toThrow(/match/);
     expect(() => validateProductionConfig(productionConfig.replace('pattern = "split.test"', 'pattern = "other.test"'))).toThrow(/custom-domain/);
   });
 
@@ -94,7 +175,7 @@ describe('Cloudflare Workers Builds preparation', () => {
       expect((await stat(rootConfigPath)).mode & 0o777).toBe(0o600);
       expect(() => validateFrontendBuildEnvironment({})).toThrow(/VITE_CLERK/);
       expect(() => validateFrontendBuildEnvironment({ VITE_CLERK_PUBLISHABLE_KEY: 'pk_test_abc123' })).toThrow(/live/);
-      await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfig, VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_other' }, outputPath })).rejects.toThrow(/match/);
+      await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfiguredConfig, VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_other' }, outputPath })).rejects.toThrow(/match/);
       await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WORKERS_CI_BRANCH: 'preview', WRANGLER_DEPLOY_TOML_BASE64: encodedConfig } })).rejects.toThrow(/main branch/);
       await expect(prepareDeployConfig({ env: { ...productionBuildEnv, WRANGLER_DEPLOY_TOML_BASE64: encodedConfig, WRANGLER_CI_OVERRIDE_NAME: 'wrong-worker' }, outputPath })).rejects.toThrow(/Worker name/);
       const remoteCommands: string[] = [];
@@ -103,6 +184,20 @@ describe('Cloudflare Workers Builds preparation', () => {
         run: async (args: string[]) => { remoteCommands.push(args.join(' ')); },
       })).rejects.toThrow(/Worker name/);
       expect(remoteCommands).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('validates the local deploy config against the frontend build key', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'bill-split-cf-local-'));
+    const configPath = resolve(root, 'wrangler.deploy.toml');
+    try {
+      await writeFile(configPath, productionConfig, 'utf8');
+      await expect(validateLocalDeployConfig({ configPath, env: { VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_abc123' } })).resolves.toBe(true);
+      await writeFile(configPath, configuredProductionConfig, 'utf8');
+      await expect(validateLocalDeployConfig({ configPath, env: { VITE_CLERK_PUBLISHABLE_KEY: 'pk_live_other' } })).rejects.toThrow(/match/);
+      await expect(validateLocalDeployConfig({ configPath, env: { VITE_CLERK_PUBLISHABLE_KEY: '' } })).rejects.toThrow(/VITE_CLERK/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -136,7 +231,7 @@ describe('Cloudflare Workers Builds deployment guards and ordering', () => {
     expect(invocation?.env.WRANGLER_CI_OVERRIDE_NAME).toBeUndefined();
   });
 
-  it('prepares, dry-runs, migrates, and deploys in order without rebuilding', async () => {
+  it('prepares, keeps runtime vars for dry-run and final deploy, migrates, and deploys in order without rebuilding', async () => {
     const calls: string[] = [];
     await deployProduction({
       env: buildEnv,

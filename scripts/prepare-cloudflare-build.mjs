@@ -1,5 +1,5 @@
 import { chmod, open, rename, unlink } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createPublicKey, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -18,15 +18,16 @@ export function assertWorkersBuildMainBranch(env = process.env) {
 }
 
 function sectionContents(source, sectionName) {
-  const section = new RegExp(`^\\s*\\[\\[?${sectionName.replace('.', '\\.') }\\]\\]?\\s*$`, 'mi').exec(source);
+  const section = new RegExp(`^\\s*\\[\\[?${sectionName.replace('.', '\\.') }\\]\\]?\\s*$`, 'm').exec(source);
   if (!section) return '';
   const rest = source.slice(section.index + section[0].length);
   return rest.split(/^\s*\[\[?.*\]\]?\s*$/m, 1)[0];
 }
 
-function assignment(source, key) {
+function assignment(source, key, { allowQuotedKey = false } = {}) {
   const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = new RegExp(`^\\s*${escapedKey}\\s*=\\s*`, 'mi').exec(source);
+  const keyPattern = allowQuotedKey ? `(?:${escapedKey}|"${escapedKey}"|'${escapedKey}')` : escapedKey;
+  const match = new RegExp(`^\\s*${keyPattern}\\s*=\\s*`, 'm').exec(source);
   if (!match) return '';
   const remainder = source.slice(match.index + match[0].length);
   const quote = remainder.match(/^("""|'''|"|')/)?.[1];
@@ -37,8 +38,15 @@ function assignment(source, key) {
   return remainder.split(/\r?\n/, 1)[0].replace(/\s+#.*$/, '').trim();
 }
 
-function quotedValue(source, key) {
-  const value = assignment(source, key);
+function hasAssignment(source, key, options) {
+  const { allowQuotedKey = false } = options ?? {};
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const keyPattern = allowQuotedKey ? `(?:${escapedKey}|"${escapedKey}"|'${escapedKey}')` : escapedKey;
+  return new RegExp(`^\\s*${keyPattern}\\s*=\\s*`, 'm').test(source);
+}
+
+function quotedValue(source, key, options) {
+  const value = assignment(source, key, options);
   return value.match(/^(['"]{1,3})(.*?)\1\s*$/s)?.[2]?.trim() ?? '';
 }
 
@@ -67,9 +75,23 @@ function httpsOrigin(value, label) {
   return parsed;
 }
 
-function requireNonPlaceholderValue(source, key, label = key) {
-  const value = requireNonEmptyValue(source, key, label);
+function requireNonPlaceholderValue(source, key, label = key, options) {
+  const value = requireNonEmptyValue(source, key, label, options);
   if (isPlaceholderValue(value) || /^0+$/.test(value)) throw new Error(`Production config must set a real ${label}.`);
+  return value;
+}
+
+function requirePublicPemValue(source, key, label = key, options) {
+  const value = requireNonPlaceholderValue(source, key, label, options);
+  const body = value.match(/^-----BEGIN PUBLIC KEY-----\r?\n([\s\S]*?)\r?\n-----END PUBLIC KEY-----$/)?.[1]?.replace(/\s/g, '') ?? '';
+  if (!body) {
+    throw new Error(`Production config must contain a PEM public key for ${label}.`);
+  }
+  try {
+    if (createPublicKey(value).type !== 'public') throw new Error('Not a public key.');
+  } catch {
+    throw new Error(`Production config must contain a PEM public key for ${label}.`);
+  }
   return value;
 }
 
@@ -80,12 +102,29 @@ function quotedArrayValues(value) {
 function hasPlaintextSecretAssignment(source) {
   const secret = `(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)`;
   const key = `(?:(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')\.)*(?:${secret}|"${secret}"|'${secret}')`;
+  const keySegment = `(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')`;
+  const secretSegment = `(?:${secret}|"${secret}"|'${secret}')`;
   const assignmentPattern = new RegExp(`^\\s*${key}\\s*=`, 'i');
   const inlineAssignmentPattern = new RegExp(`[,{]\\s*${key}\\s*=`, 'i');
+  const dottedAssignmentPattern = new RegExp(`^\\s*(?:${keySegment}\\s*\\.\\s*)*${secretSegment}\\s*\\.\\s*${keySegment}(?:\\s*\\.\\s*${keySegment})*\\s*=`, 'i');
+  const tablePattern = new RegExp(`^\\s*\\[\\[?\\s*(?:${keySegment}\\s*\\.\\s*)*${secretSegment}(?:\\s*\\.\\s*${keySegment})*\\s*\\]\\]?\\s*(?:#.*)?$`, 'i');
   return source.split(/\r?\n/).some((line) => {
     const uncommented = line.replace(/(^|\s)#.*$/, '$1');
-    return assignmentPattern.test(uncommented) || inlineAssignmentPattern.test(uncommented);
+    if (!/(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)/i.test(uncommented)) return false;
+    return assignmentPattern.test(uncommented) || inlineAssignmentPattern.test(uncommented) || dottedAssignmentPattern.test(uncommented) || tablePattern.test(line);
   });
+}
+
+function rejectVarsTableBinding(source, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const keyPattern = `(?:${escapedKey}|"${escapedKey}"|'${escapedKey}')`;
+  const varsPattern = `(?:vars|"vars"|'vars')`;
+  const tablePattern = new RegExp(`^\\s*\\[\\[?\\s*${varsPattern}\\s*\\.\\s*${keyPattern}(?:\\s*\\.\\s*[^\\]#]+)?\\s*\\]\\]?\\s*(?:#.*)?$`, 'm');
+  const vars = sectionContents(source, 'vars');
+  const dottedPattern = new RegExp(`^\\s*${keyPattern}\\s*\\.\\s*[^=\\r\\n#]+\\s*=`, 'm');
+  if (tablePattern.test(source) || dottedPattern.test(vars)) {
+    throw new Error(`Production config must define ${key} as a string in [vars], not a table binding.`);
+  }
 }
 
 function requireSectionValue(source, sectionName, key, expected) {
@@ -95,8 +134,8 @@ function requireSectionValue(source, sectionName, key, expected) {
   }
 }
 
-function requireNonEmptyValue(source, key, label = key) {
-  const value = quotedValue(source, key);
+function requireNonEmptyValue(source, key, label = key, options) {
+  const value = quotedValue(source, key, options);
   if (!value) throw new Error(`Production config must set ${label}.`);
   return value;
 }
@@ -170,14 +209,24 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   const authorizedParties = requireNonPlaceholderValue(vars, 'CLERK_AUTHORIZED_PARTIES', 'CLERK_AUTHORIZED_PARTIES');
   const authorizedUrl = httpsOrigin(authorizedParties, 'CLERK_AUTHORIZED_PARTIES');
 
-  const clerkPublishableKey = requireNonPlaceholderValue(vars, 'CLERK_PUBLISHABLE_KEY', 'CLERK_PUBLISHABLE_KEY');
-  if (!/^pk_live_[A-Za-z0-9_-]+$/.test(clerkPublishableKey)) {
-    throw new Error('Production config must contain a live Clerk publishable key.');
+  // These runtime variables may be managed in the Worker dashboard. When they
+  // are present in TOML, keep validating them rather than allowing the file to
+  // override a production value with an invalid one.
+  const optionalClerkKeyOptions = { allowQuotedKey: true };
+  rejectVarsTableBinding(source, 'CLERK_PUBLISHABLE_KEY');
+  rejectVarsTableBinding(source, 'CLERK_JWT_KEY');
+  if (hasAssignment(vars, 'CLERK_PUBLISHABLE_KEY', optionalClerkKeyOptions)) {
+    const clerkPublishableKey = requireNonPlaceholderValue(vars, 'CLERK_PUBLISHABLE_KEY', 'CLERK_PUBLISHABLE_KEY', optionalClerkKeyOptions);
+    if (!/^pk_live_[A-Za-z0-9_-]+$/.test(clerkPublishableKey)) {
+      throw new Error('Production config must contain a live Clerk publishable key.');
+    }
+    if (expectedClerkPublishableKey !== undefined && clerkPublishableKey !== expectedClerkPublishableKey.trim()) {
+      throw new Error('VITE_CLERK_PUBLISHABLE_KEY must exactly match CLERK_PUBLISHABLE_KEY.');
+    }
   }
-  if (expectedClerkPublishableKey !== undefined && clerkPublishableKey !== expectedClerkPublishableKey.trim()) {
-    throw new Error('VITE_CLERK_PUBLISHABLE_KEY must exactly match CLERK_PUBLISHABLE_KEY.');
+  if (hasAssignment(vars, 'CLERK_JWT_KEY', optionalClerkKeyOptions)) {
+    requirePublicPemValue(vars, 'CLERK_JWT_KEY', 'CLERK_JWT_KEY', optionalClerkKeyOptions);
   }
-  requireNonPlaceholderValue(vars, 'CLERK_JWT_KEY', 'CLERK_JWT_KEY');
 
   const secrets = sectionContents(source, 'secrets');
   const requiredSecrets = quotedArrayValues(assignment(secrets, 'required'));
