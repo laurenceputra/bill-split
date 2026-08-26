@@ -249,7 +249,7 @@ describe('user-scoped IndexedDB', () => {
       { type: 'expense_revision', id: 'revision-unknown', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '', label: 'Unknown', createdAt: timestamp } as never,
     ], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => [item.entityId, item.entityActive])).toEqual([
-      ['expense-1', true], ['expense-1', true], ['settlement-1', false], ['settlement-1', false], ['', undefined],
+      ['expense-1', true], ['settlement-1', false],
     ]);
   });
 
@@ -273,11 +273,11 @@ describe('user-scoped IndexedDB', () => {
     expect((await readActivity('user-a', 'group-a'))?.activity.map((item) => item.id)).toEqual(['expense-1']);
   });
 
-  it('never guesses a revision ID as an expense ID in a legacy cache', async () => {
+  it('filters revision-only rows from a legacy cache', async () => {
     const timestamp = new Date().toISOString();
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [
       { type: 'expense_revision', id: 'revision-only', label: 'Old edit', createdAt: timestamp } as never,
     ], fetchedAt: timestamp });
-    expect((await readActivity('user-a', 'group-a'))?.activity[0]).toMatchObject({ entityId: '', entityActive: undefined });
+    expect((await readActivity('user-a', 'group-a'))?.activity).toEqual([]);
   });
 });

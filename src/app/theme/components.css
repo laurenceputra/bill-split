@@ -1489,6 +1489,12 @@ form > button {
   overflow-wrap: anywhere;
 }
 
+.transaction-row__category,
+.transaction-row__notes {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .transaction-filters-disclosure {
   margin: 0 0 var(--space-5);
 }

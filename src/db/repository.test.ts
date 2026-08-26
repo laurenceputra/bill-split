@@ -367,10 +367,7 @@ class GlobalActivityDb {
     const rows = [
       { type: 'expense', id: 'expense-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Lunch', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
       { type: 'settlement', id: 'settlement-allowed', entity_id: 'settlement-allowed', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Paid', amount_minor: 50, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-02' },
-      { type: 'expense_revision', id: 'revision-allowed', entity_id: 'expense-allowed', entity_active: 1, group_id: 'group-allowed', group_name: 'Allowed', label: 'Edited lunch', amount_minor: 125, currency: 'USD', transaction_date: '2026-01-03', created_at: '2026-01-03' },
-      { type: 'settlement_revision', id: 'settlement-revision-allowed', entity_id: 'settlement-allowed', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Edited payment', amount_minor: 50, currency: 'USD', transaction_date: '2026-01-02', created_at: '2026-01-04', from_name: 'A', to_name: 'B' },
       { type: 'expense_deleted', id: 'deleted-expense', entity_id: 'expense-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Deleted', amount_minor: 75, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-04', deleted: true },
-      { type: 'settlement_revision', id: 'deleted-settlement-revision', entity_id: 'settlement-deleted', entity_active: 0, group_id: 'group-allowed', group_name: 'Allowed', label: 'Old payment', amount_minor: 25, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-05', deleted: true },
       { type: 'expense', id: 'expense-other', entity_id: 'expense-other', entity_active: 1, group_id: 'group-other', group_name: 'Other', label: 'Secret', amount_minor: 200, currency: 'USD', transaction_date: '2026-01-01', created_at: '2026-01-01' },
     ];
     return { results: rows.filter((row) => !row.deleted && row.group_id === 'group-allowed' && (!selectedGroup || row.group_id === selectedGroup)) as T[] };
@@ -804,14 +801,12 @@ describe('repository activity mapping', () => {
     await expect(repo.globalActivity('user-a', undefined, { limit: 100 })).resolves.toMatchObject({ items: [
       { type: 'expense', groupId: 'group-allowed', label: 'Lunch' },
       { type: 'settlement', groupId: 'group-allowed', label: 'Paid' },
-      { type: 'expense_revision', groupId: 'group-allowed', label: 'Edited lunch' },
-      { type: 'settlement_revision', groupId: 'group-allowed', label: 'Edited payment' },
     ] });
     await expect(repo.globalActivity('user-a', 'group-other', { limit: 100 })).resolves.toMatchObject({ items: [] });
     expect(db.sql).toContain('gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL');
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');
-    expect(db.sql).toContain("WHERE (r.entity_type='expense' AND e.deleted_at IS NULL) OR (r.entity_type='settlement' AND s.deleted_at IS NULL)");
+    expect(db.sql).not.toContain('FROM revisions');
   });
 });
 
