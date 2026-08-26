@@ -98,6 +98,11 @@ build as follows:
 - Build secret: `WRANGLER_DEPLOY_TOML_BASE64`, containing the base64 encoding of
   the complete production `wrangler.deploy.toml` (the file itself remains
   ignored and must never be committed)
+- Required Worker runtime variables in **Worker → Settings → Variables &
+  Secrets**: `CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_KEY`. These are
+  dashboard-managed variables, not build variables or secrets. Provision and
+  verify both before the first deploy; `--keep-vars` only preserves values that
+  already exist in the Worker dashboard.
 - Build variable: `VITE_CLERK_PUBLISHABLE_KEY`, set to the matching Clerk
   publishable key
 - Builds API token: select the already-created custom Cloudflare API token in
@@ -175,11 +180,15 @@ To create the single-line build secret value on Linux, use
    Wrangler custom domain route.
 
    Set `CLERK_AUTHORIZED_PARTIES` to the exact chosen HTTPS origin, such as
-   `https://your-bill-split.example`, and set the required
-   `CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_KEY` values in the ignored config.
-   `CLERK_JWT_KEY` is a public verification key, not a secret; preserve its PEM
-   formatting when pasting it. Configure that origin in Clerk, including email
-   verification-code sign-in, public signup, the custom session claim
+   `https://your-bill-split.example`. For the dashboard-managed setup, leave
+   `CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_KEY` out of the ignored config; the
+   Worker runtime variables above supply them. They may alternatively be
+   included as non-secret `[vars]` values, in which case production validation
+   requires a live publishable key matching `VITE_CLERK_PUBLISHABLE_KEY` and a
+   valid PEM public key for `CLERK_JWT_KEY`. `CLERK_JWT_KEY` is a public
+   verification key, not a secret; preserve its PEM formatting when pasting it.
+   Configure that origin in Clerk, including email verification-code sign-in,
+   public signup, the custom session claim
    `{"primaryEmail":"{{user.primary_email_address}}"}`, and the allowed web
    origins. Do not enable social sign-in unless the deployment is changed to
    support it.
@@ -212,10 +221,23 @@ To create the single-line build secret value on Linux, use
 
 6. Validate the production bundle and bindings, then deploy:
 
-   The deploy commands build the client first and use only the ignored
-   production config. They pass `--keep-vars` deliberately: config values are
-   updated from the file, while any additional dashboard-managed plaintext
-   variables are not deleted. Secrets are never deleted by a deployment.
+   The local `npm run deploy` and `npm run deploy:dry-run` commands build the
+   client, then run `npm run validate:deploy` against the existing ignored
+   production config before invoking Wrangler. That validation requires the
+   live `VITE_CLERK_PUBLISHABLE_KEY` from the shell or
+   `.env.production.local` and cross-checks any TOML publishable key. The
+   `cf:deploy` command above is the guarded Workers Builds wrapper; it decodes
+   and validates the build-supplied config, then dry-runs, migrates, and deploys
+   in that order. Both local deploy commands and the CI wrapper pass
+   `--keep-vars`: this preserves pre-existing dashboard-managed runtime
+   variables omitted from the TOML, including `CLERK_PUBLISHABLE_KEY` and
+   `CLERK_JWT_KEY`; it does not create or verify them. Operators must provision
+   and verify both dashboard values before the first deploy because the offline
+   deployment preflight cannot inspect dashboard state. If either is included
+   as a non-secret TOML variable instead, validation checks it before
+   deployment. Config values are updated from the file, while any additional
+   dashboard-managed plaintext variables are not deleted. Secrets are never
+   deleted by a deployment.
 
    ```sh
    npm run deploy:dry-run
@@ -235,12 +257,15 @@ Wrangler serves `dist` through the Workers Static Assets binding and routes `/ap
 
 The schema already includes attachment metadata. Receipt upload/download is deliberately not part of the core UI; an implementation should generate short-lived authorized object URLs only after checking group membership.
 
-Keep production Clerk secrets in Wrangler encrypted secrets; the required
-non-secret publishable key, JWT verification key, and authorized-party origin
-belong in the ignored production config. Keep local-only values in ignored
-files. OAuth credentials must live outside this repository. Account, D1,
-rate-limit, and domain settings belong in the ignored production config, not in
-`wrangler.toml`.
+Keep `CLERK_SECRET_KEY` and `IDENTITY_TOMBSTONE_KEY` in Wrangler encrypted
+secrets. Keep `CLERK_AUTHORIZED_PARTIES` and the account, D1, rate-limit, and
+domain infrastructure settings in the ignored production config. The
+`CLERK_PUBLISHABLE_KEY` and `CLERK_JWT_KEY` values may instead be managed as
+Worker dashboard runtime variables; `--keep-vars` preserves them when omitted
+from that config. They may also be included as non-secret `[vars]` values and
+are then validated before deployment. Keep local-only values in ignored files.
+OAuth credentials must live outside this repository. Do not put production
+settings in `wrangler.toml`.
 
 ## Data and API
 

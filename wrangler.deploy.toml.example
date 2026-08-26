@@ -36,11 +36,11 @@ migrations_dir = "migrations"
 ENVIRONMENT = "production"
 # Set this to the exact HTTPS origin configured in Clerk.
 CLERK_AUTHORIZED_PARTIES = "https://your-bill-split.example"
-# These two non-secret values are required by the Worker. The publishable key
-# must match VITE_CLERK_PUBLISHABLE_KEY in .env.production.local. For a PEM
-# JWT key, replace the placeholder with a TOML multiline string if needed.
-CLERK_PUBLISHABLE_KEY = "pk_live_replace_with_your_clerk_publishable_key"
-CLERK_JWT_KEY = """REPLACE_WITH_CLERK_JWT_PUBLIC_KEY"""
+# CLERK_PUBLISHABLE_KEY and CLERK_JWT_KEY are required Worker runtime variables;
+# set them under Worker Settings → Variables & Secrets. The deploy wrapper's
+# --keep-vars preserves these dashboard-managed values when they are omitted
+# here. Alternatively, add them as non-secret [vars] values; production
+# validation requires a matching live publishable key and a valid PEM public key.
 
 # Declarations only; values must be uploaded with `wrangler secret put`.
 [secrets]
