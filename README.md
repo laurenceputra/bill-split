@@ -287,7 +287,11 @@ a removed member, it is retained and new entries fall back to equal across the
 current active members until the owner updates it. Individual expenses can
 override the copied arrangement and reset to the current party default.
 
-All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. `0013_projection_layer.sql` adds compact gross totals and per-person net projections in a pending state; existing groups are never published as ready by migration. The projection-aware Worker dual-writes while the legacy aggregate remains authoritative, and bounded Cron backfill publishes readiness only after an atomic recomputation. `0014_projection_indexes.sql` adds stable keyset and person-leading indexes, `0015_audit_actor_snapshot.sql` adds non-email actor snapshots, `0016_projection_readiness_reset.sql` safely repairs installations that applied the earlier ready-state projection migration before deploying the Worker, and `0017_cleanup_indexes.sql` removes only exact duplicate indexes. `0018_category_preferences.sql` adds private, per-user learned categories keyed by `trim(description)` followed by lowercase; explicitly chosen categories remain preferences even when their originating schedule is cancelled. `0019_group_membership_events.sql` records owner transfers, self-leaves, and owner removals with actor/name snapshots (never email) and enforces one active owner per group. `0020_account_deletion.sql` adds the user soft-delete marker needed to retain financial/audit foreign-key anchors while pseudonymizing personal identity. `0021_deleted_identity_tombstones.sql` stores keyed HMAC-SHA-256 email/Clerk identity tombstones so a deleted account cannot be silently relinked after live identity fields are cleared. Seed data, when used locally, must remain local.
+All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. `0013_projection_layer.sql` adds compact gross totals and per-person net projections in a pending state; existing groups are never published as ready by migration. Migration `0024_incremental_projection_totals.sql` backfills `ledger_totals` and then replaces scan-based triggers with O(1) primary-key total guards covering insert/update/delete/restore and group/currency transitions. The authoritative tables remain `expenses`, `payers`, `splits`, and `settlements`; pending/stale groups use direct aggregation until bounded reconciliation publishes readiness, while ready groups are maintained incrementally from exact old/new payer, split, and settlement contributions. `projection_state` records mutation count, last reconciliation time, and a reconciliation-due flag; 750 mutations is a maintenance threshold only, not ledger segmentation. Full recomputation is reserved for bounded Cron backfill/reconciliation. `0014_projection_indexes.sql` adds stable keyset and person-leading indexes, `0015_audit_actor_snapshot.sql` adds non-email actor snapshots, `0016_projection_readiness_reset.sql` safely repairs installations that applied the earlier ready-state projection migration before deploying the Worker, and `0017_cleanup_indexes.sql` removes only exact duplicate indexes. `0018_category_preferences.sql` adds private, per-user learned categories keyed by `trim(description)` followed by lowercase; explicitly chosen categories remain preferences even when their originating schedule is cancelled. `0019_group_membership_events.sql` records owner transfers, self-leaves, and owner removals with actor/name snapshots (never email) and enforces one active owner per group. `0020_account_deletion.sql` adds the user soft-delete marker needed to retain financial/audit foreign-key anchors while pseudonymizing personal identity. `0021_deleted_identity_tombstones.sql` stores keyed HMAC-SHA-256 email/Clerk identity tombstones so a deleted account cannot be silently relinked after live identity fields are cleared. `0022_application_sessions.sql` adds opaque server-managed sessions, and `0023_group_split_defaults.sql` adds one optional persisted split arrangement per group. Seed data, when used locally, must remain local.
+
+The migration 0024 rollout details and current readiness guarantees are in the
+Operations section below; it is staged per group and does not perform a
+whole-database totals rebuild.
 
 Important endpoints include:
 
@@ -347,29 +351,31 @@ intentionally not rate limited.
 
 ### Operations
 
-Apply migrations before each Worker deploy, then deploy the projection-aware
-Worker before depending on projected balances. Existing groups begin with
-`projection_state.status='pending'`; the scheduled Worker backfills at most two
-groups per tick and marks each ready only after its bounded recomputation
-commits atomically. The legacy aggregate remains the safe fallback while a
-group is pending or backfilling. The same 15-minute Cron performs bounded generation and purges
-deleted transaction and group data older than 30 days. Cron emits compact JSON
-outcomes for generated/blocked/capped work, projection readiness/failures, and
-purged counts. Worker observability is enabled in `wrangler.toml` with low trace
-sampling; application logs contain request metadata and operational counts only,
-not secrets, emails, or transaction content.
+Migration 0022 uses a staged per-group rollout: it does not rebuild the whole
+database. Existing groups have `ledger_totals_ready=0` and continue using the
+authoritative scan guard until one bounded reconciliation rebuilds that group's
+totals and atomically marks them ready. Empty and newly created groups can be
+ready immediately. Reconciliation marks the group unready before rebuilding;
+D1 batch serialization means an interleaving write is either included in the
+rebuild or runs afterward against the ready total. Existing empty groups are
+also safe to publish as ready when their bounded reconciliation runs.
 
-For an optional local large-ledger check (default 10,000, maximum 100,000
-entries), use the disposable local D1 harness; it never uses `--remote`:
+Apply migrations before each Worker deploy, then deploy the projection-aware Worker before depending on projected balances. Existing non-empty groups remain `projection_state.status='pending'` or `stale` and `ledger_totals_ready=0` until reconciliation; empty and newly created groups can start ready. Ready groups receive transactional old/new deltas for every expense/settlement create, update, delete, restore, currency change, participant change, and scheduled occurrence. A failed authorization or optimistic mutation rolls back its projection statements with the authoritative write. Pending/stale groups use direct aggregation and scan-based overflow enforcement until Cron reconciles them. Each reconciliation first marks the group unready, then rebuilds that group's totals and projection and marks both ready in one bounded atomic D1 batch; D1 serialization means an interleaving write is either included in the rebuild or runs afterward against the ready total. The repository caps a call at 10 groups and the 15-minute Cron processes at most two groups per tick. The operational target is at most 10,000 ledger entries per group; there is deliberately no segmentation, checkpoint partition, or settlement partition. The 750-mutation flag schedules maintenance only. Migration 0022 does not perform a whole-database ledger scan or rebuild. Worker observability is enabled in `wrangler.toml` with low trace sampling; application logs contain request metadata and operational counts only, not secrets, emails, or transaction content.
+
+For the practical per-group target, run the optional local large-ledger check
+(default and maximum 10,000 entries); it uses a disposable local D1 harness and
+never uses `--remote`:
 
 ```sh
-npm run validate:large-ledger -- --entries 100000
+npm run validate:large-ledger -- --entries 10000
 ```
 
-The validator seeds equal-date/equal-created-at expenses and settlements,
-checks the mixed transaction page and `EXPLAIN QUERY PLAN`, and reports the
-bounded page elapsed time. The unified query may materialize and sort its two
-group-scoped streams; this is intentional and is covered by the benchmark.
+The validator seeds a projection exactly equal to the authoritative expenses,
+payers, splits, and settlements, performs one post-seed mutation, verifies the
+full exact projection against a fresh authoritative aggregation and the O(1)
+gross total, then checks the mixed transaction page and `EXPLAIN QUERY PLAN`.
+The unified query may materialize and sort its two group-scoped streams; this is
+intentional and is covered by the benchmark.
 
 ### Scheduled-template lifecycle
 

@@ -35,6 +35,7 @@ const accountDeletionSql = readFileSync(new URL('../../migrations/0020_account_d
 const identityTombstonesSql = readFileSync(new URL('../../migrations/0021_deleted_identity_tombstones.sql', moduleUrl), 'utf8');
 const applicationSessionsSql = readFileSync(new URL('../../migrations/0022_application_sessions.sql', moduleUrl), 'utf8');
 const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split_defaults.sql', moduleUrl), 'utf8');
+const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/0024_incremental_projection_totals.sql', moduleUrl), 'utf8');
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -123,6 +124,24 @@ describe('projection migrations', () => {
     expect(projectionIndexesSql).toMatch(/idx_settlements_group_keyset/);
     expect(projectionIndexesSql).toMatch(/idx_payers_person_expense/);
     expect(projectionIndexesSql).toMatch(/idx_splits_person_expense/);
+  });
+
+  it('stages per-group totals readiness before installing guarded totals triggers', () => {
+    expect(incrementalProjectionTotalsSql).toMatch(/ALTER TABLE projection_state ADD COLUMN ledger_totals_ready INTEGER/i);
+    expect(incrementalProjectionTotalsSql).not.toMatch(/DELETE FROM ledger_totals/i);
+    expect(incrementalProjectionTotalsSql.slice(0, incrementalProjectionTotalsSql.indexOf('CREATE TRIGGER'))).not.toMatch(/INSERT INTO ledger_totals\s*\(/i);
+    expect(incrementalProjectionTotalsSql.slice(0, incrementalProjectionTotalsSql.indexOf('CREATE TRIGGER'))).not.toMatch(/FROM (expenses|settlements)/i);
+    expect(incrementalProjectionTotalsSql.slice(0, incrementalProjectionTotalsSql.indexOf('CREATE TRIGGER'))).not.toMatch(/SUM\(amount_minor\)/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/ALTER TABLE projection_state ADD COLUMN mutation_count/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/reconciliation_due/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/status=CASE WHEN status='ready' THEN 'stale'/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/reconciliation_due=1/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/ALTER TABLE expenses ADD COLUMN projection_mutation_id/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/ALTER TABLE settlements ADD COLUMN projection_mutation_id/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/CREATE TRIGGER expenses_ledger_total_guard_insert/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/CREATE TRIGGER settlements_ledger_total_guard_update/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/CREATE TRIGGER expenses_ledger_total_scan_guard_insert[\s\S]*SUM\(amount_minor\)/i);
+    expect(incrementalProjectionTotalsSql).toMatch(/CREATE TRIGGER settlements_ledger_total_scan_guard_update[\s\S]*SUM\(amount_minor\)/i);
   });
 });
 
@@ -261,6 +280,10 @@ describe('scheduled completion migration integration', () => {
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);
          await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql', '0022_application_sessions.sql', '0023_group_split_defaults.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
+         await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql', '0022_application_sessions.sql', '0023_group_split_defaults.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
+       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
+       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE projection_state SET status='ready' WHERE group_id='group-1';", '--yes']);
+       await cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql'));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -273,7 +296,11 @@ describe('scheduled completion migration integration', () => {
       expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
          expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
          expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;")).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
-       expect(query('SELECT status FROM projection_state WHERE group_id=\'group-1\';')).toEqual([{ status: 'pending' }]);
+         expect(query('SELECT status,ledger_totals_ready,reconciliation_due FROM projection_state WHERE group_id=\'group-1\';')).toEqual([{ status: 'stale', ledger_totals_ready: 0, reconciliation_due: 1 }]);
+         expect(query("SELECT group_id,status,ledger_totals_ready,reconciliation_due FROM projection_state WHERE group_id IN ('group-multiple','group-ownerless') ORDER BY group_id;")).toEqual([
+           { group_id: 'group-multiple', status: 'pending', ledger_totals_ready: 0, reconciliation_due: 1 },
+           { group_id: 'group-ownerless', status: 'pending', ledger_totals_ready: 0, reconciliation_due: 1 },
+         ]);
           expect(query('SELECT user_id,normalized_description,category FROM category_preferences;')).toEqual([{ user_id: 'user-1', normalized_description: 'Éclair', category: 'Dessert' }]);
          expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
          expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name='group_membership_events';")).toEqual([{ name: 'group_membership_events' }]);
@@ -281,7 +308,8 @@ describe('scheduled completion migration integration', () => {
        expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
        run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at) VALUES('group-1','equal','["person-1"]',NULL,'2026-01-01'); UPDATE groups SET deleted_at='2026-02-01' WHERE id='group-1';`, '--yes']);
        expect(query("SELECT group_id FROM group_split_defaults WHERE group_id='group-1';")).toEqual([]);
-         expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
+       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET currency='EUR' WHERE id='expense-2'; UPDATE expenses SET deleted_at='2026-01-03' WHERE id='expense-1'; UPDATE expenses SET deleted_at=NULL WHERE id='expense-1'; DELETE FROM expenses WHERE id='expense-2';", '--yes']);
+       expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals ORDER BY currency;')).toEqual([]);
        expect(query('SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;')).toEqual([]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);
 

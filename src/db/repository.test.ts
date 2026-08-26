@@ -40,6 +40,51 @@ class FakeStatement {
     if (this.sql.includes('INSERT INTO splits(')) this.db.splits.push({ person_id: this.args[1], amount_minor: this.args[2], metadata_json: this.args[3] });
   }
 }
+class BackfillLimitDb {
+  limit: unknown;
+  batches = 0;
+  prepare(sql: string) { return new BackfillLimitStatement(this, sql); }
+  async batch(_statements: BackfillLimitStatement[]) { this.batches += 1; return []; }
+}
+class BackfillLimitStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: BackfillLimitDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; if (this.sql.includes('SELECT g.id')) this.db.limit = args[0]; return this; }
+  async all<T>() { return { results: this.sql.includes('SELECT g.id') ? Array.from({ length: 10 }, (_, index) => ({ id: `group-${index}` })) as T[] : [] as T[] }; }
+}
+class SettlementGuardDb extends FakeDb {
+  readonly sql: string[] = [];
+  override prepare(sql: string) { this.sql.push(sql); return super.prepare(sql); }
+}
+class HistoricalSettlementDb {
+  readonly sql: string[] = [];
+  row: Record<string, unknown> | null = null;
+  prepare(sql: string) { this.sql.push(sql); return new HistoricalSettlementStatement(this, sql); }
+  async batch(statements: HistoricalSettlementStatement[]) {
+    for (const statement of statements) {
+      if (statement.sql.includes('INSERT INTO settlements(')) {
+        const [id, groupId, fromPersonId, toPersonId, amountMinor, currency, date, note, createdBy, createdAt, updatedAt] = statement.args;
+        this.row = { id, group_id: groupId, from_person_id: fromPersonId, to_person_id: toPersonId, amount_minor: amountMinor, currency, settlement_date: date, note, created_by: createdBy, created_at: createdAt, updated_at: updatedAt, version: 1 };
+      }
+      if (statement.sql.includes('UPDATE settlements SET from_person_id=')) {
+        const [fromPersonId, toPersonId, amountMinor, currency, date, note, updatedAt, version] = statement.args;
+        this.row = { ...this.row, from_person_id: fromPersonId, to_person_id: toPersonId, amount_minor: amountMinor, currency, settlement_date: date, note, updated_at: updatedAt, version };
+      }
+    }
+    return statements.map(() => ({ meta: { changes: 1 } }));
+  }
+}
+class HistoricalSettlementStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: HistoricalSettlementDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('FROM revisions')) return { id: 'revision-1' } as T;
+    if (this.sql.includes('FROM settlements')) return this.db.row as T | null;
+    return null;
+  }
+  async all<T>() { return { results: [] as T[] }; }
+}
 
 class ApplicationSessionDb {
   createArgs: unknown[] | undefined;
@@ -561,8 +606,59 @@ describe('repository idempotency', () => {
   });
 });
 
+describe('repository historical settlement participants', () => {
+  it('keeps removed/deleted settlement endpoints valid for create and edit while retaining the actor guard', async () => {
+    const db = new HistoricalSettlementDb();
+    const repository = new Repository(db as never);
+    const settlement: SettlementInput = { from_person_id: 'removed-person', to_person_id: 'deleted-person', amount_minor: 100, currency: 'USD', date: '2025-01-01', client_operation_id: undefined };
+    const created = await repository.createSettlement('group-1', 'user-1', settlement);
+    expect(created).toMatchObject({ fromPersonId: 'removed-person', toPersonId: 'deleted-person' });
+    const updated = await repository.updateSettlement(String(created.id), 'user-1', { ...settlement, from_person_id: 'deleted-person', to_person_id: 'removed-person', version: 1 });
+    expect(updated).toMatchObject({ fromPersonId: 'deleted-person', toPersonId: 'removed-person', version: 2 });
+    const writes = db.sql.filter((sql) => sql.includes('settlement_participant.group_id=?'));
+    expect(writes).toHaveLength(2);
+    expect(writes.every((sql) => !sql.includes('settlement_participant.deleted_at IS NULL') && !sql.includes('settlement_person.deleted_at IS NULL'))).toBe(true);
+    expect(writes.every((sql) => sql.includes('auth_member'))).toBe(true);
+  });
+});
+
+describe('repository authorization-scoped transaction lookups', () => {
+  it('does not resolve transaction details outside the authenticated user group scope', async () => {
+    const db = new SettlementGuardDb();
+    const repository = new Repository(db as never);
+    await expect(repository.expenseForUser('expense-a', 'user-a')).resolves.toBeNull();
+    await expect(repository.settlementForUser('settlement-a', 'user-a')).resolves.toBeNull();
+    expect(db.sql.some((sql) => sql.includes('FROM expenses e') && sql.includes('gm.user_id=?'))).toBe(true);
+    expect(db.sql.some((sql) => sql.includes('FROM settlements s') && sql.includes('gm.user_id=?'))).toBe(true);
+  });
+});
+
 describe('repository mutation safety', () => {
   const settlementInput: SettlementInput = { from_person_id: '00000000-0000-4000-8000-000000000001', to_person_id: '00000000-0000-4000-8000-000000000002', amount_minor: 100, currency: 'USD', date: '2025-01-01', version: 1 };
+
+  it('caps reconciliation at ten groups per repository call', async () => {
+    const db = new BackfillLimitDb();
+    await expect(new Repository(db as never).projectionBackfill({ maxGroups: 100 })).resolves.toMatchObject({ groupsScanned: 10, groupsRebuilt: 10, capped: true });
+    expect(db.limit).toBe(10);
+    expect(db.batches).toBe(10);
+  });
+
+  it('keeps 100-payer/100-split expense update, delete, and restore deltas bounded', () => {
+    const repository = new Repository(new FakeDb() as never) as unknown as {
+      boundExpenseProjectionDelta: (...args: unknown[]) => Array<{ sql: string; args: unknown[] }>;
+    };
+    const payers = Array.from({ length: 100 }, (_, index) => ({ personId: `person-${index}`, amountMinor: 1 }));
+    const splits = Array.from({ length: 100 }, (_, index) => ({ personId: `person-${index}`, amountMinor: 1 }));
+    for (const sign of [-1, 1] as const) {
+      const statements = repository.boundExpenseProjectionDelta('expense-1', 'group-1', 'USD', payers, splits, sign, '2025-01-01', 'revision-1');
+      expect(statements).toHaveLength(2);
+      expect(statements[0].sql).toContain('json_each(?)');
+      expect(statements[0].sql).toContain('GROUP BY json_extract(value,\'$.person_id\')');
+      expect(JSON.parse(String(statements[0].args[3]))).toHaveLength(200);
+      expect(statements[0].args.length).toBeLessThanOrEqual(10);
+      expect(statements[1].sql).toContain('net_minor=0');
+    }
+  });
 
   it('turns revision unique failures into conflicts for every stale update/delete mutation', async () => {
     const expenseDb = new StaleMutationDb(); const expenseRepo = new Repository(expenseDb as never);
@@ -636,10 +732,12 @@ describe('repository account-deletion mutation guards', () => {
     const groupDb = new DeletedMutationDb();
     await expect(new Repository(groupDb as never).createGroup('user-1', 'person-1', { name: 'Group', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(groupDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
+    expect(groupDb.batches[0].some((sql) => sql.includes('ledger_totals_ready') && sql.includes("'ready'") && sql.includes(',1'))).toBe(true);
 
     const friendDb = new DeletedMutationDb();
     await expect(new Repository(friendDb as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(friendDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
+    expect(friendDb.batches[0].some((sql) => sql.includes('ledger_totals_ready') && sql.includes("'ready'") && sql.includes(',1'))).toBe(true);
 
     const invitationDb = new DeletedMutationDb();
     await expect(new Repository(invitationDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
@@ -802,7 +900,7 @@ describe('repository friend creation', () => {
     const group = await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' });
     expect(group).toMatchObject({ id: 'group-1', memberCount: 2, counterpartName: 'Friend' });
     expect(db.batches).toHaveLength(1);
-    expect(db.batches[0]).toHaveLength(4);
+    expect(db.batches[0]).toHaveLength(5);
     expect(db.batches[0].map((statement) => statement.sql)).toEqual(expect.arrayContaining([
       expect.stringContaining('INSERT INTO people'),
       expect.stringContaining('INSERT INTO groups'),
@@ -814,7 +912,7 @@ describe('repository friend creation', () => {
     const db = new FriendDb();
     db.existing = { id: 'person-2', name: 'Friend', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
     await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', email: 'FRIEND@example.com', currency: 'EUR' });
-    expect(db.batches[0]).toHaveLength(3);
+    expect(db.batches[0]).toHaveLength(4);
     const memberStatements = db.batches[0].filter((statement) => statement.sql.includes('INSERT INTO group_members'));
     expect(memberStatements[1].args[2]).toBe('user-2');
   });

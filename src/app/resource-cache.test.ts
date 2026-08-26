@@ -347,6 +347,19 @@ describe('resource cache', () => {
     expect(getResourceSnapshot(balanceKey, 'user-a').stale).toBe(false);
   });
 
+  it('invalidates schedule lists and loaded details when group membership changes', async () => {
+    setResourceIdentity('user-a');
+    const listKey = resourceKeys.scheduledExpenses('user-a', 'group-1');
+    const detailKey = resourceKeys.scheduledExpense('user-a', 'schedule-1');
+    seedResource(listKey, 'user-a', { scheduledExpenses: [] });
+    seedResource(detailKey, 'user-a', { scheduledExpense: { id: 'schedule-1', groupId: 'group-1', version: 1 } });
+
+    await invalidateForMutation.groupChanged('group-1', 'user-a');
+
+    expect(getResourceSnapshot(listKey, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(detailKey, 'user-a').stale).toBe(true);
+  });
+
   it('invalidates all private group resources without revalidating after self-leave', async () => {
     setResourceIdentity('user-a');
     const keys = [resourceKeys.groups('user-a'), resourceKeys.group('user-a', 'group-1'), resourceKeys.expenses('user-a', 'group-1'), resourceKeys.balances('user-a', 'group-1'), resourceKeys.activity('user-a', 'group-1')];

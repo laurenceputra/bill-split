@@ -7,6 +7,7 @@ import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
+import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, expenseProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard, projectionStatements, settlementProjectionDelta } from './ledger-projection';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -125,58 +126,6 @@ function mapGroup(row: Row | null): Group | null {
   };
 }
 
-const groupSelect = (requestedGroup = false) => `WITH authorized_groups AS (
-    SELECT DISTINCT gm.group_id,gm.person_id,gm.role
-    FROM group_members gm JOIN groups authorized_group ON authorized_group.id=gm.group_id
-    WHERE gm.user_id=? AND gm.deleted_at IS NULL AND authorized_group.deleted_at IS NULL${requestedGroup ? ' AND gm.group_id=?' : ''}
-  ), scoped_groups AS (
-    SELECT DISTINCT group_id FROM authorized_groups
-   ), ledger AS (
-     SELECT projection.group_id,projection.currency,projection.person_id,projection.net_minor
-     FROM group_balance_projection projection JOIN scoped_groups scope ON scope.group_id=projection.group_id
-     JOIN projection_state ready_projection ON ready_projection.group_id=projection.group_id AND ready_projection.status='ready'
-     UNION ALL
-     -- Transitional fallback: a missing or non-ready projection never hides
-     -- the old authoritative ledger aggregate.
-     SELECT e.group_id,e.currency,p.person_id,p.amount_minor AS net_minor
-     FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN payers p ON p.expense_id=e.id
-     WHERE e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=e.group_id AND state.status='ready')
-     UNION ALL
-     SELECT e.group_id,e.currency,s.person_id,-s.amount_minor AS net_minor
-     FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN splits s ON s.expense_id=e.id
-     WHERE e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=e.group_id AND state.status='ready')
-     UNION ALL
-     SELECT s.group_id,s.currency,s.from_person_id AS person_id,s.amount_minor AS net_minor
-     FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
-     WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=s.group_id AND state.status='ready')
-     UNION ALL
-     SELECT s.group_id,s.currency,s.to_person_id AS person_id,-s.amount_minor AS net_minor
-     FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
-     WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=s.group_id AND state.status='ready')
-  ), group_balances AS (
-     SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor
-      FROM ledger JOIN authorized_groups balance_member ON balance_member.group_id=ledger.group_id
-       AND balance_member.person_id=ledger.person_id
-    GROUP BY ledger.group_id,ledger.currency
-    HAVING SUM(ledger.net_minor) <> 0
-  ), ranked_balances AS (
-    SELECT group_id,currency,net_minor,
-      ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC) AS balance_rank
-    FROM group_balances
-  ), balance_json AS (
-    SELECT group_id,json_group_array(json_object('currency',currency,'net_minor',net_minor)) AS balance_summaries
-    FROM (SELECT group_id,currency,net_minor FROM ranked_balances WHERE balance_rank <= 2 ORDER BY group_id,balance_rank)
-    GROUP BY group_id
-  )
-  SELECT g.*,gm.role,
-  (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
-  (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
-    WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
-     ORDER BY p.name LIMIT 1) AS counterpart_name,
-  COALESCE(balance_json.balance_summaries, '[]') AS balance_summaries
-  FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id
-  LEFT JOIN balance_json ON balance_json.group_id=g.id`;
-
 const authorizedGroupSelect = `SELECT g.*,gm.role,
   (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
@@ -210,54 +159,30 @@ export class Repository {
    * the mutation batch. A mutation guard is used by expense/schedule writes:
    * a conditional update that changes zero rows must not still learn a value.
    */
-  categoryPreferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now(), guard?: { table: 'expenses' | 'scheduled_expenses'; id: string; version?: number; generationClaimId?: string }) {
+  categoryPreferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now(), guard?: { table: 'expenses' | 'scheduled_expenses'; id: string; version?: number; generationClaimId?: string; revisionId?: string }) {
     const normalized = this.normalizeCategoryDescription(description);
     if (!normalized) return [];
-    const guardSql = guard ? ` AND EXISTS (SELECT 1 FROM ${guard.table} learned_entity WHERE learned_entity.id=?${guard.version === undefined ? '' : ' AND learned_entity.version=?'}${guard.table === 'expenses' ? ' AND learned_entity.deleted_at IS NULL' : guard.generationClaimId === undefined ? '' : ' AND learned_entity.generation_claim_id=?'})` : '';
-    const guardArgs = guard ? [guard.id, ...(guard.version === undefined ? [] : [guard.version]), ...(guard.table === 'scheduled_expenses' && guard.generationClaimId !== undefined ? [guard.generationClaimId] : [])] : [];
+    const guardSql = guard ? ` AND EXISTS (SELECT 1 FROM ${guard.table} learned_entity WHERE learned_entity.id=?${guard.version === undefined ? '' : ' AND learned_entity.version=?'}${guard.table === 'expenses' ? ' AND learned_entity.deleted_at IS NULL' : guard.generationClaimId === undefined ? '' : ' AND learned_entity.generation_claim_id=?'})${guard.revisionId === undefined ? '' : " AND EXISTS (SELECT 1 FROM revisions learned_revision WHERE learned_revision.id=? AND learned_revision.entity_type='expense' AND learned_revision.entity_id=?)"}` : '';
+    const guardArgs = guard ? [guard.id, ...(guard.version === undefined ? [] : [guard.version]), ...(guard.table === 'scheduled_expenses' && guard.generationClaimId !== undefined ? [guard.generationClaimId] : []), ...(guard.revisionId === undefined ? [] : [guard.revisionId, guard.id])] : [];
     if (category == null || category.trim() === '') return [this.db.prepare(`DELETE FROM category_preferences WHERE user_id=? AND normalized_description=?${guardSql}`).bind(userId, normalized, ...guardArgs)];
     return [this.db.prepare(`INSERT INTO category_preferences(user_id,normalized_description,category,updated_at) SELECT ?,?,?,? WHERE 1=1${guardSql} ON CONFLICT(user_id,normalized_description) DO UPDATE SET category=excluded.category,updated_at=excluded.updated_at`).bind(userId, normalized, category.trim(), updatedAt, ...guardArgs)];
   }
   preferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now()) { return this.categoryPreferenceStatements(userId, description, category, updatedAt); }
 
-  /**
-   * Recompute one group's compact read model inside the caller's D1 batch.
-   * Recompute (rather than incremental arithmetic) makes edits that change a
-   * currency or participant set naturally correct and keeps concurrent writes
-   * race-safe: D1 serializes the transaction and the SELECT observes the
-   * preceding statements in that transaction.
-   */
-  private projectionStatements(groupId: string, timestamp = now(), finalize = false) {
-    const readiness = finalize
-      ? this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at)
-          VALUES(?,'ready',NULL,?,?) ON CONFLICT(group_id) DO UPDATE SET status='ready',backfill_cursor=NULL,last_rebuilt_at=excluded.last_rebuilt_at,updated_at=excluded.updated_at`).bind(groupId, timestamp, timestamp)
-      : this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at)
-          VALUES(?,'pending',NULL,NULL,?) ON CONFLICT(group_id) DO UPDATE SET updated_at=excluded.updated_at`).bind(groupId, timestamp);
-    return [
-      this.db.prepare('DELETE FROM ledger_totals WHERE group_id=?').bind(groupId),
-      this.db.prepare('DELETE FROM group_balance_projection WHERE group_id=?').bind(groupId),
-      this.db.prepare(`INSERT INTO ledger_totals(group_id,currency,gross_minor,updated_at)
-        SELECT group_id,currency,SUM(amount_minor),? FROM (
-          SELECT group_id,currency,amount_minor FROM expenses WHERE group_id=? AND deleted_at IS NULL
-          UNION ALL SELECT group_id,currency,amount_minor FROM settlements WHERE group_id=? AND deleted_at IS NULL
-        ) GROUP BY group_id,currency`).bind(timestamp, groupId, groupId),
-      this.db.prepare(`INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at)
-        SELECT group_id,currency,person_id,SUM(net_minor),? FROM (
-          SELECT e.group_id,e.currency,p.person_id,p.amount_minor AS net_minor
-          FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.group_id=? AND e.deleted_at IS NULL
-          UNION ALL SELECT e.group_id,e.currency,s.person_id,-s.amount_minor
-          FROM expenses e JOIN splits s ON s.expense_id=e.id WHERE e.group_id=? AND e.deleted_at IS NULL
-          UNION ALL SELECT group_id,currency,from_person_id,amount_minor FROM settlements WHERE group_id=? AND deleted_at IS NULL
-          UNION ALL SELECT group_id,currency,to_person_id,-amount_minor FROM settlements WHERE group_id=? AND deleted_at IS NULL
-        ) GROUP BY group_id,currency,person_id HAVING SUM(net_minor)<>0`).bind(timestamp, groupId, groupId, groupId, groupId),
-      readiness,
-    ];
-  }
+  /** Projection SQL is kept in ledger-projection; these adapters preserve the
+   * Repository's orchestration API and existing focused tests. */
+  private projectionStatements(groupId: string, timestamp = now(), finalize = false) { return projectionStatements(this.db, groupId, timestamp, finalize); }
+  private expenseProjectionDelta(expenseId: string, sign: 1 | -1, timestamp: string) { return expenseProjectionDelta(this.db, expenseId, sign, timestamp); }
+  private settlementProjectionDelta(settlementId: string, sign: 1 | -1, timestamp: string) { return settlementProjectionDelta(this.db, settlementId, sign, timestamp); }
+  private projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement', entityId: string) { return projectionRevisionGuard(revisionId, entityType, entityId); }
+  private boundExpenseProjectionDelta(expenseId: string, groupId: string, currencyValue: string, payers: Array<{ personId: string; amountMinor: number }>, splits: Array<{ personId: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId: string) { return boundExpenseProjectionDelta(this.db, expenseId, groupId, currencyValue, payers, splits, sign, timestamp, revisionId); }
+  private boundSettlementProjectionDelta(settlementId: string, groupId: string, currencyValue: string, fromPersonId: string, toPersonId: string, amountMinor: number, sign: 1 | -1, timestamp: string, revisionId: string) { return boundSettlementProjectionDelta(this.db, settlementId, groupId, currencyValue, fromPersonId, toPersonId, amountMinor, sign, timestamp, revisionId); }
+  private projectionMutation(groupId: string, timestamp: string, entity: 'expenses' | 'settlements', id: string, revisionId?: string) { return projectionMutation(this.db, groupId, timestamp, entity, id, revisionId); }
 
   async projectionBackfill(options: { maxGroups?: number } = {}) {
     const maxGroups = Math.min(Math.max(options.maxGroups ?? 2, 1), 10);
     const rows = (await this.db.prepare(`SELECT g.id FROM groups g LEFT JOIN projection_state state ON state.group_id=g.id
-      WHERE g.deleted_at IS NULL AND (state.group_id IS NULL OR state.status<>'ready') ORDER BY g.id LIMIT ?`).bind(maxGroups).all<Row>()).results;
+      WHERE g.deleted_at IS NULL AND (state.group_id IS NULL OR state.status<>'ready' OR state.reconciliation_due=1 OR state.ledger_totals_ready=0) ORDER BY g.id LIMIT ?`).bind(maxGroups).all<Row>()).results;
     let rebuilt = 0;
     // Each group is one bounded atomic unit.  If Cron is interrupted, the
     // batch rolls back and the same state is safely selected on the next tick.
@@ -265,8 +190,8 @@ export class Repository {
       const groupId = text(row.id), timestamp = now();
       try {
         await this.db.batch([
-          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at)
-            VALUES(?,'backfilling',?,?) ON CONFLICT(group_id) DO UPDATE SET status='backfilling',backfill_cursor=excluded.backfill_cursor,updated_at=excluded.updated_at`).bind(groupId, groupId, timestamp),
+          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready)
+            VALUES(?,'backfilling',?,?,0) ON CONFLICT(group_id) DO UPDATE SET status='backfilling',backfill_cursor=excluded.backfill_cursor,updated_at=excluded.updated_at,ledger_totals_ready=0`).bind(groupId, groupId, timestamp),
           ...this.projectionStatements(groupId, timestamp, true),
         ]);
         rebuilt += 1;
@@ -281,16 +206,9 @@ export class Repository {
   async balanceProjection(groupId: string) {
     const state = await this.db.prepare('SELECT status FROM projection_state WHERE group_id=?').bind(groupId).first<Row>();
     const ready = text(state?.status) === 'ready';
-    const source = ready
-      ? 'SELECT currency,person_id,net_minor FROM group_balance_projection WHERE group_id=? ORDER BY currency,person_id'
-      : `SELECT currency,person_id,SUM(net_minor) AS net_minor FROM (
-          SELECT e.currency,p.person_id,p.amount_minor AS net_minor FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.group_id=? AND e.deleted_at IS NULL
-          UNION ALL SELECT e.currency,s.person_id,-s.amount_minor FROM expenses e JOIN splits s ON s.expense_id=e.id WHERE e.group_id=? AND e.deleted_at IS NULL
-          UNION ALL SELECT currency,from_person_id,amount_minor FROM settlements WHERE group_id=? AND deleted_at IS NULL
-          UNION ALL SELECT currency,to_person_id,-amount_minor FROM settlements WHERE group_id=? AND deleted_at IS NULL
-        ) GROUP BY currency,person_id HAVING SUM(net_minor)<>0 ORDER BY currency,person_id`;
+    const query = balanceProjectionQuery(ready);
     const args = ready ? [groupId] : [groupId, groupId, groupId, groupId];
-    const rows = (await this.db.prepare(source).bind(...args).all<Row>()).results;
+    const rows = (await this.db.prepare(query.sql).bind(...args).all<Row>()).results;
     return { ready, rows: rows.map((row) => ({ currency: currency(row.currency), personId: text(row.person_id), netMinor: minor(row.net_minor) })) };
   }
 
@@ -560,6 +478,9 @@ export class Repository {
     }));
   }
   async groupPeople(groupId: string): Promise<string[]> {
+    // Settlement endpoints are historical ledger identities. Unlike expense
+    // participants, a removed or deleted person remains selectable so a
+    // correction can preserve the original financial relationship.
     const rows = (await this.db.prepare('SELECT gm.person_id FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=?').bind(groupId).all<Row>()).results;
     return rows.map((row) => text(row.person_id));
   }
@@ -762,7 +683,7 @@ export class Repository {
     const result = await this.db.batch([
       this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
       this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
-      this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at) SELECT ?,'ready',NULL,?,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, ...activeUser.args, id),
+      this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at,mutation_count,last_reconciled_at,reconciliation_due,ledger_totals_ready) SELECT ?,'ready',NULL,?,?,0,?,0,1 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, t, ...activeUser.args, id),
     ]);
     if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
     return this.group(id, userId);
@@ -797,6 +718,7 @@ export class Repository {
         this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, targetUserId, t, ...activeUser.args),
+        this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at,mutation_count,last_reconciled_at,reconciliation_due,ledger_totals_ready) SELECT ?,'ready',NULL,?,?,0,?,0,1 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, t, ...activeUser.args, id),
         ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql}`).bind('friend.create', userId, id, operationId, hash, id, t, ...activeUser.args)] : []),
       ];
       const result = await this.db.batch(statements);
@@ -986,6 +908,7 @@ export class Repository {
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('scheduled.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
        this.db.prepare(`INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) SELECT ? AS id,? AS group_id,? AS description,? AS amount_minor,? AS currency,? AS category,? AS start_date,? AS end_date,? AS frequency,? AS interval_count,? AS weekdays_json,? AS timezone,? AS status,? AS next_occurrence_date,? AS created_by,? AS created_at,? AS updated_at,1 AS version,? AS client_operation_id WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
+       this.db.prepare(`INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
       ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'scheduled_expenses', id }),
        ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES(?,?,?)').bind(id, payer.person_id, payer.amount_minor)),
        ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) VALUES(?,?,?,?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null)),
@@ -1098,7 +1021,8 @@ export class Repository {
       guarded('INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\') FROM json_each(?)', [id, JSON.stringify(expense.payers)]),
        guarded('INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\'),json_extract(value, \'$.metadata\') FROM json_each(?)', [id, JSON.stringify(expense.splits)]),
         this.auditInsert({ groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: template.createdBy, occurredAt: timestamp, after: this.expenseAfter(null, id, template.groupId, template.createdBy, expense, timestamp, 1) }),
-       ...this.projectionStatements(template.groupId, timestamp),
+        ...this.expenseProjectionDelta(id, 1, timestamp),
+        this.projectionMutation(template.groupId, timestamp, 'expenses', id),
        guarded('INSERT INTO scheduled_occurrences(scheduled_expense_id,occurrence_date,expense_id,created_at) SELECT ?,?,?,?', [template.id, occurrenceDate, id, timestamp]),
       this.db.prepare('UPDATE scheduled_expenses SET status=CASE WHEN ? IS NULL THEN \'completed\' ELSE status END,next_occurrence_date=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status=\'active\' AND version=? AND generation_claim_id=? AND next_occurrence_date=? AND EXISTS (SELECT 1 FROM scheduled_occurrences WHERE scheduled_expense_id=? AND occurrence_date=?)').bind(nextCursor, nextCursor, timestamp, template.id, template.version, claimId, occurrenceDate, template.id, occurrenceDate),
       // A guard can legitimately reject after the claim statement (for
@@ -1312,6 +1236,11 @@ export class Repository {
     return { items, nextCursor: hasMore && last ? encodeTransactionCursor({ date: text(last.transaction_date), createdAt: text(last.created_at), kind: text(last.kind) as Transaction['kind'], id: text(last.id) }) : undefined };
   }
   async expense(id: string, includeDeleted = false) { const row = await this.rawExpense(id); return row && (includeDeleted || !row.deleted_at) ? this.hydrateExpense(row) : null; }
+  async expenseForUser(id: string, userId: string, includeDeleted = false) {
+    const row = await this.db.prepare(`SELECT e.* FROM expenses e JOIN groups g ON g.id=e.group_id JOIN group_members gm ON gm.group_id=g.id
+      WHERE e.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL${includeDeleted ? '' : ' AND e.deleted_at IS NULL'}`).bind(id, userId).first<Row>();
+    return row ? this.hydrateExpense(row) : null;
+  }
   private withinRestoreWindow(deletedAt: unknown) { return deletedAt != null && Date.now() - Date.parse(text(deletedAt)) <= 30 * 24 * 60 * 60 * 1000; }
 
   private async claim(kind: string, userId: string, groupId: string, operationId: string, requestHash: string, entityId: string) {
@@ -1380,7 +1309,7 @@ export class Repository {
       args: [JSON.stringify(unique), groupId],
     };
   }
-  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown }) {
+  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string }) {
     const table = event.entityType === 'expense' ? 'expenses' : 'settlements';
     // Resolve the actor's person and name in the same D1 batch as the
     // mutation. The name is a snapshot; emails are intentionally never
@@ -1388,8 +1317,8 @@ export class Repository {
     return this.db.prepare(`INSERT INTO audit_events(id,group_id,entity_type,entity_id,version,action,actor_id,actor_person_id,actor_name,occurred_at,before_json,after_json)
       SELECT ?,?,?,?,?,?,?,actor_person.id,COALESCE(actor_person.name,'Unknown user'),?,?,?
       FROM users actor_user LEFT JOIN people actor_person ON actor_person.user_id=actor_user.id AND actor_person.deleted_at IS NULL
-      WHERE actor_user.id=? AND EXISTS (SELECT 1 FROM ${table} audited_entity WHERE audited_entity.id=? AND audited_entity.version=?)`)
-      .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version);
+      WHERE actor_user.id=? AND EXISTS (SELECT 1 FROM ${table} audited_entity WHERE audited_entity.id=? AND audited_entity.version=?)${event.revisionId === undefined ? '' : " AND EXISTS (SELECT 1 FROM revisions audit_revision WHERE audit_revision.id=? AND audit_revision.entity_type=? AND audit_revision.entity_id=?)"}`)
+      .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version, ...(event.revisionId === undefined ? [] : [event.revisionId, event.entityType, event.entityId]));
   }
   private expenseAfter(old: Expense | null, id: string, groupId: string, userId: string, input: ExpenseInput, t: string, version: number): Expense {
     return { id, groupId, description: input.description, amountMinor: input.amount_minor, currency: input.currency, date: input.date, category: input.category ?? null, notes: input.notes ?? null, createdBy: old?.createdBy ?? userId, createdAt: old?.createdAt ?? t, updatedAt: t, deletedAt: null, version, clientOperationId: old?.clientOperationId ?? input.client_operation_id ?? null, payers: input.payers.map((p) => ({ personId: p.person_id, amountMinor: p.amount_minor })), splits: input.splits.map((s) => ({ personId: s.person_id, amountMinor: s.amount_minor, metadata: s.metadata })) };
@@ -1407,7 +1336,8 @@ export class Repository {
         this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.splits), id),
         ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id }),
         this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
-       ...this.projectionStatements(groupId, t),
+       ...this.expenseProjectionDelta(id, 1, t),
+       this.projectionMutation(groupId, t, 'expenses', id),
     ];
     try { await this.db.batch(statements); } catch (error) {
       if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
@@ -1422,19 +1352,21 @@ export class Repository {
 
   async updateExpense(id: string, userId: string, input: ExpenseInput) {
     if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required');
-    const old = await this.expense(id); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request');
+    const old = await this.expenseForUser(id, userId); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request');
     if (old.version !== input.version) throw new RepositoryError('CONFLICT', 'The record was changed by another request');
-    const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id)), after = this.expenseAfter(old, id, old.groupId, userId, input, t, next);
+    const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id)), after = this.expenseAfter(old, id, old.groupId, userId, input, t, next), revisionGuard = this.projectionRevisionGuard(revisionId, 'expense', id);
     const statements = [
-      this.db.prepare(`UPDATE expenses SET description=?,amount_minor=?,currency=?,expense_date=?,category=?,notes=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, t, next, id, input.version, ...actor.args, ...participants.args),
-      this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, input.version, JSON.stringify(old), userId, t, id, next),
-      this.db.prepare('DELETE FROM payers WHERE expense_id=? AND EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)').bind(id, id, next),
-      this.db.prepare('DELETE FROM splits WHERE expense_id=? AND EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)').bind(id, id, next),
-       this.db.prepare("INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)").bind(id, JSON.stringify(input.payers), id, next),
-        this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=?)").bind(id, JSON.stringify(input.splits), id, next),
-        ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next }),
-        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after }),
-       ...this.projectionStatements(old.groupId, t),
+      this.db.prepare(`UPDATE expenses SET description=?,amount_minor=?,currency=?,expense_date=?,category=?,notes=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args),
+      this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, input.version, JSON.stringify(old), userId, t, id, next, revisionId),
+      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId),
+      this.db.prepare(`DELETE FROM payers WHERE expense_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
+      this.db.prepare(`DELETE FROM splits WHERE expense_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
+      this.db.prepare(`INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.payers), ...revisionGuard.args),
+      this.db.prepare(`INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.splits), ...revisionGuard.args),
+      ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next, revisionId }),
+      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+      ...this.boundExpenseProjectionDelta(id, old.groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, revisionId),
+      this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ];
       const batchResult = await this.conditionalBatch(statements);
       if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -1443,12 +1375,13 @@ export class Repository {
     return this.hydrateExpense(current);
   }
   async deleteExpense(id: string, userId: string, version: number) {
-    const old = await this.expense(id); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
-      const batchResult = await this.conditionalBatch([
-       this.db.prepare(`UPDATE expenses SET deleted_at=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, id, version, ...actor.args),
-       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND deleted_at IS NOT NULL)').bind(revisionId, 'expense', id, version, JSON.stringify(old), userId, t, id, next),
-       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null }),
-       ...this.projectionStatements(old.groupId, t),
+    const old = await this.expenseForUser(id, userId); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
+    const batchResult = await this.conditionalBatch([
+      this.db.prepare(`UPDATE expenses SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
+      this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'expense', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
+      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId),
+      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId }),
+      this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
      const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
@@ -1456,14 +1389,15 @@ export class Repository {
     return true;
   }
   async restoreExpense(id: string, userId: string, version: number) {
-    const old = await this.expense(id, true);
+    const old = await this.expenseForUser(id, userId, true);
     if (!old || !old.deletedAt || !this.withinRestoreWindow(old.deletedAt) || old.version !== version) throw new RepositoryError('CONFLICT', 'The deleted expense is unavailable or was changed by another request');
-    const next = version + 1, t = now(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
-     const batchResult = await this.conditionalBatch([
-       this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, id, version, ...actor.args),
-       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND deleted_at IS NULL)').bind(uid(), 'expense', id, next, JSON.stringify(old), userId, t, id, next),
-       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after }),
-       ...this.projectionStatements(old.groupId, t),
+    const next = version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
+    const batchResult = await this.conditionalBatch([
+      this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
+      this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
+      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, 1, t, revisionId),
+      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+      this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored'); }
      const current = await this.expense(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored');
@@ -1481,6 +1415,11 @@ export class Repository {
     return { items: pageRows.map((row) => this.mapSettlement(row)), nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.settlement_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
   }
   async settlement(id: string, includeDeleted = false) { const row = await this.db.prepare(`SELECT * FROM settlements WHERE id=?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`).bind(id).first<Row>(); return row ? this.mapSettlement(row) : null; }
+  async settlementForUser(id: string, userId: string, includeDeleted = false) {
+    const row = await this.db.prepare(`SELECT s.* FROM settlements s JOIN groups g ON g.id=s.group_id JOIN group_members gm ON gm.group_id=g.id
+      WHERE s.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL${includeDeleted ? '' : ' AND s.deleted_at IS NULL'}`).bind(id, userId).first<Row>();
+    return row ? this.mapSettlement(row) : null;
+  }
   private settlementParticipantGuard(groupId: string, ids: string[]) {
     const unique = [...new Set(ids)];
     if (!unique.length) return { sql: '1=0', args: [] as unknown[] };
@@ -1488,7 +1427,6 @@ export class Repository {
       sql: `NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (
         SELECT 1 FROM group_members settlement_participant JOIN people settlement_person ON settlement_person.id=settlement_participant.person_id
         WHERE settlement_participant.group_id=? AND settlement_participant.person_id=requested.value
-          AND settlement_participant.deleted_at IS NULL AND settlement_person.deleted_at IS NULL
       ))`,
       args: [JSON.stringify(unique), groupId],
     };
@@ -1502,7 +1440,8 @@ export class Repository {
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('settlement.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
       this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1 WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
        this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
-       ...this.projectionStatements(groupId, t),
+        ...this.settlementProjectionDelta(id, 1, t),
+        this.projectionMutation(groupId, t, 'settlements', id),
     ];
     try { await this.db.batch(statements); } catch (error) {
       if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
@@ -1514,40 +1453,44 @@ export class Repository {
      const created = await this.settlement(id); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or settlement participants are not valid for this group'); } return created;
   }
   async updateSettlement(id: string, userId: string, input: SettlementInput) {
-    if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required'); const old = await this.settlement(id); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request'); if (old.version !== input.version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.settlementParticipantGuard(old.groupId, [input.from_person_id, input.to_person_id]);
-    const after: Settlement = { ...old, fromPersonId: input.from_person_id, toPersonId: input.to_person_id, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, updatedAt: t, version: next };
+    if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required'); const old = await this.settlementForUser(id, userId); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request'); if (old.version !== input.version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.settlementParticipantGuard(old.groupId, [input.from_person_id, input.to_person_id]);
+     const after: Settlement = { ...old, fromPersonId: input.from_person_id, toPersonId: input.to_person_id, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, updatedAt: t, version: next };
      const batchResult = await this.conditionalBatch([
-       this.db.prepare(`UPDATE settlements SET from_person_id=?,to_person_id=?,amount_minor=?,currency=?,settlement_date=?,note=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, id, input.version, ...actor.args, ...participants.args),
-       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, input.version, JSON.stringify(old), userId, t, id, next),
-        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after }),
-        ...this.projectionStatements(old.groupId, t),
-    ]);
+       this.db.prepare(`UPDATE settlements SET from_person_id=?,to_person_id=?,amount_minor=?,currency=?,settlement_date=?,note=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args),
+       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, input.version, JSON.stringify(old), userId, t, id, next, revisionId),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId),
+       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, revisionId),
+       this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
+     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
      const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.db.prepare('SELECT * FROM settlements WHERE id=?').bind(id).first<Row>(); if (!revision || !current || number(current.version) !== next) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); return this.mapSettlement(current);
   }
   async deleteSettlement(id: string, userId: string, version: number) {
-     const old = await this.settlement(id); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
-      const batchResult = await this.conditionalBatch([
-       this.db.prepare(`UPDATE settlements SET deleted_at=?,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, id, version, ...actor.args),
-       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NOT NULL)').bind(revisionId, 'settlement', id, version, JSON.stringify(old), userId, t, id, next),
-        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null }),
-        ...this.projectionStatements(old.groupId, t),
-    ]);
+     const old = await this.settlementForUser(id, userId); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId);
+     const batchResult = await this.conditionalBatch([
+        this.db.prepare(`UPDATE settlements SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
+        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'settlement', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId),
+       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId }),
+       this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
+     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
      const revision = await this.db.prepare('SELECT id FROM revisions WHERE id=?').bind(revisionId).first<Row>();
     const current = await this.db.prepare('SELECT * FROM settlements WHERE id=?').bind(id).first<Row>(); if (!revision || !current || number(current.version) !== next || !current.deleted_at) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); return true;
   }
   async restoreSettlement(id: string, userId: string, version: number) {
-    const old = await this.settlement(id, true);
+    const old = await this.settlementForUser(id, userId, true);
     if (!old || !old.deletedAt || !this.withinRestoreWindow(old.deletedAt) || old.version !== version) throw new RepositoryError('CONFLICT', 'The deleted settlement is unavailable or was changed by another request');
-    const next = version + 1, t = now(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
+     const next = version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next };
      const batchResult = await this.conditionalBatch([
-      this.db.prepare(`UPDATE settlements SET deleted_at=NULL,updated_at=?,version=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, id, version, ...actor.args),
-       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND deleted_at IS NULL)').bind(uid(), 'settlement', id, next, JSON.stringify(old), userId, t, id, next),
-       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after }),
-       ...this.projectionStatements(old.groupId, t),
-    ]);
+       this.db.prepare(`UPDATE settlements SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
+       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, 1, t, revisionId),
+       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+       this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
+     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored'); }
      const current = await this.settlement(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored');
     return current;
