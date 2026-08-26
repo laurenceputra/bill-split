@@ -13,6 +13,8 @@
     "test:e2e:audit": "playwright test tests/e2e/audit.spec.ts",
     "e2e:prepare": "node tests/e2e/prepare-db.mjs",
     "e2e:server": "node tests/e2e/start-server.mjs",
+    "cf:build": "node scripts/prepare-cloudflare-build.mjs && npm test && npm run build",
+    "cf:deploy": "node scripts/deploy-cloudflare-build.mjs",
     "deploy": "npm run build && wrangler deploy --config=wrangler.deploy.toml --keep-vars",
     "deploy:dry-run": "npm run build && wrangler deploy --config=wrangler.deploy.toml --keep-vars --dry-run",
     "cf:types": "wrangler types",
