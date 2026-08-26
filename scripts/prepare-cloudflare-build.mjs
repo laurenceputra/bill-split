@@ -177,8 +177,7 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   if (expectedClerkPublishableKey !== undefined && clerkPublishableKey !== expectedClerkPublishableKey.trim()) {
     throw new Error('VITE_CLERK_PUBLISHABLE_KEY must exactly match CLERK_PUBLISHABLE_KEY.');
   }
-  const clerkJwtKey = requireNonPlaceholderValue(vars, 'CLERK_JWT_KEY', 'CLERK_JWT_KEY');
-  if (!clerkJwtKey) throw new Error('Production config must set CLERK_JWT_KEY.');
+  requireNonPlaceholderValue(vars, 'CLERK_JWT_KEY', 'CLERK_JWT_KEY');
 
   const secrets = sectionContents(source, 'secrets');
   const requiredSecrets = quotedArrayValues(assignment(secrets, 'required'));
@@ -244,8 +243,6 @@ export async function prepareDeployConfig({ env = process.env, outputPath = DEPL
   }
   return resolvedOutputPath;
 }
-
-export const decodeBase64Config = decodeWranglerConfig;
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
