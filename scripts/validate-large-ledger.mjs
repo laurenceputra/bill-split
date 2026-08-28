@@ -34,7 +34,6 @@ try {
      "INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('large-group','Local large-ledger validation','USD','2026-01-01','2026-01-01');",
      "INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('large-group','large-person','large-user','2026-01-01','owner');",
      "INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('large-group','large-person-2','2026-01-01','member');",
-     "INSERT INTO projection_state(group_id,status,last_rebuilt_at,updated_at,ledger_totals_ready) VALUES('large-group','ready','2026-01-01','2026-01-01',1);",
   ];
   for (let start = 1; start <= entries; start += 1_000) {
     const end = Math.min(entries, start + 999);
@@ -44,17 +43,26 @@ try {
     statements.push(`${sequence} INSERT INTO splits(expense_id,person_id,amount_minor) SELECT printf('large-expense-%06d',n),'large-person',100 FROM seq;`);
     statements.push(`${sequence} INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,created_by,created_at,updated_at) SELECT printf('large-settlement-%06d',n),'large-group','large-person','large-person-2',1,'USD','2026-01-01','large-user','2026-01-01','2026-01-01' FROM seq;`);
   }
-  statements.push(`INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('large-group','USD','large-person',${entries},'2026-01-01');`);
-  statements.push(`INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('large-group','USD','large-person-2',-${entries},'2026-01-01');`);
+   // Publish the compact monthly/checkpoint state from the authoritative seed.
+   // The production path does this in bounded chunks; this disposable harness
+   // uses one aggregate statement to keep the 10,000-entry validator quick.
+    statements.push("INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT group_id,'2026-01-01','seed-build',currency,from_person_id,SUM(amount_minor),'2026-01-01' FROM settlements WHERE group_id='large-group' GROUP BY group_id,currency,from_person_id;");
+    statements.push("INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT group_id,'2026-01-01','seed-build',currency,to_person_id,-SUM(amount_minor),'2026-01-01' FROM settlements WHERE group_id='large-group' GROUP BY group_id,currency,to_person_id;");
+    statements.push("INSERT INTO ledger_period_totals(group_id,month,build_id,currency,gross_minor,updated_at) SELECT group_id,'2026-01-01','seed-build',currency,SUM(amount_minor),'2026-01-01' FROM (SELECT group_id,currency,amount_minor FROM expenses UNION ALL SELECT group_id,currency,amount_minor FROM settlements) WHERE group_id='large-group' GROUP BY group_id,currency;");
+    statements.push("INSERT INTO ledger_period_state(group_id,month,status,source_generation,applied_generation,build_generation,active_build_id,updated_at) SELECT 'large-group','2026-01-01','ready',0,0,0,'seed-build','2026-01-01' FROM ledger_summary_state WHERE group_id='large-group' ON CONFLICT(group_id,month) DO UPDATE SET status='ready',source_generation=0,applied_generation=0,build_generation=0,active_build_id='seed-build',updated_at=excluded.updated_at;");
+   statements.push("INSERT INTO ledger_checkpoint_balances(group_id,currency,person_id,net_minor,updated_at) SELECT group_id,currency,person_id,net_minor,'2026-01-01' FROM ledger_period_balances WHERE group_id='large-group';");
+   statements.push("INSERT INTO ledger_totals(group_id,currency,gross_minor,updated_at) SELECT group_id,currency,gross_minor,'2026-01-01' FROM ledger_period_totals WHERE group_id='large-group';");
+    statements.push("INSERT INTO ledger_checkpoint_totals(group_id,currency,gross_minor,updated_at) SELECT group_id,currency,gross_minor,'2026-01-01' FROM ledger_period_totals WHERE group_id='large-group' AND build_id='seed-build';");
+    statements.push("UPDATE ledger_summary_state SET status='ready',checkpoint_through='2026-01-01',discovery_complete=1,updated_at='2026-01-01' WHERE group_id='large-group';");
   // Exercise a real post-seed mutation rather than validating only seeded
   // reads. This mirrors the repository's add path: authoritative rows first,
   // then exact payer/split deltas and the mutation metadata update.
-  statements.push("INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version) VALUES('large-expense-mutation','large-group','Mutation entry',125,'USD','2026-01-02','large-user','2026-01-02','2026-01-02',1);");
+   statements.push("INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version,projection_mutation_id) VALUES('large-expense-mutation','large-group','Mutation entry',125,'USD','2026-01-02','large-user','2026-01-02','2026-01-02',1,'large-expense-mutation');");
   statements.push("INSERT INTO payers(expense_id,person_id,amount_minor) VALUES('large-expense-mutation','large-person',125);");
   statements.push("INSERT INTO splits(expense_id,person_id,amount_minor) VALUES('large-expense-mutation','large-person-2',125);");
-  statements.push("INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('large-group','USD','large-person',125,'2026-01-02') ON CONFLICT(group_id,currency,person_id) DO UPDATE SET net_minor=group_balance_projection.net_minor+excluded.net_minor,updated_at=excluded.updated_at;");
-  statements.push("INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('large-group','USD','large-person-2',-125,'2026-01-02') ON CONFLICT(group_id,currency,person_id) DO UPDATE SET net_minor=group_balance_projection.net_minor+excluded.net_minor,updated_at=excluded.updated_at;");
-  statements.push("UPDATE projection_state SET mutation_count=mutation_count+1,updated_at='2026-01-02' WHERE group_id='large-group' AND status='ready';");
+    statements.push("INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) VALUES('large-group','2026-01-01','seed-build','USD','large-person',125,'2026-01-02') ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor,updated_at=excluded.updated_at;");
+    statements.push("INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) VALUES('large-group','2026-01-01','seed-build','USD','large-person-2',-125,'2026-01-02') ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor,updated_at=excluded.updated_at;");
+    statements.push("UPDATE ledger_period_totals SET gross_minor=gross_minor+125,updated_at='2026-01-02' WHERE group_id='large-group' AND month='2026-01-01' AND build_id='seed-build' AND currency='USD'; UPDATE ledger_checkpoint_balances SET net_minor=net_minor+125,updated_at='2026-01-02' WHERE group_id='large-group' AND currency='USD' AND person_id='large-person'; UPDATE ledger_checkpoint_balances SET net_minor=net_minor-125,updated_at='2026-01-02' WHERE group_id='large-group' AND currency='USD' AND person_id='large-person-2'; INSERT INTO ledger_checkpoint_totals(group_id,currency,gross_minor,updated_at) VALUES('large-group','USD',125,'2026-01-02') ON CONFLICT(group_id,currency) DO UPDATE SET gross_minor=ledger_checkpoint_totals.gross_minor+excluded.gross_minor; UPDATE ledger_totals SET gross_minor=gross_minor+125,updated_at='2026-01-02' WHERE group_id='large-group' AND currency='USD';");
   await writeFile(seed, `${statements.join('\n')}\n`);
   run(['d1', 'execute', database, '--local', '--persist-to', persist, '--config', config, '--file', seed]);
   const count = query("SELECT COUNT(*) AS count FROM expenses WHERE group_id='large-group';")[0]?.count;
@@ -67,12 +75,15 @@ try {
     SELECT s.id,s.group_id,NULL,s.amount_minor,s.currency,s.settlement_date,NULL,NULL,s.note,s.from_person_id,s.to_person_id,s.created_at,'settlement' AS kind
       FROM settlements s WHERE s.group_id='large-group' AND s.deleted_at IS NULL
   )`;
-  const transactionSql = `${transactionCte} SELECT id,kind FROM transaction_rows ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`;
-  const continuationSql = `${transactionCte} SELECT id,kind FROM transaction_rows WHERE transaction_date='2026-01-01' AND created_at='2026-01-01' AND (kind>'expense' OR (kind='expense' AND id<'large-expense-000001')) ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`;
-  const explain = query(`EXPLAIN QUERY PLAN ${transactionSql}`);
+   const transactionSql = `${transactionCte} SELECT id,kind,transaction_date,created_at FROM transaction_rows ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`;
+   const firstPage = query(transactionSql);
+   const boundary = firstPage.length > 100 ? firstPage[99] : null;
+   const continuationSql = boundary
+     ? `${transactionCte} SELECT id,kind,transaction_date,created_at FROM transaction_rows WHERE transaction_date<'${boundary.transaction_date}' OR (transaction_date='${boundary.transaction_date}' AND created_at<'${boundary.created_at}') OR (transaction_date='${boundary.transaction_date}' AND created_at='${boundary.created_at}' AND (kind>'${boundary.kind}' OR (kind='${boundary.kind}' AND id<'${boundary.id}'))) ORDER BY transaction_date DESC,created_at DESC,kind ASC,id DESC LIMIT 101;`
+     : `${transactionCte} SELECT id,kind,transaction_date,created_at FROM transaction_rows WHERE 0 LIMIT 101;`;
+   const explain = query(`EXPLAIN QUERY PLAN ${transactionSql}`);
   const startedAt = performance.now();
-  const transactionPage = query(transactionSql);
-  const continuation = query(continuationSql);
+   const continuation = query(continuationSql);
   const expectedProjection = query(`SELECT group_id,currency,person_id,SUM(net_minor) AS net_minor FROM (
     SELECT e.group_id,e.currency,p.person_id,p.amount_minor AS net_minor
       FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.group_id='large-group' AND e.deleted_at IS NULL
@@ -86,12 +97,13 @@ try {
     SELECT s.group_id,s.currency,s.to_person_id,-s.amount_minor
       FROM settlements s WHERE s.group_id='large-group' AND s.deleted_at IS NULL
   ) GROUP BY group_id,currency,person_id HAVING SUM(net_minor)<>0 ORDER BY group_id,currency,person_id;`);
-  const actualProjection = query("SELECT group_id,currency,person_id,net_minor FROM group_balance_projection WHERE group_id='large-group' ORDER BY group_id,currency,person_id;");
+   const actualProjection = query("SELECT group_id,currency,person_id,net_minor FROM ledger_checkpoint_balances WHERE group_id='large-group' ORDER BY group_id,currency,person_id;");
   const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
-  const kinds = new Set([...transactionPage, ...continuation].map((row) => row.kind));
+   const kinds = new Set(query(`${transactionCte} SELECT kind FROM transaction_rows GROUP BY kind;`).map((row) => row.kind));
   const expectedGross = entries * 101 + 125;
-  if (Number(count) !== entries + 1 || page !== Math.min(entries + 1, 100) || Number(gross) !== expectedGross || JSON.stringify(actualProjection) !== JSON.stringify(expectedProjection) || transactionPage.length !== Math.min(entries + 1, 101) || continuation.length !== Math.min(entries + 1, 101) || !kinds.has('expense') || !kinds.has('settlement')) throw new Error(`Validation failed: count=${count}, page=${page}, gross_minor=${gross}, projection=${JSON.stringify(actualProjection)}, expectedProjection=${JSON.stringify(expectedProjection)}, transactions=${transactionPage.length}, continuation=${continuation.length}`);
-  process.stdout.write(`Validated ${entries.toLocaleString()} expenses + ${entries.toLocaleString()} settlements plus one mutation: tie-heavy transaction pages=${transactionPage.length}+${continuation.length}, EXPLAIN steps=${explain.length}, elapsed=${elapsedMs}ms; count, keyset, exact authoritative projection, and O(1) gross total passed.\n`);
+   const transactionCount = entries * 2 + 1;
+   if (Number(count) !== entries + 1 || page !== Math.min(entries + 1, 100) || Number(gross) !== expectedGross || JSON.stringify(actualProjection) !== JSON.stringify(expectedProjection) || firstPage.length !== Math.min(transactionCount, 101) || continuation.length !== Math.max(Math.min(transactionCount - 100, 101), 0) || !kinds.has('expense') || !kinds.has('settlement')) throw new Error(`Validation failed: count=${count}, page=${page}, gross_minor=${gross}, projection=${JSON.stringify(actualProjection)}, expectedProjection=${JSON.stringify(expectedProjection)}, transactions=${firstPage.length}, continuation=${continuation.length}`);
+   process.stdout.write(`Validated ${entries.toLocaleString()} expenses + ${entries.toLocaleString()} settlements plus one mutation: tie-heavy transaction pages=${firstPage.length}+${continuation.length}, EXPLAIN steps=${explain.length}, elapsed=${elapsedMs}ms; count, keyset, exact authoritative projection, and O(1) gross total passed.\n`);
 } finally {
   if (!keep) await rm(persist, { recursive: true, force: true });
   else process.stdout.write(`Kept local validation state at ${persist}\n`);

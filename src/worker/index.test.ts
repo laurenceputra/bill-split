@@ -121,14 +121,18 @@ class ScheduledRouteStatement extends Statement {
   async run() { return { meta: { changes: 1 } }; }
 }
 class ProjectionFailureStatement extends Statement {
+  async first<T>() {
+    if (this.sql.includes('ledger_summary_state')) return { group_id: 'group-1', status: 'pending', generation: 0 } as T;
+    return null;
+  }
   async all<T>() {
-    if (this.sql.includes('FROM groups g LEFT JOIN projection_state')) return { results: [{ id: 'group-1' }] as T[] };
+    if (this.sql.includes('FROM ledger_summary_state state JOIN groups g')) return { results: [{ group_id: 'group-1' }] as T[] };
     return { results: [] as T[] };
   }
 }
 class ProjectionFailureDb {
   prepare(sql: string) { return new ProjectionFailureStatement(sql); }
-  async batch() { throw new Error('projection backfill unavailable'); }
+  async batch() { throw new Error('monthly summary unavailable'); }
 }
 class MutationDb {
   prepare(sql: string) { return new Statement(sql); }
@@ -446,17 +450,17 @@ describe('worker boundary', () => {
        await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: database }), {} as ExecutionContext);
        expect(database.batches.some((batch) => batch.some((statement: any) => String(statement.sql ?? '').includes('INSERT INTO expenses')))).toBe(true);
        const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
-       expect(record).toMatchObject({ outcome: 'completed', generated: expect.any(Number), blocked: expect.any(Number), generationCapped: expect.any(Boolean), projection: { ready: true } });
+        expect(record).toMatchObject({ outcome: 'completed', generated: expect.any(Number), blocked: expect.any(Number), generationCapped: expect.any(Boolean), monthlySummary: expect.objectContaining({ groupsScanned: expect.any(Number), capped: expect.any(Boolean) }) });
        expect(record).not.toHaveProperty('email');
      } finally { log.mockRestore(); }
   });
-  it('logs a structured projection failure and preserves the scheduled error', async () => {
+   it('logs a structured monthly-summary failure and preserves the scheduled error', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
-      await expect(worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: new ProjectionFailureDb() }), {} as ExecutionContext)).rejects.toThrow('projection backfill unavailable');
-      expect(error.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', stage: 'projection', outcome: 'failed', error: 'UNEXPECTED_ERROR' }));
-      expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'failed', projection: { ready: false } }));
+       await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: new ProjectionFailureDb() }), {} as ExecutionContext);
+       expect(error).not.toHaveBeenCalled();
+       expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'completed', monthlySummary: expect.objectContaining({ groupsFailed: 1 }) }));
     } finally { log.mockRestore(); error.mockRestore(); }
   });
   it.each(['/api/groups/group-1/expenses?offset=1', '/api/groups/group-1/settlements?offset=1', '/api/groups/group-1/transactions?offset=1', '/api/groups/group-1/audit?offset=1'])('rejects removed offset pagination on %s', async (path) => {

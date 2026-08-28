@@ -8,6 +8,7 @@ import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, expenseProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard, projectionStatements, settlementProjectionDelta } from './ledger-projection';
+import { monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -169,47 +170,23 @@ export class Repository {
   }
   preferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now()) { return this.categoryPreferenceStatements(userId, description, category, updatedAt); }
 
-  /** Projection SQL is kept in ledger-projection; these adapters preserve the
-   * Repository's orchestration API and existing focused tests. */
-  private projectionStatements(groupId: string, timestamp = now(), finalize = false) { return projectionStatements(this.db, groupId, timestamp, finalize); }
-  private expenseProjectionDelta(expenseId: string, sign: 1 | -1, timestamp: string) { return expenseProjectionDelta(this.db, expenseId, sign, timestamp); }
-  private settlementProjectionDelta(settlementId: string, sign: 1 | -1, timestamp: string) { return settlementProjectionDelta(this.db, settlementId, sign, timestamp); }
+  /** Summary SQL adapters. They intentionally never read group_balance_projection. */
   private projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement', entityId: string) { return projectionRevisionGuard(revisionId, entityType, entityId); }
-  private boundExpenseProjectionDelta(expenseId: string, groupId: string, currencyValue: string, payers: Array<{ personId: string; amountMinor: number }>, splits: Array<{ personId: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId: string) { return boundExpenseProjectionDelta(this.db, expenseId, groupId, currencyValue, payers, splits, sign, timestamp, revisionId); }
-  private boundSettlementProjectionDelta(settlementId: string, groupId: string, currencyValue: string, fromPersonId: string, toPersonId: string, amountMinor: number, sign: 1 | -1, timestamp: string, revisionId: string) { return boundSettlementProjectionDelta(this.db, settlementId, groupId, currencyValue, fromPersonId, toPersonId, amountMinor, sign, timestamp, revisionId); }
+  private boundExpenseProjectionDelta(expenseId: string, groupId: string, currencyValue: string, payers: Array<{ personId: string; amountMinor: number }>, splits: Array<{ personId: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundExpenseProjectionDelta(this.db, expenseId, groupId, currencyValue, payers, splits, sign, timestamp, revisionId, date); }
+  private boundSettlementProjectionDelta(settlementId: string, groupId: string, currencyValue: string, fromPersonId: string, toPersonId: string, amountMinor: number, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundSettlementProjectionDelta(this.db, settlementId, groupId, currencyValue, fromPersonId, toPersonId, amountMinor, sign, timestamp, revisionId, date); }
   private projectionMutation(groupId: string, timestamp: string, entity: 'expenses' | 'settlements', id: string, revisionId?: string) { return projectionMutation(this.db, groupId, timestamp, entity, id, revisionId); }
 
-  async projectionBackfill(options: { maxGroups?: number } = {}) {
-    const maxGroups = Math.min(Math.max(options.maxGroups ?? 2, 1), 10);
-    const rows = (await this.db.prepare(`SELECT g.id FROM groups g LEFT JOIN projection_state state ON state.group_id=g.id
-      WHERE g.deleted_at IS NULL AND (state.group_id IS NULL OR state.status<>'ready' OR state.reconciliation_due=1 OR state.ledger_totals_ready=0) ORDER BY g.id LIMIT ?`).bind(maxGroups).all<Row>()).results;
-    let rebuilt = 0;
-    // Each group is one bounded atomic unit.  If Cron is interrupted, the
-    // batch rolls back and the same state is safely selected on the next tick.
-    for (const row of rows) {
-      const groupId = text(row.id), timestamp = now();
-      try {
-        await this.db.batch([
-          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready)
-            VALUES(?,'backfilling',?,?,0) ON CONFLICT(group_id) DO UPDATE SET status='backfilling',backfill_cursor=excluded.backfill_cursor,updated_at=excluded.updated_at,ledger_totals_ready=0`).bind(groupId, groupId, timestamp),
-          ...this.projectionStatements(groupId, timestamp, true),
-        ]);
-        rebuilt += 1;
-      } catch (error) {
-        if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
-        throw error;
-      }
-    }
-    return { groupsScanned: rows.length, groupsRebuilt: rebuilt, capped: rows.length >= maxGroups };
+  async monthlySummaryMaintenance(options: { maxGroups?: number; maxMonths?: number; chunkSize?: number } = {}) {
+    return runMonthlySummaryMaintenance(this.db, options);
   }
 
+  async projectionBackfill(options: { maxGroups?: number } = {}) { return this.monthlySummaryMaintenance(options); }
+
   async balanceProjection(groupId: string) {
-    const state = await this.db.prepare('SELECT status FROM projection_state WHERE group_id=?').bind(groupId).first<Row>();
-    const ready = text(state?.status) === 'ready';
-    const query = balanceProjectionQuery(ready);
-    const args = ready ? [groupId] : [groupId, groupId, groupId, groupId];
-    const rows = (await this.db.prepare(query.sql).bind(...args).all<Row>()).results;
-    return { ready, rows: rows.map((row) => ({ currency: currency(row.currency), personId: text(row.person_id), netMinor: minor(row.net_minor) })) };
+    const query = balanceProjectionQuery();
+    const rows = (await this.db.prepare(query.sql).bind(groupId).all<Row>()).results;
+    const ready = flag(rows[0]?.read_ready);
+    return { ready, rows: rows.filter((row) => row.currency != null).map((row) => ({ currency: currency(row.currency), personId: text(row.person_id), netMinor: minor(row.net_minor) })) };
   }
 
   private async personForUser(user: Row, email: string, t = now()) {
@@ -680,10 +657,13 @@ export class Repository {
   async createGroup(userId: string, personId: string, input: { name: string; currency: string }) {
     const id = uid(), t = now();
     const activeUser = this.activeUserGuard(userId);
+    const createdGroup = `EXISTS (SELECT 1 FROM groups created_group WHERE created_group.id=? AND created_group.name=? AND created_group.currency=? AND created_group.created_at=? AND created_group.deleted_at IS NULL)
+      AND EXISTS (SELECT 1 FROM group_members created_owner WHERE created_owner.group_id=? AND created_owner.person_id=? AND created_owner.user_id=? AND created_owner.role='owner' AND created_owner.deleted_at IS NULL)`;
     const result = await this.db.batch([
-      this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
-      this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
-      this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at,mutation_count,last_reconciled_at,reconciliation_due,ledger_totals_ready) SELECT ?,'ready',NULL,?,?,0,?,0,1 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, t, ...activeUser.args, id),
+       this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
+      this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND created_at=? AND deleted_at IS NULL)`).bind(id, personId, userId, t, ...activeUser.args, id, t),
+         this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,1,? WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
+         this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
     ]);
     if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
     return this.group(id, userId);
@@ -718,7 +698,8 @@ export class Repository {
         this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, targetUserId, t, ...activeUser.args),
-        this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,last_rebuilt_at,updated_at,mutation_count,last_reconciled_at,reconciliation_due,ledger_totals_ready) SELECT ?,'ready',NULL,?,?,0,?,0,1 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=?)`).bind(id, t, t, t, ...activeUser.args, id),
+         this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,1,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
+         this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
         ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql}`).bind('friend.create', userId, id, operationId, hash, id, t, ...activeUser.args)] : []),
       ];
       const result = await this.db.batch(statements);
@@ -1017,11 +998,11 @@ export class Repository {
       // user-controlled expense idempotency namespace. A generated
       // client_operation_id would let an ordinary API request collide with
       // this batch's UNIQUE(created_by, client_operation_id) constraint.
-       guarded('INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1', [id, template.groupId, expense.description, expense.amount_minor, expense.currency, expense.date, expense.category ?? null, null, template.createdBy, timestamp, timestamp, null]),
+       guarded('INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,?', [id, template.groupId, expense.description, expense.amount_minor, expense.currency, expense.date, expense.category ?? null, null, template.createdBy, timestamp, timestamp, null, id]),
       guarded('INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\') FROM json_each(?)', [id, JSON.stringify(expense.payers)]),
        guarded('INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\'),json_extract(value, \'$.metadata\') FROM json_each(?)', [id, JSON.stringify(expense.splits)]),
-        this.auditInsert({ groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: template.createdBy, occurredAt: timestamp, after: this.expenseAfter(null, id, template.groupId, template.createdBy, expense, timestamp, 1) }),
-        ...this.expenseProjectionDelta(id, 1, timestamp),
+         this.auditInsert({ groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: template.createdBy, occurredAt: timestamp, after: this.expenseAfter(null, id, template.groupId, template.createdBy, expense, timestamp, 1), mutationMarker: id }),
+         ...this.boundExpenseProjectionDelta(id, template.groupId, expense.currency, expense.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), expense.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, timestamp, undefined, expense.date),
         this.projectionMutation(template.groupId, timestamp, 'expenses', id),
        guarded('INSERT INTO scheduled_occurrences(scheduled_expense_id,occurrence_date,expense_id,created_at) SELECT ?,?,?,?', [template.id, occurrenceDate, id, timestamp]),
       this.db.prepare('UPDATE scheduled_expenses SET status=CASE WHEN ? IS NULL THEN \'completed\' ELSE status END,next_occurrence_date=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status=\'active\' AND version=? AND generation_claim_id=? AND next_occurrence_date=? AND EXISTS (SELECT 1 FROM scheduled_occurrences WHERE scheduled_expense_id=? AND occurrence_date=?)').bind(nextCursor, nextCursor, timestamp, template.id, template.version, claimId, occurrenceDate, template.id, occurrenceDate),
@@ -1051,7 +1032,7 @@ export class Repository {
       throw error;
     }
   }
-  async generateDueScheduledExpenses(asOf: Date | string = new Date(), options: { maxTemplates?: number; maxOccurrences?: number; maxOccurrencesPerTemplate?: number } = {}) {
+  async generateDueScheduledExpenses(asOf: Date | string = new Date(), options: { maxTemplates?: number; maxOccurrences?: number; maxOccurrencesPerTemplate?: number; maxCleanup?: number } = {}) {
     // One atomic generation batch is one D1 subrequest. Twenty templates and
     // twenty occurrences leave room for the candidate, bulk children, member
     // validation, and permanent-failure updates on the free-plan budget.
@@ -1062,18 +1043,21 @@ export class Repository {
     const maxTemplates = Math.max(0, Math.min(options.maxTemplates ?? 20, 20));
     const maxOccurrences = Math.max(0, Math.min(options.maxOccurrences ?? 20, 20));
     const maxOccurrencesPerTemplate = Math.max(0, Math.min(options.maxOccurrencesPerTemplate ?? 20, 20));
+    const maxCleanup = Math.max(0, Math.min(options.maxCleanup ?? 20, 20));
     const utcDate = typeof asOf === 'string' ? asOf : localDateForTimeZone(asOf, 'UTC');
     const candidateThrough = typeof asOf === 'string' ? asOf : nextCalendarDate(utcDate);
-    await this.db.prepare("UPDATE scheduled_expenses SET status='completed',next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE status='active' AND generation_claim_id IS NULL AND end_date IS NOT NULL AND end_date<=? AND (next_occurrence_date IS NULL OR next_occurrence_date>end_date)").bind(now(), candidateThrough).run();
+    await this.db.prepare("UPDATE scheduled_expenses SET status='completed',next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id IN (SELECT id FROM scheduled_expenses WHERE status='active' AND generation_claim_id IS NULL AND end_date IS NOT NULL AND end_date<=? AND (next_occurrence_date IS NULL OR next_occurrence_date>end_date) ORDER BY end_date,id LIMIT ?)").bind(now(), candidateThrough, maxCleanup).run();
     // A creator can become inactive between deployments or through an older
     // membership path. Terminally cancel those rows before selecting due
     // work, otherwise an invalid active row can remain due forever.
     await this.db.prepare(`UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1
-      WHERE status='active' AND (NOT EXISTS (SELECT 1 FROM users creator WHERE creator.id=scheduled_expenses.created_by AND creator.deleted_at IS NULL)
-        OR NOT EXISTS (SELECT 1 FROM group_members creator_member JOIN people creator_person ON creator_person.id=creator_member.person_id
-          JOIN groups creator_group ON creator_group.id=creator_member.group_id
-          WHERE creator_member.group_id=scheduled_expenses.group_id AND creator_member.user_id=scheduled_expenses.created_by
-            AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL AND creator_group.deleted_at IS NULL))`).bind(now()).run();
+      WHERE id IN (SELECT schedule.id FROM scheduled_expenses schedule
+        WHERE schedule.status='active' AND (NOT EXISTS (SELECT 1 FROM users creator WHERE creator.id=schedule.created_by AND creator.deleted_at IS NULL)
+          OR NOT EXISTS (SELECT 1 FROM group_members creator_member JOIN people creator_person ON creator_person.id=creator_member.person_id
+            JOIN groups creator_group ON creator_group.id=creator_member.group_id
+            WHERE creator_member.group_id=schedule.group_id AND creator_member.user_id=schedule.created_by
+              AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL AND creator_group.deleted_at IS NULL))
+        ORDER BY schedule.id LIMIT ?)`).bind(now(), maxCleanup).run();
     const cursorRow = await this.db.prepare('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1').first<Row>();
     const cursorId = cursorRow?.cursor_id == null ? null : text(cursorRow.cursor_id);
     const rows = (await this.db.prepare(`SELECT * FROM scheduled_expenses
@@ -1309,7 +1293,7 @@ export class Repository {
       args: [JSON.stringify(unique), groupId],
     };
   }
-  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string }) {
+  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
     const table = event.entityType === 'expense' ? 'expenses' : 'settlements';
     // Resolve the actor's person and name in the same D1 batch as the
     // mutation. The name is a snapshot; emails are intentionally never
@@ -1317,8 +1301,8 @@ export class Repository {
     return this.db.prepare(`INSERT INTO audit_events(id,group_id,entity_type,entity_id,version,action,actor_id,actor_person_id,actor_name,occurred_at,before_json,after_json)
       SELECT ?,?,?,?,?,?,?,actor_person.id,COALESCE(actor_person.name,'Unknown user'),?,?,?
       FROM users actor_user LEFT JOIN people actor_person ON actor_person.user_id=actor_user.id AND actor_person.deleted_at IS NULL
-      WHERE actor_user.id=? AND EXISTS (SELECT 1 FROM ${table} audited_entity WHERE audited_entity.id=? AND audited_entity.version=?)${event.revisionId === undefined ? '' : " AND EXISTS (SELECT 1 FROM revisions audit_revision WHERE audit_revision.id=? AND audit_revision.entity_type=? AND audit_revision.entity_id=?)"}`)
-      .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version, ...(event.revisionId === undefined ? [] : [event.revisionId, event.entityType, event.entityId]));
+       WHERE actor_user.id=? AND EXISTS (SELECT 1 FROM ${table} audited_entity WHERE audited_entity.id=? AND audited_entity.version=?${event.mutationMarker === undefined ? '' : ' AND audited_entity.projection_mutation_id=?'})${event.revisionId === undefined ? '' : " AND EXISTS (SELECT 1 FROM revisions audit_revision WHERE audit_revision.id=? AND audit_revision.entity_type=? AND audit_revision.entity_id=?)"}`)
+       .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version, ...(event.mutationMarker === undefined ? [] : [event.mutationMarker]), ...(event.revisionId === undefined ? [] : [event.revisionId, event.entityType, event.entityId]));
   }
   private expenseAfter(old: Expense | null, id: string, groupId: string, userId: string, input: ExpenseInput, t: string, version: number): Expense {
     return { id, groupId, description: input.description, amountMinor: input.amount_minor, currency: input.currency, date: input.date, category: input.category ?? null, notes: input.notes ?? null, createdBy: old?.createdBy ?? userId, createdAt: old?.createdAt ?? t, updatedAt: t, deletedAt: null, version, clientOperationId: old?.clientOperationId ?? input.client_operation_id ?? null, payers: input.payers.map((p) => ({ personId: p.person_id, amountMinor: p.amount_minor })), splits: input.splits.map((s) => ({ personId: s.person_id, amountMinor: s.amount_minor, metadata: s.metadata })) };
@@ -1331,12 +1315,12 @@ export class Repository {
     const id = operation.id, t = now(), participants = this.activeParticipantGuard(groupId, [...input.payers, ...input.splits].map((p) => p.person_id)), actor = this.activeMutationGuard(groupId, userId), after = this.expenseAfter(null, id, groupId, userId, input, t, 1);
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('expense.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
-      this.db.prepare(`INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1 WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, userId, t, t, scopedOperation ?? null, ...actor.args, ...participants.args),
+       this.db.prepare(`INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, userId, t, t, scopedOperation ?? null, id, ...actor.args, ...participants.args),
        this.db.prepare("INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.payers), id),
         this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.splits), id),
         ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id }),
-        this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
-       ...this.expenseProjectionDelta(id, 1, t),
+        this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
+        ...this.boundExpenseProjectionDelta(id, groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, undefined, input.date),
        this.projectionMutation(groupId, t, 'expenses', id),
     ];
     try { await this.db.batch(statements); } catch (error) {
@@ -1358,14 +1342,14 @@ export class Repository {
     const statements = [
       this.db.prepare(`UPDATE expenses SET description=?,amount_minor=?,currency=?,expense_date=?,category=?,notes=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args),
       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, input.version, JSON.stringify(old), userId, t, id, next, revisionId),
-      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId),
+       ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId, old.date),
       this.db.prepare(`DELETE FROM payers WHERE expense_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
       this.db.prepare(`DELETE FROM splits WHERE expense_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
       this.db.prepare(`INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.payers), ...revisionGuard.args),
       this.db.prepare(`INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.splits), ...revisionGuard.args),
       ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next, revisionId }),
-      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId }),
-      ...this.boundExpenseProjectionDelta(id, old.groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, revisionId),
+      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
+       ...this.boundExpenseProjectionDelta(id, old.groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, revisionId, input.date),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ];
       const batchResult = await this.conditionalBatch(statements);
@@ -1379,8 +1363,8 @@ export class Repository {
     const batchResult = await this.conditionalBatch([
       this.db.prepare(`UPDATE expenses SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'expense', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
-      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId),
-      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId }),
+       ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId, old.date),
+       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -1395,8 +1379,8 @@ export class Repository {
     const batchResult = await this.conditionalBatch([
       this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
-      ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, 1, t, revisionId),
-      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+       ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, 1, t, revisionId, old.date),
+       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored'); }
@@ -1438,9 +1422,9 @@ export class Repository {
     const after: Settlement = { id, groupId, fromPersonId: input.from_person_id, toPersonId: input.to_person_id, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, createdAt: t, updatedAt: t, deletedAt: null, version: 1 };
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('settlement.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
-      this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1 WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
-       this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after }),
-        ...this.settlementProjectionDelta(id, 1, t),
+       this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, id, ...actor.args, ...participants.args),
+        this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
+         ...this.boundSettlementProjectionDelta(id, groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, undefined, input.date),
         this.projectionMutation(groupId, t, 'settlements', id),
     ];
     try { await this.db.batch(statements); } catch (error) {
@@ -1458,9 +1442,9 @@ export class Repository {
      const batchResult = await this.conditionalBatch([
        this.db.prepare(`UPDATE settlements SET from_person_id=?,to_person_id=?,amount_minor=?,currency=?,settlement_date=?,note=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, input.version, JSON.stringify(old), userId, t, id, next, revisionId),
-       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId),
-       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId }),
-       ...this.boundSettlementProjectionDelta(id, old.groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, revisionId),
+        ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId, old.date),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
+        ...this.boundSettlementProjectionDelta(id, old.groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, revisionId, input.date),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -1472,8 +1456,8 @@ export class Repository {
      const batchResult = await this.conditionalBatch([
         this.db.prepare(`UPDATE settlements SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
         this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'settlement', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
-       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId),
-       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId }),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId, old.date),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -1487,8 +1471,8 @@ export class Repository {
      const batchResult = await this.conditionalBatch([
        this.db.prepare(`UPDATE settlements SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
-       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, 1, t, revisionId),
-       this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+       ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, 1, t, revisionId, old.date),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored'); }
@@ -1515,66 +1499,132 @@ export class Repository {
   }
   async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number } = {}) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf, cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    // Cron shares the free-plan request budget with generation and projection
-    // backfill. Keep the default purge slice deliberately small.
-    const maxTransactions = Math.min(Math.max(options.maxTransactions ?? 8, 0), 100), maxGroups = Math.min(Math.max(options.maxGroups ?? 4, 0), 20);
-    const transactionRows = (await this.db.prepare('SELECT id,group_id,\'expense\' AS entity_type FROM expenses WHERE deleted_at IS NOT NULL AND deleted_at<? UNION ALL SELECT id,group_id,\'settlement\' AS entity_type FROM settlements WHERE deleted_at IS NOT NULL AND deleted_at<? ORDER BY id LIMIT ?').bind(cutoff, cutoff, maxTransactions).all<Row>()).results;
-    let transactionsPurged = 0, auditEventsPurged = 0;
-    for (const row of transactionRows) {
-      const id = text(row.id), type = text(row.entity_type);
-      const result = await this.db.batch(type === 'expense' ? [
-        this.db.prepare('DELETE FROM attachments WHERE expense_id=?').bind(id),
-        this.db.prepare('DELETE FROM payers WHERE expense_id=?').bind(id),
-        this.db.prepare('DELETE FROM splits WHERE expense_id=?').bind(id),
-        this.db.prepare('DELETE FROM revisions WHERE entity_type=? AND entity_id=?').bind(type, id),
-        this.db.prepare('DELETE FROM audit_events WHERE entity_type=? AND entity_id=?').bind(type, id),
-        this.db.prepare('DELETE FROM expenses WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(id, cutoff),
-      ] : [
-        this.db.prepare('DELETE FROM revisions WHERE entity_type=? AND entity_id=?').bind(type, id),
-        this.db.prepare('DELETE FROM audit_events WHERE entity_type=? AND entity_id=?').bind(type, id),
-        this.db.prepare('DELETE FROM settlements WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(id, cutoff),
-      ]);
-      const deleted = Number((result[result.length - 1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-      const auditIndex = type === 'expense' ? 4 : 1;
-      auditEventsPurged += Number((result[auditIndex] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-      if (deleted) transactionsPurged += 1;
-    }
-    const groups = (await this.db.prepare('SELECT id FROM groups WHERE deleted_at IS NOT NULL AND deleted_at<? ORDER BY deleted_at,id LIMIT ?').bind(cutoff, maxGroups).all<Row>()).results;
-    let groupsPurged = 0;
+    // Financial detail is permanent for active groups. Deleted groups are the
+    // exception, and are drained in bounded, FK-safe chunks before the group
+     // tombstone itself is removed. A durable (deleted_at,id) cursor provides
+     // round-robin progress without sorting the whole tombstone range.
+    const maxTransactions = Math.min(Math.max(options.maxTransactions ?? 8, 1), 100), maxGroups = Math.min(Math.max(options.maxGroups ?? 4, 0), 20);
+     const groups = (await this.db.prepare(`WITH purge_cursor AS (
+         SELECT deleted_at AS cursor_deleted_at,group_id AS cursor_group_id FROM group_purge_cursor WHERE id=1
+       ), after_cursor AS (
+         SELECT g.id,g.deleted_at,0 AS wrapped FROM groups g CROSS JOIN purge_cursor
+           WHERE g.deleted_at IS NOT NULL AND g.deleted_at<?
+             AND (purge_cursor.cursor_deleted_at IS NULL OR g.deleted_at>purge_cursor.cursor_deleted_at
+               OR (g.deleted_at=purge_cursor.cursor_deleted_at AND g.id>purge_cursor.cursor_group_id))
+           ORDER BY g.deleted_at,g.id LIMIT ?
+       ), before_cursor AS (
+         SELECT g.id,g.deleted_at,1 AS wrapped FROM groups g CROSS JOIN purge_cursor
+           WHERE g.deleted_at IS NOT NULL AND g.deleted_at<? AND purge_cursor.cursor_deleted_at IS NOT NULL
+             AND (g.deleted_at<purge_cursor.cursor_deleted_at
+               OR (g.deleted_at=purge_cursor.cursor_deleted_at AND g.id<=purge_cursor.cursor_group_id))
+           ORDER BY g.deleted_at,g.id LIMIT ?
+       )
+       SELECT id,deleted_at FROM (SELECT * FROM after_cursor UNION ALL SELECT * FROM before_cursor)
+         ORDER BY wrapped,deleted_at,id LIMIT ?`).bind(cutoff, maxGroups, cutoff, maxGroups, maxGroups).all<Row>()).results;
+    let transactionsScanned = 0, transactionsPurged = 0, auditEventsPurged = 0, groupsPurged = 0, incomplete = false;
     for (const row of groups) {
       const groupId = text(row.id);
-      const result = await this.db.batch([
-        this.db.prepare('DELETE FROM attachments WHERE expense_id IN (SELECT id FROM expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM payers WHERE expense_id IN (SELECT id FROM expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM splits WHERE expense_id IN (SELECT id FROM expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM scheduled_occurrences WHERE scheduled_expense_id IN (SELECT id FROM scheduled_expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM scheduled_payers WHERE scheduled_expense_id IN (SELECT id FROM scheduled_expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM scheduled_splits WHERE scheduled_expense_id IN (SELECT id FROM scheduled_expenses WHERE group_id=?)').bind(groupId),
-        this.db.prepare('DELETE FROM scheduled_expenses WHERE group_id=?').bind(groupId),
-        this.db.prepare('DELETE FROM revisions WHERE entity_type IN (\'expense\',\'settlement\') AND entity_id IN (SELECT id FROM expenses WHERE group_id=? UNION SELECT id FROM settlements WHERE group_id=?)').bind(groupId, groupId),
-         this.db.prepare('DELETE FROM audit_events WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM group_membership_events WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM group_balance_projection WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM ledger_totals WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM projection_state WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM group_invitations WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM group_split_defaults WHERE group_id=?').bind(groupId),
-         this.db.prepare('DELETE FROM group_members WHERE group_id=?').bind(groupId),
-        this.db.prepare('DELETE FROM expenses WHERE group_id=?').bind(groupId),
-        this.db.prepare('DELETE FROM settlements WHERE group_id=?').bind(groupId),
-        // A claim is only replayable through an active group.  Once the group
-        // is being physically purged there is no valid access path left, so
-        // delete every group-scoped claim (including normal UI expense and
-        // settlement keys) before deleting the parent row.  Retaining those
-        // FK rows would make an otherwise valid purge fail under FK checks.
-        this.db.prepare('DELETE FROM idempotency_keys WHERE group_id=?').bind(groupId),
-        this.db.prepare('DELETE FROM groups WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(groupId, cutoff),
+       const [expenseRows, settlementRows] = await Promise.all([
+         this.db.prepare("SELECT id,'expense' AS entity_type FROM expenses WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>(),
+         this.db.prepare("SELECT id,'settlement' AS entity_type FROM settlements WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>(),
+       ]);
+       const transactions = [...expenseRows.results, ...settlementRows.results].sort((left, right) => text(left.id).localeCompare(text(right.id))).slice(0, maxTransactions);
+      transactionsScanned += transactions.length;
+      const transactionResult = await this.db.batch([
+         this.db.prepare(`DELETE FROM attachments WHERE id IN (SELECT attachment.id FROM attachments attachment JOIN expenses expense ON expense.id=attachment.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+        // Occurrences are both schedule children and expense FK children.
+         this.db.prepare(`DELETE FROM scheduled_occurrences WHERE rowid IN (SELECT occurrence.rowid FROM scheduled_occurrences occurrence JOIN expenses expense ON expense.id=occurrence.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+         this.db.prepare(`DELETE FROM payers WHERE rowid IN (SELECT payer.rowid FROM payers payer JOIN expenses expense ON expense.id=payer.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+         this.db.prepare(`DELETE FROM splits WHERE rowid IN (SELECT split.rowid FROM splits split JOIN expenses expense ON expense.id=split.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+         this.db.prepare(`DELETE FROM revisions WHERE rowid IN (SELECT revision.rowid FROM revisions revision JOIN expenses expense ON expense.id=revision.entity_id WHERE revision.entity_type='expense' AND expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+        this.db.prepare(`DELETE FROM expenses WHERE rowid IN (SELECT expense.rowid FROM expenses expense WHERE expense.group_id=?
+          AND NOT EXISTS (SELECT 1 FROM attachments attachment WHERE attachment.expense_id=expense.id)
+          AND NOT EXISTS (SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence.expense_id=expense.id)
+          AND NOT EXISTS (SELECT 1 FROM payers payer WHERE payer.expense_id=expense.id)
+          AND NOT EXISTS (SELECT 1 FROM splits split WHERE split.expense_id=expense.id)
+          AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.entity_type='expense' AND revision.entity_id=expense.id)
+           LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM revisions WHERE rowid IN (SELECT revision.rowid FROM revisions revision JOIN settlements settlement ON settlement.id=revision.entity_id WHERE revision.entity_type='settlement' AND settlement.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+        this.db.prepare(`DELETE FROM settlements WHERE rowid IN (SELECT settlement.rowid FROM settlements settlement WHERE settlement.group_id=?
+          AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.entity_type='settlement' AND revision.entity_id=settlement.id)
+           LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM scheduled_occurrences WHERE rowid IN (SELECT occurrence.rowid FROM scheduled_occurrences occurrence JOIN scheduled_expenses schedule ON schedule.id=occurrence.scheduled_expense_id WHERE schedule.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM scheduled_payers WHERE rowid IN (SELECT payer.rowid FROM scheduled_payers payer JOIN scheduled_expenses schedule ON schedule.id=payer.scheduled_expense_id WHERE schedule.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM scheduled_splits WHERE rowid IN (SELECT split.rowid FROM scheduled_splits split JOIN scheduled_expenses schedule ON schedule.id=split.scheduled_expense_id WHERE schedule.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+        this.db.prepare(`DELETE FROM scheduled_expenses WHERE rowid IN (SELECT schedule.rowid FROM scheduled_expenses schedule WHERE schedule.group_id=?
+          AND NOT EXISTS (SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence.scheduled_expense_id=schedule.id)
+          AND NOT EXISTS (SELECT 1 FROM scheduled_payers payer WHERE payer.scheduled_expense_id=schedule.id)
+          AND NOT EXISTS (SELECT 1 FROM scheduled_splits split WHERE split.scheduled_expense_id=schedule.id)
+           LIMIT ?)` ).bind(groupId, maxTransactions),
       ]);
-      const deleted = Number((result[result.length - 1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-       auditEventsPurged += Number((result[8] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-      if (deleted) groupsPurged += 1;
+      transactionsPurged += Number((transactionResult[5] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+      transactionsPurged += Number((transactionResult[7] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+      const remainingTransaction = await this.db.prepare('SELECT 1 FROM expenses WHERE group_id=? UNION ALL SELECT 1 FROM settlements WHERE group_id=? LIMIT 1').bind(groupId, groupId).first<Row>();
+      const remainingSchedule = await this.db.prepare('SELECT 1 FROM scheduled_expenses WHERE group_id=? LIMIT 1').bind(groupId).first<Row>();
+      if (remainingTransaction || remainingSchedule) {
+        incomplete = true;
+        await this.db.batch([
+          this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff),
+           this.db.prepare('UPDATE group_purge_cursor SET deleted_at=?,group_id=?,updated_at=? WHERE id=1').bind(text(row.deleted_at), groupId, now()),
+        ]);
+        continue;
+      }
+
+      // Once authoritative rows are gone, every derived/compatibility table
+      // gets its own bounded rowid/key delete. Never issue an unbounded
+      // group-wide DELETE: large audit/build histories must yield to Cron.
+      const metadataResult = await this.db.batch([
+        this.db.prepare('DELETE FROM audit_events WHERE rowid IN (SELECT rowid FROM audit_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM group_membership_events WHERE rowid IN (SELECT rowid FROM group_membership_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_period_balances WHERE rowid IN (SELECT rowid FROM ledger_period_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_period_totals WHERE rowid IN (SELECT rowid FROM ledger_period_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_period_verify_balances WHERE rowid IN (SELECT rowid FROM ledger_period_verify_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_period_verify_totals WHERE rowid IN (SELECT rowid FROM ledger_period_verify_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_checkpoint_balances WHERE rowid IN (SELECT rowid FROM ledger_checkpoint_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_checkpoint_totals WHERE rowid IN (SELECT rowid FROM ledger_checkpoint_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_period_state WHERE rowid IN (SELECT rowid FROM ledger_period_state WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_summary_state WHERE rowid IN (SELECT rowid FROM ledger_summary_state WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM group_balance_projection WHERE rowid IN (SELECT rowid FROM group_balance_projection WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM ledger_totals WHERE rowid IN (SELECT rowid FROM ledger_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM projection_state WHERE rowid IN (SELECT rowid FROM projection_state WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+          this.db.prepare('DELETE FROM group_invitations WHERE rowid IN (SELECT rowid FROM group_invitations WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM group_split_defaults WHERE rowid IN (SELECT rowid FROM group_split_defaults WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM idempotency_keys WHERE rowid IN (SELECT rowid FROM idempotency_keys WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        this.db.prepare('DELETE FROM group_members WHERE rowid IN (SELECT rowid FROM group_members WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        // The parent delete repeats the dependent checks in the same D1
+        // batch. It therefore cannot race a later metadata insert and never
+        // removes a group whose dependent table still contains a row.
+        this.db.prepare(`DELETE FROM groups WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?
+          AND NOT EXISTS (SELECT 1 FROM expenses child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM settlements child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM scheduled_expenses child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM group_members child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM group_invitations child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM audit_events child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM group_membership_events child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_period_balances child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_period_totals child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_balances child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_totals child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_balances child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_totals child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_period_state child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_summary_state child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM group_balance_projection child WHERE child.group_id=groups.id)
+          AND NOT EXISTS (SELECT 1 FROM ledger_totals child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM projection_state child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM group_split_defaults child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM idempotency_keys child WHERE child.group_id=groups.id)`).bind(groupId, cutoff),
+         this.db.prepare('UPDATE group_purge_cursor SET deleted_at=?,group_id=?,updated_at=? WHERE id=1').bind(text(row.deleted_at), groupId, now()),
+      ]);
+      auditEventsPurged += Number((metadataResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+       if (Number((metadataResult[17] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0)) groupsPurged += 1;
+      else {
+        incomplete = true;
+        await this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff).run();
+      }
     }
-    return { cutoff, transactionsScanned: transactionRows.length, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: transactionRows.length >= maxTransactions || groups.length >= maxGroups };
+    return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: incomplete || groups.length >= maxGroups };
   }
   async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }) {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options.cursor);

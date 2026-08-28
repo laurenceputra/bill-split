@@ -49,8 +49,10 @@ class BackfillLimitDb {
 class BackfillLimitStatement {
   args: unknown[] = [];
   constructor(private readonly db: BackfillLimitDb, readonly sql: string) {}
-  bind(...args: unknown[]) { this.args = args; if (this.sql.includes('SELECT g.id')) this.db.limit = args[0]; return this; }
-  async all<T>() { return { results: this.sql.includes('SELECT g.id') ? Array.from({ length: 10 }, (_, index) => ({ id: `group-${index}` })) as T[] : [] as T[] }; }
+  bind(...args: unknown[]) { this.args = args; if (this.sql.includes('SELECT g.id') || this.sql.includes('FROM ledger_summary_state state JOIN groups')) this.db.limit = args[0]; return this; }
+  async first<T>() { return this.sql.includes('ledger_summary_state') ? { status: 'pending', generation: 0 } as T : null; }
+  async run() { return { meta: { changes: 1 } }; }
+  async all<T>() { return { results: this.sql.includes('SELECT g.id') || this.sql.includes('FROM ledger_summary_state state JOIN groups') ? Array.from({ length: 10 }, (_, index) => ({ id: `group-${index}`, group_id: `group-${index}` })) as T[] : [] as T[] }; }
 }
 class SettlementGuardDb extends FakeDb {
   readonly sql: string[] = [];
@@ -638,9 +640,11 @@ describe('repository mutation safety', () => {
 
   it('caps reconciliation at ten groups per repository call', async () => {
     const db = new BackfillLimitDb();
-    await expect(new Repository(db as never).projectionBackfill({ maxGroups: 100 })).resolves.toMatchObject({ groupsScanned: 10, groupsRebuilt: 10, capped: true });
+    await expect(new Repository(db as never).projectionBackfill({ maxGroups: 100 })).resolves.toMatchObject({ groupsScanned: 10, monthsScanned: 0, capped: true });
     expect(db.limit).toBe(10);
-    expect(db.batches).toBe(10);
+    // Each selected group may perform a bounded discovery batch in addition
+    // to its maintenance work; the group selection itself remains capped.
+    expect(db.batches).toBeLessThanOrEqual(20);
   });
 
   it('keeps 100-payer/100-split expense update, delete, and restore deltas bounded', () => {
@@ -650,13 +654,16 @@ describe('repository mutation safety', () => {
     const payers = Array.from({ length: 100 }, (_, index) => ({ personId: `person-${index}`, amountMinor: 1 }));
     const splits = Array.from({ length: 100 }, (_, index) => ({ personId: `person-${index}`, amountMinor: 1 }));
     for (const sign of [-1, 1] as const) {
-      const statements = repository.boundExpenseProjectionDelta('expense-1', 'group-1', 'USD', payers, splits, sign, '2025-01-01', 'revision-1');
-      expect(statements).toHaveLength(2);
-      expect(statements[0].sql).toContain('json_each(?)');
-      expect(statements[0].sql).toContain('GROUP BY json_extract(value,\'$.person_id\')');
-      expect(JSON.parse(String(statements[0].args[3]))).toHaveLength(200);
-      expect(statements[0].args.length).toBeLessThanOrEqual(10);
-      expect(statements[1].sql).toContain('net_minor=0');
+       const statements = repository.boundExpenseProjectionDelta('expense-1', 'group-1', 'USD', payers, splits, sign, '2025-01-01', 'revision-1');
+      // The bounded compatibility upsert precedes the monthly summary delta;
+      // its zero-row cleanup is performed by the projection trigger.
+      expect(statements).toHaveLength(14);
+       const balanceDelta = statements.find((statement) => statement.sql.includes('ledger_period_balances'));
+       expect(balanceDelta?.sql).toContain('json_each(?)');
+       expect(balanceDelta?.sql).toContain('GROUP BY json_extract(value,\'$.month\')');
+       expect(JSON.parse(String(balanceDelta?.args[2]))).toHaveLength(200);
+       expect(balanceDelta?.args.length).toBeLessThanOrEqual(10);
+       expect(statements.some((statement) => statement.sql.includes('ledger_period_totals'))).toBe(true);
     }
   });
 
@@ -732,12 +739,12 @@ describe('repository account-deletion mutation guards', () => {
     const groupDb = new DeletedMutationDb();
     await expect(new Repository(groupDb as never).createGroup('user-1', 'person-1', { name: 'Group', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(groupDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
-    expect(groupDb.batches[0].some((sql) => sql.includes('ledger_totals_ready') && sql.includes("'ready'") && sql.includes(',1'))).toBe(true);
+    expect(groupDb.batches[0].some((sql) => sql.includes('ledger_summary_state') && sql.includes("'ready'"))).toBe(true);
 
     const friendDb = new DeletedMutationDb();
     await expect(new Repository(friendDb as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' })).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
     expect(friendDb.batches[0].every((sql) => sql.includes('deleted_at IS NULL'))).toBe(true);
-    expect(friendDb.batches[0].some((sql) => sql.includes('ledger_totals_ready') && sql.includes("'ready'") && sql.includes(',1'))).toBe(true);
+    expect(friendDb.batches[0].some((sql) => sql.includes('ledger_summary_state') && sql.includes("'ready'"))).toBe(true);
 
     const invitationDb = new DeletedMutationDb();
     await expect(new Repository(invitationDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
@@ -900,7 +907,7 @@ describe('repository friend creation', () => {
     const group = await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', currency: 'USD' });
     expect(group).toMatchObject({ id: 'group-1', memberCount: 2, counterpartName: 'Friend' });
     expect(db.batches).toHaveLength(1);
-    expect(db.batches[0]).toHaveLength(5);
+     expect(db.batches[0]).toHaveLength(6);
     expect(db.batches[0].map((statement) => statement.sql)).toEqual(expect.arrayContaining([
       expect.stringContaining('INSERT INTO people'),
       expect.stringContaining('INSERT INTO groups'),
@@ -912,7 +919,7 @@ describe('repository friend creation', () => {
     const db = new FriendDb();
     db.existing = { id: 'person-2', name: 'Friend', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
     await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', email: 'FRIEND@example.com', currency: 'EUR' });
-    expect(db.batches[0]).toHaveLength(4);
+     expect(db.batches[0]).toHaveLength(5);
     const memberStatements = db.batches[0].filter((statement) => statement.sql.includes('INSERT INTO group_members'));
     expect(memberStatements[1].args[2]).toBe('user-2');
   });
@@ -1075,7 +1082,7 @@ describe('repository home balance summaries', () => {
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');
     expect(db.sql).toContain('ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC)');
-    expect(db.sql).toContain('WHERE balance_rank <= 2');
+    expect(db.sql).toContain('WHERE balance_rank<=2');
   });
 
   it('uses only active membership and group metadata for single-group authorization', async () => {

@@ -431,20 +431,20 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
    let failure: unknown;
    let purge: Awaited<ReturnType<Repository['purgeExpiredData']>> | undefined;
    let generation: Awaited<ReturnType<Repository['generateDueScheduledExpenses']>> | undefined;
-    let projection: Awaited<ReturnType<Repository['projectionBackfill']>> | undefined;
     let sessions: Awaited<ReturnType<Repository['purgeExpiredApplicationSessions']>> | undefined;
+    let summary: Awaited<ReturnType<Repository['monthlySummaryMaintenance']>> | undefined;
     for (const [stage, run] of [
-      ['purge', () => repo.purgeExpiredData(asOf)] as const,
-      ['sessions', () => repo.purgeExpiredApplicationSessions(asOf, 100)] as const,
-      ['generation', () => repo.generateDueScheduledExpenses(asOf)] as const,
-     ['projection', () => repo.projectionBackfill({ maxGroups: 2 })] as const,
+      // Keep one bounded purge stage: application-session cleanup is part of
+      // purge rather than a fifth rotating stage.
+      ['purge', async () => { const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1 }); sessions = await repo.purgeExpiredApplicationSessions(asOf, 100); return result; }] as const,
+      ['generation', () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2 })] as const,
+      ['monthly-summary', () => repo.monthlySummaryMaintenance({ maxGroups: 1, maxMonths: 2, chunkSize: 100 })] as const,
    ]) {
      try {
        const result = await run();
        if (stage === 'purge') purge = result as typeof purge;
-        else if (stage === 'sessions') sessions = result as typeof sessions;
         else if (stage === 'generation') generation = result as typeof generation;
-       else projection = result as typeof projection;
+        else summary = result as typeof summary;
      } catch (error) {
        failure ??= error;
        console.error(JSON.stringify({ event: 'bill-split.cron', scheduledTime: controller.scheduledTime, stage, outcome: 'failed', error: error instanceof RepositoryError ? error.code : 'UNEXPECTED_ERROR' }));
@@ -459,7 +459,7 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
      generated: generation?.generated ?? 0,
      blocked: generation?.blocked ?? 0,
      generationCapped: generation?.capped ?? false,
-     projection: projection ? { groupsScanned: projection.groupsScanned, groupsRebuilt: projection.groupsRebuilt, ready: !projection.capped, capped: projection.capped } : { ready: false },
+      monthlySummary: summary ? { groupsScanned: summary.groupsScanned, monthsScanned: summary.monthsScanned, monthsVerified: summary.monthsVerified, chunks: summary.chunks, groupsFailed: summary.groupsFailed, monthsFailed: summary.monthsFailed, capped: summary.capped } : { ready: false },
    }));
    if (failure) throw failure;
  } };
