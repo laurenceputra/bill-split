@@ -1,5 +1,6 @@
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS } from '../shared/session-policy';
+
 export const SESSION_ACTIVITY_STORAGE_KEY = 'billsplit-last-session-activity';
-export const SESSION_ACTIVITY_CLIENT_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
 type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type EventTargetLike = Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
@@ -34,7 +35,7 @@ export function createSessionActivityScheduler(options: SessionActivityScheduler
     const timestamp = now();
     let previous = 0;
     try { previous = Number(storage?.getItem(SESSION_ACTIVITY_STORAGE_KEY) || 0); } catch { /* Storage is optional. */ }
-    if (Number.isFinite(previous) && timestamp - previous < SESSION_ACTIVITY_CLIENT_THROTTLE_MS) return;
+    if (Number.isFinite(previous) && timestamp - previous < APPLICATION_SESSION_ACTIVITY_THROTTLE_MS) return;
     try { storage?.setItem(SESSION_ACTIVITY_STORAGE_KEY, String(timestamp)); } catch { /* The server throttle remains authoritative. */ }
     requestInFlight = true;
     void options.renew().catch(() => {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS } from '../shared/session-policy';
 import { createSessionActivityScheduler, SESSION_ACTIVITY_STORAGE_KEY } from './session-activity';
 
 const trusted = () => {
@@ -17,7 +18,7 @@ describe('foreground session activity', () => {
     const values = new Map<string, string>();
     let visible = true;
     let online = true;
-    let timestamp = 24 * 60 * 60 * 1000;
+    let timestamp = APPLICATION_SESSION_ACTIVITY_THROTTLE_MS;
     const renew = vi.fn(async () => undefined);
     const scheduler = createSessionActivityScheduler({
       isAuthenticated: () => true,
@@ -35,7 +36,7 @@ describe('foreground session activity', () => {
 
     windowTarget.dispatchEvent(new Event('pointerdown'));
     expect(renew).toHaveBeenCalledOnce();
-    timestamp += 24 * 60 * 60 * 1000;
+    timestamp += APPLICATION_SESSION_ACTIVITY_THROTTLE_MS;
     windowTarget.dispatchEvent(trusted());
     await Promise.resolve();
     await Promise.resolve();
@@ -82,7 +83,7 @@ describe('foreground session activity', () => {
       renew,
       windowTarget,
       storage: { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) },
-      now: () => 24 * 60 * 60 * 1000,
+      now: () => APPLICATION_SESSION_ACTIVITY_THROTTLE_MS,
     });
     rejectRenew(new Error('offline'));
     await Promise.resolve();

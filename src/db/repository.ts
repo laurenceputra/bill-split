@@ -6,6 +6,7 @@ import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextO
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -352,7 +353,7 @@ export class Repository {
   }
   async me(email: string) { return this.user(email); }
 
-  async createApplicationSession(userId: string, tokenHash: string, createdAt = now(), idleExpiresAt = new Date(Date.parse(createdAt) + 30 * 24 * 60 * 60 * 1000).toISOString()) {
+  async createApplicationSession(userId: string, tokenHash: string, createdAt = now(), idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString()) {
     if (!/^[a-f0-9]{64}$/i.test(tokenHash)) throw new RepositoryError('DATABASE_ERROR', 'Application session credentials must be SHA-256 digests');
     const id = uid();
     const active = await this.db.prepare('SELECT id FROM users WHERE id=? AND deleted_at IS NULL').bind(userId).first<Row>();
@@ -369,9 +370,9 @@ export class Repository {
     return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at) };
   }
 
-  async renewApplicationSession(sessionId: string, asOf = now(), throttleMs = 24 * 60 * 60 * 1000) {
+  async renewApplicationSession(sessionId: string, asOf = now(), throttleMs = APPLICATION_SESSION_ACTIVITY_THROTTLE_MS) {
     const threshold = new Date(Date.parse(asOf) - throttleMs).toISOString();
-    const idleExpiresAt = new Date(Date.parse(asOf) + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const idleExpiresAt = new Date(Date.parse(asOf) + APPLICATION_SESSION_IDLE_MS).toISOString();
     // The throttle predicate is part of the update, so two foreground tabs
     // cannot both renew the same session after the 24-hour boundary.
     const updated = await this.db.prepare(`UPDATE application_sessions SET last_activity_at=?,idle_expires_at=?
@@ -608,10 +609,6 @@ export class Repository {
     }
     return Number(result.meta?.changes ?? 0) > 0;
   }
-  // Short aliases keep repository callers consistent with the other group settings methods.
-  groupSplitDefault(groupId: string) { return this.getGroupSplitDefault(groupId); }
-  updateGroupSplitDefault(groupId: string, userId: string, input: GroupSplitDefaultInput) { return this.upsertGroupSplitDefault(groupId, userId, input); }
-  deleteSplitDefault(groupId: string, userId: string) { return this.deleteGroupSplitDefault(groupId, userId); }
   private mapInvitation(row: Row): GroupInvitation {
     return { id: text(row.id), groupId: text(row.group_id), email: text(row.email_normalized), createdBy: text(row.created_by), createdAt: text(row.created_at), expiresAt: text(row.expires_at), revokedAt: row.revoked_at == null ? null : text(row.revoked_at), acceptedAt: row.accepted_at == null ? null : text(row.accepted_at), acceptedBy: row.accepted_by == null ? null : text(row.accepted_by), rejectedAt: row.rejected_at == null ? null : text(row.rejected_at) };
   }

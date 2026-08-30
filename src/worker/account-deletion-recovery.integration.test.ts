@@ -133,6 +133,7 @@ describe('production account deletion recovery boundary', () => {
     const sameUser = await bootstrap(sameUserDb);
     expect(sameUser.status).toBe(200);
     expect(sameUser.headers.get('Set-Cookie')).toContain('__Host-billsplit_session=');
+    expect(sameUser.headers.get('Set-Cookie')).toContain('Max-Age=2592000');
     expect(sameUserDb.revocations).toBe(0);
     expect(sameUserDb.createdSessions).toBe(1);
 
@@ -161,7 +162,9 @@ describe('production account deletion recovery boundary', () => {
     db.sessionExpired = true;
     expect((await request('/api/me')).status).toBe(401);
     db.sessionExpired = false;
-    expect((await request('/api/session/activity', 'POST')).status).toBe(200);
+    const activity = await request('/api/session/activity', 'POST');
+    expect(activity.status).toBe(200);
+    expect(activity.headers.get('Set-Cookie')).toContain('Max-Age=2592000');
     expect(db.renewAttempts).toBe(1);
     expect((await request('/api/session', 'DELETE')).status).toBe(204);
     expect((await request('/api/sessions', 'DELETE')).status).toBe(204);

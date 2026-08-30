@@ -1,5 +1,6 @@
 import type { Activity, Balances, Expense, Group, GroupMember, GroupSplitDefault, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
+import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 export const DB_NAME = 'bill-split-local';
@@ -42,7 +43,7 @@ export interface OfflineTrustRecord {
 }
 
 export const OFFLINE_TRUST_KEY = 'current' as const;
-export const OFFLINE_TRUST_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+export const OFFLINE_TRUST_MAX_AGE_MS = APPLICATION_SESSION_IDLE_MS;
 
 const normalizeOfflineTrust = (value: OfflineTrustRecord | undefined): OfflineTrustRecord | undefined => {
   if (!value) return undefined;

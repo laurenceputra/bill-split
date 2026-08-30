@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
 import { hydrateActivity, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -27,8 +28,9 @@ describe('user-scoped IndexedDB', () => {
     const verifiedAt = new Date('2026-01-01T00:00:00.000Z').toISOString();
     await saveOfflineTrust({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', clerkUserId: 'clerk-a', verifiedAt });
     const record = await readOfflineTrust();
-    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + 30 * 24 * 60 * 60 * 1000 - 1)).toBe(true);
-    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + 30 * 24 * 60 * 60 * 1000)).toBe(false);
+    expect(OFFLINE_TRUST_MAX_AGE_MS).toBe(APPLICATION_SESSION_IDLE_MS);
+    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + APPLICATION_SESSION_IDLE_MS - 1)).toBe(true);
+    expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + APPLICATION_SESSION_IDLE_MS)).toBe(false);
   });
 
   it('honors the server-provided application-session idle expiry', async () => {

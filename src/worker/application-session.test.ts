@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { APPLICATION_SESSION_IDLE_MS, APPLICATION_SESSION_COOKIE, CSRF_COOKIE, DEVELOPMENT_APPLICATION_SESSION_COOKIE, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
+import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
+import { APPLICATION_SESSION_COOKIE, CSRF_COOKIE, DEVELOPMENT_APPLICATION_SESSION_COOKIE, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
 
 describe('application session credentials', () => {
   it('generates a 256-bit opaque token and stores only its SHA-256 digest', async () => {

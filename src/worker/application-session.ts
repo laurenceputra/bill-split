@@ -1,5 +1,3 @@
-export const APPLICATION_SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
-export const APPLICATION_SESSION_ACTIVITY_THROTTLE_MS = 24 * 60 * 60 * 1000;
 export const APPLICATION_SESSION_COOKIE = '__Host-billsplit_session';
 export const DEVELOPMENT_APPLICATION_SESSION_COOKIE = 'billsplit_session';
 export const CSRF_COOKIE = 'billsplit_csrf';
