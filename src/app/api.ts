@@ -1,15 +1,16 @@
-import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
-import type { ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
+import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
+import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
-import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { beginLocalLogoutCleanup, broadcastSessionCoordination, cancelLocalLogoutCleanup, captureAuthInvalidationNonce, captureSessionGeneration, clearSessionLogout, completeLocalLogoutCleanup, consumeAuthInvalidationNonce, getLocallyOwnedLogoutGeneration, getSessionGeneration, getSessionLogoutInProgress, hydrateSessionCoordination, isSessionGenerationCurrent, isSessionLogoutAdopted, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionCoordination, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
 import type { ExpenseFilters } from './expense-filters';
 import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
 import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
+import { CSRF_COOKIE, CSRF_HEADER } from '../worker/application-session';
 
-export type CurrentUser = { id: string; email: string; personId: string };
+export type CurrentUser = { id: string; email: string; personId: string; idleExpiresAt?: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
 export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string; headers?: Headers };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
@@ -25,7 +26,7 @@ export type SettlementPage = { settlements: Settlement[]; nextCursor?: string };
 export type TransactionPage = { transactions: Transaction[]; nextCursor?: string };
 export type ActivityPage = { activity: Activity[]; nextCursor?: string };
 export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
-export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
+export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
 export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
 const TRANSACTION_HISTORY_PAGE_LIMIT = 25;
 const isSufficientTransactionHistoryPage = (limit: number | undefined) => typeof limit === 'number' && limit >= TRANSACTION_HISTORY_PAGE_LIMIT;
@@ -570,7 +571,13 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
   headers.set('X-Requested-With', 'XMLHttpRequest');
+  const method = (init?.method || 'GET').toUpperCase();
+  if (isServerMutationMethod(method)) {
+    const csrf = typeof document === 'undefined' ? undefined : document.cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1);
+    if (csrf) headers.set(CSRF_HEADER, decodeURIComponent(csrf));
+  }
   if (import.meta.env.DEV && !headers.has('X-Dev-Email')) headers.set('X-Dev-Email', devEmail());
+  const clearsConnectionState = path !== '/session/activity';
   let response: Response;
   try { response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin' }); }
   catch (error) {
@@ -579,7 +586,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     // The auth coordinator owns the ordering for its authoritative probe. A
     // /me transport failure is published only after the lifecycle has settled
     // to trusted-offline or verification-unavailable.
-    if (path !== '/me' && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) browserOffline ? signalOffline() : signalReconnectRequired();
+    if (clearsConnectionState && path !== '/me' && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) browserOffline ? signalOffline() : signalReconnectRequired();
     throw new ApiError(browserOffline ? 'Network connection unavailable.' : 'Connection issue. Retry when the connection is available.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired: !browserOffline });
   }
 
@@ -589,6 +596,9 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;
   const currentTransportEpoch = expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch);
   const authoritativePath = path === '/me';
+  // Foreground session renewal is a background maintenance write, not an
+  // authoritative connectivity probe. It must not clear an issue reported by
+  // a concurrent resource request (for example, a failed groups request).
   // This is defense in depth for callers which accidentally probe while Clerk
   // is restoring. Such a response is not evidence of logout and must not
   // advance the auth epoch or revoke private state.
@@ -603,10 +613,10 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     if (expectedAuthEpoch !== undefined && !isAuthEpochCurrent(expectedAuthEpoch) && !getSessionLogoutInProgress()) throw new ApiError('The authentication session changed before this response completed.', { status: 401, code: 'AUTH_REQUIRED' });
   };
   if (response.status === 204) {
-    if (authResponse) { if (currentTransportEpoch) clearReconnectRequired(authoritativePath); throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' }); }
-    if (!response.ok) { if (currentTransportEpoch) { if (response.status >= 500) { if (!authoritativePath) signalReconnectRequired(); } else clearReconnectRequired(authoritativePath); } throw new ApiError(`Request failed (${response.status})`, { status: response.status }); }
+    if (authResponse) { if (currentTransportEpoch && clearsConnectionState) clearReconnectRequired(authoritativePath); throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: 'AUTH_REQUIRED' }); }
+    if (!response.ok) { if (currentTransportEpoch && clearsConnectionState) { if (response.status >= 500) { if (!authoritativePath) signalReconnectRequired(); } else clearReconnectRequired(authoritativePath); } throw new ApiError(`Request failed (${response.status})`, { status: response.status }); }
     assertTransportEpoch();
-    clearReconnectRequired(authoritativePath);
+    if (clearsConnectionState) clearReconnectRequired(authoritativePath);
      return { data: undefined as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined, headers: response.headers };
   }
 
@@ -615,9 +625,9 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   try { body = JSON.parse(bodyText) as { error?: { code?: string; message?: string } } | T; } catch { /* handled as an auth/session response below */ }
   const responseCode = body && typeof body === 'object' && 'error' in body ? (body as { error?: { code?: string } }).error?.code : undefined;
   // 403 is auth revocation unless the API has explicitly identified an
-  // application-level permission error. OWNER_REQUIRED/ORIGIN_FORBIDDEN are
-  // meaningful API errors.
-  const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN';
+  // application-level error. CSRF failure is a request-integrity problem, not
+  // evidence that the account or group authorization was revoked.
+  const accessDenied = response.status === 403 && responseCode !== 'OWNER_REQUIRED' && responseCode !== 'ORIGIN_FORBIDDEN' && responseCode !== 'CSRF_FORBIDDEN';
   // A captive portal can turn a same-origin /me request into a redirect or an
   // HTML response. It proves neither logout nor a new identity. Keep it on the
   // retryable transport path so getMe may use only a matching, complete trust
@@ -628,7 +638,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   if (authResponse || accessDenied) {
     // Authentication responses are still authoritative evidence that the
     // server was reached, even though they require a lifecycle transition.
-    if (currentTransportEpoch) clearReconnectRequired(authoritativePath);
+    if (currentTransportEpoch && clearsConnectionState) clearReconnectRequired(authoritativePath);
     // A request from an earlier Clerk epoch may finish after a new account has
     // started. It must not downgrade the new session.
     const authCode: AuthRequiredCode = responseCode === 'IDENTITY_MISMATCH' || signedInClerkEvidence || incompleteSignedInClerkEvidence ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
@@ -637,16 +647,16 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
   }
   if (responseMode === 'blob' && response.ok) {
     assertTransportEpoch();
-    if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired(authoritativePath);
+    if (clearsConnectionState && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) clearReconnectRequired(authoritativePath);
     return { data: await response.blob() as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined, headers: response.headers };
   }
   if (body === null || unexpectedFormat) {
-    if (currentTransportEpoch && !authoritativePath) signalReconnectRequired();
+    if (clearsConnectionState && currentTransportEpoch && !authoritativePath) signalReconnectRequired();
     if (response.status >= 500) throw new ApiError(`Request failed (${response.status})`, { status: response.status, code: 'SERVER_ERROR' });
     throw new ApiError('The server returned an unexpected response. Reconnect and check your session before retrying.', { status: response.status, code: 'PROTOCOL_ERROR', reconnectRequired: true });
   }
   if (!response.ok) {
-    if (currentTransportEpoch) { if (response.status >= 500) { if (!authoritativePath) signalReconnectRequired(); } else clearReconnectRequired(authoritativePath); }
+    if (currentTransportEpoch && clearsConnectionState) { if (response.status >= 500) { if (!authoritativePath) signalReconnectRequired(); } else clearReconnectRequired(authoritativePath); }
     const errorBody = body as { error?: { code?: string; message?: string } };
     const message = errorBody?.error?.message || `Request failed (${response.status})`;
     const code = errorBody?.error?.code;
@@ -654,9 +664,29 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     throw new ApiError(message, { status: response.status, code });
   }
   assertTransportEpoch();
-  if (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch)) clearReconnectRequired(authoritativePath);
+  if (clearsConnectionState && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) clearReconnectRequired(authoritativePath);
   return { data: body as T, userId: response.headers.get('X-BillSplit-User-Id') || undefined, clerkUserId: response.headers.get('X-BillSplit-Clerk-User-Id') || undefined };
 }
+
+type SessionResponse = { idleExpiresAt: string; user?: CurrentUser };
+async function directSessionRequest<T>(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json');
+  headers.set('X-Requested-With', 'XMLHttpRequest');
+  if (import.meta.env.DEV && !headers.has('X-Dev-Email')) headers.set('X-Dev-Email', devEmail());
+  const response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin' });
+  if (response.status === 204) return undefined as T;
+  const body = await response.json().catch(() => null) as { error?: { message?: string; code?: string } } & T | null;
+  if (!response.ok) throw new ApiError(body?.error?.message || `Request failed (${response.status})`, { status: response.status, code: body?.error?.code });
+  return body as T;
+}
+
+/** Establish the application session using the still-live Clerk cookie. */
+export const bootstrapApplicationSession = () => directSessionRequest<SessionResponse>('/session/bootstrap', { method: 'POST', body: '{}' });
+/** Sliding renewal is intentionally a separately named, explicit operation. */
+export const recordSessionActivity = () => api<SessionResponse>('/session/activity', { method: 'POST', body: '{}' });
+export const revokeApplicationSession = () => api<void>('/session', { method: 'DELETE' });
+export const revokeAllApplicationSessions = () => api<void>('/sessions', { method: 'DELETE' });
 
 export function apiWithMeta<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number, options?: ApiMutationOptions): Promise<ApiResponse<T>> {
   if (path === '/me' && clerkEvidenceKnown && (!clerkEvidence.isLoaded || isIncompleteSignedInEvidence(clerkEvidence)) && !isDevelopmentAuthBypass) {
@@ -895,7 +925,7 @@ async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrap
     const cached = await snapshot(id);
     if (!cached || !provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return cached;
     const timestamp = cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt);
-    if (resources.includes('group') && cached.group && cached.members) seedProvisionalResource(resourceKeys.group(userId, id), userId, { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) }, timestamp, token, routeGeneration, authEpoch, evidenceEpoch, generation);
+    if (resources.includes('group') && cached.group && cached.members) seedProvisionalResource(resourceKeys.group(userId, id), userId, { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, timestamp, token, routeGeneration, authEpoch, evidenceEpoch, generation);
     const resourceTimestamp = (resource: keyof NonNullable<GroupSnapshot['cachedAtByResource']>) => cacheTimestamp(cached.cachedAtByResource?.[resource] || cached.cachedAt);
     if (resources.includes('balances') && cached.balances) seedProvisionalResource(resourceKeys.balances(userId, id), userId, { balances: cached.balances }, resourceTimestamp('balances'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
     if (resources.includes('expenses') && cached.expenses) seedProvisionalResource(resourceKeys.expenses(userId, id), userId, { expenses: cached.expenses }, resourceTimestamp('expenses'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
@@ -1148,8 +1178,8 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
     const knownPositiveMismatch = Boolean(nextEvidence.isLoaded && nextEvidence.isSignedIn === true && nextEvidence.userId && knownPreviousClerkUserId && nextEvidence.userId !== knownPreviousClerkUserId);
     const authoritativeSignedOut = nextEvidence.isLoaded && nextEvidence.isSignedIn === false && !nextEvidence.userId;
     clerkRestorationRetryAttempts = 0;
-    if (knownPositiveMismatch || authoritativeSignedOut) {
-       if (knownPositiveMismatch) broadcastSessionCoordination({ type: 'auth-invalidation', reason: 'account-switch', previousClerkUserId: knownPreviousClerkUserId, clerkUserId: nextEvidence.userId });
+    if (knownPositiveMismatch) {
+      broadcastSessionCoordination({ type: 'auth-invalidation', reason: 'account-switch', previousClerkUserId: knownPreviousClerkUserId, clerkUserId: nextEvidence.userId });
       requestTrustRevocation();
       verifiedIdentity = undefined;
       verifiedClerkUserId = undefined;
@@ -1157,6 +1187,12 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
       authBlocked = true;
       blockResourceIdentity(new ApiError('The Clerk account changed. Verify the current account before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }));
       setAuthLifecycle({ status: 'checking' });
+    } else if (authoritativeSignedOut && verifiedIdentity && authLifecycle.status === 'authenticated') {
+      // Ending the Clerk session is not an application logout. Keep the
+      // already verified application session and its private view alive.
+      verifiedClerkUserId = undefined;
+      clerkUserIdHydrated = false;
+      setAuthLifecycle({ status: 'authenticated' });
     } else if (!nextIsCompleteSignedIn && hasRetainedPrivateSession()) {
       // Clerk can transiently unload or publish a partial user while a mobile
       // browser wakes. Keep the already verified same-user view fenced in
@@ -1205,9 +1241,16 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
   const resolveDeadline = clerkRestorationResolve;
   cancelClerkRestorationDeadline();
   if (isDefinitivelySignedOut(clerkEvidence.isLoaded, clerkEvidence.isSignedIn) && !isDevelopmentAuthBypass) {
-    markSignedOut();
-    resolveDeadline?.(authLifecycle);
-    return Promise.resolve(authLifecycle);
+    // Clerk is identity bootstrap only. A valid BillSplit session remains
+    // authoritative after the provider's shorter session has ended.
+    if (verifiedIdentity && authLifecycle.status === 'authenticated') {
+      resolveDeadline?.(authLifecycle);
+      return Promise.resolve(authLifecycle);
+    }
+    const appSessionProbe = getMe({ networkOnly: true, expectedAuthEpoch: getAuthEpoch(), expectedClerkEvidenceEpoch: evidenceEpoch, deferConnectionFailure: true, preserveAuthenticatedOnProtocolFailure: true });
+    const result = appSessionProbe.then(() => authLifecycle).catch(() => { markSignedOut(); return authLifecycle; });
+    void result.then((value) => resolveDeadline?.(value));
+    return result;
   }
   if (clerkEvidence.isLoaded && clerkEvidence.isSignedIn !== true && !isDevelopmentAuthBypass) {
     setVerificationUnavailable(new ApiError('Clerk loaded without a usable signed-in identity.', { code: 'VERIFICATION_UNAVAILABLE' }), options.route);
@@ -1404,7 +1447,7 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
        // This is the sole trust write. A timeout or CAS miss is non-fatal to
       // the authoritative session, but it grants no durable offline trust.
        if (options.clerkUserId && result.clerkUserId === options.clerkUserId && result.userId === user.id && (!options.expectedUserId || options.expectedUserId === user.id)) {
-        if (!expectedTrustRead.timedOut) await boundedTrustWrite(saveOfflineTrust({ userId: user.id, email: user.email, personId: user.personId, clerkUserId: options.clerkUserId!, verifiedAt: new Date().toISOString() }, generation, () => authGeneration === authInvalidationGeneration && isClerkEvidenceEpochCurrent(evidenceGeneration) && !getSessionLogoutInProgress(), expectedTrustRead.record?.revision ?? 0));
+         if (!expectedTrustRead.timedOut) await boundedTrustWrite(saveOfflineTrust({ userId: user.id, email: user.email, personId: user.personId, clerkUserId: options.clerkUserId!, verifiedAt: new Date().toISOString(), idleExpiresAt: user.idleExpiresAt }, generation, () => authGeneration === authInvalidationGeneration && isClerkEvidenceEpochCurrent(evidenceGeneration) && !getSessionLogoutInProgress(), expectedTrustRead.record?.revision ?? 0));
         assertAuthEvidence(authGeneration, evidenceGeneration);
         verifiedClerkUserId = options.clerkUserId;
         clerkUserIdHydrated = true;
@@ -1414,9 +1457,9 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
        // An invalidation already published before this authoritative probe is
        // the transition which this new commit supersedes. Mark its nonce as
        // consumed so delayed BC delivery cannot revoke the new session; a
-        // nonce published after the baseline remains actionable.
-        consumeAuthInvalidationNonce(authInvalidationBaseline);
-        if (pendingSharedAuthInvalidation?.nonce === authInvalidationBaseline) pendingSharedAuthInvalidation = undefined;
+       // nonce published after the baseline remains actionable.
+       consumeAuthInvalidationNonce(authInvalidationBaseline);
+       if (pendingSharedAuthInvalidation?.nonce === authInvalidationBaseline) pendingSharedAuthInvalidation = undefined;
        // A pending provisional route read may still be inside IndexedDB after
       // /me wins. Fence it before publishing the authoritative session so it
       // cannot seed over the refresh that follows authentication.
@@ -1619,7 +1662,16 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         return authLifecycle;
       }
       const expectedUserId = currentSessionMatches ? verifiedIdentity?.id : undefined;
-      await getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, expectedClerkEvidenceEpoch: evidenceEpoch, startupFallbackMs: options.startupFallbackMs, deferConnectionFailure: true, preserveAuthenticatedOnProtocolFailure: previousLiveLifecycle && currentSessionMatches, preferLiveAuthenticatedStatus: options.clerkEvidenceEpoch === undefined && previousUsableLifecycle === 'authenticated', route: options.route });
+      try {
+        await getMe({ networkOnly: forceReverify, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, expectedClerkEvidenceEpoch: evidenceEpoch, startupFallbackMs: options.startupFallbackMs, deferConnectionFailure: true, preserveAuthenticatedOnProtocolFailure: previousLiveLifecycle && currentSessionMatches, preferLiveAuthenticatedStatus: options.clerkEvidenceEpoch === undefined && previousUsableLifecycle === 'authenticated', route: options.route });
+      } catch (error) {
+        // A Clerk session can be valid while the application cookie is absent
+        // (first visit, expiry, or a cleared cookie). Bootstrap exactly here;
+        // ordinary API calls never use Clerk as an authentication fallback.
+        if (!options.clerkUserId || !(error instanceof ApiError) || error.status !== 401 || !isAuthEpochCurrent(authEpoch) || !isClerkEvidenceEpochCurrent(evidenceEpoch)) throw error;
+        await bootstrapApplicationSession();
+        await getMe({ networkOnly: false, clerkUserId: options.clerkUserId, expectedUserId, expectedAuthEpoch: authEpoch, expectedClerkEvidenceEpoch: evidenceEpoch, startupFallbackMs: options.startupFallbackMs, deferConnectionFailure: true, route: options.route });
+      }
       assertAuthEvidence(authEpoch, evidenceEpoch);
       return authLifecycle;
     } catch (error) {
@@ -1806,21 +1858,25 @@ export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ gr
   }
 }
 
-export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[] }>> {
+export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[]; splitDefault: GroupSplitDefault | null }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
-    const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[] }>(`/groups/${id}`, { signal });
+    const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[]; splitDefault?: GroupSplitDefault | null }>(`/groups/${id}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    const data = { ...result.data, historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) };
-    if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants }, generation));
+    const data = { ...result.data, historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: result.data.splitDefault ?? null };
+    if (result.userId) {
+      const persisted = await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants, splitDefault: data.splitDefault }, requestMutationGeneration, generation));
+      if (persisted === false) return { ...data, stale: true };
+    }
     return data;
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
-    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members, historicalParticipants: cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) });
+    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null });
     throw error;
   }
 }
@@ -1832,6 +1888,13 @@ export async function getHistoricalParticipants(groupId: string, signal?: AbortS
 
 export async function updateGroup(id: string, input: { name: string; currency: Group['currency'] }) {
   return api<{ group: Group }>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export async function updateGroupSplitDefault(id: string, input: GroupSplitDefaultInput) {
+  return api<{ splitDefault: GroupSplitDefault }>(`/groups/${id}/split-default`, { method: 'PUT', body: JSON.stringify(input) });
+}
+export async function deleteGroupSplitDefault(id: string) {
+  return api<void>(`/groups/${id}/split-default`, { method: 'DELETE' });
 }
 
 export async function deleteGroup(id: string) {
@@ -2214,7 +2277,7 @@ export async function hydrateIdentity() {
 }
 export async function hydrateGroup(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
-  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })) }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
+  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateExpenses(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));

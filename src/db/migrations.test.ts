@@ -33,6 +33,8 @@ const categoryPreferencesSql = readFileSync(new URL('../../migrations/0018_categ
 const membershipEventsSql = readFileSync(new URL('../../migrations/0019_group_membership_events.sql', moduleUrl), 'utf8');
 const accountDeletionSql = readFileSync(new URL('../../migrations/0020_account_deletion.sql', moduleUrl), 'utf8');
 const identityTombstonesSql = readFileSync(new URL('../../migrations/0021_deleted_identity_tombstones.sql', moduleUrl), 'utf8');
+const applicationSessionsSql = readFileSync(new URL('../../migrations/0022_application_sessions.sql', moduleUrl), 'utf8');
+const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split_defaults.sql', moduleUrl), 'utf8');
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -180,6 +182,27 @@ describe('account deletion migration', () => {
   });
 });
 
+describe('application session migration', () => {
+  it('stores only fixed-size token digests and supports bounded cleanup indexes', () => {
+    expect(applicationSessionsSql).toMatch(/CREATE TABLE application_sessions/);
+    expect(applicationSessionsSql).toMatch(/token_hash TEXT NOT NULL UNIQUE CHECK\(length\(token_hash\) = 64\)/i);
+    expect(applicationSessionsSql).toMatch(/last_activity_at TEXT NOT NULL/);
+    expect(applicationSessionsSql).toMatch(/idle_expires_at TEXT NOT NULL/);
+    expect(applicationSessionsSql).toMatch(/idx_application_sessions_expiry/);
+  });
+});
+
+describe('group split default migration', () => {
+  it('stores one optional supported arrangement per group and cascades physical purges', () => {
+    expect(splitDefaultsSql).toMatch(/CREATE TABLE group_split_defaults/);
+    expect(splitDefaultsSql).toMatch(/PRIMARY KEY/);
+    expect(splitDefaultsSql).toMatch(/method TEXT NOT NULL CHECK\(method IN \('equal','percentage','shares'\)\)/i);
+    expect(splitDefaultsSql).toMatch(/REFERENCES groups\(id\) ON DELETE CASCADE/i);
+    expect(splitDefaultsSql).toMatch(/json_valid/);
+    expect(splitDefaultsSql).toMatch(/group_split_defaults_purge_on_group_delete/);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -237,7 +260,7 @@ describe('scheduled completion migration integration', () => {
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);
-         await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
+         await Promise.all(['0008_scheduled_expense_completion.sql', '0009_scheduled_generation_cursor.sql', '0010_generated_expense_operation_namespace.sql', '0011_scheduled_expense_category.sql', '0012_invitations_audit_purge.sql', '0013_projection_layer.sql', '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql', '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql', '0022_application_sessions.sql', '0023_group_split_defaults.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -255,8 +278,10 @@ describe('scheduled completion migration integration', () => {
          expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
          expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name='group_membership_events';")).toEqual([{ name: 'group_membership_events' }]);
          expect(query("SELECT group_id,person_id,role FROM group_members WHERE group_id IN ('group-multiple','group-ownerless') AND role='owner' ORDER BY group_id,person_id;")).toEqual([{ group_id: 'group-multiple', person_id: 'person-2', role: 'owner' }, { group_id: 'group-ownerless', person_id: 'person-3', role: 'owner' }]);
-          expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
-        expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
+       expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
+       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at) VALUES('group-1','equal','["person-1"]',NULL,'2026-01-01'); UPDATE groups SET deleted_at='2026-02-01' WHERE id='group-1';`, '--yes']);
+       expect(query("SELECT group_id FROM group_split_defaults WHERE group_id='group-1';")).toEqual([]);
+         expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
        expect(query('SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;')).toEqual([]);
        expect(query('PRAGMA foreign_key_check;')).toEqual([]);
 

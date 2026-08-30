@@ -56,7 +56,7 @@ describe('Clerk auth bootstrap coordinator', () => {
     expect(await readOfflineTrust()).toMatchObject({ state: 'active', clerkUserId: 'clerk-cached' });
   });
 
-  it('serializes repeated Clerk/foreground events and lets signed-out win without probing', async () => {
+  it('serializes repeated Clerk/foreground events without probing on Clerk sign-out', async () => {
     let resolve!: (value: Response) => void;
     const fetch = vi.fn(() => new Promise<Response>((done) => { resolve = done; }));
     vi.stubGlobal('navigator', { onLine: true });
@@ -72,7 +72,7 @@ describe('Clerk auth bootstrap coordinator', () => {
     const beforeSignedOut = fetch.mock.calls.length;
     await coordinateAuthBootstrap({ isLoaded: true, isSignedIn: false });
     expect(fetch).toHaveBeenCalledTimes(beforeSignedOut);
-    expect(getAuthLifecycle().status).toBe('unauthenticated');
+    expect(getAuthLifecycle().status).toBe('authenticated');
   });
 
   it('settles a loaded identity mismatch as verification-unavailable', async () => {

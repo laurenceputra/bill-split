@@ -2,6 +2,12 @@ import type { supportedCurrencies } from './schemas';
 
 export type Currency = typeof supportedCurrencies[number];
 export type SplitMethod = 'equal' | 'exact' | 'percentage' | 'shares';
+export type GroupSplitDefaultMethod = Exclude<SplitMethod, 'exact'>;
+export interface GroupSplitDefault {
+  method: GroupSplitDefaultMethod;
+  personIds: string[];
+  values?: number[];
+}
 export type RecurrenceFrequency = 'daily' | 'weekly' | 'monthly' | 'yearly';
 export type ScheduledExpenseStatus = 'active' | 'paused' | 'cancelled' | 'blocked' | 'completed';
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;

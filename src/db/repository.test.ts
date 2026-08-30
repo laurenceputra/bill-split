@@ -40,6 +40,20 @@ class FakeStatement {
   }
 }
 
+class SplitDefaultDb {
+  readonly sql: string[] = [];
+  prepare(sql: string) { this.sql.push(sql); return new SplitDefaultStatement(sql); }
+}
+class SplitDefaultStatement {
+  constructor(private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT d.*')) return { method: 'percentage', person_ids_json: '["00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002"]', values_json: '[2500,7500]' } as T;
+    return null;
+  }
+  async run() { return { meta: { changes: 1 } }; }
+}
+
 class AuditPageDb {
   prepare(sql: string) { return new AuditPageStatement(sql); }
 }
@@ -845,6 +859,27 @@ describe('repository global export pagination', () => {
       { groupId: 'group-b', expenseCursor: undefined, settlementCursor: undefined },
       { groupId: 'group-c', expenseCursor: undefined, settlementCursor: undefined },
     ]);
+  });
+});
+
+describe('repository group split defaults', () => {
+  it('maps stored basis-point defaults and keeps writes owner/member guarded', async () => {
+    const db = new SplitDefaultDb();
+    const repo = new Repository(db as never);
+    const personIds = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+    await expect(repo.getGroupSplitDefault('group-1')).resolves.toEqual({ method: 'percentage', personIds, values: [2500, 7500] });
+    await expect(repo.upsertGroupSplitDefault('group-1', 'user-1', { method: 'percentage', person_ids: personIds, values: [2500, 7500] })).resolves.toEqual({ method: 'percentage', personIds, values: [2500, 7500] });
+    await expect(repo.deleteGroupSplitDefault('group-1', 'user-1')).resolves.toBe(true);
+    const upsert = db.sql.find((sql) => sql.includes('INSERT INTO group_split_defaults')) || '';
+    expect(upsert).toContain("owner_member.role='owner'");
+    expect(upsert).toContain('gm.deleted_at IS NULL');
+    expect(upsert).toContain('p.deleted_at IS NULL');
+  });
+
+  it('rejects the forbidden exact method before database access', async () => {
+    const db = new SplitDefaultDb();
+    await expect(new Repository(db as never).upsertGroupSplitDefault('group-1', 'user-1', { method: 'exact', person_ids: ['00000000-0000-4000-8000-000000000001'] } as never)).rejects.toMatchObject({ code: 'INVALID_SPLIT_DEFAULT' });
+    expect(db.sql).toEqual([]);
   });
 });
 

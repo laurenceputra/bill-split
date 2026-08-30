@@ -2,15 +2,16 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
+import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
 import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthenticationError } from './clerk-auth';
 import { escapeCsvCell, settlementCsvRow } from './csv';
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS, CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string }; repo: Repository; requestId: string } };
+type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string }; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
 const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
 const api = new Hono<Env>();
@@ -94,16 +95,18 @@ const allowsMutation = (c: any) => {
   const origin = c.req.header('Origin');
   const fetchSite = c.req.header('Sec-Fetch-Site');
   const authorization = c.req.header('Authorization');
-  const hasBrowserMetadata = origin !== undefined || fetchSite !== undefined;
   const exactOrigin = origin === url.origin;
   const trustedFetchSite = fetchSite === 'same-origin';
-  const explicitBearer = /^Bearer\s+\S+$/i.test(authorization ?? '');
   if (origin !== undefined && !exactOrigin) return false;
   if (fetchSite !== undefined && !trustedFetchSite) return false;
-  return exactOrigin || trustedFetchSite || (!hasBrowserMetadata && explicitBearer);
+  // An Authorization header is not an authentication fallback. Permit the
+  // legacy non-browser request to reach the explicit no-session rejection so
+  // callers receive a normal auth error, but never pass that token to Clerk
+  // or an application route.
+  return exactOrigin || trustedFetchSite || /^Bearer\s+\S+$/i.test(authorization ?? '');
 };
 const repositoryError = (c: any, error: unknown) => {
-   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' ? 400 : 500, error.code, error.message, error.details);
+   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
   throw error;
 };
 export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
@@ -119,6 +122,29 @@ const accountDeletionIdentityError = (c: any) => {
   const result = validateAccountDeletionIdentityBinding(clerkUserId, expectedClerkUserId);
   if (!result.ok) return jsonError(c, result.status, result.code, result.message);
   return undefined;
+};
+const freshClerkIdentityForDeletion = async (c: any) => {
+  const env = c.env;
+  const config = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
+  try {
+    assertClerkAuthenticationConfig(config);
+    const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
+    return await authenticateClerkSession(c.req.raw, config, clerk.authenticateRequest.bind(clerk));
+  } catch (error) {
+    if (error instanceof ClerkAuthenticationError) return error;
+    return new ClerkAuthenticationError('AUTH_INVALID', 'A fresh Clerk identity is required for account deletion');
+  }
+};
+const recoverDeletedAccountIdentity = async (c: any, repo: Repository) => {
+  const expectedClerkUserId = c.req.header(ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER);
+  if (!expectedClerkUserId) return undefined;
+  const fresh = await freshClerkIdentityForDeletion(c);
+  if (fresh instanceof ClerkAuthenticationError) return jsonError(c, 401, fresh.code, fresh.message);
+  const binding = validateAccountDeletionIdentityBinding(fresh.clerkUserId, expectedClerkUserId);
+  if (!binding.ok) return jsonError(c, binding.status, binding.code, binding.message);
+  const deleted = await repo.deletedAccountForIdentity(fresh.clerkUserId, fresh.primaryEmail);
+  if (!deleted) return undefined;
+  return { id: String(deleted.id), email: fresh.primaryEmail, personId: '', clerkUserId: fresh.clerkUserId };
 };
 const balanceError = (c: any, error: unknown) => error instanceof BalanceOverflowError ? jsonError(c, 422, error.code, error.message) : undefined;
 export type RateLimitOperation = 'group-create' | 'friend-create' | 'invitation-create' | 'invitation-accept' | 'invitation-reject';
@@ -143,8 +169,13 @@ api.use('/api/*', async (c, next) => {
   let failed = false;
   let earlyResponse: Response | undefined;
   try {
+    if (!cookieValue(c.req.raw, CSRF_COOKIE)) c.res.headers.append('Set-Cookie', serializeCookie(CSRF_COOKIE, randomSessionToken(), { secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
     if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(c.req.method)) {
       if (!allowsMutation(c)) { earlyResponse = jsonError(c, 403, 'ORIGIN_FORBIDDEN', 'Mutations require same-origin browser metadata or an explicit bearer authorization'); return earlyResponse; }
+      const path = new URL(c.req.url).pathname;
+      const csrfCookie = cookieValue(c.req.raw, CSRF_COOKIE);
+      const csrfHeader = c.req.header(CSRF_HEADER);
+      if (path !== '/api/session/bootstrap' && c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' && cookieValue(c.req.raw, sessionCookieName(c.env.ENVIRONMENT)) && !constantTimeEqual(csrfCookie, csrfHeader)) { earlyResponse = jsonError(c, 403, 'CSRF_FORBIDDEN', 'A matching host-only CSRF token is required'); return earlyResponse; }
       if (!(await readBoundedBody(c))) { earlyResponse = jsonError(c, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body must not exceed 64 KiB'); return earlyResponse; }
     }
     await next();
@@ -165,8 +196,10 @@ api.use('/api/*', async (c, next) => {
 });
 api.use('/api/*', async (c, next) => {
   const env = c.env;
+  const pathname = new URL(c.req.url).pathname;
   const devEmail = c.req.header('X-Dev-Email');
-  if (env.ENVIRONMENT === 'development' && devEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(devEmail)) {
+  const hasApplicationCookie = Boolean(cookieValue(c.req.raw, sessionCookieName(env.ENVIRONMENT)));
+  if (env.ENVIRONMENT === 'development' && !hasApplicationCookie && devEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(devEmail)) {
     try {
       const repo = repositoryFor(env); const identity = await repo.user(devEmail.trim().toLowerCase());
       const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id) };
@@ -180,37 +213,59 @@ api.use('/api/*', async (c, next) => {
     }
   }
 
-  let identityClaims: Awaited<ReturnType<typeof authenticateClerkSession>> | undefined;
-  try {
-    const clerkConfig = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
-    assertClerkAuthenticationConfig(clerkConfig);
-    const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
-    identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
-    const repo = repositoryFor(env); const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
-     const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId };
-    const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
-    if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
-    c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
-  } catch (error) {
-    if (error instanceof ClerkAuthenticationError) return jsonError(c, 401, error.code, error.message);
-    if (error instanceof RepositoryError) {
-      // The server may have committed account deletion before its response
-      // reached the browser. Permit only the same authenticated DELETE to
-      // enter the idempotent route; all other requests remain rejected.
-      if (error.code === 'AUTH_IDENTITY_CONFLICT' && identityClaims && c.req.method === 'DELETE' && new URL(c.req.url).pathname === '/api/account') {
-        try {
-          const repo = repositoryFor(env);
-          const tombstoned = await repo.deletedAccountForIdentity(identityClaims.clerkUserId, identityClaims.primaryEmail);
-          if (tombstoned) {
-            const auth = { id: String(tombstoned.id), email: '', personId: '', clerkUserId: identityClaims.clerkUserId };
-            c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next(); return;
-          }
-        } catch (recoveryError) { if (recoveryError instanceof RepositoryError) return repositoryError(c, recoveryError); throw recoveryError; }
-      }
-      return repositoryError(c, error);
+  // Clerk is used only to bootstrap a new application session. Every other
+  // ordinary API request, including GET /api/me, requires the app cookie.
+  if (pathname === '/api/session/bootstrap') {
+    let identityClaims: Awaited<ReturnType<typeof authenticateClerkSession>>;
+    try {
+      const clerkConfig = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
+      assertClerkAuthenticationConfig(clerkConfig);
+      const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
+       identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
+       const repo = repositoryFor(env);
+       const presentedToken = cookieValue(c.req.raw, sessionCookieName(env.ENVIRONMENT));
+       if (presentedToken) {
+         const presentedSession = await repo.applicationSession(await sha256Hex(presentedToken));
+         if (presentedSession && presentedSession.clerkUserId !== identityClaims.clerkUserId) await repo.revokeApplicationSessionForIdentitySwitch(presentedSession.id, identityClaims.clerkUserId);
+       }
+       const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
+       c.set('repo', repo); c.set('auth', { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId });
+      await next();
+      return;
+    } catch (error) {
+      if (error instanceof ClerkAuthenticationError) return jsonError(c, 401, error.code, error.message);
+      if (error instanceof RepositoryError) return repositoryError(c, error);
+      return jsonError(c, 401, 'AUTH_INVALID', 'The Clerk session could not be verified');
     }
-    if (error instanceof Error && /Clerk|token|JWT|authorized|session/i.test(error.message)) return jsonError(c, 401, 'AUTH_INVALID', 'The Clerk session could not be verified');
-    console.error(JSON.stringify({ message: 'database request failed', requestId: c.get('requestId') })); return jsonError(c, 500, 'DATABASE_ERROR', 'The request could not be completed');
+  }
+
+  const rawToken = cookieValue(c.req.raw, sessionCookieName(env.ENVIRONMENT));
+  try {
+    const repo = repositoryFor(env);
+    const session = rawToken ? await repo.applicationSession(await sha256Hex(rawToken)) : null;
+    if (session) {
+      const auth = { id: session.userId, email: session.email, personId: session.personId, clerkUserId: session.clerkUserId, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt };
+      const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
+      if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
+      c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
+      return;
+    }
+    // This is the sole post-commit recovery exception. It is available only
+    // for DELETE /account, requires a fresh Clerk identity bound to the
+    // request header, and resolves an existing Clerk tombstone. No ordinary
+    // API route reaches Clerk here.
+    if (pathname === '/api/account' && c.req.method === 'DELETE') {
+      const recoveryAuth = await recoverDeletedAccountIdentity(c, repo);
+      if (recoveryAuth instanceof Response) return recoveryAuth;
+      if (recoveryAuth) {
+        c.set('repo', repo); c.set('auth', recoveryAuth); c.header('X-BillSplit-User-Id', recoveryAuth.id); c.header('X-BillSplit-Clerk-User-Id', recoveryAuth.clerkUserId); await next();
+        return;
+      }
+    }
+    return jsonError(c, 401, /^Bearer\s+\S+$/i.test(c.req.header('Authorization') ?? '') && env.CLERK_SECRET_KEY ? 'AUTH_INVALID' : 'AUTH_REQUIRED', 'A valid BillSplit session is required');
+  } catch (error) {
+    if (error instanceof RepositoryError) return repositoryError(c, error);
+    console.error(JSON.stringify({ message: 'database request failed', requestId: c.get('requestId') })); return jsonError(c, 401, 'AUTH_REQUIRED', 'The BillSplit session could not be verified');
   }
 });
 // This middleware is deliberately placed after authentication. It only sees
@@ -259,19 +314,49 @@ export function sanitizeReturnTo(value: unknown): string {
   } catch { return '/'; }
 }
 
-api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId }); });
+api.post('/api/session/bootstrap', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.clerkUserId) return jsonError(c, 401, 'AUTH_REQUIRED', 'A verified Clerk identity is required to bootstrap a session');
+  try {
+    const token = randomSessionToken();
+    const createdAt = new Date().toISOString();
+    const idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString();
+    const session = await getRepo(c).createApplicationSession(auth.id, await sha256Hex(token), createdAt, idleExpiresAt);
+    c.res.headers.append('Set-Cookie', serializeCookie(sessionCookieName(c.env.ENVIRONMENT), token, { maxAge: APPLICATION_SESSION_IDLE_MS / 1000, httpOnly: true, secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
+    c.header('X-BillSplit-User-Id', auth.id);
+    c.header('X-BillSplit-Clerk-User-Id', auth.clerkUserId);
+    return c.json({ user: { id: auth.id, email: auth.email, personId: auth.personId }, idleExpiresAt });
+  } catch (error) { return repositoryError(c, error); }
+});
+api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
+api.post('/api/session/activity', async (c) => {
+  const auth = c.get('auth');
+  if (!auth.applicationSessionId) return c.json({ idleExpiresAt: auth.idleExpiresAt });
+  const session = await getRepo(c).renewApplicationSession(auth.applicationSessionId, new Date().toISOString(), APPLICATION_SESSION_ACTIVITY_THROTTLE_MS);
+  if (!session) return jsonError(c, 401, 'AUTH_REQUIRED', 'A valid BillSplit session is required');
+  c.res.headers.append('Set-Cookie', serializeCookie(sessionCookieName(c.env.ENVIRONMENT), cookieValue(c.req.raw, sessionCookieName(c.env.ENVIRONMENT)) || '', { maxAge: APPLICATION_SESSION_IDLE_MS / 1000, httpOnly: true, secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
+  return c.json({ idleExpiresAt: session.idleExpiresAt });
+});
+const clearApplicationSessionCookie = (c: any) => c.res.headers.append('Set-Cookie', serializeCookie(sessionCookieName(c.env.ENVIRONMENT), '', { maxAge: 0, httpOnly: true, secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
+api.delete('/api/session', async (c) => { const id = c.get('auth').applicationSessionId; if (id) await getRepo(c).revokeApplicationSession(id); clearApplicationSessionCookie(c); return c.body(null, 204); });
+api.delete('/api/sessions', async (c) => { await getRepo(c).revokeAllApplicationSessions(c.get('auth').id); clearApplicationSessionCookie(c); return c.body(null, 204); });
 api.delete('/api/account', zValidator('json', accountDeletionInput), async (c) => {
   const identityError = accountDeletionIdentityError(c);
   if (identityError) return identityError;
-  try { await getRepo(c).deleteAccount(c.get('auth').id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); }
+  const fresh = await freshClerkIdentityForDeletion(c);
+  if (fresh instanceof ClerkAuthenticationError) return jsonError(c, 401, fresh.code, fresh.message);
+  if (fresh.clerkUserId !== c.get('auth').clerkUserId) return jsonError(c, 409, 'IDENTITY_MISMATCH', 'The fresh Clerk identity does not match this BillSplit session');
+  try { await getRepo(c).deleteAccount(c.get('auth').id); clearApplicationSessionCookie(c); return c.body(null, 204); } catch (error) { return repositoryError(c, error); }
 });
 api.post('/api/category-suggestion', zValidator('json', categorySuggestionInput), async (c) => c.json({ category: await getRepo(c).categorySuggestion(c.get('auth').id, c.req.valid('json').description) }));
 api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.get('auth').id) }));
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ group: x.group, members: await x.repo.members(c.req.param('groupId')), historicalParticipants: await x.repo.historicalParticipants(c.req.param('groupId')) }); });
+api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const groupId = c.req.param('groupId'); const [members, historicalParticipants, splitDefault] = await Promise.all([x.repo.members(groupId), x.repo.historicalParticipants(groupId), x.repo.getGroupSplitDefault(groupId)]); return c.json({ group: x.group, members, historicalParticipants, splitDefault }); });
 api.get('/api/groups/:groupId/historical-participants', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ participants: await x.repo.historicalParticipants(c.req.param('groupId')) }); });
 api.put('/api/groups/:groupId', zValidator('json', groupInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; return c.json({ group: await x.repo.updateGroup(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); });
+api.put('/api/groups/:groupId/split-default', zValidator('json', groupSplitDefaultInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ splitDefault: await x.repo.upsertGroupSplitDefault(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); } });
+api.delete('/api/groups/:groupId/split-default', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.deleteGroupSplitDefault(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.delete('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.deleteGroup(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ person: await x.repo.addPerson(c.req.param('groupId'), c.req.valid('json'), x.auth.id, x.auth.personId) }, 201); } catch (error) { return repositoryError(c, error); } });
 api.delete('/api/groups/:groupId/members/:personId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.removeMember(c.req.param('groupId'), c.req.param('personId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
@@ -377,16 +462,19 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
    let failure: unknown;
    let purge: Awaited<ReturnType<Repository['purgeExpiredData']>> | undefined;
    let generation: Awaited<ReturnType<Repository['generateDueScheduledExpenses']>> | undefined;
-   let projection: Awaited<ReturnType<Repository['projectionBackfill']>> | undefined;
-   for (const [stage, run] of [
-     ['purge', () => repo.purgeExpiredData(asOf)] as const,
-     ['generation', () => repo.generateDueScheduledExpenses(asOf)] as const,
+    let projection: Awaited<ReturnType<Repository['projectionBackfill']>> | undefined;
+    let sessions: Awaited<ReturnType<Repository['purgeExpiredApplicationSessions']>> | undefined;
+    for (const [stage, run] of [
+      ['purge', () => repo.purgeExpiredData(asOf)] as const,
+      ['sessions', () => repo.purgeExpiredApplicationSessions(asOf, 100)] as const,
+      ['generation', () => repo.generateDueScheduledExpenses(asOf)] as const,
      ['projection', () => repo.projectionBackfill({ maxGroups: 2 })] as const,
    ]) {
      try {
        const result = await run();
        if (stage === 'purge') purge = result as typeof purge;
-       else if (stage === 'generation') generation = result as typeof generation;
+        else if (stage === 'sessions') sessions = result as typeof sessions;
+        else if (stage === 'generation') generation = result as typeof generation;
        else projection = result as typeof projection;
      } catch (error) {
        failure ??= error;
@@ -397,7 +485,8 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
      event: 'bill-split.cron',
      scheduledTime: controller.scheduledTime,
      outcome: failure ? 'failed' : 'completed',
-     purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, capped: purge.capped } : undefined,
+      purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, capped: purge.capped } : undefined,
+      sessionsPurged: sessions?.purged ?? 0,
      generated: generation?.generated ?? 0,
      blocked: generation?.blocked ?? 0,
      generationCapped: generation?.capped ?? false,

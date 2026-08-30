@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { invalidateCachedGroups } from './idb';
+import { invalidateCachedGroups, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 /** The shortest freshness window used by the application. */
@@ -249,6 +249,14 @@ export function evictGroupResources(groupId: string, userId: string) {
 }
 
 export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') { for (const key of keys) invalidateResource(key, userId); }
+/** Apply a server-confirmed group-settings response without disturbing ledger resources. */
+export function patchResourceData<T>(key: ResourceKey, userId: string, patch: (data: T) => T) {
+  const resource = entries.get(key);
+  if (!resource || resource.snapshot.userId !== userId || resource.snapshot.data === undefined) return false;
+  resource.snapshot = stable({ ...resource.snapshot, data: patch(resource.snapshot.data as T), fetchedAt: now(), stale: false, offline: false, error: undefined });
+  notify(resource);
+  return true;
+}
 export function invalidateResourcePrefix(prefix: string, userId = activeUserId || '', options: { revalidate?: boolean } = {}) {
   for (const [key, resource] of entries) if (key.startsWith(prefix) && (!userId || resource.snapshot.userId === userId)) invalidateResource(key, userId, options);
 }
@@ -409,6 +417,15 @@ const invalidatePersistedCaches = async (userId: string, generation = captureSes
 export const invalidateForMutation = {
   groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
   groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  splitDefaultChanged: async (groupId: string, splitDefault: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'], userId?: string, generation?: number) => {
+    if (!userId) return;
+    // Abort/fence a GET that was started before the server mutation. The
+    // persisted mutation generation below protects the same race in IDB.
+    invalidateResource(resourceKeys.group(userId, groupId), userId, { revalidate: false });
+    patchResourceData<{ group: unknown; members: unknown[]; splitDefault?: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'] }>(resourceKeys.group(userId, groupId), userId, (data) => ({ ...data, splitDefault }));
+    await invalidatePersistedCaches(userId, generation, { groups: false });
+    try { await updateGroupSnapshot(userId, groupId, { splitDefault }, generation); } catch { /* Local cache is an enhancement, not a mutation failure. */ }
+  },
   groupDeleted: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
   groupLeft: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },
   groupAccessRevoked: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId }); },

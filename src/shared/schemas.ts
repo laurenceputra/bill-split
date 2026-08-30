@@ -49,6 +49,20 @@ export const scheduledExpenseStatusInput = z.object({ version: z.number().int().
 export const ACCOUNT_DELETION_CONFIRMATION = 'DELETE MY ACCOUNT' as const;
 export const accountDeletionInput = z.object({ confirmation: z.literal(ACCOUNT_DELETION_CONFIRMATION) });
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
+const splitDefaultPersonIds = z.array(id).min(1).max(100).refine((values) => new Set(values).size === values.length, 'Included members must be unique');
+const splitDefaultValues = z.array(z.number().finite().positive()).min(1).max(100);
+export const groupSplitDefaultInput = z.union([
+  z.object({ method: z.literal('equal'), person_ids: splitDefaultPersonIds }).strict(),
+  z.object({ method: z.literal('percentage'), person_ids: splitDefaultPersonIds, values: z.array(z.number().int().min(1).max(10_000)).min(1).max(100) }).strict().superRefine((value, context) => {
+    if (value.values.length !== value.person_ids.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['values'], message: 'Each included member needs one percentage' });
+    else if (value.values.reduce((sum, current) => sum + current, 0) !== 10_000) context.addIssue({ code: z.ZodIssueCode.custom, path: ['values'], message: 'Percentages must total 10000 basis points' });
+  }),
+  z.object({ method: z.literal('shares'), person_ids: splitDefaultPersonIds, values: splitDefaultValues }).strict().superRefine((value, context) => {
+    if (value.values.length !== value.person_ids.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['values'], message: 'Each included member needs one share value' });
+    if (value.values.reduce((sum, current) => sum + current, 0) > 1_000_000) context.addIssue({ code: z.ZodIssueCode.custom, path: ['values'], message: 'Total shares must not exceed 1000000' });
+  }),
+]);
+export type GroupSplitDefaultInput = z.infer<typeof groupSplitDefaultInput>;
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
 export type FriendInput = z.infer<typeof friendInput>;

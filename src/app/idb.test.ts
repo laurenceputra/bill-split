@@ -31,6 +31,15 @@ describe('user-scoped IndexedDB', () => {
     expect(isOfflineTrustUsable(record, Date.parse(verifiedAt) + 30 * 24 * 60 * 60 * 1000)).toBe(false);
   });
 
+  it('honors the server-provided application-session idle expiry', async () => {
+    const verifiedAt = new Date('2026-01-01T00:00:00.000Z').toISOString();
+    const idleExpiresAt = new Date('2026-01-10T00:00:00.000Z').toISOString();
+    await saveOfflineTrust({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', clerkUserId: 'clerk-a', verifiedAt, idleExpiresAt });
+    const record = await readOfflineTrust();
+    expect(isOfflineTrustUsable(record, Date.parse(idleExpiresAt) - 1)).toBe(true);
+    expect(isOfflineTrustUsable(record, Date.parse(idleExpiresAt))).toBe(false);
+  });
+
   it('does not let a late active save resurrect trust after revocation', async () => {
     await saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a' });
     const expectedRevision = (await readOfflineTrust())!.revision;
@@ -129,10 +138,12 @@ describe('user-scoped IndexedDB', () => {
 
   it('preserves resource-specific freshness and persists activity and details', async () => {
     const timestamp = new Date().toISOString();
-    await updateGroupSnapshot('user-a', 'group-a', { group: { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }, cachedAt: timestamp });
+    await updateGroupSnapshot('user-a', 'group-a', { group: { id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '' }, splitDefault: { method: 'percentage', personIds: ['person-a', 'person-b'], values: [2500, 7500] }, cachedAt: timestamp });
     await updateGroupSnapshot('user-a', 'group-a', { balances: {}, cachedAt: 'balances-time' });
     expect((await readResourceFreshness('user-a', 'group:group-a:group'))?.fetchedAt).toBe(timestamp);
     expect((await readResourceFreshness('user-a', 'group:group-a:balances'))?.fetchedAt).toBe('balances-time');
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.splitDefault).toEqual({ method: 'percentage', personIds: ['person-a', 'person-b'], values: [2500, 7500] });
+    expect((await readResourceFreshness('user-a', 'group:group-a:splitDefault'))?.fetchedAt).toBe(timestamp);
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'e-1', entityId: 'e-1', entityActive: true, amountMinor: 100, currency: 'USD', transactionDate: '2026-01-01', label: 'Lunch', createdAt: timestamp }], fetchedAt: timestamp });
     await saveExpenseDetails({ userId: 'user-a', expenseId: 'e-1', expense: { id: 'e-1', groupId: 'group-a', description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: timestamp, updatedAt: timestamp, version: 1, payers: [], splits: [] }, history: [], fetchedAt: timestamp });
     expect((await readActivity('user-a', 'group-a'))?.activity[0].label).toBe('Lunch');

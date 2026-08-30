@@ -1,4 +1,4 @@
-import type { Activity, Balances, Expense, Group, GroupMember, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
+import type { Activity, Balances, Expense, Group, GroupMember, GroupSplitDefault, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
@@ -37,6 +37,8 @@ export interface OfflineTrustRecord {
   personId: string;
   clerkUserId: string;
   verifiedAt: string;
+  /** Server-side application-session idle boundary used for offline trust. */
+  idleExpiresAt?: string;
 }
 
 export const OFFLINE_TRUST_KEY = 'current' as const;
@@ -52,7 +54,8 @@ export function isOfflineTrustUsable(record: OfflineTrustRecord | undefined, now
   if (!record || record.state !== 'active') return false;
   if (![record.userId, record.email, record.personId, record.clerkUserId].every((value) => typeof value === 'string' && value.trim().length > 0)) return false;
   const verifiedAt = Date.parse(record.verifiedAt);
-  return Number.isFinite(verifiedAt) && now < verifiedAt + OFFLINE_TRUST_MAX_AGE_MS;
+  const idleExpiresAt = record.idleExpiresAt ? Date.parse(record.idleExpiresAt) : verifiedAt + OFFLINE_TRUST_MAX_AGE_MS;
+  return Number.isFinite(verifiedAt) && Number.isFinite(idleExpiresAt) && now < idleExpiresAt;
 }
 
 export interface CachedGroups {
@@ -65,6 +68,7 @@ export interface GroupSnapshot {
   userId: string;
   groupId: string;
   group?: Group;
+  splitDefault?: GroupSplitDefault | null;
   members?: GroupMember[];
   historicalParticipants?: HistoricalParticipant[];
   expenses?: Expense[];
@@ -74,7 +78,7 @@ export interface GroupSnapshot {
   transactionsNextCursor?: string;
   transactionsLimit?: number;
   cachedAt: string;
-  cachedAtByResource?: Partial<Record<'group' | 'members' | 'expenses' | 'balances' | 'settlements' | 'transactions', string>>;
+  cachedAtByResource?: Partial<Record<'group' | 'splitDefault' | 'members' | 'expenses' | 'balances' | 'settlements' | 'transactions', string>>;
 }
 
 export interface ResourceFreshness {
@@ -426,7 +430,7 @@ export async function invalidateCachedGroups(userId: string, generation = captur
 }
 
 type GroupSnapshotPatch = Omit<Partial<GroupSnapshot>, 'userId' | 'groupId' | 'cachedAt'> & { cachedAt?: string };
-const transactionResourceNames = ['group', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const;
+const transactionResourceNames = ['group', 'splitDefault', 'members', 'expenses', 'balances', 'settlements', 'transactions'] as const;
 const preserveLargerTransactionPage = (current: GroupSnapshot | undefined, patch: GroupSnapshotPatch) => {
   const currentLimit = current?.transactionsLimit;
   const incomingLimit = patch.transactionsLimit;

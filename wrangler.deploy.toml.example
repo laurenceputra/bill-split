@@ -31,6 +31,9 @@ binding = "DB"
 database_name = "replace-with-your-d1-database-name"
 database_id = "REPLACE_WITH_D1_DATABASE_ID"
 migrations_dir = "migrations"
+# Migration 0022 creates the application-managed session store. Session
+# credentials are random opaque tokens; only their SHA-256 hashes are stored,
+# so no additional session secret or binding is required.
 
 [vars]
 ENVIRONMENT = "production"
