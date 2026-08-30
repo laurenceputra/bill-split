@@ -12,13 +12,15 @@ import { escapeCsvCell, settlementCsvRow } from './csv';
 import { CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string }; repo: Repository; requestId: string } };
+type ApplicationAuth = { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
+type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
 const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
 const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string, details?: Record<string, unknown>) => c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
 export const MAX_API_BODY_BYTES = 64 * 1024;
+export const LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS = Date.parse('2026-10-15T00:00:00Z');
 // Manual CSP follows Clerk's current CSP guidance. The FAPI origin is decoded
 // from the configured publishable key rather than assuming it is the app
 // origin. See https://clerk.com/docs/guides/secure/best-practices/csp-headers.md
@@ -106,6 +108,14 @@ const allowsMutation = (c: any) => {
   // or an application route.
   return exactOrigin || trustedFetchSite || /^Bearer\s+\S+$/i.test(authorization ?? '');
 };
+const isLegacyMeBridgeRequest = (c: any) => {
+  const request = c.req.raw as Request;
+  const url = new URL(request.url);
+  const origin = request.headers.get('Origin');
+  const fetchSite = request.headers.get('Sec-Fetch-Site');
+  return request.method === 'GET' && url.pathname === '/api/me' && !url.search && request.headers.get('X-Requested-With') === 'XMLHttpRequest'
+    && (origin === null || origin === url.origin) && (fetchSite === null || fetchSite === 'same-origin');
+};
 const repositoryError = (c: any, error: unknown) => {
    if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
   throw error;
@@ -146,6 +156,28 @@ const recoverDeletedAccountIdentity = async (c: any, repo: Repository) => {
   const deleted = await repo.deletedAccountForIdentity(fresh.clerkUserId, fresh.primaryEmail);
   if (!deleted) return undefined;
   return { id: String(deleted.id), email: fresh.primaryEmail, personId: '', clerkUserId: fresh.clerkUserId };
+};
+const authenticateClerkIdentity = async (c: any) => {
+  const env = c.env;
+  const clerkConfig = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
+  assertClerkAuthenticationConfig(clerkConfig);
+  const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
+  return authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
+};
+const authForClerkClaims = async (repo: Repository, identityClaims: Awaited<ReturnType<typeof authenticateClerkIdentity>>) => {
+  const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
+  return {
+    id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId,
+  } satisfies ApplicationAuth;
+};
+const authForClerkIdentity = async (c: any, repo: Repository) => authForClerkClaims(repo, await authenticateClerkIdentity(c));
+const issueApplicationSession = async (c: any, auth: ApplicationAuth) => {
+  const token = randomSessionToken();
+  const createdAt = new Date().toISOString();
+  const idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString();
+  const session = await getRepo(c).createApplicationSession(auth.id, await sha256Hex(token), createdAt, idleExpiresAt);
+  c.res.headers.append('Set-Cookie', serializeCookie(sessionCookieName(c.env.ENVIRONMENT), token, { maxAge: APPLICATION_SESSION_IDLE_MS / 1000, httpOnly: true, secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
+  return { ...auth, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt } satisfies ApplicationAuth;
 };
 const balanceError = (c: any, error: unknown) => error instanceof BalanceOverflowError ? jsonError(c, 422, error.code, error.message) : undefined;
 export type RateLimitOperation = 'group-create' | 'friend-create' | 'invitation-create' | 'invitation-accept' | 'invitation-reject';
@@ -215,22 +247,19 @@ api.use('/api/*', async (c, next) => {
   }
 
   // Clerk is used only to bootstrap a new application session. Every other
-  // ordinary API request, including GET /api/me, requires the app cookie.
+  // ordinary API request requires the app cookie, except for the temporary
+  // legacy GET /api/me recovery bridge.
   if (pathname === '/api/session/bootstrap') {
-    let identityClaims: Awaited<ReturnType<typeof authenticateClerkSession>>;
     try {
-      const clerkConfig = { publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY, authorizedParties: env.CLERK_AUTHORIZED_PARTIES };
-      assertClerkAuthenticationConfig(clerkConfig);
-      const clerk = createClerkClient({ publishableKey: env.CLERK_PUBLISHABLE_KEY, secretKey: env.CLERK_SECRET_KEY, jwtKey: env.CLERK_JWT_KEY });
-       identityClaims = await authenticateClerkSession(c.req.raw, clerkConfig, clerk.authenticateRequest.bind(clerk));
-       const repo = repositoryFor(env);
-       const presentedToken = cookieValue(c.req.raw, sessionCookieName(env.ENVIRONMENT));
-       if (presentedToken) {
-         const presentedSession = await repo.applicationSession(await sha256Hex(presentedToken));
-         if (presentedSession && presentedSession.clerkUserId !== identityClaims.clerkUserId) await repo.revokeApplicationSessionForIdentitySwitch(presentedSession.id, identityClaims.clerkUserId);
-       }
-       const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
-       c.set('repo', repo); c.set('auth', { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId });
+      const repo = repositoryFor(env);
+      const identityClaims = await authenticateClerkIdentity(c);
+      const presentedToken = cookieValue(c.req.raw, sessionCookieName(env.ENVIRONMENT));
+      if (presentedToken) {
+        const presentedSession = await repo.applicationSession(await sha256Hex(presentedToken));
+        if (presentedSession && presentedSession.clerkUserId !== identityClaims.clerkUserId) await repo.revokeApplicationSessionForIdentitySwitch(presentedSession.id, identityClaims.clerkUserId);
+      }
+      const auth = await authForClerkClaims(repo, identityClaims);
+      c.set('repo', repo); c.set('auth', auth);
       await next();
       return;
     } catch (error) {
@@ -250,6 +279,20 @@ api.use('/api/*', async (c, next) => {
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
       return;
+    }
+    if (Date.now() < LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS && isLegacyMeBridgeRequest(c)) {
+      try {
+        const auth = await authForClerkIdentity(c, repo);
+        c.set('repo', repo);
+        const sessionAuth = await issueApplicationSession(c, auth);
+        c.set('auth', sessionAuth); c.header('X-BillSplit-User-Id', sessionAuth.id); c.header('X-BillSplit-Session-Bootstrapped', 'legacy-me');
+        await next();
+        return;
+      } catch (error) {
+        if (error instanceof ClerkAuthenticationError) return jsonError(c, 401, error.code, error.message);
+        if (error instanceof RepositoryError) return repositoryError(c, error);
+        return jsonError(c, 401, 'AUTH_INVALID', 'The Clerk session could not be verified');
+      }
     }
     // This is the sole post-commit recovery exception. It is available only
     // for DELETE /account, requires a fresh Clerk identity bound to the
@@ -319,14 +362,11 @@ api.post('/api/session/bootstrap', async (c) => {
   const auth = c.get('auth');
   if (!auth.clerkUserId) return jsonError(c, 401, 'AUTH_REQUIRED', 'A verified Clerk identity is required to bootstrap a session');
   try {
-    const token = randomSessionToken();
-    const createdAt = new Date().toISOString();
-    const idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString();
-    const session = await getRepo(c).createApplicationSession(auth.id, await sha256Hex(token), createdAt, idleExpiresAt);
-    c.res.headers.append('Set-Cookie', serializeCookie(sessionCookieName(c.env.ENVIRONMENT), token, { maxAge: APPLICATION_SESSION_IDLE_MS / 1000, httpOnly: true, secure: c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' }));
-    c.header('X-BillSplit-User-Id', auth.id);
-    c.header('X-BillSplit-Clerk-User-Id', auth.clerkUserId);
-    return c.json({ user: { id: auth.id, email: auth.email, personId: auth.personId }, idleExpiresAt });
+    const sessionAuth = await issueApplicationSession(c, auth);
+    c.set('auth', sessionAuth);
+    c.header('X-BillSplit-User-Id', sessionAuth.id);
+    c.header('X-BillSplit-Clerk-User-Id', sessionAuth.clerkUserId!);
+    return c.json({ user: { id: sessionAuth.id, email: sessionAuth.email, personId: sessionAuth.personId }, idleExpiresAt: sessionAuth.idleExpiresAt });
   } catch (error) { return repositoryError(c, error); }
 });
 api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
