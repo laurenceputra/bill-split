@@ -288,7 +288,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
       if (!isAuthEpochCurrent(authEpoch)) {
         // Catch means the transport is settled (including an abort). Do not
         // release this lease from the auth-downgrade observer itself.
-        const currentAuthWasRevoked = getAuthLifecycle().status === 'unauthenticated' && error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID');
+        const currentAuthWasRevoked = getAuthLifecycle().status === 'unauthenticated' && error instanceof ApiError && error.code !== 'CSRF_FORBIDDEN' && (error.status === 401 || error.status === 403 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID');
         const settledPatch = currentAuthWasRevoked
           ? { status: 'auth-required' as const, lastError: { code: 'AUTH_REQUIRED', message: 'Sign in to sync this expense.', status: 401 }, leaseOwner: undefined, leaseExpiresAt: undefined }
           : { status: 'pending' as const, leaseOwner: undefined, leaseExpiresAt: undefined };
@@ -302,7 +302,7 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
       }
      const apiError = timedOut ? new ApiError('The sync request timed out.', { code: 'NETWORK_TIMEOUT', networkFailure: true }) : error instanceof ApiError ? error : new ApiError('Unable to sync expense.', { networkFailure: true, code: 'NETWORK_ERROR' });
      const ambiguous = apiError.status === undefined || apiError.networkFailure || apiError.code === 'NETWORK_TIMEOUT' || apiError.status === 408 || apiError.status === 429 || (apiError.status !== undefined && apiError.status >= 500);
-      const status: OutboxStatus = apiError.status === 401 || apiError.status === 403 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' || apiError.code === 'AUTH_IDENTITY_CONFLICT' ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
+       const status: OutboxStatus = apiError.code !== 'CSRF_FORBIDDEN' && (apiError.status === 401 || apiError.status === 403 || apiError.code === 'AUTH_REQUIRED' || apiError.code === 'AUTH_INVALID' || apiError.code === 'IDENTITY_MISMATCH' || apiError.code === 'AUTH_IDENTITY_CONFLICT') ? 'auth-required' : isRetryable(apiError) ? 'pending' : 'failed';
       // A timed-out send is delivery-uncertain. Keep the lease until it
       // expires so another tab cannot immediately duplicate a possibly
       // committed idempotent operation.
@@ -364,7 +364,7 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
       }
       await refreshOutbox();
     } catch (error) {
-      if (isAuthEpochCurrent(flushEpoch) && error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH' || error.code === 'AUTH_IDENTITY_CONFLICT')) {
+      if (isAuthEpochCurrent(flushEpoch) && error instanceof ApiError && error.code !== 'CSRF_FORBIDDEN' && (error.status === 401 || error.status === 403 || error.code === 'AUTH_REQUIRED' || error.code === 'AUTH_INVALID' || error.code === 'IDENTITY_MISMATCH' || error.code === 'AUTH_IDENTITY_CONFLICT')) {
           const lifecycle = getAuthLifecycle().status;
           const trust = lifecycle === 'trusted-offline' ? await bounded(readOfflineTrust()) : undefined;
           const userId = lifecycle === 'authenticated' ? currentOutboxUserId() : trust && isOfflineTrustUsable(trust) ? trust.userId : undefined;

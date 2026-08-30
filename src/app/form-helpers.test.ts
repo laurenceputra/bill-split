@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, settlementSuggestion, settlementSuggestionFingerprint } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultSummary, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, settlementSuggestion, settlementSuggestionFingerprint } from './form-helpers';
 import type { Balances, GroupMember } from '../shared/types';
 
 const member = (personId: string, name = personId): GroupMember => ({ personId, name, joinedAt: '', role: 'member' });
@@ -31,6 +31,11 @@ describe('expense form helpers', () => {
     const shares = previewAllocation(Number.MAX_SAFE_INTEGER, ['one', 'two'], 'shares', { one: '1000000', two: '1' }, 'USD');
     expect(shares.error).toContain('safe amount calculation');
     expect(Object.values(shares.allocations).every(Number.isSafeInteger)).toBe(true);
+  });
+  it('falls back to equal for defaults containing a removed member', () => {
+    const value = { method: 'percentage' as const, personIds: ['one', 'gone'], values: [5000, 5000] };
+    expect(resolveGroupSplitDefault(value, members)).toMatchObject({ method: 'equal', selected: ['one', 'two'], applied: false, invalid: true });
+    expect(groupSplitDefaultSummary(value, members)).toMatchObject({ warning: true });
   });
 });
 

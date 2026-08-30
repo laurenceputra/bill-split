@@ -1,10 +1,27 @@
-import type { Balances, Currency, GroupMember, PairwiseBalance, Split, SplitMethod } from '../shared/types';
+import type { Balances, Currency, GroupMember, GroupSplitDefault, PairwiseBalance, Split, SplitMethod } from '../shared/types';
 import { allocateByWeights, allocateEqual, allocatePercentage, checkedSumMinor, parseMoney } from '../domain/money';
 
 export type AllocationState = Record<string, string>;
 export type PayerState = { personId: string; amount: string };
 const MAX_SHARE_VALUE = 1_000_000;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+
+/** Apply a stored party arrangement only when every referenced member is still active. */
+export function resolveGroupSplitDefault(value: GroupSplitDefault | null | undefined, members: GroupMember[]): { method: SplitMethod; selected: string[]; values: AllocationState; applied: boolean; invalid: boolean } {
+  const all = members.map((member) => member.personId);
+  if (!value || value.personIds.some((personId) => !all.includes(personId))) return { method: 'equal', selected: all, values: {}, applied: false, invalid: Boolean(value) };
+  if (value.method === 'equal') return { method: 'equal', selected: [...value.personIds], values: {}, applied: true, invalid: false };
+  if (!value.values || value.values.length !== value.personIds.length) return { method: 'equal', selected: all, values: {}, applied: false, invalid: true };
+  return { method: value.method, selected: [...value.personIds], values: Object.fromEntries(value.personIds.map((personId, index) => [personId, value.method === 'percentage' ? String(value.values![index] / 100) : String(value.values![index])])), applied: true, invalid: false };
+}
+
+export function groupSplitDefaultSummary(value: GroupSplitDefault | null | undefined, members: GroupMember[]): { label: string; warning: boolean } {
+  if (!value) return { label: 'Automatic equal split', warning: false };
+  const missing = value.personIds.filter((personId) => !members.some((member) => member.personId === personId));
+  const names = value.personIds.map((personId) => members.find((member) => member.personId === personId)?.name || 'Removed member');
+  const method = value.method === 'equal' ? 'Equal' : value.method === 'percentage' ? 'Percentage' : 'Shares';
+  return { label: `${method} · ${names.join(', ')}`, warning: missing.length > 0 };
+}
 
 export type AmountInputLength = 'normal' | 'long' | 'very-long';
 

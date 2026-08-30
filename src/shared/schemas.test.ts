@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
 import { BalanceOverflowError } from './money';
 
 const base = { description: 'Lunch', amount_minor: 1000, currency: 'USD' as const, date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }] };
@@ -40,5 +40,14 @@ describe('financial input', () => {
     const people = Array.from({ length: 82 }, (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
     const value = { ...base, amount_minor: 8200, start_date: '2026-01-01', end_date: null, frequency: 'monthly' as const, interval: 1, weekdays: [], timezone: 'UTC', payers: people.slice(0, 41).map((person_id) => ({ person_id, amount_minor: 200 })), splits: people.slice(41).map((person_id) => ({ person_id, amount_minor: 200 })) };
     expect(scheduledExpenseInput.safeParse(value).success).toBe(true);
+  });
+  it('validates party defaults without allowing exact or zero allocations', () => {
+    const one = '00000000-0000-4000-8000-000000000001', two = '00000000-0000-4000-8000-000000000002';
+    expect(groupSplitDefaultInput.safeParse({ method: 'equal', person_ids: [one, two] }).success).toBe(true);
+    expect(groupSplitDefaultInput.safeParse({ method: 'exact', person_ids: [one] }).success).toBe(false);
+    expect(groupSplitDefaultInput.safeParse({ method: 'percentage', person_ids: [one, two], values: [5000, 5000] }).success).toBe(true);
+    expect(groupSplitDefaultInput.safeParse({ method: 'percentage', person_ids: [one, two], values: [0, 10000] }).success).toBe(false);
+    expect(groupSplitDefaultInput.safeParse({ method: 'shares', person_ids: [one, two], values: [1, 2] }).success).toBe(true);
+    expect(groupSplitDefaultInput.safeParse({ method: 'shares', person_ids: [one, two], values: [1, 1_000_000] }).success).toBe(false);
   });
 });

@@ -1,11 +1,12 @@
-import type { ExpenseInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
+import { groupSplitDefaultInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, ScheduledExpense, ScheduledExpenseStatus, Settlement, Transaction } from '../shared/types';
+import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, Transaction } from '../shared/types';
 import { checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -17,7 +18,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -352,6 +353,62 @@ export class Repository {
   }
   async me(email: string) { return this.user(email); }
 
+  async createApplicationSession(userId: string, tokenHash: string, createdAt = now(), idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString()) {
+    if (!/^[a-f0-9]{64}$/i.test(tokenHash)) throw new RepositoryError('DATABASE_ERROR', 'Application session credentials must be SHA-256 digests');
+    const id = uid();
+    const active = await this.db.prepare('SELECT id FROM users WHERE id=? AND deleted_at IS NULL').bind(userId).first<Row>();
+    if (!active) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The authenticated account is not available');
+    await this.db.prepare('INSERT INTO application_sessions(id,user_id,token_hash,created_at,last_activity_at,idle_expires_at) VALUES(?,?,?,?,?,?)').bind(id, userId, tokenHash, createdAt, createdAt, idleExpiresAt).run();
+    return { id, createdAt, lastActivityAt: createdAt, idleExpiresAt };
+  }
+
+  async applicationSession(tokenHash: string, asOf = now()) {
+    const row = await this.db.prepare(`SELECT s.id,s.user_id,s.created_at,s.last_activity_at,s.idle_expires_at,u.email,u.clerk_user_id,u.deleted_at,p.id AS person_id
+      FROM application_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN people p ON p.user_id=u.id AND p.deleted_at IS NULL
+      WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.idle_expires_at>? AND u.deleted_at IS NULL`).bind(tokenHash, asOf).first<Row>();
+    if (!row) return null;
+    return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at) };
+  }
+
+  async renewApplicationSession(sessionId: string, asOf = now(), throttleMs = APPLICATION_SESSION_ACTIVITY_THROTTLE_MS) {
+    const threshold = new Date(Date.parse(asOf) - throttleMs).toISOString();
+    const idleExpiresAt = new Date(Date.parse(asOf) + APPLICATION_SESSION_IDLE_MS).toISOString();
+    // The throttle predicate is part of the update, so two foreground tabs
+    // cannot both renew the same session after the 24-hour boundary.
+    const updated = await this.db.prepare(`UPDATE application_sessions SET last_activity_at=?,idle_expires_at=?
+      WHERE id=? AND revoked_at IS NULL AND idle_expires_at>? AND last_activity_at<=?`).bind(asOf, idleExpiresAt, sessionId, asOf, threshold).run();
+    if (Number(updated.meta?.changes ?? 0) > 0) return { lastActivityAt: asOf, idleExpiresAt, renewed: true };
+    const current = await this.db.prepare(`SELECT id,last_activity_at,idle_expires_at FROM application_sessions WHERE id=? AND revoked_at IS NULL AND idle_expires_at>?`).bind(sessionId, asOf).first<Row>();
+    if (!current) return null;
+    return { lastActivityAt: text(current.last_activity_at), idleExpiresAt: text(current.idle_expires_at), renewed: false };
+  }
+
+  async revokeApplicationSession(sessionId: string, revokedAt = now()) {
+    await this.db.prepare('UPDATE application_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL').bind(revokedAt, sessionId).run();
+  }
+
+  /** Revoke only the presented device session when Clerk has switched users. */
+  async revokeApplicationSessionForIdentitySwitch(sessionId: string, clerkUserId: string, revokedAt = now()) {
+    await this.db.prepare(`UPDATE application_sessions SET revoked_at=?
+      WHERE id=? AND revoked_at IS NULL AND EXISTS (
+        SELECT 1 FROM users WHERE users.id=application_sessions.user_id
+          AND users.deleted_at IS NULL AND (users.clerk_user_id IS NULL OR users.clerk_user_id!=?)
+      )`).bind(revokedAt, sessionId, clerkUserId).run();
+  }
+
+  async revokeAllApplicationSessions(userId: string, revokedAt = now()) {
+    await this.db.prepare('UPDATE application_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').bind(revokedAt, userId).run();
+  }
+
+  async purgeExpiredApplicationSessions(asOf: Date | string = new Date(), limit = 100) {
+    const timestamp = typeof asOf === 'string' ? asOf : asOf.toISOString();
+    const bounded = Math.min(Math.max(limit, 1), 500);
+    const result = await this.db.prepare(`DELETE FROM application_sessions WHERE id IN (
+      SELECT id FROM application_sessions WHERE idle_expires_at<=? OR revoked_at IS NOT NULL ORDER BY id LIMIT ?
+    )`).bind(timestamp, bounded).run();
+    return { purged: Number(result.meta?.changes ?? 0), capped: Number(result.meta?.changes ?? 0) >= bounded };
+  }
+
   /**
    * Delete the application's account without deleting financial rows. The
    * owner check is performed before and repeated by the conditional claim in
@@ -383,7 +440,7 @@ export class Repository {
     const result = await this.db.batch([
       this.db.prepare(`UPDATE users SET email=?,clerk_user_id=NULL,deleted_email_hash=?,deleted_clerk_hash=?,deleted_at=?,updated_at=?
         WHERE id=? AND deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.id=gm.group_id
-          WHERE gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND g.deleted_at IS NULL)`).bind(pseudonym, deletedEmailHash, deletedClerkHash, timestamp, timestamp, userId, userId),
+           WHERE gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND g.deleted_at IS NULL)`).bind(pseudonym, deletedEmailHash, deletedClerkHash, timestamp, timestamp, userId, userId),
       this.db.prepare(`UPDATE group_members SET deleted_at=? WHERE user_id=? AND role='member' AND deleted_at IS NULL AND ${deletionGuard}`).bind(timestamp, userId, userId, timestamp),
       // Account deletion also terminally cancels this creator's active
       // templates in the same atomic batch. Existing expenses remain intact.
@@ -505,6 +562,52 @@ export class Repository {
   async groupPeople(groupId: string): Promise<string[]> {
     const rows = (await this.db.prepare('SELECT gm.person_id FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=?').bind(groupId).all<Row>()).results;
     return rows.map((row) => text(row.person_id));
+  }
+  private mapGroupSplitDefault(row: Row | null): GroupSplitDefault | null {
+    if (!row) return null;
+    try {
+      const personIds = JSON.parse(text(row.person_ids_json));
+      const values = row.values_json == null ? undefined : JSON.parse(text(row.values_json));
+      const parsed = groupSplitDefaultInput.safeParse({ method: text(row.method), person_ids: personIds, ...(values === undefined ? {} : { values }) });
+      if (!parsed.success) return null;
+      return { method: parsed.data.method, personIds: [...parsed.data.person_ids], ...('values' in parsed.data ? { values: [...parsed.data.values] } : {}) } as GroupSplitDefault;
+    } catch { return null; }
+  }
+  async getGroupSplitDefault(groupId: string): Promise<GroupSplitDefault | null> {
+    const row = await this.db.prepare('SELECT d.* FROM group_split_defaults d JOIN groups g ON g.id=d.group_id WHERE d.group_id=? AND g.deleted_at IS NULL').bind(groupId).first<Row>();
+    return this.mapGroupSplitDefault(row);
+  }
+  async upsertGroupSplitDefault(groupId: string, userId: string, input: GroupSplitDefaultInput): Promise<GroupSplitDefault> {
+    const parsed = groupSplitDefaultInput.safeParse(input);
+    if (!parsed.success) throw new RepositoryError('INVALID_SPLIT_DEFAULT', parsed.error.issues[0]?.message || 'The group split default is invalid');
+    const value = parsed.data;
+    const personIds = value.person_ids, timestamp = now();
+    const values = 'values' in value ? value.values : undefined;
+    const result = await this.db.prepare(`INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at)
+      SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL)
+      AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id
+        WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (SELECT 1 FROM group_members gm JOIN people p ON p.id=gm.person_id
+        WHERE gm.group_id=? AND gm.person_id=requested.value AND gm.deleted_at IS NULL AND p.deleted_at IS NULL))
+      ON CONFLICT(group_id) DO UPDATE SET method=excluded.method,person_ids_json=excluded.person_ids_json,values_json=excluded.values_json,updated_at=excluded.updated_at`).bind(groupId, value.method, JSON.stringify(personIds), values === undefined ? null : JSON.stringify(values), timestamp, groupId, groupId, userId, JSON.stringify(personIds), groupId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const owner = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
+      if (!owner) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update the split default');
+      throw new RepositoryError('MEMBER_REQUIRED', 'Every split-default participant must be an active group member');
+    }
+    const saved = await this.getGroupSplitDefault(groupId);
+    if (!saved) throw new RepositoryError('DATABASE_ERROR', 'The group split default could not be read');
+    return saved;
+  }
+  async deleteGroupSplitDefault(groupId: string, userId: string): Promise<boolean> {
+    const result = await this.db.prepare("DELETE FROM group_split_defaults WHERE group_id=? AND EXISTS (SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND u.deleted_at IS NULL)").bind(groupId, groupId, userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const owner = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
+      if (!owner) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can delete the split default');
+    }
+    return Number(result.meta?.changes ?? 0) > 0;
   }
   private mapInvitation(row: Row): GroupInvitation {
     return { id: text(row.id), groupId: text(row.group_id), email: text(row.email_normalized), createdBy: text(row.created_by), createdAt: text(row.created_at), expiresAt: text(row.expires_at), revokedAt: row.revoked_at == null ? null : text(row.revoked_at), acceptedAt: row.accepted_at == null ? null : text(row.accepted_at), acceptedBy: row.accepted_by == null ? null : text(row.accepted_by), rejectedAt: row.rejected_at == null ? null : text(row.rejected_at) };
@@ -882,7 +985,7 @@ export class Repository {
     const status = next ? 'active' : 'completed';
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('scheduled.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
-      this.db.prepare(`INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
+       this.db.prepare(`INSERT INTO scheduled_expenses(id,group_id,description,amount_minor,currency,category,start_date,end_date,frequency,interval_count,weekdays_json,timezone,status,next_occurrence_date,created_by,created_at,updated_at,version,client_operation_id) SELECT ? AS id,? AS group_id,? AS description,? AS amount_minor,? AS currency,? AS category,? AS start_date,? AS end_date,? AS frequency,? AS interval_count,? AS weekdays_json,? AS timezone,? AS status,? AS next_occurrence_date,? AS created_by,? AS created_at,? AS updated_at,1 AS version,? AS client_operation_id WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.category ?? null, input.start_date, input.end_date ?? null, input.frequency, input.interval, JSON.stringify(input.weekdays), input.timezone, status, next, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, ...actor.args, ...participants.args),
       ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'scheduled_expenses', id }),
        ...input.payers.map((payer) => this.db.prepare('INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES(?,?,?)').bind(id, payer.person_id, payer.amount_minor)),
        ...input.splits.map((split) => this.db.prepare('INSERT INTO scheduled_splits(scheduled_expense_id,person_id,amount_minor,metadata_json) VALUES(?,?,?,?)').bind(id, split.person_id, split.amount_minor, split.metadata ? JSON.stringify(split.metadata) : null)),
@@ -1512,7 +1615,8 @@ export class Repository {
          this.db.prepare('DELETE FROM ledger_totals WHERE group_id=?').bind(groupId),
          this.db.prepare('DELETE FROM projection_state WHERE group_id=?').bind(groupId),
          this.db.prepare('DELETE FROM group_invitations WHERE group_id=?').bind(groupId),
-        this.db.prepare('DELETE FROM group_members WHERE group_id=?').bind(groupId),
+         this.db.prepare('DELETE FROM group_split_defaults WHERE group_id=?').bind(groupId),
+         this.db.prepare('DELETE FROM group_members WHERE group_id=?').bind(groupId),
         this.db.prepare('DELETE FROM expenses WHERE group_id=?').bind(groupId),
         this.db.prepare('DELETE FROM settlements WHERE group_id=?').bind(groupId),
         // A claim is only replayable through an active group.  Once the group
@@ -1572,13 +1676,14 @@ export class Repository {
   }
   async groupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
-    const [g, members, expenses, settlements] = await Promise.all([
+    const [g, members, splitDefault, expenses, settlements] = await Promise.all([
       this.db.prepare('SELECT * FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>().then(mapGroup),
       this.members(groupId),
+      this.getGroupSplitDefault(groupId),
       options.expenseCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.expensePage(groupId, { limit, cursor: options.expenseCursor }),
       options.settlementCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.settlementPage(groupId, { limit, cursor: options.settlementCursor }),
     ]);
-    return { version: 1, exportedAt: now(), group: g, members, expenses: expenses.items, settlements: settlements.items, nextCursor: expenses.nextCursor || settlements.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: settlements.nextCursor ?? null } : undefined };
+    return { version: 1, exportedAt: now(), group: g, splitDefault, members, expenses: expenses.items, settlements: settlements.items, nextCursor: expenses.nextCursor || settlements.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: settlements.nextCursor ?? null } : undefined };
   }
   async exportPage(userId: string, options: { groupCursor?: string; limit?: number } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 1, 1), 2);

@@ -1,11 +1,11 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
 import { readGroupSnapshot, updateGroupSnapshot } from './idb';
-import { getResourceSnapshot, invalidateForMutation, seedResource } from './resource-cache';
+import { configureResource, getResourceSnapshot, invalidateForMutation, revalidate, resourceKeys, seedResource } from './resource-cache';
 import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
 import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
 
@@ -33,6 +33,27 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('fences an in-flight group GET when a split default mutation patches memory and IDB', async () => {
+    const userId = 'split-default-race-user';
+    const groupId = 'split-default-race-group';
+    const key = resourceKeys.group(userId, groupId);
+    const oldDefault = { method: 'equal' as const, personIds: ['person-a'], values: [] };
+    const newDefault = { method: 'shares' as const, personIds: ['person-a'], values: [1] };
+    await updateGroupSnapshot(userId, groupId, { splitDefault: oldDefault });
+    seedResource(key, userId, { group: { id: groupId }, members: [], splitDefault: oldDefault });
+    let resolveStale!: (value: unknown) => void;
+    configureResource(key, userId, () => new Promise((resolve) => { resolveStale = resolve; }));
+    const staleGet = revalidate(key, userId, { force: true, reason: 'route' });
+    await vi.waitFor(() => expect(resolveStale).toBeTypeOf('function'));
+
+    await invalidateForMutation.splitDefaultChanged(groupId, newDefault, userId, captureSessionGeneration());
+    resolveStale({ group: { id: groupId }, members: [], splitDefault: oldDefault });
+    await staleGet;
+
+    expect(getResourceSnapshot(key, userId).data).toMatchObject({ splitDefault: newDefault });
+    expect((await readGroupSnapshot(userId, groupId))?.splitDefault).toEqual(newDefault);
+  });
+
   it('allows trusted offline startup before Clerk has loaded but gates online startup', () => {
     expect(shouldStartAuthCheck(false, false)).toBe(true);
     expect(shouldStartAuthCheck(false, true)).toBe(true);
@@ -54,6 +75,33 @@ describe('frontend API errors and cache fallback', () => {
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-b', undefined, false)).toBe(false);
     expect(shouldReverifyTrustedOffline(false, true, true, 'trusted-offline')).toBe(false);
     expect(shouldReverifyTrustedOffline(true, true, true, 'trusted-offline')).toBe(true);
+  });
+  it('does not turn a CSRF failure into account or group auth revocation', async () => {
+    await establishAuthenticatedMutationSession();
+    const epoch = getAuthEpoch();
+    vi.stubGlobal('fetch', vi.fn(async () => json({ error: { code: 'CSRF_FORBIDDEN', message: 'csrf mismatch' } }, 403)));
+
+    await expect(api('/groups', { method: 'POST', body: '{}' })).rejects.toMatchObject({ status: 403, code: 'CSRF_FORBIDDEN' });
+    expect(getAuthEpoch()).toBe(epoch);
+    expect(getAuthLifecycle().status).toBe('authenticated');
+  });
+  it('does not let a failed session activity request clear a concurrent connection failure', async () => {
+    await establishAuthenticatedMutationSession();
+    const resolvers = new Map<string, (response: Response) => void>();
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => new Promise<Response>((resolve) => {
+      resolvers.set(new URL(String(request), 'https://billsplit.test').pathname, resolve);
+    })));
+
+    const activity = recordSessionActivity();
+    const groups = api('/groups');
+    await vi.waitFor(() => expect(resolvers.size).toBe(2));
+    resolvers.get('/api/groups')!(json({ error: { code: 'UPSTREAM_UNAVAILABLE' } }, 503));
+    await expect(groups).rejects.toMatchObject({ status: 503 });
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
+
+    resolvers.get('/api/session/activity')!(json({ error: { code: 'CSRF_FORBIDDEN', message: 'csrf mismatch' } }, 403));
+    await expect(activity).rejects.toMatchObject({ status: 403, code: 'CSRF_FORBIDDEN' });
+    expect(getConnectionState()).toMatchObject({ status: 'connection-issue', reconnectRequired: true });
   });
   it('does not revoke a fast Clerk load while last Clerk ID hydration is pending', () => {
     expect(shouldRevokeForOfflineClerkUser(true, true, 'clerk-fast', undefined, false)).toBe(false);

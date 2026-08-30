@@ -395,9 +395,11 @@ describe('worker boundary', () => {
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/members/person-1', 'DELETE'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/transfer-ownership', 'POST'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/split-default', 'PUT'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/split-default', 'DELETE'],
     ];
     for (const [path, method] of paths) {
-       const response = await worker.fetch(new Request(`https://split.example${path}`, { method, headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' ? { body: JSON.stringify(path.includes('transfer-ownership') ? { person_id: '00000000-0000-4000-8000-000000000002' } : { email: 'invitee@example.com' }) } : {}) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+       const response = await worker.fetch(new Request(`https://split.example${path}`, { method, headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', ...(method === 'POST' || method === 'PUT' ? { 'Content-Type': 'application/json' } : {}) }, ...(method === 'POST' || method === 'PUT' ? { body: JSON.stringify(path.includes('transfer-ownership') ? { person_id: '00000000-0000-4000-8000-000000000002' } : path.includes('split-default') ? { method: 'equal', person_ids: ['00000000-0000-0000-0000-000000000001'] } : { email: 'invitee@example.com' }) } : {}) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
       expect(response.status).toBe(403);
       expect(await response.json()).toMatchObject({ error: { code: 'OWNER_REQUIRED' } });
     }

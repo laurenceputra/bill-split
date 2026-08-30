@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Repository, assertLikeSearch, decodeLedgerCursor, decodeTransactionCursor, encodeLedgerCursor, encodeTransactionCursor } from './repository';
+import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 import type { Transaction } from '../shared/types';
 
@@ -38,6 +39,72 @@ class FakeStatement {
     if (this.sql.includes('INSERT INTO payers(')) this.db.payers.push({ person_id: this.args[1], amount_minor: this.args[2] });
     if (this.sql.includes('INSERT INTO splits(')) this.db.splits.push({ person_id: this.args[1], amount_minor: this.args[2], metadata_json: this.args[3] });
   }
+}
+
+class ApplicationSessionDb {
+  createArgs: unknown[] | undefined;
+  renewArgs: unknown[] | undefined;
+  prepare(sql: string) { return new ApplicationSessionStatement(this, sql); }
+}
+class ApplicationSessionStatement {
+  private args: unknown[] = [];
+  constructor(private readonly db: ApplicationSessionDb, private readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT id FROM users')) return { id: 'user-1' } as T;
+    if (this.sql.includes('SELECT id,last_activity_at')) return { id: 'session-1', last_activity_at: '2026-01-01T00:00:00.000Z', idle_expires_at: '2026-02-01T00:00:00.000Z' } as T;
+    return null;
+  }
+  async run() {
+    if (this.sql.includes('INSERT INTO application_sessions')) this.db.createArgs = this.args;
+    if (this.sql.includes('UPDATE application_sessions SET last_activity_at')) this.db.renewArgs = this.args;
+    return { meta: { changes: 1 } };
+  }
+}
+
+describe('repository application sessions', () => {
+  it('creates sessions with the shared idle expiration policy', async () => {
+    const db = new ApplicationSessionDb();
+    const createdAt = '2026-01-01T00:00:00.000Z';
+    await new Repository(db as never).createApplicationSession('user-1', 'a'.repeat(64), createdAt);
+
+    expect(db.createArgs?.[4]).toBe(createdAt);
+    expect(db.createArgs?.[5]).toBe(new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString());
+  });
+
+  it('renews sessions with the shared idle expiration and activity throttle policies', async () => {
+    const db = new ApplicationSessionDb();
+    const asOf = '2026-02-01T00:00:00.000Z';
+    const idleExpiresAt = new Date(Date.parse(asOf) + APPLICATION_SESSION_IDLE_MS).toISOString();
+    const renewed = await new Repository(db as never).renewApplicationSession('session-1', asOf);
+
+    expect(renewed).toEqual({
+      lastActivityAt: asOf,
+      idleExpiresAt,
+      renewed: true,
+    });
+    expect(db.renewArgs).toEqual([
+      asOf,
+      idleExpiresAt,
+      'session-1',
+      asOf,
+      new Date(Date.parse(asOf) - APPLICATION_SESSION_ACTIVITY_THROTTLE_MS).toISOString(),
+    ]);
+  });
+});
+
+class SplitDefaultDb {
+  readonly sql: string[] = [];
+  prepare(sql: string) { this.sql.push(sql); return new SplitDefaultStatement(sql); }
+}
+class SplitDefaultStatement {
+  constructor(private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT d.*')) return { method: 'percentage', person_ids_json: '["00000000-0000-4000-8000-000000000001","00000000-0000-4000-8000-000000000002"]', values_json: '[2500,7500]' } as T;
+    return null;
+  }
+  async run() { return { meta: { changes: 1 } }; }
 }
 
 class AuditPageDb {
@@ -845,6 +912,27 @@ describe('repository global export pagination', () => {
       { groupId: 'group-b', expenseCursor: undefined, settlementCursor: undefined },
       { groupId: 'group-c', expenseCursor: undefined, settlementCursor: undefined },
     ]);
+  });
+});
+
+describe('repository group split defaults', () => {
+  it('maps stored basis-point defaults and keeps writes owner/member guarded', async () => {
+    const db = new SplitDefaultDb();
+    const repo = new Repository(db as never);
+    const personIds = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+    await expect(repo.getGroupSplitDefault('group-1')).resolves.toEqual({ method: 'percentage', personIds, values: [2500, 7500] });
+    await expect(repo.upsertGroupSplitDefault('group-1', 'user-1', { method: 'percentage', person_ids: personIds, values: [2500, 7500] })).resolves.toEqual({ method: 'percentage', personIds, values: [2500, 7500] });
+    await expect(repo.deleteGroupSplitDefault('group-1', 'user-1')).resolves.toBe(true);
+    const upsert = db.sql.find((sql) => sql.includes('INSERT INTO group_split_defaults')) || '';
+    expect(upsert).toContain("owner_member.role='owner'");
+    expect(upsert).toContain('gm.deleted_at IS NULL');
+    expect(upsert).toContain('p.deleted_at IS NULL');
+  });
+
+  it('rejects the forbidden exact method before database access', async () => {
+    const db = new SplitDefaultDb();
+    await expect(new Repository(db as never).upsertGroupSplitDefault('group-1', 'user-1', { method: 'exact', person_ids: ['00000000-0000-4000-8000-000000000001'] } as never)).rejects.toMatchObject({ code: 'INVALID_SPLIT_DEFAULT' });
+    expect(db.sql).toEqual([]);
   });
 });
 

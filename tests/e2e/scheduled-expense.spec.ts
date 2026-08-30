@@ -32,7 +32,7 @@ test('ordinary expense creation starts one-time while recurring fields preserve 
     await page.getByLabel('Expense amount').fill('42');
     await page.getByPlaceholder('What was this for?').fill('Apartment rent');
     await page.getByLabel('Date').fill('2026-01-15');
-    await page.getByLabel('Category (optional)').fill('Home');
+    await page.getByLabel('Category').selectOption('Housing');
     await page.getByLabel('Notes (optional)').fill('Keep this detail');
 
     await page.getByLabel('Repeat this expense').check();
@@ -43,14 +43,14 @@ test('ordinary expense creation starts one-time while recurring fields preserve 
     await expect(timezone.locator('option')).not.toHaveCount(0);
     await expect(page.locator('.schedule-preview ol li')).toHaveCount(3);
     await expect(page.getByText('It continues until you pause or cancel it.')).toBeVisible();
-    await expect(page.getByText('Category and notes are saved only for one-time expenses.')).toBeVisible();
-    await expect(page.getByLabel('Category (optional)')).toBeDisabled();
-    await expect(page.getByLabel('Notes (optional)')).toBeDisabled();
+    await expect(page.getByText('Categories are saved with scheduled expenses. Notes are available for one-time expenses only.')).toBeVisible();
+    await expect(page.getByLabel('Category')).toHaveValue('Housing');
+    await expect(page.getByLabel('Notes (optional)')).toHaveCount(0);
 
     await page.getByLabel('Repeat this expense').uncheck();
     await expect(page.getByRole('heading', { name: 'Add expense' })).toBeVisible();
     await expect(page.getByLabel('Date')).toHaveValue('2026-01-15');
-    await expect(page.getByLabel('Category (optional)')).toHaveValue('Home');
+    await expect(page.getByLabel('Category')).toHaveValue('Housing');
     await expect(page.getByLabel('Notes (optional)')).toHaveValue('Keep this detail');
   } finally {
     await context.close();
@@ -79,6 +79,7 @@ test('legacy recurring route redirects with intent, submits only a schedule, and
     await page.getByRole('button', { name: 'Create schedule' }).click();
     await expect(page).toHaveURL(`${BASE_URL}/groups/${groupId}`);
     await expect(page.getByRole('heading', { name: 'Scheduled expenses' })).toBeVisible();
+    await page.locator('summary', { hasText: 'View scheduled expenses and actions' }).click();
     await expect(page.getByText(description, { exact: true })).toBeVisible();
     expect(postPaths).toContain(`/api/groups/${groupId}/scheduled-expenses`);
     expect(postPaths).not.toContain(`/api/groups/${groupId}/expenses`);
@@ -98,8 +99,8 @@ test('expense and scheduled-expense edit modes do not expose the new-expense rec
     await page.goto(`${BASE_URL}/groups/${groupId}/scheduled-expense/${scheduledExpenseId}`, { waitUntil: 'networkidle' });
     await expect(page.getByRole('heading', { name: 'Edit recurring expense' })).toBeVisible();
     await expect(page.getByLabel('Repeat this expense')).toHaveCount(0);
-    await expect(page.getByLabel('Category (optional)')).toBeDisabled();
-    await expect(page.getByLabel('Notes (optional)')).toBeDisabled();
+    await expect(page.getByLabel('Category')).toBeVisible();
+    await expect(page.getByLabel('Notes (optional)')).toHaveCount(0);
   } finally {
     await context.close();
   }
