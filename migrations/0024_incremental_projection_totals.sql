@@ -32,9 +32,9 @@ CREATE TABLE ledger_summary_state (
   expense_discovery_high_water TEXT,
   settlement_discovery_high_water TEXT,
   lease_owner TEXT,
-  lease_until TEXT,
+  lease_until_ms INTEGER,
   retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
-  next_attempt_at TEXT,
+  available_at_ms INTEGER NOT NULL,
   last_error TEXT,
   maintenance_due INTEGER NOT NULL DEFAULT 1 CHECK(maintenance_due IN (0,1)),
   updated_at TEXT NOT NULL
@@ -56,9 +56,9 @@ CREATE TABLE ledger_period_state (
   expense_high_water TEXT,
   settlement_high_water TEXT,
   lease_owner TEXT,
-  lease_until TEXT,
+  lease_until_ms INTEGER,
   retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
-  next_attempt_at TEXT,
+  retry_at_ms INTEGER,
   last_error TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(group_id,month)
@@ -77,6 +77,24 @@ CREATE TABLE ledger_period_totals (
   build_id TEXT NOT NULL, currency TEXT NOT NULL,
   gross_minor INTEGER NOT NULL CHECK(gross_minor >= 0), updated_at TEXT NOT NULL,
   PRIMARY KEY(group_id,month,build_id,currency)
+);
+
+-- A build is disposable only after it is no longer the published build or the
+-- build currently being verified.  The queue is deliberately independent of
+-- readiness so garbage collection can never make a ready read fall back.
+CREATE TABLE ledger_period_build_gc (
+  group_id TEXT NOT NULL REFERENCES groups(id),
+  month TEXT NOT NULL,
+  build_id TEXT NOT NULL,
+  enqueued_at_ms INTEGER NOT NULL,
+  available_at_ms INTEGER NOT NULL,
+  last_served_at_ms INTEGER,
+  lease_owner TEXT,
+  lease_until_ms INTEGER,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+  last_error TEXT,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(group_id,month,build_id)
 );
 CREATE TABLE ledger_checkpoint_balances (
   group_id TEXT NOT NULL REFERENCES groups(id), currency TEXT NOT NULL,
@@ -104,7 +122,11 @@ CREATE TABLE ledger_period_verify_totals (
 
 CREATE INDEX idx_ledger_verify_balances_chunk ON ledger_period_verify_balances(group_id,month,build_id);
 CREATE INDEX idx_ledger_verify_totals_chunk ON ledger_period_verify_totals(group_id,month,build_id);
-CREATE INDEX idx_ledger_summary_maintenance_due ON ledger_summary_state(maintenance_due,updated_at,group_id,next_attempt_at,lease_until);
+CREATE INDEX idx_ledger_summary_maintenance_due ON ledger_summary_state(maintenance_due,available_at_ms,updated_at,group_id);
+CREATE INDEX idx_ledger_period_gc_available ON ledger_period_build_gc(available_at_ms,last_served_at_ms,enqueued_at_ms,group_id,month,build_id);
+CREATE INDEX idx_ledger_period_gc_group ON ledger_period_build_gc(group_id,month,build_id);
+CREATE INDEX idx_ledger_period_eligible_month ON ledger_period_state(group_id,retry_at_ms,month)
+  WHERE status<>'ready' OR source_generation<>applied_generation OR active_build_id IS NULL;
 CREATE INDEX idx_ledger_period_non_ready ON ledger_period_state(group_id,status,source_generation,applied_generation,active_build_id,month)
   WHERE status<>'ready' OR source_generation<>applied_generation OR active_build_id IS NULL;
 CREATE INDEX idx_ledger_period_non_ready_month ON ledger_period_state(group_id,month)
@@ -140,12 +162,12 @@ CREATE INDEX idx_settlements_group_date_id ON settlements(group_id,settlement_da
 CREATE INDEX idx_scheduled_completion_due ON scheduled_expenses(status,end_date,generation_claim_id,next_occurrence_date,id);
 CREATE INDEX idx_scheduled_generation_cleanup ON scheduled_expenses(status,generation_claim_id,group_id,created_by,id);
 
-INSERT INTO ledger_summary_state(group_id,status,maintenance_due,updated_at)
-  SELECT id,'pending',1,CURRENT_TIMESTAMP FROM groups;
+INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,updated_at)
+  SELECT id,'pending',1,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),CURRENT_TIMESTAMP FROM groups;
 
 CREATE TRIGGER ledger_summary_group_insert_state AFTER INSERT ON groups BEGIN
-  INSERT INTO ledger_summary_state(group_id,status,maintenance_due,updated_at)
-    VALUES(NEW.id,'pending',1,CURRENT_TIMESTAMP) ON CONFLICT(group_id) DO NOTHING;
+  INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,updated_at)
+    VALUES(NEW.id,'pending',1,CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),CURRENT_TIMESTAMP) ON CONFLICT(group_id) DO NOTHING;
 END;
 
 -- A newly inserted period must be folded into the rolling checkpoint before
@@ -156,11 +178,11 @@ END;
 CREATE TRIGGER ledger_period_state_insert_maintenance AFTER INSERT ON ledger_period_state BEGIN
   UPDATE ledger_summary_state SET
     status=CASE WHEN status='ready' THEN 'pending' ELSE status END,
-    maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
+    maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
 END;
 CREATE TRIGGER ledger_period_state_dirty_maintenance AFTER UPDATE OF status,source_generation,applied_generation,active_build_id ON ledger_period_state
 WHEN NEW.status<>'ready' OR NEW.source_generation<>NEW.applied_generation OR NEW.active_build_id IS NULL BEGIN
-  UPDATE ledger_summary_state SET maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
+  UPDATE ledger_summary_state SET maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
 END;
 
 -- Old Workers have no mutation marker. They dirty exactly the affected month(s)
@@ -172,7 +194,7 @@ WHEN NEW.projection_mutation_id IS NULL BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(NEW.group_id,substr(NEW.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
 END;
 CREATE TRIGGER ledger_summary_expense_update_dirty AFTER UPDATE ON expenses
 WHEN NEW.projection_mutation_id IS OLD.projection_mutation_id
@@ -187,20 +209,20 @@ WHEN NEW.projection_mutation_id IS OLD.projection_mutation_id
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(NEW.group_id,substr(NEW.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id IN (OLD.group_id,NEW.group_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id IN (OLD.group_id,NEW.group_id);
 END;
 CREATE TRIGGER ledger_summary_expense_delete_dirty AFTER DELETE ON expenses BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(OLD.group_id,substr(OLD.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=OLD.group_id;
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=OLD.group_id;
 END;
 CREATE TRIGGER ledger_summary_settlement_insert_dirty AFTER INSERT ON settlements
 WHEN NEW.projection_mutation_id IS NULL BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(NEW.group_id,substr(NEW.settlement_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=NEW.group_id;
 END;
 CREATE TRIGGER ledger_summary_settlement_update_dirty AFTER UPDATE ON settlements
 WHEN NEW.projection_mutation_id IS OLD.projection_mutation_id
@@ -215,13 +237,13 @@ WHEN NEW.projection_mutation_id IS OLD.projection_mutation_id
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(NEW.group_id,substr(NEW.settlement_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id IN (OLD.group_id,NEW.group_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id IN (OLD.group_id,NEW.group_id);
 END;
 CREATE TRIGGER ledger_summary_settlement_delete_dirty AFTER DELETE ON settlements BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     VALUES(OLD.group_id,substr(OLD.settlement_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=OLD.group_id;
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=OLD.group_id;
 END;
 
 -- Legacy child writes resolve the parent month and queue only the new summary.
@@ -231,42 +253,42 @@ WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=NEW.expense_id AND e.projection_
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=NEW.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
 END;
 CREATE TRIGGER ledger_summary_payer_update_dirty AFTER UPDATE ON payers
 WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=NEW.expense_id AND e.projection_mutation_id IS NULL) BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=NEW.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
 END;
 CREATE TRIGGER ledger_summary_payer_delete_dirty AFTER DELETE ON payers
 WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=OLD.expense_id AND e.projection_mutation_id IS NULL) BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=OLD.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=OLD.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=OLD.expense_id);
 END;
 CREATE TRIGGER ledger_summary_split_insert_dirty AFTER INSERT ON splits
 WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=NEW.expense_id AND e.projection_mutation_id IS NULL) BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=NEW.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
 END;
 CREATE TRIGGER ledger_summary_split_update_dirty AFTER UPDATE ON splits
 WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=NEW.expense_id AND e.projection_mutation_id IS NULL) BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=NEW.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=NEW.expense_id);
 END;
 CREATE TRIGGER ledger_summary_split_delete_dirty AFTER DELETE ON splits
 WHEN EXISTS(SELECT 1 FROM expenses e WHERE e.id=OLD.expense_id AND e.projection_mutation_id IS NULL) BEGIN
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id=OLD.expense_id
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=OLD.expense_id);
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id=(SELECT group_id FROM expenses WHERE id=OLD.expense_id);
 END;
 
 -- Reassignment touches both parent months.
@@ -277,7 +299,7 @@ WHEN NEW.expense_id IS NOT OLD.expense_id
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id IN (OLD.expense_id,NEW.expense_id)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id IN (SELECT group_id FROM expenses WHERE id IN (OLD.expense_id,NEW.expense_id));
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id IN (SELECT group_id FROM expenses WHERE id IN (OLD.expense_id,NEW.expense_id));
 END;
 CREATE TRIGGER ledger_summary_split_reassign_dirty AFTER UPDATE OF expense_id ON splits
 WHEN NEW.expense_id IS NOT OLD.expense_id
@@ -286,7 +308,7 @@ WHEN NEW.expense_id IS NOT OLD.expense_id
   INSERT INTO ledger_period_state(group_id,month,status,source_generation,updated_at)
     SELECT e.group_id,substr(e.expense_date,1,7)||'-01','dirty',1,CURRENT_TIMESTAMP FROM expenses e WHERE e.id IN (OLD.expense_id,NEW.expense_id)
     ON CONFLICT(group_id,month) DO UPDATE SET source_generation=source_generation+1,status='dirty',updated_at=CURRENT_TIMESTAMP;
-  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=CURRENT_TIMESTAMP WHERE group_id IN (SELECT group_id FROM expenses WHERE id IN (OLD.expense_id,NEW.expense_id));
+  UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER),updated_at=CURRENT_TIMESTAMP WHERE group_id IN (SELECT group_id FROM expenses WHERE id IN (OLD.expense_id,NEW.expense_id));
 END;
 
 -- The legacy projection is still a public read surface for 0021 Workers.

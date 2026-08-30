@@ -100,7 +100,7 @@ export function summaryDelta(
   const guard = mutationGuard(mutation);
   const contributionJson = JSON.stringify(contributions.map((value) => ({ ...value, net_minor: value.net_minor * sign })));
   const grossJson = JSON.stringify(gross.map((value) => ({ ...value, gross_minor: value.gross_minor * sign })));
-  const newBuild = buildId();
+  const newBuild = buildId(), queueTime = Date.now();
   const guarded = (sql: string, args: unknown[]) => {
     const conflict = sql.indexOf(' ON CONFLICT');
     if (conflict < 0) return db.prepare(`${sql} AND ${guard.sql}`).bind(...args, ...guard.args);
@@ -120,23 +120,23 @@ export function summaryDelta(
         AND period.active_build_id IS NOT NULL)`;
   const readyPeriodArgs = [groupId, groupId];
   return [
-    db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,updated_at)
-      SELECT ?,'pending',1,? WHERE ${guard.sql} ON CONFLICT(group_id) DO NOTHING`).bind(groupId, timestamp, ...guard.args),
+    db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,updated_at)
+      SELECT ?,'pending',1,?,? WHERE ${guard.sql} ON CONFLICT(group_id) DO NOTHING`).bind(groupId, queueTime, timestamp, ...guard.args),
     // A first mutation in a period not represented by the rolling checkpoint
     // creates an unbounded ready tail if it is allowed to publish immediately.
     // Move the new summary out of ready before creating that period so reads
     // use the exact authoritative fallback until maintenance folds it.
-    guarded(`UPDATE ledger_summary_state SET status='pending',maintenance_due=1,updated_at=?
+    guarded(`UPDATE ledger_summary_state SET status='pending',maintenance_due=1,available_at_ms=?,updated_at=?
       WHERE group_id=? AND status='ready'
         AND EXISTS (SELECT 1 FROM (SELECT DISTINCT json_extract(value,'$.month') AS month FROM json_each(?)) delta
           WHERE delta.month>COALESCE(ledger_summary_state.checkpoint_through,'0000-00-00')
-            AND NOT EXISTS (SELECT 1 FROM ledger_period_state period WHERE period.group_id=ledger_summary_state.group_id AND period.month=delta.month))`, [timestamp, groupId, contributionJson]),
-    guarded(`UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,updated_at=? WHERE group_id=? AND status='ready' AND discovery_complete=1 AND maintenance_due=0
+            AND NOT EXISTS (SELECT 1 FROM ledger_period_state period WHERE period.group_id=ledger_summary_state.group_id AND period.month=delta.month))`, [queueTime, timestamp, groupId, contributionJson]),
+    guarded(`UPDATE ledger_summary_state SET status='dirty',maintenance_due=1,available_at_ms=?,updated_at=? WHERE group_id=? AND status='ready' AND discovery_complete=1 AND maintenance_due=0
       AND EXISTS (WITH deltas AS (SELECT json_extract(value,'$.month') month,json_extract(value,'$.currency') currency,SUM(json_extract(value,'$.gross_minor')) gross_minor FROM json_each(?) GROUP BY month,currency)
         SELECT 1 FROM deltas d JOIN ledger_period_state period ON period.group_id=? AND period.month=d.month AND period.status='ready'
         WHERE d.gross_minor<0 AND COALESCE((SELECT gross_minor FROM ledger_period_totals total
           JOIN ledger_period_state total_period ON total_period.group_id=total.group_id AND total_period.month=total.month AND total_period.active_build_id=total.build_id
-          WHERE total.group_id=? AND total.month=d.month AND total.currency=d.currency),0)+d.gross_minor<0)`, [timestamp, groupId, grossJson, groupId, groupId]),
+           WHERE total.group_id=? AND total.month=d.month AND total.currency=d.currency),0)+d.gross_minor<0)`, [queueTime, timestamp, groupId, grossJson, groupId, groupId]),
     guarded(`INSERT INTO ledger_period_state(group_id,month,status,source_generation,applied_generation,build_generation,active_build_id,updated_at)
       SELECT ?,json_extract(value,'$.month'),CASE WHEN (SELECT status FROM ledger_summary_state WHERE group_id=?)='ready' THEN 'ready' ELSE 'pending' END,
         0,0,0,CASE WHEN (SELECT status FROM ledger_summary_state WHERE group_id=?)='ready' THEN ? ELSE NULL END,?

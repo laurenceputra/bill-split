@@ -14,6 +14,14 @@ import { registerExpenseSettlementRoutes } from './expense-settlement-routes';
 export { parseAuthorizedParties } from './clerk-auth';
 
 type ApplicationAuth = { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
+export type CronStage = 'purge' | 'generation' | 'monthly-summary' | 'build-gc';
+const cronStages: CronStage[] = ['purge', 'generation', 'monthly-summary', 'build-gc'];
+const cronSlotMs = 15 * 60 * 1000;
+/** Rotate the first stage by scheduled slot so no stage is always last. */
+export const cronStageOrder = (scheduledTime: number): CronStage[] => {
+  const start = ((Math.floor(scheduledTime / cronSlotMs) % cronStages.length) + cronStages.length) % cronStages.length;
+  return [...cronStages.slice(start), ...cronStages.slice(0, start)];
+};
 type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
 const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
@@ -422,7 +430,7 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
     headers.set('Pragma', 'no-cache');
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
- }, async scheduled(controller: ScheduledController, env: Env['Bindings'], _ctx: ExecutionContext) {
+  }, async scheduled(controller: ScheduledController, env: Env['Bindings'], _ctx: ExecutionContext) {
   // Cron is deliberately bounded in the repository so a long-outage catch-up
   // cannot consume the entire invocation. A later tick resumes from the
   // template's next occurrence cursor.
@@ -433,33 +441,50 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
    let generation: Awaited<ReturnType<Repository['generateDueScheduledExpenses']>> | undefined;
     let sessions: Awaited<ReturnType<Repository['purgeExpiredApplicationSessions']>> | undefined;
     let summary: Awaited<ReturnType<Repository['monthlySummaryMaintenance']>> | undefined;
-    for (const [stage, run] of [
-      // Keep one bounded purge stage: application-session cleanup is part of
-      // purge rather than a fifth rotating stage.
-      ['purge', async () => { const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1 }); sessions = await repo.purgeExpiredApplicationSessions(asOf, 100); return result; }] as const,
-      ['generation', () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2 })] as const,
-      ['monthly-summary', () => repo.monthlySummaryMaintenance({ maxGroups: 1, maxMonths: 2, chunkSize: 100 })] as const,
-   ]) {
-     try {
-       const result = await run();
-       if (stage === 'purge') purge = result as typeof purge;
+    let buildGc: Awaited<ReturnType<Repository['ledgerPeriodBuildGarbageCollection']>> | undefined;
+    let capped = false;
+    let deadlineExhausted = false;
+    // Keep one deadline for every bounded Cron stage. The cursors and leases
+    // make an invocation that yields here safe to resume on the next tick.
+    const deadlineMs = Date.now() + 25_000;
+    const runs: Record<CronStage, () => Promise<unknown>> = {
+      // Application-session cleanup is part of purge, not a fifth rotating
+      // stage. Both operations share this invocation deadline.
+      purge: async () => {
+        const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1, deadlineMs });
+        if (Date.now() + 25 < deadlineMs) sessions = await repo.purgeExpiredApplicationSessions(asOf, 100);
+        return result;
+      },
+      generation: () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2, deadlineMs }),
+      'monthly-summary': () => repo.monthlySummaryMaintenance({ maxGroups: 1, maxMonths: 2, chunkSize: 100, deadlineMs }),
+      'build-gc': () => repo.ledgerPeriodBuildGarbageCollection({ maxBuilds: 1, chunkSize: 100, deadlineMs }),
+    };
+    for (const stage of cronStageOrder(controller.scheduledTime)) {
+      if (Date.now() >= deadlineMs) { capped = true; deadlineExhausted = true; break; }
+      try {
+        const result = await runs[stage]();
+        if (stage === 'purge') purge = result as typeof purge;
         else if (stage === 'generation') generation = result as typeof generation;
-        else summary = result as typeof summary;
-     } catch (error) {
-       failure ??= error;
-       console.error(JSON.stringify({ event: 'bill-split.cron', scheduledTime: controller.scheduledTime, stage, outcome: 'failed', error: error instanceof RepositoryError ? error.code : 'UNEXPECTED_ERROR' }));
-     }
-   }
+        else if (stage === 'monthly-summary') summary = result as typeof summary;
+        else buildGc = result as typeof buildGc;
+        if ((result as { capped?: boolean }).capped) capped = true;
+      } catch (error) {
+        failure ??= error;
+        console.error(JSON.stringify({ event: 'bill-split.cron', scheduledTime: controller.scheduledTime, stage, outcome: 'failed', error: error instanceof RepositoryError ? error.code : 'UNEXPECTED_ERROR' }));
+      }
+    }
    console.log(JSON.stringify({
      event: 'bill-split.cron',
      scheduledTime: controller.scheduledTime,
      outcome: failure ? 'failed' : 'completed',
       purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, capped: purge.capped } : undefined,
       sessionsPurged: sessions?.purged ?? 0,
-     generated: generation?.generated ?? 0,
-     blocked: generation?.blocked ?? 0,
-     generationCapped: generation?.capped ?? false,
-      monthlySummary: summary ? { groupsScanned: summary.groupsScanned, monthsScanned: summary.monthsScanned, monthsVerified: summary.monthsVerified, chunks: summary.chunks, groupsFailed: summary.groupsFailed, monthsFailed: summary.monthsFailed, capped: summary.capped } : { ready: false },
+      generated: generation?.generated ?? 0,
+      blocked: generation?.blocked ?? 0,
+      generationCapped: generation?.capped ?? deadlineExhausted,
+      monthlySummary: summary ? { groupsScanned: summary.groupsScanned, monthsScanned: summary.monthsScanned, monthsVerified: summary.monthsVerified, chunks: summary.chunks, groupsFailed: summary.groupsFailed, monthsFailed: summary.monthsFailed, capped: summary.capped } : { ready: false, capped },
+      buildGc: buildGc ? { buildsScanned: buildGc.buildsScanned, buildsCompleted: buildGc.buildsCompleted, balancesDeleted: buildGc.balancesDeleted, totalsDeleted: buildGc.totalsDeleted, capped: buildGc.capped } : { buildsScanned: 0, buildsCompleted: 0, balancesDeleted: 0, totalsDeleted: 0, capped },
+      capped,
    }));
    if (failure) throw failure;
  } };

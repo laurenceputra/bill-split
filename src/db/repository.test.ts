@@ -49,7 +49,7 @@ class BackfillLimitDb {
 class BackfillLimitStatement {
   args: unknown[] = [];
   constructor(private readonly db: BackfillLimitDb, readonly sql: string) {}
-  bind(...args: unknown[]) { this.args = args; if (this.sql.includes('SELECT g.id') || this.sql.includes('FROM ledger_summary_state state JOIN groups')) this.db.limit = args[0]; return this; }
+  bind(...args: unknown[]) { this.args = args; if (this.sql.includes('SELECT g.id') || this.sql.includes('FROM ledger_summary_state state JOIN groups')) this.db.limit = args[2]; return this; }
   async first<T>() { return this.sql.includes('ledger_summary_state') ? { status: 'pending', generation: 0 } as T : null; }
   async run() { return { meta: { changes: 1 } }; }
   async all<T>() { return { results: this.sql.includes('SELECT g.id') || this.sql.includes('FROM ledger_summary_state state JOIN groups') ? Array.from({ length: 10 }, (_, index) => ({ id: `group-${index}`, group_id: `group-${index}` })) as T[] : [] as T[] }; }

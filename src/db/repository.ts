@@ -7,11 +7,13 @@ import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, expenseProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard, projectionStatements, settlementProjectionDelta } from './ledger-projection';
+import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
+import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
+const withinDeadline = (deadlineMs?: number, reserveMs = 25) => deadlineMs == null || Date.now() + reserveMs < deadlineMs;
 const identityHash = async (value: string, key: string) => {
   const cryptoKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const digest = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(value));
@@ -176,11 +178,15 @@ export class Repository {
   private boundSettlementProjectionDelta(settlementId: string, groupId: string, currencyValue: string, fromPersonId: string, toPersonId: string, amountMinor: number, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundSettlementProjectionDelta(this.db, settlementId, groupId, currencyValue, fromPersonId, toPersonId, amountMinor, sign, timestamp, revisionId, date); }
   private projectionMutation(groupId: string, timestamp: string, entity: 'expenses' | 'settlements', id: string, revisionId?: string) { return projectionMutation(this.db, groupId, timestamp, entity, id, revisionId); }
 
-  async monthlySummaryMaintenance(options: { maxGroups?: number; maxMonths?: number; chunkSize?: number } = {}) {
+  async monthlySummaryMaintenance(options: { maxGroups?: number; maxMonths?: number; chunkSize?: number; deadlineMs?: number } = {}) {
     return runMonthlySummaryMaintenance(this.db, options);
   }
 
-  async projectionBackfill(options: { maxGroups?: number } = {}) { return this.monthlySummaryMaintenance(options); }
+  async ledgerPeriodBuildGarbageCollection(options: { maxBuilds?: number; chunkSize?: number; deadlineMs?: number } = {}) {
+    return ledgerPeriodBuildGarbageCollection(this.db, options);
+  }
+
+  async projectionBackfill(options: { maxGroups?: number; maxMonths?: number; chunkSize?: number; deadlineMs?: number } = {}) { return this.monthlySummaryMaintenance(options); }
 
   async balanceProjection(groupId: string) {
     const query = balanceProjectionQuery();
@@ -655,14 +661,14 @@ export class Repository {
   }
   async leaveMember(groupId: string, userId: string) { return this.leaveGroup(groupId, userId); }
   async createGroup(userId: string, personId: string, input: { name: string; currency: string }) {
-    const id = uid(), t = now();
+    const id = uid(), t = now(), queueTime = Date.now();
     const activeUser = this.activeUserGuard(userId);
     const createdGroup = `EXISTS (SELECT 1 FROM groups created_group WHERE created_group.id=? AND created_group.name=? AND created_group.currency=? AND created_group.created_at=? AND created_group.deleted_at IS NULL)
       AND EXISTS (SELECT 1 FROM group_members created_owner WHERE created_owner.group_id=? AND created_owner.person_id=? AND created_owner.user_id=? AND created_owner.role='owner' AND created_owner.deleted_at IS NULL)`;
     const result = await this.db.batch([
        this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
       this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND created_at=? AND deleted_at IS NULL)`).bind(id, personId, userId, t, ...activeUser.args, id, t),
-         this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,1,? WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
+          this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,?,1,? WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,available_at_ms=excluded.available_at_ms,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, queueTime, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
     ]);
     if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
@@ -689,7 +695,7 @@ export class Repository {
 
     let existing = email ? await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(email).first<Row>() : null;
     if (existing && (text(existing.id) === personId || text(existing.user_id) === userId)) throw new RepositoryError('SELF_FRIEND', 'You cannot add your own linked person as a friend');
-    const id = uid(), friendId = uid(), t = now();
+    const id = uid(), friendId = uid(), t = now(), queueTime = Date.now();
     const create = async (target: Row | null) => {
       const targetPersonId = target ? text(target.id) : friendId;
       const targetUserId = target?.user_id == null ? null : text(target.user_id);
@@ -698,7 +704,7 @@ export class Repository {
         this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, targetUserId, t, ...activeUser.args),
-         this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,1,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
+         this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,?,1,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,available_at_ms=excluded.available_at_ms,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, queueTime, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
         ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql}`).bind('friend.create', userId, id, operationId, hash, id, t, ...activeUser.args)] : []),
       ];
@@ -1032,7 +1038,7 @@ export class Repository {
       throw error;
     }
   }
-  async generateDueScheduledExpenses(asOf: Date | string = new Date(), options: { maxTemplates?: number; maxOccurrences?: number; maxOccurrencesPerTemplate?: number; maxCleanup?: number } = {}) {
+  async generateDueScheduledExpenses(asOf: Date | string = new Date(), options: { maxTemplates?: number; maxOccurrences?: number; maxOccurrencesPerTemplate?: number; maxCleanup?: number; deadlineMs?: number } = {}) {
     // One atomic generation batch is one D1 subrequest. Twenty templates and
     // twenty occurrences leave room for the candidate, bulk children, member
     // validation, and permanent-failure updates on the free-plan budget.
@@ -1044,13 +1050,14 @@ export class Repository {
     const maxOccurrences = Math.max(0, Math.min(options.maxOccurrences ?? 20, 20));
     const maxOccurrencesPerTemplate = Math.max(0, Math.min(options.maxOccurrencesPerTemplate ?? 20, 20));
     const maxCleanup = Math.max(0, Math.min(options.maxCleanup ?? 20, 20));
+    if (!withinDeadline(options.deadlineMs)) return { templatesScanned: 0, generated: 0, blocked: 0, processed: 0, capped: true };
     const utcDate = typeof asOf === 'string' ? asOf : localDateForTimeZone(asOf, 'UTC');
     const candidateThrough = typeof asOf === 'string' ? asOf : nextCalendarDate(utcDate);
-    await this.db.prepare("UPDATE scheduled_expenses SET status='completed',next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id IN (SELECT id FROM scheduled_expenses WHERE status='active' AND generation_claim_id IS NULL AND end_date IS NOT NULL AND end_date<=? AND (next_occurrence_date IS NULL OR next_occurrence_date>end_date) ORDER BY end_date,id LIMIT ?)").bind(now(), candidateThrough, maxCleanup).run();
+    if (withinDeadline(options.deadlineMs)) await this.db.prepare("UPDATE scheduled_expenses SET status='completed',next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id IN (SELECT id FROM scheduled_expenses WHERE status='active' AND generation_claim_id IS NULL AND end_date IS NOT NULL AND end_date<=? AND (next_occurrence_date IS NULL OR next_occurrence_date>end_date) ORDER BY end_date,id LIMIT ?)").bind(now(), candidateThrough, maxCleanup).run();
     // A creator can become inactive between deployments or through an older
     // membership path. Terminally cancel those rows before selecting due
     // work, otherwise an invalid active row can remain due forever.
-    await this.db.prepare(`UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1
+    if (withinDeadline(options.deadlineMs)) await this.db.prepare(`UPDATE scheduled_expenses SET status='cancelled',blocked_reason=NULL,next_occurrence_date=NULL,generation_claim_id=NULL,updated_at=?,version=version+1
       WHERE id IN (SELECT schedule.id FROM scheduled_expenses schedule
         WHERE schedule.status='active' AND (NOT EXISTS (SELECT 1 FROM users creator WHERE creator.id=schedule.created_by AND creator.deleted_at IS NULL)
           OR NOT EXISTS (SELECT 1 FROM group_members creator_member JOIN people creator_person ON creator_person.id=creator_member.person_id
@@ -1058,6 +1065,7 @@ export class Repository {
             WHERE creator_member.group_id=schedule.group_id AND creator_member.user_id=schedule.created_by
               AND creator_member.deleted_at IS NULL AND creator_person.deleted_at IS NULL AND creator_group.deleted_at IS NULL))
         ORDER BY schedule.id LIMIT ?)`).bind(now(), maxCleanup).run();
+    if (!withinDeadline(options.deadlineMs)) return { templatesScanned: 0, generated: 0, blocked: 0, processed: 0, capped: true };
     const cursorRow = await this.db.prepare('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1').first<Row>();
     const cursorId = cursorRow?.cursor_id == null ? null : text(cursorRow.cursor_id);
     const rows = (await this.db.prepare(`SELECT * FROM scheduled_expenses
@@ -1099,6 +1107,7 @@ export class Repository {
     while (processed < maxOccurrences && states.some((state) => !state.stopped && state.processed < maxOccurrencesPerTemplate)) {
       let madeProgress = false;
       for (const state of states) {
+        if (!withinDeadline(options.deadlineMs)) break;
         if (processed >= maxOccurrences || state.stopped || state.processed >= maxOccurrencesPerTemplate) continue;
         let { template, cursor } = state;
         try {
@@ -1134,8 +1143,8 @@ export class Repository {
       }
       if (!madeProgress) break;
     }
-    if (blockedTemplates.length) await this.db.batch(blockedTemplates.map(({ template, reason }) => this.db.prepare("UPDATE scheduled_expenses SET status='blocked',blocked_reason=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status='active' AND version=?").bind(reason, now(), template.id, template.version)));
-    return { templatesScanned: rows.length, generated, blocked, processed, capped: processed >= maxOccurrences || states.some((state) => !state.stopped && state.processed >= maxOccurrencesPerTemplate) };
+     if (blockedTemplates.length && withinDeadline(options.deadlineMs)) await this.db.batch(blockedTemplates.map(({ template, reason }) => this.db.prepare("UPDATE scheduled_expenses SET status='blocked',blocked_reason=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status='active' AND version=?").bind(reason, now(), template.id, template.version)));
+    return { templatesScanned: rows.length, generated, blocked, processed, capped: processed >= maxOccurrences || states.some((state) => !state.stopped && state.processed >= maxOccurrencesPerTemplate) || !withinDeadline(options.deadlineMs) };
   }
   async expensePage(groupId: string, opts: { q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit: number; cursor?: string; offset?: number }) {
     if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
@@ -1497,14 +1506,14 @@ export class Repository {
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.occurred_at), createdAt: text(last.occurred_at), id: text(last.id) }) : undefined };
   }
-  async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number } = {}) {
+  async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number; deadlineMs?: number } = {}) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf, cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     // Financial detail is permanent for active groups. Deleted groups are the
     // exception, and are drained in bounded, FK-safe chunks before the group
      // tombstone itself is removed. A durable (deleted_at,id) cursor provides
      // round-robin progress without sorting the whole tombstone range.
     const maxTransactions = Math.min(Math.max(options.maxTransactions ?? 8, 1), 100), maxGroups = Math.min(Math.max(options.maxGroups ?? 4, 0), 20);
-     const groups = (await this.db.prepare(`WITH purge_cursor AS (
+     const groups = withinDeadline(options.deadlineMs) ? (await this.db.prepare(`WITH purge_cursor AS (
          SELECT deleted_at AS cursor_deleted_at,group_id AS cursor_group_id FROM group_purge_cursor WHERE id=1
        ), after_cursor AS (
          SELECT g.id,g.deleted_at,0 AS wrapped FROM groups g CROSS JOIN purge_cursor
@@ -1520,17 +1529,22 @@ export class Repository {
            ORDER BY g.deleted_at,g.id LIMIT ?
        )
        SELECT id,deleted_at FROM (SELECT * FROM after_cursor UNION ALL SELECT * FROM before_cursor)
-         ORDER BY wrapped,deleted_at,id LIMIT ?`).bind(cutoff, maxGroups, cutoff, maxGroups, maxGroups).all<Row>()).results;
-    let transactionsScanned = 0, transactionsPurged = 0, auditEventsPurged = 0, groupsPurged = 0, incomplete = false;
-    for (const row of groups) {
+          ORDER BY wrapped,deleted_at,id LIMIT ?`).bind(cutoff, maxGroups, cutoff, maxGroups, maxGroups).all<Row>()).results
+      : [] as Row[];
+     let transactionsScanned = 0, transactionsPurged = 0, auditEventsPurged = 0, groupsPurged = 0, incomplete = false;
+     for (const row of groups) {
+       if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
       const groupId = text(row.id);
-       const [expenseRows, settlementRows] = await Promise.all([
-         this.db.prepare("SELECT id,'expense' AS entity_type FROM expenses WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>(),
-         this.db.prepare("SELECT id,'settlement' AS entity_type FROM settlements WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>(),
-       ]);
+        // Check between each bounded substep. In particular, do not start a
+        // second query or batch after the shared Cron deadline has expired.
+        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+        const expenseRows = await this.db.prepare("SELECT id,'expense' AS entity_type FROM expenses WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>();
+        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+        const settlementRows = await this.db.prepare("SELECT id,'settlement' AS entity_type FROM settlements WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>();
        const transactions = [...expenseRows.results, ...settlementRows.results].sort((left, right) => text(left.id).localeCompare(text(right.id))).slice(0, maxTransactions);
       transactionsScanned += transactions.length;
-      const transactionResult = await this.db.batch([
+       if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+       const transactionResult = await this.db.batch([
          this.db.prepare(`DELETE FROM attachments WHERE id IN (SELECT attachment.id FROM attachments attachment JOIN expenses expense ON expense.id=attachment.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
         // Occurrences are both schedule children and expense FK children.
          this.db.prepare(`DELETE FROM scheduled_occurrences WHERE rowid IN (SELECT occurrence.rowid FROM scheduled_occurrences occurrence JOIN expenses expense ON expense.id=occurrence.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
@@ -1559,8 +1573,10 @@ export class Repository {
       ]);
       transactionsPurged += Number((transactionResult[5] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
       transactionsPurged += Number((transactionResult[7] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-      const remainingTransaction = await this.db.prepare('SELECT 1 FROM expenses WHERE group_id=? UNION ALL SELECT 1 FROM settlements WHERE group_id=? LIMIT 1').bind(groupId, groupId).first<Row>();
-      const remainingSchedule = await this.db.prepare('SELECT 1 FROM scheduled_expenses WHERE group_id=? LIMIT 1').bind(groupId).first<Row>();
+       if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+       const remainingTransaction = await this.db.prepare('SELECT 1 FROM expenses WHERE group_id=? UNION ALL SELECT 1 FROM settlements WHERE group_id=? LIMIT 1').bind(groupId, groupId).first<Row>();
+       if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+       const remainingSchedule = await this.db.prepare('SELECT 1 FROM scheduled_expenses WHERE group_id=? LIMIT 1').bind(groupId).first<Row>();
       if (remainingTransaction || remainingSchedule) {
         incomplete = true;
         await this.db.batch([
@@ -1573,12 +1589,14 @@ export class Repository {
       // Once authoritative rows are gone, every derived/compatibility table
       // gets its own bounded rowid/key delete. Never issue an unbounded
       // group-wide DELETE: large audit/build histories must yield to Cron.
-      const metadataResult = await this.db.batch([
+       if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
+       const metadataResult = await this.db.batch([
         this.db.prepare('DELETE FROM audit_events WHERE rowid IN (SELECT rowid FROM audit_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         this.db.prepare('DELETE FROM group_membership_events WHERE rowid IN (SELECT rowid FROM group_membership_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
-        this.db.prepare('DELETE FROM ledger_period_balances WHERE rowid IN (SELECT rowid FROM ledger_period_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
-        this.db.prepare('DELETE FROM ledger_period_totals WHERE rowid IN (SELECT rowid FROM ledger_period_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
-        this.db.prepare('DELETE FROM ledger_period_verify_balances WHERE rowid IN (SELECT rowid FROM ledger_period_verify_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM ledger_period_balances WHERE rowid IN (SELECT rowid FROM ledger_period_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM ledger_period_totals WHERE rowid IN (SELECT rowid FROM ledger_period_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM ledger_period_build_gc WHERE rowid IN (SELECT rowid FROM ledger_period_build_gc WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM ledger_period_verify_balances WHERE rowid IN (SELECT rowid FROM ledger_period_verify_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         this.db.prepare('DELETE FROM ledger_period_verify_totals WHERE rowid IN (SELECT rowid FROM ledger_period_verify_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         this.db.prepare('DELETE FROM ledger_checkpoint_balances WHERE rowid IN (SELECT rowid FROM ledger_checkpoint_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         this.db.prepare('DELETE FROM ledger_checkpoint_totals WHERE rowid IN (SELECT rowid FROM ledger_checkpoint_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
@@ -1603,8 +1621,9 @@ export class Repository {
           AND NOT EXISTS (SELECT 1 FROM audit_events child WHERE child.group_id=groups.id)
           AND NOT EXISTS (SELECT 1 FROM group_membership_events child WHERE child.group_id=groups.id)
           AND NOT EXISTS (SELECT 1 FROM ledger_period_balances child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_period_totals child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_balances child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_totals child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_build_gc child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_balances child WHERE child.group_id=groups.id)
           AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_totals child WHERE child.group_id=groups.id)
           AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_balances child WHERE child.group_id=groups.id)
           AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_totals child WHERE child.group_id=groups.id)
@@ -1624,7 +1643,7 @@ export class Repository {
         await this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff).run();
       }
     }
-    return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: incomplete || groups.length >= maxGroups };
+    return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: incomplete || groups.length >= maxGroups || !withinDeadline(options.deadlineMs) };
   }
   async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }) {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options.cursor);
