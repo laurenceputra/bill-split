@@ -20,7 +20,6 @@ const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string, details?: Record<string, unknown>) => c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
 export const MAX_API_BODY_BYTES = 64 * 1024;
-export const LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS = Date.parse('2026-10-15T00:00:00Z');
 // Manual CSP follows Clerk's current CSP guidance. The FAPI origin is decoded
 // from the configured publishable key rather than assuming it is the app
 // origin. See https://clerk.com/docs/guides/secure/best-practices/csp-headers.md
@@ -108,14 +107,6 @@ const allowsMutation = (c: any) => {
   // or an application route.
   return exactOrigin || trustedFetchSite || /^Bearer\s+\S+$/i.test(authorization ?? '');
 };
-const isLegacyMeBridgeRequest = (c: any) => {
-  const request = c.req.raw as Request;
-  const url = new URL(request.url);
-  const origin = request.headers.get('Origin');
-  const fetchSite = request.headers.get('Sec-Fetch-Site');
-  return request.method === 'GET' && url.pathname === '/api/me' && !url.search && request.headers.get('X-Requested-With') === 'XMLHttpRequest'
-    && (origin === null || origin === url.origin) && (fetchSite === null || fetchSite === 'same-origin');
-};
 const repositoryError = (c: any, error: unknown) => {
    if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
   throw error;
@@ -170,7 +161,6 @@ const authForClerkClaims = async (repo: Repository, identityClaims: Awaited<Retu
     id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId,
   } satisfies ApplicationAuth;
 };
-const authForClerkIdentity = async (c: any, repo: Repository) => authForClerkClaims(repo, await authenticateClerkIdentity(c));
 const issueApplicationSession = async (c: any, auth: ApplicationAuth) => {
   const token = randomSessionToken();
   const createdAt = new Date().toISOString();
@@ -247,8 +237,7 @@ api.use('/api/*', async (c, next) => {
   }
 
   // Clerk is used only to bootstrap a new application session. Every other
-  // ordinary API request requires the app cookie, except for the temporary
-  // legacy GET /api/me recovery bridge.
+  // ordinary API request, including GET /api/me, requires the app cookie.
   if (pathname === '/api/session/bootstrap') {
     try {
       const repo = repositoryFor(env);
@@ -279,20 +268,6 @@ api.use('/api/*', async (c, next) => {
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
       return;
-    }
-    if (Date.now() < LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS && isLegacyMeBridgeRequest(c)) {
-      try {
-        const auth = await authForClerkIdentity(c, repo);
-        c.set('repo', repo);
-        const sessionAuth = await issueApplicationSession(c, auth);
-        c.set('auth', sessionAuth); c.header('X-BillSplit-User-Id', sessionAuth.id); c.header('X-BillSplit-Session-Bootstrapped', 'legacy-me');
-        await next();
-        return;
-      } catch (error) {
-        if (error instanceof ClerkAuthenticationError) return jsonError(c, 401, error.code, error.message);
-        if (error instanceof RepositoryError) return repositoryError(c, error);
-        return jsonError(c, 401, 'AUTH_INVALID', 'The Clerk session could not be verified');
-      }
     }
     // This is the sole post-commit recovery exception. It is available only
     // for DELETE /account, requires a fresh Clerk identity bound to the

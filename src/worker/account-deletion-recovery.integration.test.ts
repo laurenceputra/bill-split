@@ -5,7 +5,7 @@ vi.mock('@clerk/backend', () => ({
   createClerkClient: vi.fn(() => ({ authenticateRequest: clerkAuthenticateRequest })),
 }));
 
-import worker, { LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS } from './index';
+import worker from './index';
 
 const deletedUser = { id: 'deleted-user', email: 'deleted+deleted-user@billsplit.invalid', clerk_user_id: null, deleted_at: '2026-08-01T00:00:00.000Z' };
 class RecoveryStatement {
@@ -78,12 +78,6 @@ const recoveryHeaders = {
   'X-BillSplit-CSRF': 'csrf-token',
   'Content-Type': 'application/json',
 };
-const legacyMeBridgeHeaders = {
-  Origin: 'https://split.example',
-  'Sec-Fetch-Site': 'same-origin',
-  'X-Requested-With': 'XMLHttpRequest',
-};
-
 beforeEach(() => {
   clerkAuthenticateRequest.mockReset();
   clerkAuthenticateRequest.mockResolvedValue({
@@ -94,56 +88,6 @@ beforeEach(() => {
 });
 
 describe('production account deletion recovery boundary', () => {
-  it('bridges a legacy GET /api/me into an application session before the cutoff', async () => {
-    const now = vi.spyOn(Date, 'now').mockReturnValue(LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS - 1);
-    try {
-      const db = new SessionDb();
-      const response = await worker.fetch(new Request('https://split.example/api/me', { headers: legacyMeBridgeHeaders }), env(db), {} as ExecutionContext);
-
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({ id: 'user-current', email: 'current@example.com', personId: 'person-current' });
-      expect(response.headers.get('X-BillSplit-Session-Bootstrapped')).toBe('legacy-me');
-      expect(response.headers.get('Set-Cookie')).toContain('billsplit_csrf=');
-      expect(response.headers.get('Set-Cookie')).toContain('__Host-billsplit_session=');
-      expect(db.createdSessions).toBe(1);
-      expect(clerkAuthenticateRequest).toHaveBeenCalledOnce();
-    } finally {
-      now.mockRestore();
-    }
-  });
-
-  it('keeps non-/me requests application-session-only', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/groups', { headers: legacyMeBridgeHeaders }), env(new SessionDb()), {} as ExecutionContext);
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: 'AUTH_REQUIRED' } });
-    expect(clerkAuthenticateRequest).not.toHaveBeenCalled();
-  });
-
-  it('does not bridge requests with conflicting browser metadata', async () => {
-    for (const headers of [
-      { ...legacyMeBridgeHeaders, Origin: 'https://evil.example' },
-      { ...legacyMeBridgeHeaders, 'Sec-Fetch-Site': 'cross-site' },
-    ]) {
-      const response = await worker.fetch(new Request('https://split.example/api/me', { headers }), env(new SessionDb()), {} as ExecutionContext);
-      expect(response.status).toBe(401);
-    }
-    expect(clerkAuthenticateRequest).not.toHaveBeenCalled();
-  });
-
-  it('disables the legacy bridge at the absolute cutoff', async () => {
-    const now = vi.spyOn(Date, 'now').mockReturnValue(LEGACY_ME_SESSION_BRIDGE_CUTOFF_MS);
-    try {
-      const response = await worker.fetch(new Request('https://split.example/api/me', { headers: legacyMeBridgeHeaders }), env(new SessionDb()), {} as ExecutionContext);
-
-      expect(response.status).toBe(401);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: 'AUTH_REQUIRED' } });
-      expect(clerkAuthenticateRequest).not.toHaveBeenCalled();
-    } finally {
-      now.mockRestore();
-    }
-  });
-
   it('retries a committed deletion with a fresh matching Clerk identity after the app session was revoked', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/account', {
       method: 'DELETE', headers: recoveryHeaders, body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }),
