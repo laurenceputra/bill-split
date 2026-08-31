@@ -1,7 +1,6 @@
--- 0022: independently verified monthly ledger summaries.
+-- 0024: independently verified monthly ledger summaries.
 --
--- Production is only through 0021.  This migration may therefore replace the
--- unfinished 0022 design.  Financial tables remain authoritative; everything
+-- Production is only through 0023. Financial tables remain authoritative; everything
 -- below is disposable, derived state.
 
 -- 0003's transaction-wide scans are replaced by the hybrid guards below.
@@ -336,7 +335,7 @@ END;
 -- Ready groups use the compact exact total. The old-worker dirty triggers only
 -- queue the monthly summary, so legacy readiness remains an independent
 -- compatibility concern during the rollout.
--- Only the 0022-owned summary state selects the compact path. In particular,
+-- Only the 0024-owned summary state selects the compact path. In particular,
 -- never use projection_state here: an older Worker may still use its status,
 -- reconciliation_due, and ledger_totals_ready columns as a full-rebuild queue.
 CREATE TRIGGER expenses_ledger_total_guard_insert BEFORE INSERT ON expenses WHEN NEW.deleted_at IS NULL AND EXISTS(SELECT 1 FROM ledger_summary_state state WHERE state.group_id=NEW.group_id AND state.status='ready' AND state.discovery_complete=1 AND state.maintenance_due=0) AND COALESCE((SELECT gross_minor FROM ledger_totals WHERE group_id=NEW.group_id AND currency=NEW.currency),0)>9007199254740991-NEW.amount_minor BEGIN SELECT RAISE(ABORT,'BALANCE_OVERFLOW'); END;

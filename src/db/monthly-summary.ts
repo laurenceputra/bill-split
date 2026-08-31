@@ -120,6 +120,12 @@ export async function ledgerPeriodBuildGarbageCollection(db: D1Database, options
         await db.prepare(`UPDATE ledger_period_build_gc SET lease_owner=NULL,lease_until_ms=NULL,available_at_ms=?,last_error=NULL,updated_at_ms=?
           WHERE group_id=? AND month=? AND build_id=? AND lease_owner=?`).bind(at, at, groupId, month, buildId, owner).run();
       }
+      // A caller can enqueue a build after it becomes active. It is excluded
+      // from candidate selection for safety, but remove that obsolete queue
+      // row once this invocation has done real GC work so it cannot linger
+      // behind unrelated orphan builds.
+      await db.prepare(`DELETE FROM ledger_period_build_gc WHERE group_id=? AND month=?
+        AND EXISTS (SELECT 1 FROM ledger_period_state p WHERE p.group_id=? AND p.month=? AND p.active_build_id=ledger_period_build_gc.build_id)`).bind(groupId, month, groupId, month).run();
     } catch (error) {
       incomplete = true;
       await db.prepare(`UPDATE ledger_period_build_gc SET lease_owner=NULL,lease_until_ms=NULL,available_at_ms=?,last_error=?,updated_at_ms=?

@@ -296,7 +296,7 @@ whole-database totals rebuild.
 The older projection wording in the preceding historical paragraph is retained
 for migration context only. The current Worker uses the monthly/checkpoint
 tables and readiness rules documented below; it does not use a mutation-count
-threshold or read `group_balance_projection`. Migration 0022 replaces the
+threshold or read `group_balance_projection`. Migration 0024 replaces the
 legacy 0003 aggregate triggers with hybrid guards; its dirty triggers preserve
 safe fallback behavior for old Workers.
 
@@ -362,7 +362,7 @@ intentionally not rate limited.
 
 ### Operations
 
-Migration 0022 is a hybrid replacement of the legacy 0003 guards. Existing groups start
+Migration 0024 is a hybrid replacement of the legacy 0003 guards. Existing groups start
 pending in `ledger_summary_state` and use authoritative fallback reads while
 bounded maintenance scans immutable expense/settlement IDs into compact
 verification rows. Generation CAS, leases, retry metadata, and per-month
@@ -378,7 +378,7 @@ and never read legacy `group_balance_projection`; pending, dirty, missing, and
  triggers update only the new monthly maintenance state; new-worker mutations
  leave the legacy `projection_state.status` and ready projection untouched.
 
-Migration 0022 uses a staged monthly rollout. It does not rebuild the whole
+Migration 0024 uses a staged monthly rollout. It does not rebuild the whole
 database or repurpose legacy projection tables, but it does replace the legacy
 0003 aggregate triggers with hybrid guards. Existing groups remain pending
 until bounded maintenance verifies each month; ready reads combine the rolling
