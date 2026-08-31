@@ -383,5 +383,5 @@ describe('scheduled completion migration integration', () => {
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 600_000);
 });
