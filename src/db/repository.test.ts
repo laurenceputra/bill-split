@@ -109,6 +109,31 @@ class ApplicationSessionStatement {
   }
 }
 
+class PurgeAccountingDb {
+  metadataPass = 0;
+  prepare(sql: string) { return new PurgeAccountingStatement(sql); }
+  async batch(statements: PurgeAccountingStatement[]) {
+    if (!statements.some((statement) => statement.sql.includes('DELETE FROM groups WHERE'))) return [];
+    const result = statements.map(() => ({ meta: { changes: 0 } }));
+    const memberDelete = statements.findIndex((statement) => statement.sql.includes('DELETE FROM group_members WHERE'));
+    const parentDelete = statements.findIndex((statement) => statement.sql.includes('DELETE FROM groups WHERE'));
+    if (this.metadataPass++ === 0) result[memberDelete] = { meta: { changes: 1 } };
+    else result[parentDelete] = { meta: { changes: 1 } };
+    return result;
+  }
+}
+class PurgeAccountingStatement {
+  args: unknown[] = [];
+  constructor(readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async all<T>() {
+    if (this.sql.includes('WITH purge_cursor')) return { results: [{ id: 'expired-group', deleted_at: '2026-01-01T00:00:00.000Z' }] as T[] };
+    return { results: [] as T[] };
+  }
+  async first<T>() { return null as T | null; }
+  async run() { return { meta: { changes: 1 } }; }
+}
+
 describe('repository application sessions', () => {
   it('creates sessions with the shared idle expiration policy', async () => {
     const db = new ApplicationSessionDb();
@@ -137,6 +162,19 @@ describe('repository application sessions', () => {
       asOf,
       new Date(Date.parse(asOf) - APPLICATION_SESSION_ACTIVITY_THROTTLE_MS).toISOString(),
     ]);
+  });
+});
+
+describe('repository expired-group purge accounting', () => {
+  it('counts only actual parent deletions, including after members were removed', async () => {
+    const db = new PurgeAccountingDb();
+    const repo = new Repository(db as never);
+
+    const blocked = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxGroups: 1 });
+    expect(blocked.groupsPurged).toBe(0);
+
+    const purged = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxGroups: 1 });
+    expect(purged.groupsPurged).toBe(1);
   });
 });
 

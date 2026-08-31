@@ -397,14 +397,18 @@ describe('home balance summaries against local D1', () => {
        // the next deleted group must make progress instead of being starved.
        const firstPurge = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 100, maxGroups: 1 });
        expect(firstPurge.groupsScanned).toBe(1);
+       expect(firstPurge.groupsPurged).toBe(0);
        expect(execute("SELECT COUNT(*) AS count FROM audit_events WHERE group_id='group-3'").rows).toEqual([{ count: 101 }]);
        const secondPurge = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 100, maxGroups: 1 });
        expect(secondPurge.groupsScanned).toBe(1);
+       expect(secondPurge.groupsPurged).toBe(0);
        expect(execute("SELECT COUNT(*) AS count FROM audit_events WHERE group_id='group-3'").rows).toEqual([{ count: 1 }]);
        let purged = { groupsPurged: 0 };
        for (let pass = 0; pass < 12 && execute("SELECT id FROM groups WHERE id IN ('group-2','group-3')").rows.length; pass += 1) {
          purged = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 100, maxGroups: 1 });
        }
+       // A later pass can delete the parent after members were already
+       // removed; the member DELETE then reports zero changes.
        expect(purged.groupsPurged).toBe(1);
        expect(execute("SELECT id FROM groups WHERE id='group-2'").rows).toEqual([]);
        expect(execute("SELECT id FROM expenses WHERE group_id='group-2'").rows).toEqual([]);

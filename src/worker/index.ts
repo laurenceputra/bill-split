@@ -451,8 +451,8 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
       // Application-session cleanup is part of purge, not a fifth rotating
       // stage. Both operations share this invocation deadline.
       purge: async () => {
+        sessions = await repo.purgeExpiredApplicationSessions(asOf, 100);
         const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1, deadlineMs });
-        if (Date.now() + 25 < deadlineMs) sessions = await repo.purgeExpiredApplicationSessions(asOf, 100);
         return result;
       },
       generation: () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2, deadlineMs }),

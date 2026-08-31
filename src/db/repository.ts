@@ -1588,8 +1588,31 @@ export class Repository {
       // gets its own bounded rowid/key delete. Never issue an unbounded
       // group-wide DELETE: large audit/build histories must yield to Cron.
        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
-       const metadataResult = await this.db.batch([
-        this.db.prepare('DELETE FROM audit_events WHERE rowid IN (SELECT rowid FROM audit_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+        const auditEventsDelete = this.db.prepare('DELETE FROM audit_events WHERE rowid IN (SELECT rowid FROM audit_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions);
+        const parentDelete = this.db.prepare(`DELETE FROM groups WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?
+           AND NOT EXISTS (SELECT 1 FROM expenses child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM settlements child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM scheduled_expenses child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM group_members child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM group_invitations child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM audit_events child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM group_membership_events child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_balances child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM ledger_period_totals child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM ledger_period_build_gc child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_balances child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_totals child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_balances child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_totals child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_period_state child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_summary_state child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM group_balance_projection child WHERE child.group_id=groups.id)
+           AND NOT EXISTS (SELECT 1 FROM ledger_totals child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM projection_state child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM group_split_defaults child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM idempotency_keys child WHERE child.group_id=groups.id)`).bind(groupId, cutoff);
+        const metadataStatements = [
+         auditEventsDelete,
         this.db.prepare('DELETE FROM group_membership_events WHERE rowid IN (SELECT rowid FROM group_membership_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
          this.db.prepare('DELETE FROM ledger_period_balances WHERE rowid IN (SELECT rowid FROM ledger_period_balances WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
          this.db.prepare('DELETE FROM ledger_period_totals WHERE rowid IN (SELECT rowid FROM ledger_period_totals WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
@@ -1610,32 +1633,13 @@ export class Repository {
         // The parent delete repeats the dependent checks in the same D1
         // batch. It therefore cannot race a later metadata insert and never
         // removes a group whose dependent table still contains a row.
-        this.db.prepare(`DELETE FROM groups WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?
-          AND NOT EXISTS (SELECT 1 FROM expenses child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM settlements child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM scheduled_expenses child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM group_members child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM group_invitations child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM audit_events child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM group_membership_events child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_period_balances child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM ledger_period_totals child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM ledger_period_build_gc child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_balances child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_period_verify_totals child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_balances child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_checkpoint_totals child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_period_state child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_summary_state child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM group_balance_projection child WHERE child.group_id=groups.id)
-          AND NOT EXISTS (SELECT 1 FROM ledger_totals child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM projection_state child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM group_split_defaults child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM idempotency_keys child WHERE child.group_id=groups.id)`).bind(groupId, cutoff),
+         parentDelete,
          this.db.prepare('UPDATE group_purge_cursor SET deleted_at=?,group_id=?,updated_at=? WHERE id=1').bind(text(row.deleted_at), groupId, now()),
-      ]);
-      auditEventsPurged += Number((metadataResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-       if (Number((metadataResult[17] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0)) groupsPurged += 1;
+       ];
+       const metadataResult = await this.db.batch(metadataStatements);
+       const changesFor = (statement: (typeof metadataStatements)[number]) => Number((metadataResult[metadataStatements.indexOf(statement)] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+       auditEventsPurged += changesFor(auditEventsDelete);
+        if (changesFor(parentDelete) > 0) groupsPurged += 1;
       else {
         incomplete = true;
         await this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff).run();

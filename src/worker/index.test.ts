@@ -192,6 +192,25 @@ describe('worker boundary', () => {
     }
   });
 
+  it('runs session purge before group purge can exhaust the shared deadline', async () => {
+    let currentTime = 1_000;
+    const sessions = vi.spyOn(Repository.prototype, 'purgeExpiredApplicationSessions').mockResolvedValue({ purged: 7, capped: false });
+    const purge = vi.spyOn(Repository.prototype, 'purgeExpiredData').mockImplementation(async () => {
+      currentTime = 30_000;
+      return { capped: true } as any;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    try {
+      await worker.scheduled?.({ type: 'scheduled', cron: '* * * * *', scheduledTime: 0, noRetry: () => undefined } as ScheduledController, env(), {} as ExecutionContext);
+      const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
+      expect(sessions).toHaveBeenCalledWith(new Date(0), 100);
+      expect(record).toMatchObject({ sessionsPurged: 7, capped: true });
+    } finally {
+      sessions.mockRestore(); purge.mockRestore(); log.mockRestore(); clock.mockRestore();
+    }
+  });
+
   it('sanitizes bootstrap return paths', async () => {
     const { sanitizeReturnTo } = await import('./index');
     expect(sanitizeReturnTo('/groups/g-1?tab=activity#ledger')).toBe('/groups/g-1?tab=activity#ledger');

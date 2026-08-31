@@ -2028,6 +2028,7 @@ export async function getTransactionPage(groupId: string, options: TransactionPa
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const expectedUserId = getVerifiedUserId();
+  const requestMutationGeneration = expectedUserId ? (await cacheRead(() => readMutationGeneration(expectedUserId)) ?? 0) : 0;
   const query = new URLSearchParams(pageParams({ limit: options.limit ?? 25, cursor: options.cursor }));
   for (const [key, value] of transactionFilterQuery(options).entries()) query.set(key, value);
   try {
@@ -2040,8 +2041,7 @@ export async function getTransactionPage(groupId: string, options: TransactionPa
     }
     const firstUnfilteredPage = options.cursor === undefined && !hasTransactionFilters(options);
     if (result.userId && firstUnfilteredPage) {
-      const mutationGeneration = await cacheRead(() => readMutationGeneration(result.userId!)) ?? 0;
-      const persisted = await persistTransactionResponse(result.userId!, groupId, result.data.transactions, result.data.nextCursor, options.limit ?? 25, mutationGeneration, generation);
+      const persisted = await persistTransactionResponse(result.userId!, groupId, result.data.transactions, result.data.nextCursor, options.limit ?? 25, requestMutationGeneration, generation);
       if (persisted === false || !isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
     }
     return result.data;
