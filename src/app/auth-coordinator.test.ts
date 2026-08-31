@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, api, authRouteCacheKey, clearAuthRequired, clearEverythingForLogout, coordinateAuthBootstrap, getAuthLifecycle, getMe, getVerifiedClerkUserId, getVerifiedUserId, isIncompleteLoadedSignedInEvidence, isPrivateCacheRouteCurrent, isRetryableAuthFailure, recoverAfterClerkSignOutFailure, requestAuthProbe, resumeAuthVerification, scheduleAuthVerification, setForegroundRetrySchedulerForTests, signalConnectionChecking, subscribeAuthLifecycle } from './api';
-import { DB_NAME, listOutbox, readOfflineTrust, revokeOfflineTrust, saveActivity, saveCategories, saveOfflineTrust, updateGroupSnapshot } from './idb';
+import { DB_NAME, listOutbox, readOfflineTrust, revokeOfflineTrust, saveActivity, saveCategories, saveGroups, saveOfflineTrust, updateGroupSnapshot } from './idb';
 import * as idb from './idb';
 import { getResourceSnapshot, resourceKeys } from './resource-cache';
 import { clearSessionLogout } from './session';
@@ -491,6 +491,33 @@ describe('Clerk auth bootstrap coordinator', () => {
     expect(getResourceSnapshot<{ transactions: Array<{ id: string }> }>(resourceKeys.transactions('transactions-route-user', 'transactions-route-group', transactionFilterKey({}))).data?.transactions[0]).toMatchObject({ id: 'history-0' });
   });
 
+  it('requires group context before restoring scoped activity transactions', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    recoverAfterClerkSignOutFailure();
+    clearAuthRequired();
+    await saveOfflineTrust({ userId: 'activity-transactions-user', email: 'activity-transactions@example.com', personId: 'activity-transactions-person', clerkUserId: 'clerk-burst', verifiedAt: new Date().toISOString() });
+    const groupId = 'activity-transactions-group';
+    await saveGroups({ userId: 'activity-transactions-user', groups: [{ id: groupId, name: 'Activity transactions', currency: 'USD', createdAt: '', updatedAt: '', role: 'member', memberCount: 1 }], cachedAt: new Date().toISOString() });
+    const transaction = (id: string) => ({ kind: 'expense' as const, id, groupId, description: id, amountMinor: 100, currency: 'USD' as const, date: '2026-08-24', category: null, notes: null, createdBy: 'activity-transactions-user', createdAt: '' });
+    await updateGroupSnapshot('activity-transactions-user', groupId, { transactions: Array.from({ length: 25 }, (_, index) => transaction(`transaction-${index}`)), transactionsLimit: 25 });
+    vi.stubGlobal('navigator', { onLine: false });
+    vi.stubGlobal('fetch', vi.fn());
+    const route = { pathname: '/activity', search: `?group=${groupId}&view=transactions` };
+
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-burst', sessionId: 'session-activity-transactions' }, { route })).resolves.toMatchObject({ status: 'provisional', privateCacheAvailable: false });
+    expect(getResourceSnapshot(resourceKeys.group('activity-transactions-user', groupId)).data).toBeUndefined();
+    expect(getResourceSnapshot(resourceKeys.transactions('activity-transactions-user', groupId, transactionFilterKey({}))).data).toBeUndefined();
+
+    await updateGroupSnapshot('activity-transactions-user', groupId, {
+      group: { id: groupId, name: 'Activity transactions', currency: 'USD', createdAt: '', updatedAt: '', role: 'member', memberCount: 1 },
+      members: [{ personId: 'activity-transactions-person', name: 'Activity user', joinedAt: '', role: 'member' }],
+    });
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-burst', sessionId: 'session-activity-transactions' }, { force: true, route })).resolves.toMatchObject({ status: 'provisional', privateCacheAvailable: true });
+    expect(getResourceSnapshot(resourceKeys.group('activity-transactions-user', groupId)).data).toMatchObject({ group: { id: groupId }, members: [{ personId: 'activity-transactions-person' }] });
+    expect(getResourceSnapshot<{ transactions: Array<{ id: string }> }>(resourceKeys.transactions('activity-transactions-user', groupId, transactionFilterKey({}))).data?.transactions).toHaveLength(25);
+  });
+
   it('fences provisional route A when the active route changes to an uncached then cached route B', async () => {
     await clearEverythingForLogout(false);
     clearSessionLogout();
@@ -535,6 +562,7 @@ describe('Clerk auth bootstrap coordinator', () => {
     expect(isPrivateCacheRouteCurrent(lifecycle, '/groups/route-a', '?group=route-a&z=2')).toBe(true);
     expect(isPrivateCacheRouteCurrent(lifecycle, '/groups/route-b', '?group=route-a&z=2')).toBe(false);
     expect(isPrivateCacheRouteCurrent(lifecycle, '/groups/route-a', '?group=route-b&z=2')).toBe(false);
+    expect(authRouteCacheKey('/groups/route-a/transactions')).toBe(authRouteCacheKey('/activity', '?view=transactions&group=route-a'));
   });
 
   it('does not let an in-flight route A restore commit after navigation to route B', async () => {

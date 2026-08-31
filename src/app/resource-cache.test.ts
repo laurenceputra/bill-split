@@ -318,6 +318,18 @@ describe('resource cache', () => {
     expect(getResourceSnapshot(filtered, 'user-a').stale).toBe(true);
   });
 
+  it('invalidates transaction group labels when a group changes', async () => {
+    setResourceIdentity('user-a');
+    const scoped = resourceKeys.transactions('user-a', 'group-1');
+    const global = resourceKeys.transactions('user-a', 'all');
+    [scoped, global].forEach((key) => seedResource(key, 'user-a', { cached: true }));
+
+    await invalidateForMutation.groupChanged('group-1', 'user-a');
+
+    expect(getResourceSnapshot(scoped, 'user-a').stale).toBe(true);
+    expect(getResourceSnapshot(global, 'user-a').stale).toBe(true);
+  });
+
   it('invalidates every filtered expense resource for the mutated group', async () => {
     setResourceIdentity('user-a');
     const unfiltered = resourceKeys.expenses('user-a', 'group-1');

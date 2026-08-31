@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -929,6 +929,28 @@ describe('frontend API errors and cache fallback', () => {
     expect(await listOutbox('user-a')).toEqual([]);
     expect((await readGroups('user-a'))?.cachedAt).toBe('1970-01-01T00:00:00.000Z');
     expect((await readResourceFreshness('user-a', 'groups'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
+  });
+
+  it('reconciles committed expenses from every authorized group in global transactions', async () => {
+    resetForClerkSessionChange();
+    clearSessionLogout();
+    const identity = { id: 'user-a', email: 'a@example.com', personId: 'person-a' };
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => String(request).endsWith('/me') ? json(identity, 200, 'user-a', 'clerk-a') : json({ transactions: [] }, 200, 'user-a', 'clerk-a')));
+    await initializeAuthLifecycle({ networkOnly: true, clerkUserId: 'clerk-a' });
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    const queue = (groupId: string, clientOperationId: string) => enqueueExpense({ userId: 'user-a', groupId, clientOperationId, payload: { description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: clientOperationId }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' } });
+    await queue('group-a', 'op-a');
+    await queue('group-b', 'op-b');
+    await queue('group-not-returned', 'op-not-returned');
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      if (String(request).endsWith('/me')) return json(identity, 200, 'user-a', 'clerk-a');
+      const expense = (groupId: string, clientOperationId: string) => ({ kind: 'expense', id: `server-${clientOperationId}`, groupId, description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-01-01T00:00:00.000Z', clientOperationId });
+      return json({ transactions: [expense('group-a', 'op-a'), expense('group-b', 'op-b')] }, 200, 'user-a', 'clerk-a');
+    }));
+
+    await getGlobalTransactionPage(undefined);
+
+    expect((await listOutbox('user-a')).map((item) => item.clientOperationId)).toEqual(['op-not-returned']);
   });
 
   it('does not hammer identity after an auth failure blocks the gate', async () => {

@@ -37,12 +37,12 @@ export interface ScheduledExpense {
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
 /** The deliberately small row returned by the unified transaction list. */
 export interface ExpenseTransaction {
-    kind: 'expense'; id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
+    kind: 'expense'; id: string; groupId: string; groupName?: string; description: string; amountMinor: number; currency: Currency;
     date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
     clientOperationId?: string | null;
 }
 export interface SettlementTransaction {
-    kind: 'settlement'; id: string; groupId: string; amountMinor: number; currency: Currency; date: string;
+    kind: 'settlement'; id: string; groupId: string; groupName?: string; amountMinor: number; currency: Currency; date: string;
     note?: string | null; fromPersonId: string; toPersonId: string; fromName: string; toName: string; createdAt: string;
 }
 export type Transaction = ExpenseTransaction | SettlementTransaction;

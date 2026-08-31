@@ -1,6 +1,6 @@
 import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
 import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
-import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
+import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGlobalTransactions, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { beginLocalLogoutCleanup, broadcastSessionCoordination, cancelLocalLogoutCleanup, captureAuthInvalidationNonce, captureSessionGeneration, clearSessionLogout, completeLocalLogoutCleanup, consumeAuthInvalidationNonce, getLocallyOwnedLogoutGeneration, getSessionGeneration, getSessionLogoutInProgress, hydrateSessionCoordination, isSessionGenerationCurrent, isSessionLogoutAdopted, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionCoordination, subscribeSessionLogout } from './session';
@@ -548,6 +548,14 @@ const cacheRead = async <T>(read: () => Promise<T | undefined>) => {
     return undefined;
   }
 };
+const cacheWrite = async <T>(write: () => Promise<T>) => {
+  try { return await write(); }
+  catch (error) {
+    if (error instanceof SessionGenerationMismatchError) throw error;
+    /* Private cache is an enhancement, not a request failure. */
+    return undefined;
+  }
+};
 const assertRequestGeneration = (generation: number) => {
   if (!isSessionGenerationCurrent(generation)) throw new ApiError('The local session was cleared.', { status: 401, code: 'AUTH_REQUIRED' });
 };
@@ -841,17 +849,27 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
   const routeRestore = routeKey && provisionalRestoreRequest?.route && provisionalRouteKey(provisionalRestoreRequest.route) === routeKey ? provisionalRestoreRequest : undefined;
   if (effectiveRoute && effectiveRoute.pathname !== '/settings') {
     if (provisionalRestoreRequest?.route && provisionalRouteKey(provisionalRestoreRequest.route) !== routeKey) return authLifecycle;
-    if (!routeRestore) {
-      setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
-      return authLifecycle;
-    }
-    const result = await routeRestore.promise;
-    if (result.status === 'authenticated') return result;
-    if (result.status === 'provisional') {
-      if (result.privateCacheRouteKey !== routeKey || result.privateCacheAvailable !== true) return result;
+    if (routeRestore) {
+      const result = await routeRestore.promise;
+      if (result.status === 'authenticated') return result;
+      if (result.status === 'provisional') {
+        if (result.privateCacheRouteKey !== routeKey || result.privateCacheAvailable !== true) return result;
+      } else {
+        setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
+        return authLifecycle;
+      }
     } else {
-      setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
-      return authLifecycle;
+      // A dev-bypass startup reaches this path through the /me fallback rather
+      // than startProvisionalRestore. Build the route contract here so a cold
+      // offline reload can hydrate the same cached private page.
+      const token = startupCacheToken;
+      const routeGeneration = ++provisionalRouteGeneration;
+      const authEpoch = getAuthEpoch();
+      const restored = await restoreProvisionalRouteCache(trust.userId, effectiveRoute, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation);
+      if (!provisionalRouteIsCurrent(routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || !restored) {
+        setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
+        return authLifecycle;
+      }
     }
   }
   if (!offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation)) return authLifecycle;
@@ -881,9 +899,26 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
   return authLifecycle;
 };
 
-export const authRouteCacheKey = (pathname: string, search = '') => {
-  const normalizedPathname = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+const normalizeAuthRoutePathname = (pathname: string) => pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+const decodeAuthRoutePart = (value: string) => {
+  try { return decodeURIComponent(value); } catch { return value; }
+};
+/** Legacy group history URLs are redirects to one canonical route. Keep the
+ * auth fence on that canonical route even if the provider callback races the
+ * redirect and reports the legacy URL first. */
+const canonicalAuthRoute = (pathname: string, search: string) => {
+  let normalizedPathname = normalizeAuthRoutePathname(pathname);
   const params = new URLSearchParams(search);
+  const legacyMatch = normalizedPathname.match(/^\/groups\/([^/]+)\/(activity|transactions)$/);
+  if (legacyMatch) {
+    params.set('group', decodeAuthRoutePart(legacyMatch[1]));
+    params.set('view', legacyMatch[2] === 'transactions' ? 'transactions' : 'changes');
+    normalizedPathname = '/activity';
+  }
+  return { normalizedPathname, params };
+};
+export const authRouteCacheKey = (pathname: string, search = '') => {
+  const { normalizedPathname, params } = canonicalAuthRoute(pathname, search);
   params.sort();
   const normalizedSearch = params.toString();
   return `${normalizedPathname}${normalizedSearch ? `?${normalizedSearch}` : ''}`;
@@ -910,7 +945,7 @@ const seedProvisionalResource = <T>(key: string, userId: string, data: T, fetche
 async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrapRoute | undefined, token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number): Promise<boolean> {
   if (!route) return provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation);
   if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return false;
-  const pathname = route.pathname || '/';
+  const pathname = normalizeAuthRoutePathname(route.pathname || '/');
   const search = new URLSearchParams(route.search || '');
   const groupMatch = pathname.match(/^\/groups\/([^/]+)/);
   const decodeRoutePart = (value: string) => { try { return decodeURIComponent(value); } catch { return value; } };
@@ -956,9 +991,27 @@ async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrap
     return Boolean(cached && resourceReady(resourceKeys.groups(userId)));
   }
   if (pathname === '/activity' || (groupId && pathname.endsWith('/activity'))) {
-    const activityId = groupId || 'all';
-    const cached = await seedActivity(activityId);
-    return Boolean(cached && resourceReady(resourceKeys.activity(userId, activityId)));
+    const cachedHome = await seedHome();
+    const homeReady = Boolean(cachedHome && resourceReady(resourceKeys.groups(userId)));
+    if (pathname === '/activity' && !homeReady) return false;
+    if (search.get('view') === 'transactions') {
+      const filters = readTransactionFilters(search);
+      if (groupId) {
+        const cached = await seedGroup(groupId, ['group']);
+        if (hasTransactionFilters(filters) || !cached?.group || !cached.members || cached.transactions === undefined || !isSufficientTransactionHistoryPage(cached.transactionsLimit)) return false;
+        seedProvisionalResource(resourceKeys.transactions(userId, groupId, transactionFilterKey(filters)), userId, { transactions: cached.transactions, nextCursor: cached.transactionsNextCursor }, cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+      } else {
+        const cached = await cacheRead(() => readGlobalTransactions(userId));
+        if (hasTransactionFilters(filters) || !cached) return false;
+        if (!isSufficientTransactionHistoryPage(cached.limit)) return false;
+        seedProvisionalResource(resourceKeys.transactions(userId, 'all', transactionFilterKey(filters)), userId, { transactions: cached.transactions, nextCursor: cached.nextCursor }, cacheTimestamp(cached.fetchedAt), token, routeGeneration, authEpoch, evidenceEpoch, generation);
+      }
+      await seedCategories();
+      if (groupId) return resourceReady(resourceKeys.group(userId, groupId)) && resourceReady(resourceKeys.transactions(userId, groupId, transactionFilterKey(filters)));
+      return resourceReady(resourceKeys.transactions(userId, 'all', transactionFilterKey(filters)));
+    }
+    const cached = await seedActivity(groupId || 'all');
+    return Boolean(cached && resourceReady(resourceKeys.activity(userId, groupId || 'all')));
   }
   if (groupId && (pathname === `/groups/${groupId}` || pathname === `/groups/${encodeURIComponent(groupId)}`)) {
     const cached = await seedGroup(groupId, ['group', 'balances', 'transactions']);
@@ -1040,7 +1093,10 @@ const activateProvisionalOffline = async (trust: OfflineTrustRecord, expectedEvi
 const startProvisionalRestore = (route: AuthBootstrapRoute | undefined, authEpoch: number, evidenceEpoch: number, force = false) => {
   const restoringProvisionalRoute = authLifecycle.status === 'provisional' || authLifecycle.status === 'trusted-offline' || authLifecycle.status === 'restoring' || authLifecycle.status === 'reverifying' || authLifecycle.status === 'checking';
   const hasRouteContract = Boolean(route || provisionalRestoreRequest?.route);
-  if (isDevelopmentAuthBypass || (verifiedIdentity && (!restoringProvisionalRoute || !hasRouteContract)) || authBlocked || getSessionLogoutInProgress() || hasPendingAccountDeletion()) return Promise.resolve(authLifecycle);
+  // The development auth bypass still needs this path: /api/me is unavailable
+  // on a cold offline reload, so the route cache must be restored before it can
+  // fall back to the normal online lifecycle.
+  if ((verifiedIdentity && (!restoringProvisionalRoute || !hasRouteContract)) || authBlocked || getSessionLogoutInProgress() || hasPendingAccountDeletion()) return Promise.resolve(authLifecycle);
   const effectiveRoute = route || provisionalRestoreRequest?.route;
   const key = provisionalRestoreKey(authEpoch, evidenceEpoch, effectiveRoute);
   if (provisionalRestoreRequest?.key === key && !force) return provisionalRestoreRequest.promise;
@@ -2067,7 +2123,7 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
       const persisted = await persistTransactionResponse(result.userId!, groupId, result.data.transactions, result.data.nextCursor, limit, requestMutationGeneration, generation);
       const expenseRows = result.data.transactions.filter((item): item is Extract<Transaction, { kind: 'expense' }> => item.kind === 'expense');
       const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, groupId, expenseRows, generation, authEpoch));
-      if (reconciled) { await invalidateForMutation.expenseChanged(groupId, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); }
+      if (groupId && reconciled) { await invalidateForMutation.expenseChanged(groupId, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); }
       if (persisted === false) return { ...result.data, stale: true };
     }
     return result.data;
@@ -2078,6 +2134,72 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
     if (filtered) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, groupId));
     if (cached?.transactions && isSufficientTransactionHistoryPage(cached.transactionsLimit)) return offline({ transactions: cached.transactions, nextCursor: cached.transactionsNextCursor });
+    throw error;
+  }
+}
+
+/** Reconcile only expenses returned by an authorized transaction query. The
+ * global endpoint can contain rows from several groups, so each group must be
+ * reconciled independently before its pending outbox rows are removed. */
+async function reconcileTransactionExpenses(userId: string, expenses: Array<Pick<Expense, 'groupId' | 'createdBy'> & { clientOperationId?: string | null }>, requestedGroupId: string | undefined, generation: number, authEpoch: number): Promise<boolean | undefined> {
+  const expensesByGroup = new Map<string, typeof expenses>();
+  for (const expense of expenses) {
+    if (!expense.groupId || expense.createdBy !== userId || requestedGroupId && expense.groupId !== requestedGroupId) continue;
+    const groupExpenses = expensesByGroup.get(expense.groupId) || [];
+    groupExpenses.push(expense);
+    expensesByGroup.set(expense.groupId, groupExpenses);
+  }
+  let changed = false;
+  for (const [groupId, groupExpenses] of expensesByGroup) {
+    if (!isSessionGenerationCurrent(generation) || !isAuthEpochCurrent(authEpoch)) return undefined;
+    const removed = await cacheRead(() => reconcileOutboxItems(userId, groupId, groupExpenses, generation, authEpoch));
+    if (!isSessionGenerationCurrent(generation) || !isAuthEpochCurrent(authEpoch)) return undefined;
+    if (!removed) continue;
+    await invalidateForMutation.expenseChanged(groupId, undefined, userId, generation);
+    if (!isSessionGenerationCurrent(generation) || !isAuthEpochCurrent(authEpoch)) return undefined;
+    changed = true;
+  }
+  return changed;
+}
+
+/** Canonical history API. A selected group remains scoped to its snapshot;
+ * only the all-groups first page gets the account-scoped global cache. */
+export async function getGlobalTransactionPage(groupId: string | undefined, options: TransactionPageOptions = {}, signal?: AbortSignal): Promise<CachedResult<TransactionPage>> {
+  const generation = captureSessionGeneration();
+  const authEpoch = getAuthEpoch();
+  const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
+  const filtered = hasTransactionFilters(options);
+  const query = new URLSearchParams(pageParams({ limit: options.limit ?? 25, cursor: options.cursor }));
+  for (const [key, value] of transactionFilterQuery(options).entries()) query.set(key, value);
+  if (groupId) query.set('group', groupId);
+  try {
+    const result = await apiWithMeta<TransactionPage>(`/transactions?${query}`, { signal });
+    assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
+    if (!isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
+    const firstUnfiltered = options.cursor === undefined && !filtered;
+    if (result.userId && firstUnfiltered) {
+      const saved = groupId
+        ? await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, groupId, { transactions: result.data.transactions, transactionsNextCursor: result.data.nextCursor, transactionsLimit: options.limit ?? 25 }, requestMutationGeneration, generation))
+        : await cacheWrite(() => saveGlobalTransactions({ userId: result.userId!, transactions: result.data.transactions, nextCursor: result.data.nextCursor, limit: options.limit ?? 25, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
+      if (saved === false || !isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
+      const expenseRows = result.data.transactions.filter((item): item is Extract<Transaction, { kind: 'expense' }> => item.kind === 'expense');
+      const reconciled = await reconcileTransactionExpenses(result.userId!, expenseRows, groupId, generation, authEpoch);
+      if (reconciled === undefined) return { ...result.data, stale: true };
+      if (reconciled && typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed'));
+    }
+    return result.data;
+  } catch (error) {
+    assertRequestGeneration(generation);
+    if (groupId && isGroupAuthorizationLoss(error)) { await evictRevokedGroup(groupId, identity); throw error; }
+    if (!isNetwork(error) || !identity || filtered || options.cursor !== undefined) throw error;
+    if (groupId) {
+      const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, groupId));
+      if (cached?.transactions && isSufficientTransactionHistoryPage(cached.transactionsLimit)) return offline({ transactions: cached.transactions, nextCursor: cached.transactionsNextCursor });
+    } else {
+      const cached = await cacheRead(() => readGlobalTransactions(identity.user.id));
+      if (cached && isSufficientTransactionHistoryPage(cached.limit)) return offline({ transactions: cached.transactions, nextCursor: cached.nextCursor });
+    }
     throw error;
   }
 }
@@ -2291,6 +2413,10 @@ export async function hydrateSettlements(userId: string, id: string) {
 export async function hydrateTransactions(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
   return cached?.transactions && isSufficientTransactionHistoryPage(cached.transactionsLimit) ? { data: { transactions: cached.transactions, nextCursor: cached.transactionsNextCursor }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.transactions || cached.cachedAt), offline: true } : undefined;
+}
+export async function hydrateGlobalTransactions(userId: string) {
+  const cached = await cacheRead(() => readGlobalTransactions(userId));
+  return cached && isSufficientTransactionHistoryPage(cached.limit) ? { data: { transactions: cached.transactions, nextCursor: cached.nextCursor }, fetchedAt: cacheTimestamp(cached.fetchedAt), offline: true } : undefined;
 }
 /** The overview has its own exact resource key and only renders five rows.
  * Keep it separate from the full history hydrator so the overview can use the

@@ -931,6 +931,17 @@ describe('repository transaction pagination', () => {
     expect(page.items.filter((item): item is Extract<Transaction, { kind: 'settlement' }> => item.kind === 'settlement')[0]).toMatchObject({ fromName: 'Former payer', toName: 'Removed participant' });
   });
 
+  it('supports an authorized all-groups page and includes the display group name', async () => {
+    const rows = transactionRows.map((row) => ({ ...row, group_name: row.group_id === 'group-1' ? 'Friend' : 'Other group' }));
+    const db = new TransactionPageDb(rows);
+    const page = await new Repository(db as never).globalTransactionPage('user-1', undefined, { limit: 2 });
+
+    expect(page.items).toHaveLength(2);
+    expect(page.items.every((item) => item.groupName === 'Friend')).toBe(true);
+    expect(db.lastSql).toContain('authorized_member.user_id=?');
+    expect(db.lastSql).toContain('authorized_group.deleted_at IS NULL');
+  });
+
   it('rejects invalid cursors, dates, and offset pagination', async () => {
     const repository = new Repository(new TransactionPageDb(transactionRows) as never);
     await expect(repository.transactionPage('group-1', { cursor: 'not-a-cursor' })).rejects.toMatchObject({ code: 'INVALID_CURSOR' });

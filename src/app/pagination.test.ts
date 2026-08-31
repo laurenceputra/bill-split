@@ -30,4 +30,14 @@ describe('continuation request scopes', () => {
     expect(scope.isCurrent(first)).toBe(false);
     expect(scope.isCurrent(second)).toBe(true);
   });
+
+  it('invalidates a continuation when its owner is disposed', () => {
+    const scope = createPageRequestScope();
+    const request = scope.begin('user-a:group-a', 'cursor-a');
+
+    scope.dispose();
+
+    expect(request.signal.aborted).toBe(true);
+    expect(scope.isCurrent(request)).toBe(false);
+  });
 });

@@ -1,8 +1,8 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
-import { hydrateActivity, hydrateTransactions } from './api';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -70,7 +70,7 @@ describe('user-scoped IndexedDB', () => {
     await saveVerifiedIdentity(user('user-a'));
     expect(await readRecent<{ choice: string }>()).toEqual({ choice: 'USD' });
     const upgraded = indexedDB.open(DB_NAME, DB_VERSION);
-    await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); expect(upgraded.result.objectStoreNames.contains('clerkIdentities')).toBe(true); expect(upgraded.result.objectStoreNames.contains('offlineTrust')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
+      await new Promise<void>((resolve, reject) => { upgraded.onsuccess = () => { expect(upgraded.result.objectStoreNames.contains('expenseOutbox')).toBe(true); expect(upgraded.result.objectStoreNames.contains('resourceFreshness')).toBe(true); expect(upgraded.result.objectStoreNames.contains('activity')).toBe(true); expect(upgraded.result.objectStoreNames.contains('globalTransactions')).toBe(true); expect(upgraded.result.objectStoreNames.contains('expenseDetails')).toBe(true); expect(upgraded.result.objectStoreNames.contains('clerkIdentities')).toBe(true); expect(upgraded.result.objectStoreNames.contains('offlineTrust')).toBe(true); upgraded.result.close(); resolve(); }; upgraded.onerror = () => reject(upgraded.error); });
   });
 
   it('migrates a version three database without losing an outbox row', async () => {
@@ -174,6 +174,16 @@ describe('user-scoped IndexedDB', () => {
     await expect(hydrateTransactions('user-a', 'group-c')).resolves.toBeUndefined();
   });
 
+  it('stores and hydrates only the unfiltered all-groups transaction page per user', async () => {
+    const transaction = { kind: 'expense' as const, id: 'e-a', groupId: 'group-a', groupName: 'Friend', description: 'Lunch', amountMinor: 100, currency: 'USD' as const, date: '2026-01-01', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-01-01T00:00:00.000Z', clientOperationId: null };
+    await saveGlobalTransactions({ userId: 'user-a', transactions: [transaction], nextCursor: 'next-a', limit: 25, fetchedAt: 'global-time' });
+    await saveGlobalTransactions({ userId: 'user-b', transactions: [{ ...transaction, id: 'e-b' }], limit: 25, fetchedAt: 'other-time' });
+
+    expect(await readGlobalTransactions('user-a')).toMatchObject({ transactions: [{ id: 'e-a', groupName: 'Friend' }], nextCursor: 'next-a' });
+    expect(await readGlobalTransactions('user-b')).toMatchObject({ transactions: [{ id: 'e-b' }] });
+    await expect(hydrateGlobalTransactions('user-a')).resolves.toMatchObject({ data: { transactions: [{ id: 'e-a' }], nextCursor: 'next-a' }, offline: true });
+  });
+
   it.each([
     [{ groupId: 'group-a' }, 'group leave/delete/access revocation'],
     [{ transactions: true, transactionGroupId: 'group-a' }, 'expense/settlement mutation invalidation'],
@@ -247,12 +257,14 @@ describe('user-scoped IndexedDB', () => {
     await saveGroups({ userId: 'user-a', groups: [], cachedAt: timestamp });
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [], fetchedAt: timestamp });
     await saveActivity({ userId: 'user-a', groupId: 'all', activity: [], fetchedAt: timestamp });
+    await saveGlobalTransactions({ userId: 'user-a', transactions: [], limit: 25, fetchedAt: timestamp });
     await saveCategories({ userId: 'user-a', categories: ['Dining'], fetchedAt: timestamp });
 
-    await invalidateCachedGroups('user-a', undefined, { activity: true, categories: true });
+    await invalidateCachedGroups('user-a', undefined, { activity: true, categories: true, transactions: true });
 
     expect(await readActivity('user-a', 'group-a')).toBeUndefined();
     expect(await readActivity('user-a', 'all')).toBeUndefined();
+    expect(await readGlobalTransactions('user-a')).toBeUndefined();
     expect(await readCategories('user-a')).toBeUndefined();
     expect(await readMutationGeneration('user-a')).toBe(1);
   });

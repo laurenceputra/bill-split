@@ -15,8 +15,8 @@ class MemberStatement extends Statement {
 class TransactionRouteStatement extends MemberStatement {
   async all<T>() {
     if (this.sql.includes('WITH transaction_rows')) return { results: [
-      { id: 'expense-1', group_id: '00000000-0000-0000-0000-000000000009', description: 'Dinner', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-02', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-02T00:00:00.000Z', client_operation_id: null, kind: 'expense' },
-      { id: 'settlement-1', group_id: '00000000-0000-0000-0000-000000000009', description: null, amount_minor: 50, currency: 'USD', transaction_date: '2026-01-01', note: 'Paid', from_person_id: 'person-1', to_person_id: 'person-2', from_name: 'Dev', to_name: 'Other', created_by: 'user-1', created_at: '2026-01-01T00:00:00.000Z', client_operation_id: null, kind: 'settlement' },
+      { id: 'expense-1', group_id: '00000000-0000-0000-0000-000000000009', group_name: 'Friend', description: 'Dinner', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-02', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-02T00:00:00.000Z', client_operation_id: null, kind: 'expense' },
+      { id: 'settlement-1', group_id: '00000000-0000-0000-0000-000000000009', group_name: 'Friend', description: null, amount_minor: 50, currency: 'USD', transaction_date: '2026-01-01', note: 'Paid', from_person_id: 'person-1', to_person_id: 'person-2', from_name: 'Dev', to_name: 'Other', created_by: 'user-1', created_at: '2026-01-01T00:00:00.000Z', client_operation_id: null, kind: 'settlement' },
     ] as T[] };
     return { results: [] as T[] };
   }
@@ -408,6 +408,16 @@ describe('worker boundary', () => {
     expect(body.transactions[0]).not.toHaveProperty('fromName');
     expect(body.nextCursor).toEqual(expect.any(String));
   });
+  it('serves the authorized all-groups transaction route with group context', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/transactions?limit=1', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ transactions: [{ id: 'expense-1', groupId: '00000000-0000-0000-0000-000000000009', groupName: 'Friend' }] });
+  });
+  it('does not leak all-groups transactions for an unauthorized group filter', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/transactions?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND' } });
+  });
   it('returns not found for an unauthorized transaction route', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/transactions', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(404);
@@ -422,6 +432,17 @@ describe('worker boundary', () => {
     ['offset=1', 'INVALID_PAGINATION'],
   ])('rejects invalid transaction query %s', async (query, code) => {
     const response = await worker.fetch(new Request(`https://split.example/api/groups/00000000-0000-0000-0000-000000000009/transactions?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code } });
+  });
+  it.each([
+    ['offset=1', 'INVALID_PAGINATION'],
+    ['kind=invalid', 'INVALID_FILTER'],
+    ['currency=invalid', 'INVALID_FILTER'],
+    ['from=2026-02-30', 'INVALID_DATE'],
+    [`q=${encodeURIComponent('é'.repeat(25))}`, 'INVALID_SEARCH'],
+  ])('rejects invalid global transaction query %s', async (query, code) => {
+    const response = await worker.fetch(new Request(`https://split.example/api/transactions?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code } });
   });
