@@ -641,8 +641,13 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     if (currentTransportEpoch && clearsConnectionState) clearReconnectRequired(authoritativePath);
     // A request from an earlier Clerk epoch may finish after a new account has
     // started. It must not downgrade the new session.
-    const authCode: AuthRequiredCode = responseCode === 'IDENTITY_MISMATCH' || signedInClerkEvidence || incompleteSignedInClerkEvidence ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
-    if (!authEvidenceRestoring && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalAuthRequired(authCode);
+    // A complete Clerk session can be valid while its application session is
+    // absent or expired. Preserve this explicit response so the lifecycle can
+    // bootstrap the application session and retry /me without invalidating the
+    // still-current Clerk epoch first.
+    const shouldBootstrapApplicationSession = authoritativePath && response.status === 401 && responseCode === 'AUTH_REQUIRED' && clerkEvidenceKnown && clerkEvidenceAuthoritative && isCompleteSignedInEvidence(clerkEvidence);
+    const authCode: AuthRequiredCode = shouldBootstrapApplicationSession ? 'AUTH_REQUIRED' : responseCode === 'IDENTITY_MISMATCH' || signedInClerkEvidence || incompleteSignedInClerkEvidence ? 'IDENTITY_MISMATCH' : 'AUTH_REQUIRED';
+    if (!shouldBootstrapApplicationSession && !authEvidenceRestoring && (expectedAuthEpoch === undefined || isAuthEpochCurrent(expectedAuthEpoch))) signalAuthRequired(authCode);
     throw new ApiError('Your secure session needs attention. Reconnect and check your sign-in before retrying.', { status: response.status, code: authCode });
   }
   if (responseMode === 'blob' && response.ok) {

@@ -940,6 +940,36 @@ describe('frontend API errors and cache fallback', () => {
     expect(getAuthLifecycle().status).toBe('unauthenticated');
   });
 
+  it('recovers a missing application session without invalidating complete Clerk evidence', async () => {
+    await clearEverythingForLogout(false);
+    clearSessionLogout();
+    clearAuthRequired();
+    vi.stubGlobal('navigator', { onLine: true });
+    const calls: Array<{ path: string; method: string }> = [];
+    let epochAtInitialFailure: number | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      calls.push({ path: url.pathname, method: init?.method || 'GET' });
+      if (url.pathname === '/api/me' && calls.filter((call) => call.path === '/api/me').length === 1) {
+        epochAtInitialFailure = getAuthEpoch();
+        return json({ error: { code: 'AUTH_REQUIRED', message: 'Application session required' } }, 401);
+      }
+      if (url.pathname === '/api/session/bootstrap') return json({ idleExpiresAt: '2026-09-29T00:00:00.000Z' });
+      return json({ id: 'recovered-user', email: 'recovered@example.com', personId: 'recovered-person' }, 200, 'recovered-user', 'clerk-session-recovery');
+    }));
+
+    await expect(coordinateAuthBootstrap({ isLoaded: true, isSignedIn: true, userId: 'clerk-session-recovery', sessionId: 'session-session-recovery' }, { networkOnly: true })).resolves.toMatchObject({ status: 'authenticated' });
+
+    expect(calls).toEqual([
+      { path: '/api/me', method: 'GET' },
+      { path: '/api/session/bootstrap', method: 'POST' },
+      { path: '/api/me', method: 'GET' },
+    ]);
+    expect(getAuthEpoch()).toBe(epochAtInitialFailure);
+    expect(getAuthState().required).toBe(false);
+    expect(getAuthLifecycle().status).toBe('authenticated');
+  });
+
   it('does not create trust from a client-only Clerk pairing', async () => {
     await clearEverythingForLogout(false);
     clearSessionLogout();
