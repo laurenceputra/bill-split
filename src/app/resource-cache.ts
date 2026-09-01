@@ -248,6 +248,21 @@ export function evictGroupResources(groupId: string, userId: string) {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-group-revoked', { detail: { groupId } }));
 }
 
+function invalidateScheduledDetailsForGroup(groupId: string, userId: string) {
+  const list = entries.get(resourceKeys.scheduledExpenses(userId, groupId));
+  const scheduledIds = new Set(
+    ((list?.snapshot.data as { scheduledExpenses?: Array<{ id?: string }> } | undefined)?.scheduledExpenses || [])
+      .map((scheduled) => scheduled.id)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+  for (const [key, resource] of entries) {
+    if (resource.snapshot.userId !== userId || resource.snapshot.data === undefined) continue;
+    const data = resource.snapshot.data as { scheduledExpense?: { groupId?: string } };
+    const scheduleId = key.startsWith(`scheduled-expense:${userId}:`) ? key.slice(`scheduled-expense:${userId}:`.length) : undefined;
+    if (data.scheduledExpense?.groupId === groupId || scheduleId !== undefined && scheduledIds.has(scheduleId)) invalidateResource(key, userId);
+  }
+}
+
 export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') { for (const key of keys) invalidateResource(key, userId); }
 /** Apply a server-confirmed group-settings response without disturbing ledger resources. */
 export function patchResourceData<T>(key: ResourceKey, userId: string, patch: (data: T) => T) {
@@ -416,7 +431,7 @@ const invalidatePersistedCaches = async (userId: string, generation = captureSes
 };
 export const invalidateForMutation = {
   groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
-  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId)], userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
+  groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId)], userId); invalidateScheduledDetailsForGroup(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true }); },
   splitDefaultChanged: async (groupId: string, splitDefault: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'], userId?: string, generation?: number) => {
     if (!userId) return;
     // Abort/fence a GET that was started before the server mutation. The

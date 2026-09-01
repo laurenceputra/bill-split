@@ -796,6 +796,27 @@ describe('frontend API errors and cache fallback', () => {
     expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
   });
 
+  it('does not persist an in-flight paged transaction response after mutation invalidation', async () => {
+    await saveVerifiedIdentity({ userId: 'user-a', email: 'a@example.com', personId: 'person-a', verifiedAt: new Date().toISOString() });
+    await updateGroupSnapshot('user-a', 'group-a', { transactions: [] });
+    let resolveTransactions!: (response: Response) => void;
+    let transactionsStarted!: () => void;
+    const started = new Promise<void>((resolve) => { transactionsStarted = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      transactionsStarted();
+      return new Promise<Response>((resolve) => { resolveTransactions = resolve; });
+    }));
+
+    const request = getTransactionPage('group-a');
+    await started;
+    await invalidateForMutation.expenseChanged('group-a', undefined, 'user-a');
+    resolveTransactions(json({ transactions: [{ kind: 'expense', id: 'late-page', groupId: 'group-a', description: 'Late', amountMinor: 100, currency: 'USD', date: '2026-01-01', category: null, notes: null, createdBy: 'user-a', createdAt: '2026-01-01T00:00:00.000Z', clientOperationId: null }] }, 200, 'user-a'));
+
+    await expect(request).resolves.toMatchObject({ transactions: [{ id: 'late-page' }], stale: true });
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.transactions).toBeUndefined();
+    expect((await readResourceFreshness('user-a', 'group:group-a:transactions'))?.fetchedAt).toBe('1970-01-01T00:00:00.000Z');
+  });
+
   it('keeps filtered transaction requests on the API path instead of using the unfiltered cache', async () => {
     await updateGroupSnapshot('user-a', 'group-a', { transactions: [] });
     const fetchSpy = vi.fn(async (_request: RequestInfo | URL) => { throw new TypeError('network unavailable'); });

@@ -287,7 +287,22 @@ a removed member, it is retained and new entries fall back to equal across the
 current active members until the owner updates it. Individual expenses can
 override the copied arrangement and reset to the current party default.
 
-All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. `0013_projection_layer.sql` adds compact gross totals and per-person net projections in a pending state; existing groups are never published as ready by migration. The projection-aware Worker dual-writes while the legacy aggregate remains authoritative, and bounded Cron backfill publishes readiness only after an atomic recomputation. `0014_projection_indexes.sql` adds stable keyset and person-leading indexes, `0015_audit_actor_snapshot.sql` adds non-email actor snapshots, `0016_projection_readiness_reset.sql` safely repairs installations that applied the earlier ready-state projection migration before deploying the Worker, and `0017_cleanup_indexes.sql` removes only exact duplicate indexes. `0018_category_preferences.sql` adds private, per-user learned categories keyed by `trim(description)` followed by lowercase; explicitly chosen categories remain preferences even when their originating schedule is cancelled. `0019_group_membership_events.sql` records owner transfers, self-leaves, and owner removals with actor/name snapshots (never email) and enforces one active owner per group. `0020_account_deletion.sql` adds the user soft-delete marker needed to retain financial/audit foreign-key anchors while pseudonymizing personal identity. `0021_deleted_identity_tombstones.sql` stores keyed HMAC-SHA-256 email/Clerk identity tombstones so a deleted account cannot be silently relinked after live identity fields are cleared. Seed data, when used locally, must remain local.
+All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. `0013_projection_layer.sql` adds compact gross totals and per-person net projections in a pending state; existing groups are never published as ready by migration. Migration `0024_incremental_projection_totals.sql` stages existing groups as pending and installs hybrid overflow guards that use O(1) primary-key totals only when a group is ready. Bounded per-group maintenance later builds and atomically publishes those totals. The authoritative tables remain `expenses`, `payers`, `splits`, and `settlements`; pending, dirty, missing, and failed groups use direct aggregation until bounded maintenance publishes readiness, while ready groups are maintained incrementally from exact old/new payer, split, and settlement contributions. The legacy `projection_state` records mutation count, last reconciliation time, and a reconciliation-due flag for compatibility; current readiness and maintenance do not use a mutation-count threshold. Full recomputation is reserved for bounded Cron backfill/reconciliation. `0014_projection_indexes.sql` adds stable keyset and person-leading indexes, `0015_audit_actor_snapshot.sql` adds non-email actor snapshots, `0016_projection_readiness_reset.sql` safely repairs installations that applied the earlier ready-state projection migration before deploying the Worker, and `0017_cleanup_indexes.sql` removes only exact duplicate indexes. `0018_category_preferences.sql` adds private, per-user learned categories keyed by `trim(description)` followed by lowercase; explicitly chosen categories remain preferences even when their originating schedule is cancelled. `0019_group_membership_events.sql` records owner transfers, self-leaves, and owner removals with actor/name snapshots (never email) and enforces one active owner per group. `0020_account_deletion.sql` adds the user soft-delete marker needed to retain financial/audit foreign-key anchors while pseudonymizing personal identity. `0021_deleted_identity_tombstones.sql` stores keyed HMAC-SHA-256 email/Clerk identity tombstones so a deleted account cannot be silently relinked after live identity fields are cleared. `0022_application_sessions.sql` adds opaque server-managed sessions, and `0023_group_split_defaults.sql` adds one optional persisted split arrangement per group. Seed data, when used locally, must remain local.
+
+The migration 0024 rollout details and current readiness guarantees are in the
+Operations section below; it is staged per group and does not perform a
+whole-database totals rebuild.
+
+The older projection wording in the preceding historical paragraph is retained
+for migration context only. The current Worker uses the monthly/checkpoint
+tables and readiness rules documented below; it does not use a mutation-count
+threshold or read `group_balance_projection`. Migration 0024 replaces the
+legacy 0003 aggregate triggers with hybrid guards; its dirty triggers preserve
+safe fallback behavior for old Workers.
+
+The current implementation uses monthly/checkpoint summaries described in
+Operations below. The legacy projection names mentioned in older deployment
+notes are retained only for compatibility and are not runtime read sources.
 
 Important endpoints include:
 
@@ -298,21 +313,21 @@ Important endpoints include:
 - `GET/POST /api/groups/:id/scheduled-expenses`, `GET/PUT /api/scheduled-expenses/:id`, and pause/resume/cancel actions
 - balances (raw and deterministic simplified debts), activity, versioned JSON export, group JSON/expense CSV/settlement CSV export
 
-Expense and settlement writes validate membership, supported two-decimal ISO currency, real calendar dates, safe integer values, participant uniqueness, and exact payer/split totals before using D1 `batch()` for atomic related writes. Active-user and active-participant predicates are repeated inside mutation batches, so a removal racing a write cannot grant access or introduce a removed participant. Removed participants remain valid settlement endpoints for clearing outstanding balances, while new expenses and schedules require active participants. D1 ledger-limit triggers are authoritative for races and return structured `BALANCE_OVERFLOW`/422 errors; checked application arithmetic remains in place for legacy or imported data. Supported currencies are USD, EUR, GBP, AUD, CAD, NZD, SGD, HKD, CHF, CNY, and INR; currencies with a different minor-unit exponent (for example JPY) are intentionally rejected. `client_operation_id` claims are scoped by mutation kind and authenticated user/group and include a request hash. Updates and deletes require the loaded integer `version`, use conditional writes, snapshot the previous state in `revisions`, and append actor user/person IDs plus a name snapshot (never email) with before/after records to `audit_events` in the same batch. Group ownership transfer and member self-leave are serialized D1 operations with repeated authorization predicates, soft-removal, pending-invitation revocation, and append-only non-email snapshots in `group_membership_events`; only a current owner can transfer to an active linked member, and owners must transfer or delete before leaving. Legacy audit rows fall back to `Unknown user` when no current person is available. Audit history is available at `GET /api/groups/:id/audit` with bounded pagination. Deleted transaction detail and restore are available for 30 days.
+Expense and settlement writes validate membership, supported two-decimal ISO currency, real calendar dates, safe integer values, participant uniqueness, and exact payer/split totals before using D1 `batch()` for atomic related writes. Active-user and active-participant predicates are repeated inside mutation batches, so a removal racing a write cannot grant access or introduce a removed participant. Removed participants remain valid settlement endpoints for clearing outstanding balances, while new expenses and schedules require active participants. D1 ledger-limit triggers are authoritative for races and return structured `BALANCE_OVERFLOW`/422 errors; checked application arithmetic remains in place for legacy or imported data. Supported currencies are USD, EUR, GBP, AUD, CAD, NZD, SGD, HKD, CHF, CNY, and INR; currencies with a different minor-unit exponent (for example JPY) are intentionally rejected. `client_operation_id` claims are scoped by mutation kind and authenticated user/group and include a request hash. Updates and deletes require the loaded integer `version`, use conditional writes, snapshot the previous state in `revisions`, and append actor user/person IDs plus a name snapshot (never email) with before/after records to `audit_events` in the same batch. Group ownership transfer and member self-leave are serialized D1 operations with repeated authorization predicates, soft-removal, pending-invitation revocation, and append-only non-email snapshots in `group_membership_events`; only a current owner can transfer to an active linked member, and owners must transfer or delete before leaving. Legacy audit rows fall back to `Unknown user` when no current person is available. Audit history is available at `GET /api/groups/:id/audit` with bounded pagination. Active-group financial detail, including soft-deleted expenses and settlements, is permanent; deleted-group cleanup remains bounded. Deleted transaction detail is restorable for 30 days.
 Conditional mutations guard the parent and child statements in one D1 batch and then verify the resulting version. This avoids silent stale overwrites even where a D1 batch does not expose a convenient affected-row count; a failed post-batch version check returns `CONFLICT`.
 
 Historical settlement participants are authorized separately from active membership. Removed people and deleted accounts remain available for outstanding settlement endpoints with `Removed` or `Deleted account` labels, while new expenses and schedules continue to accept active members only.
 
 The expense, settlement, scheduled-expense, and audit lists support bounded opaque keyset pagination. Expense and settlement pages are ordered by `(expense_date|settlement_date, created_at, id)`, scheduled templates by `(created_at, id)`, and audit pages by `(occurred_at, id)`, all descending with the ID tie-breaker. Responses expose `nextCursor`; an `offset` on expense, settlement, or audit endpoints returns structured `400 INVALID_PAGINATION` rather than being ignored. Offset pagination remains explicitly supported only on scheduled-expense list requests for one deployed-client grace release so old cached PWA clients do not repeat page one. The current client always uses the cursor. Expense search accepts description/notes, member, category, date range, and currency filters and rejects a complete UTF-8 LIKE pattern over 50 bytes (including wildcards). JSON responses use `{ error: { code, message } }` for structured failures.
 
-Scheduled expenses are recurring templates, not ledger rows. From a group or friend ledger, choose **Add expense**, leave it one-time, or turn on **Repeat this expense** to configure a custom daily, weekly, monthly, or yearly interval. Weekly schedules require one or more weekdays; an optional end date is inclusive. The creator timezone defaults from the browser and can be edited as an IANA timezone. The form previews up to three localized next dates and explains whether the schedule continues until paused/cancelled or through its end date. A Worker cron generates ordinary expenses only when their occurrence is due, so occurrences affect balances only when posted; future templates do not affect balances. Generated expenses remain in the ledger even if the template is later edited, paused, or cancelled. Edits are online-only and apply only to future occurrences. Schedules show their status, next occurrence, and any blocked reason, and can be paused, resumed, or cancelled online. Schedule mutations never enter the expense outbox. Cron catch-up is bounded to 20 occurrences per invocation and 20 occurrences per template, processed round-robin so a stale template cannot starve other schedules. When a cursor reaches a cap it remains due and is continued by later invocations; dates are not silently skipped, and operators should edit, pause, or cancel a template if historical catch-up is not wanted. The same scheduled handler performs bounded 30-day purging, generation, and projection backfill and logs structured outcomes. Generated occurrence tombstones remain after a generated expense purge, preventing Cron from regenerating that occurrence; transaction idempotency tombstones are retained where needed for safe retries.
+Scheduled expenses are recurring templates, not ledger rows. From a group or friend ledger, choose **Add expense**, leave it one-time, or turn on **Repeat this expense** to configure a custom daily, weekly, monthly, or yearly interval. Weekly schedules require one or more weekdays; an optional end date is inclusive. The creator timezone defaults from the browser and can be edited as an IANA timezone. The form previews up to three localized next dates and explains whether the schedule continues until paused/cancelled or through its end date. A Worker cron generates ordinary expenses only when their occurrence is due, so occurrences affect balances only when posted; future templates do not affect balances. Generated expenses remain in the ledger even if the template is later edited, paused, or cancelled. Edits are online-only and apply only to future occurrences. Schedules show their status, next occurrence, and any blocked reason, and can be paused, resumed, or cancelled online. Schedule mutations never enter the expense outbox. Cron catch-up is bounded to 20 occurrences per invocation and 20 occurrences per template, processed round-robin so a stale template cannot starve other schedules. When a cursor reaches a cap it remains due and is continued by later invocations; dates are not silently skipped, and operators should edit, pause, or cancel a template if historical catch-up is not wanted. The same scheduled handler performs bounded deleted-group cleanup, generation, and projection backfill and logs structured outcomes. Generated occurrence tombstones remain after a generated expense purge, preventing Cron from regenerating that occurrence; transaction idempotency tombstones are retained where needed for safe retries.
 The former `/groups/:id/scheduled-expense/new` URL redirects to the combined expense form; existing schedule edit URLs remain available for recurring schedule management.
 
 ## Client features and limitations
 
 The app includes groups, owner/member access, multi-payer expense editing, equal/exact/percentage-basis-point/share allocation, expense and settlement history/deletion/restoration, multi-currency balances, partial settlements, activity, and exports. Group owners can rename a group, change its default currency without conversion, or soft-delete it after a typed-name confirmation; these settings are online-only. Owners can transfer ownership only to an active linked member; non-owners can leave after confirmation, while owners must transfer first or delete the group. Group expenses can be filtered by search, member, category, date range, and currency. Filters use namespaced URL parameters, preserve unrelated route parameters, and reset cursor pagination when applied. Percentages are entered as basis points totaling 10,000 to avoid persisted floating point. Verified users see matched pending invitations in the app and can accept or reject them; owners invite by email, see expiry/status, revoke, retry, transfer ownership, and remove members with confirmation. There is no email copy or invitation-link UI. Removed people are excluded from new expenses and schedules but remain usable in settlement flows and are marked where historical data lacks an active member.
 
-Expense, settlement, scheduled-expense, activity, and audit lists use opaque keyset cursors with Load more or bounded cursor-following. The first IndexedDB page remains an offline presentation and never implies that the ledger is complete; server-side expense filtering is disabled offline because filtered pages are not cached. New settlements default to today but allow a selected date, which is preserved while suggestions refresh and when resetting the suggested participants/amount. Detail pages include safe actor/timestamp audit differences, settlement details, and 30-day tombstones with version-checked restore; purged records return a normal not-found error. Group JSON, separate expense CSV, separate settlement CSV, and account-wide JSON exports are assembled page-by-page with progress, cancellation, download errors, File System Access where available, and a Blob fallback. CSV formula protection remains server-side.
+Expense, settlement, scheduled-expense, activity, and audit lists use opaque keyset cursors with Load more or bounded cursor-following. The first IndexedDB page remains an offline presentation and never implies that the ledger is complete; server-side expense filtering is disabled offline because filtered pages are not cached. New settlements default to today but allow a selected date, which is preserved while suggestions refresh and when resetting the suggested participants/amount. Detail pages include safe actor/timestamp audit differences, settlement details, and 30-day tombstones with version-checked restore; active-group financial rows remain available after soft deletion, while deleted-group purge removes the group and its detail in bounded work. Group JSON, separate expense CSV, separate settlement CSV, and account-wide JSON exports are assembled page-by-page with progress, cancellation, download errors, File System Access where available, and a Blob fallback. CSV formula protection remains server-side.
 
 `public/manifest.webmanifest`, the SVG icon, and `public/sw.js` provide the installable PWA shell. The service worker uses a versioned, bounded allowlist for static shell assets, serves navigation with a cached `index.html` fallback (including deep expense routes), and never caches `/api`, authentication paths, or mutation responses.
 
@@ -347,29 +362,49 @@ intentionally not rate limited.
 
 ### Operations
 
-Apply migrations before each Worker deploy, then deploy the projection-aware
-Worker before depending on projected balances. Existing groups begin with
-`projection_state.status='pending'`; the scheduled Worker backfills at most two
-groups per tick and marks each ready only after its bounded recomputation
-commits atomically. The legacy aggregate remains the safe fallback while a
-group is pending or backfilling. The same 15-minute Cron performs bounded generation and purges
-deleted transaction and group data older than 30 days. Cron emits compact JSON
-outcomes for generated/blocked/capped work, projection readiness/failures, and
-purged counts. Worker observability is enabled in `wrangler.toml` with low trace
-sampling; application logs contain request metadata and operational counts only,
-not secrets, emails, or transaction content.
+Migration 0024 is a hybrid replacement of the legacy 0003 guards. Existing groups start
+pending in `ledger_summary_state` and use authoritative fallback reads while
+bounded maintenance scans immutable expense/settlement IDs into compact
+verification rows. Generation CAS, leases, retry metadata, and per-month
+failure isolation make bootstrap resumable. Every fully verified active month
+folds into `ledger_checkpoint_balances` in chronological order, including
+current and future-dated months; the checkpoint therefore means “through the
+latest verified folded month,” not “closed months only.” Normal mutations apply JSON-bound old/new payer,
+split, and settlement contributions to monthly totals and checkpoint rows in
+the same D1 batch. Ready reads combine checkpoint and post-checkpoint periods
+and never read legacy `group_balance_projection`; pending, dirty, missing, and
+ failed state uses direct authoritative aggregation. The legacy aggregate 0003
+ triggers are removed, while old Workers remain safe because legacy dirty
+ triggers update only the new monthly maintenance state; new-worker mutations
+ leave the legacy `projection_state.status` and ready projection untouched.
 
-For an optional local large-ledger check (default 10,000, maximum 100,000
-entries), use the disposable local D1 harness; it never uses `--remote`:
+Migration 0024 uses a staged monthly rollout. It does not rebuild the whole
+database or repurpose legacy projection tables, but it does replace the legacy
+0003 aggregate triggers with hybrid guards. Existing groups remain pending
+until bounded maintenance verifies each month; ready reads combine the rolling
+checkpoint with the bounded post-checkpoint tail. A single maintenance pass
+folds at most one verified month and yields when another foldable month
+remains, so publication occurs only after the checkpoint reaches the latest
+verified month. Creating a new month while ready queues maintenance; its
+bounded incremental tail remains readable until maintenance claims the group,
+after which pending fallback is used.
+
+Apply migrations before each Worker deploy, then deploy the summary-aware Worker. Normal expense, settlement, restore, delete, and generated-occurrence batches update authoritative detail plus affected monthly/checkpoint rows atomically; date moves decrement the old month and increment the new month. Pending, dirty, missing, and failed state falls back to direct authoritative aggregation. Monthly Cron maintenance is bounded and fair, reports structured counts without financial content, and has no 750-group threshold or full-group rebuild.
+
+For the practical per-group target, run the optional local large-ledger check
+(default and maximum 10,000 entries); it uses a disposable local D1 harness and
+never uses `--remote`:
 
 ```sh
-npm run validate:large-ledger -- --entries 100000
+npm run validate:large-ledger -- --entries 10000
 ```
 
-The validator seeds equal-date/equal-created-at expenses and settlements,
-checks the mixed transaction page and `EXPLAIN QUERY PLAN`, and reports the
-bounded page elapsed time. The unified query may materialize and sort its two
-group-scoped streams; this is intentional and is covered by the benchmark.
+The validator seeds a projection exactly equal to the authoritative expenses,
+payers, splits, and settlements, performs one post-seed mutation, verifies the
+full exact projection against a fresh authoritative aggregation and the O(1)
+gross total, then checks the mixed transaction page and `EXPLAIN QUERY PLAN`.
+The unified query may materialize and sort its two group-scoped streams; this is
+intentional and is covered by the benchmark.
 
 ### Scheduled-template lifecycle
 

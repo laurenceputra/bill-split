@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
 import { hydrateActivity, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -197,6 +197,23 @@ describe('user-scoped IndexedDB', () => {
       rollbackSessionLogout(logoutGeneration, false);
     }
     expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+  });
+
+  it('rejects late groups, ledger snapshots, and detail writes after one mutation generation advances', async () => {
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'Old', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: 'old' });
+    await updateGroupSnapshot('user-a', 'group-a', { group: { id: 'group-a', name: 'Old', currency: 'USD', createdAt: '', updatedAt: '' } });
+    await saveExpenseDetails({ userId: 'user-a', expenseId: 'expense-a', expense: { id: 'expense-a', groupId: 'group-a', description: 'Old', amountMinor: 100, currency: 'USD', date: '2026-01-01', createdBy: 'user-a', createdAt: '', updatedAt: '', version: 1, payers: [], splits: [] }, history: [], fetchedAt: 'old' });
+    const requestGeneration = await readMutationGeneration('user-a');
+    await invalidateCachedGroups('user-a', undefined, { groupId: 'group-a' });
+
+    expect(await saveGroupsIfGenerationMatches({ userId: 'user-a', groups: [{ id: 'late', name: 'Late', currency: 'USD', createdAt: '', updatedAt: '' }], cachedAt: 'late' }, requestGeneration)).toBe(false);
+    for (const patch of [{ expenses: [] }, { balances: {} }, { settlements: [] }]) {
+      expect(await updateGroupSnapshotIfGenerationMatches('user-a', 'group-a', patch, requestGeneration)).toBe(false);
+    }
+    expect(await saveExpenseDetailsIfGenerationMatches({ userId: 'user-a', expenseId: 'expense-a', expense: { id: 'expense-a', groupId: 'group-a', description: 'Late', amountMinor: 200, currency: 'USD', date: '2026-01-02', createdBy: 'user-a', createdAt: '', updatedAt: '', version: 2, payers: [], splits: [] }, history: [], fetchedAt: 'late' }, requestGeneration)).toBe(false);
+    expect((await readGroups('user-a'))?.groups).toEqual([]);
+    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+    expect(await readExpenseDetails('user-a', 'expense-a')).toBeUndefined();
   });
 
   it('persists home balance summaries without requiring an IndexedDB migration', async () => {

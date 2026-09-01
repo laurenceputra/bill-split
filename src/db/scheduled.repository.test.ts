@@ -257,6 +257,13 @@ const input: ScheduledExpenseInput = {
 };
 
 describe('scheduled expense repository', () => {
+  it('reports an expired build-GC deadline as capped without starting work', async () => {
+    const db = { prepare: () => { throw new Error('expired work must not query'); } };
+    await expect(new Repository(db as never).ledgerPeriodBuildGarbageCollection({ deadlineMs: Date.now() - 1 })).resolves.toEqual({
+      buildsScanned: 0, buildsCompleted: 0, balancesDeleted: 0, totalsDeleted: 0, capped: true,
+    });
+  });
+
   it('persists the timezone, recurrence cursor, children, and a retry claim', async () => {
     const db = new ScheduledDb();
     const result = await new Repository(db as never).createScheduledExpense('group-1', 'user-1', input);

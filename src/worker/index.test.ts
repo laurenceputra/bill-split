@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import worker from './index';
+import worker, { cronStageOrder } from './index';
+import { Repository } from '../db/repository';
 
 class Statement {
   constructor(protected readonly sql: string) {}
@@ -121,14 +122,21 @@ class ScheduledRouteStatement extends Statement {
   async run() { return { meta: { changes: 1 } }; }
 }
 class ProjectionFailureStatement extends Statement {
+  async first<T>() {
+    if (this.sql.includes('SELECT p.month,p.source_generation')) throw new Error('monthly summary unavailable');
+    if (this.sql.includes('SELECT discovery_complete')) return { discovery_complete: 1 } as T;
+    if (this.sql.includes('ledger_summary_state')) return { group_id: 'group-1', status: 'pending', generation: 0 } as T;
+    return null;
+  }
   async all<T>() {
-    if (this.sql.includes('FROM groups g LEFT JOIN projection_state')) return { results: [{ id: 'group-1' }] as T[] };
+    if (this.sql.includes('FROM ledger_summary_state state JOIN groups g')) return { results: [{ group_id: 'group-1' }] as T[] };
     return { results: [] as T[] };
   }
+  async run() { return { meta: { changes: 1 } }; }
 }
 class ProjectionFailureDb {
   prepare(sql: string) { return new ProjectionFailureStatement(sql); }
-  async batch() { throw new Error('projection backfill unavailable'); }
+  async batch() { throw new Error('monthly summary unavailable'); }
 }
 class MutationDb {
   prepare(sql: string) { return new Statement(sql); }
@@ -155,6 +163,54 @@ const testRateLimiter = (success = true) => ({
 });
 
 describe('worker boundary', () => {
+  it('rotates the first Cron stage on each scheduled slot', () => {
+    const slot = 15 * 60 * 1000;
+    expect(cronStageOrder(0)).toEqual(['purge', 'generation', 'monthly-summary', 'build-gc']);
+    expect(cronStageOrder(slot)).toEqual(['generation', 'monthly-summary', 'build-gc', 'purge']);
+    expect(cronStageOrder(slot * 2)[0]).toBe('monthly-summary');
+    expect(cronStageOrder(slot * 3)[0]).toBe('build-gc');
+    expect(cronStageOrder(slot * 4)[0]).toBe('purge');
+  });
+
+  it('marks later stages capped when an earlier stage exhausts the shared deadline', async () => {
+    const purge = vi.spyOn(Repository.prototype, 'purgeExpiredData').mockResolvedValue({ capped: true } as any);
+    const generation = vi.spyOn(Repository.prototype, 'generateDueScheduledExpenses').mockResolvedValue({ capped: false } as any);
+    const summary = vi.spyOn(Repository.prototype, 'monthlySummaryMaintenance').mockResolvedValue({ capped: false } as any);
+    const buildGc = vi.spyOn(Repository.prototype, 'ledgerPeriodBuildGarbageCollection').mockResolvedValue({ capped: false } as any);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const clock = vi.spyOn(Date, 'now').mockReturnValueOnce(1_000).mockReturnValueOnce(1_000).mockReturnValue(30_000);
+    try {
+      await worker.scheduled?.({ type: 'scheduled', cron: '* * * * *', scheduledTime: 0, noRetry: () => undefined } as ScheduledController, env(), {} as ExecutionContext);
+      const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
+      expect(purge).toHaveBeenCalledTimes(1);
+      expect(generation).not.toHaveBeenCalled();
+      expect(summary).not.toHaveBeenCalled();
+      expect(buildGc).not.toHaveBeenCalled();
+      expect(record).toMatchObject({ capped: true, buildGc: expect.objectContaining({ capped: true }) });
+    } finally {
+      purge.mockRestore(); generation.mockRestore(); summary.mockRestore(); buildGc.mockRestore(); log.mockRestore(); clock.mockRestore();
+    }
+  });
+
+  it('runs session purge before group purge can exhaust the shared deadline', async () => {
+    let currentTime = 1_000;
+    const sessions = vi.spyOn(Repository.prototype, 'purgeExpiredApplicationSessions').mockResolvedValue({ purged: 7, capped: false });
+    const purge = vi.spyOn(Repository.prototype, 'purgeExpiredData').mockImplementation(async () => {
+      currentTime = 30_000;
+      return { capped: true } as any;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+    try {
+      await worker.scheduled?.({ type: 'scheduled', cron: '* * * * *', scheduledTime: 0, noRetry: () => undefined } as ScheduledController, env(), {} as ExecutionContext);
+      const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
+      expect(sessions).toHaveBeenCalledWith(new Date(0), 100);
+      expect(record).toMatchObject({ sessionsPurged: 7, capped: true });
+    } finally {
+      sessions.mockRestore(); purge.mockRestore(); log.mockRestore(); clock.mockRestore();
+    }
+  });
+
   it('sanitizes bootstrap return paths', async () => {
     const { sanitizeReturnTo } = await import('./index');
     expect(sanitizeReturnTo('/groups/g-1?tab=activity#ledger')).toBe('/groups/g-1?tab=activity#ledger');
@@ -446,17 +502,17 @@ describe('worker boundary', () => {
        await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: database }), {} as ExecutionContext);
        expect(database.batches.some((batch) => batch.some((statement: any) => String(statement.sql ?? '').includes('INSERT INTO expenses')))).toBe(true);
        const record = log.mock.calls.map(([value]) => JSON.parse(String(value)) as Record<string, any>).find((value) => value.event === 'bill-split.cron');
-       expect(record).toMatchObject({ outcome: 'completed', generated: expect.any(Number), blocked: expect.any(Number), generationCapped: expect.any(Boolean), projection: { ready: true } });
+        expect(record).toMatchObject({ outcome: 'completed', generated: expect.any(Number), blocked: expect.any(Number), generationCapped: expect.any(Boolean), monthlySummary: expect.objectContaining({ groupsScanned: expect.any(Number), capped: expect.any(Boolean) }), buildGc: expect.objectContaining({ buildsScanned: expect.any(Number), capped: expect.any(Boolean) }) });
        expect(record).not.toHaveProperty('email');
      } finally { log.mockRestore(); }
   });
-  it('logs a structured projection failure and preserves the scheduled error', async () => {
+    it('logs a structured monthly-summary failure while isolating scheduled work', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
-      await expect(worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: new ProjectionFailureDb() }), {} as ExecutionContext)).rejects.toThrow('projection backfill unavailable');
-      expect(error.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', stage: 'projection', outcome: 'failed', error: 'UNEXPECTED_ERROR' }));
-      expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'failed', projection: { ready: false } }));
+       await worker.scheduled?.({ type: 'scheduled', cron: '*/15 * * * *', scheduledTime: Date.parse('2026-01-02T00:00:00Z'), noRetry: () => undefined } as ScheduledController, env({ DB: new ProjectionFailureDb() }), {} as ExecutionContext);
+       expect(error).not.toHaveBeenCalled();
+       expect(log.mock.calls.map(([value]) => JSON.parse(String(value)))).toContainEqual(expect.objectContaining({ event: 'bill-split.cron', outcome: 'completed', monthlySummary: expect.objectContaining({ groupsFailed: 1 }) }));
     } finally { log.mockRestore(); error.mockRestore(); }
   });
   it.each(['/api/groups/group-1/expenses?offset=1', '/api/groups/group-1/settlements?offset=1', '/api/groups/group-1/transactions?offset=1', '/api/groups/group-1/audit?offset=1'])('rejects removed offset pagination on %s', async (path) => {

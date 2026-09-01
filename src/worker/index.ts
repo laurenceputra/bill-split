@@ -4,15 +4,24 @@ import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
 import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
-import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
+import { Repository, RepositoryError } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthenticationError } from './clerk-auth';
 import { escapeCsvCell, settlementCsvRow } from './csv';
 import { CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
+import { registerExpenseSettlementRoutes } from './expense-settlement-routes';
 export { parseAuthorizedParties } from './clerk-auth';
 
 type ApplicationAuth = { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
+export type CronStage = 'purge' | 'generation' | 'monthly-summary' | 'build-gc';
+const cronStages: CronStage[] = ['purge', 'generation', 'monthly-summary', 'build-gc'];
+const cronSlotMs = 15 * 60 * 1000;
+/** Rotate the first stage by scheduled slot so no stage is always last. */
+export const cronStageOrder = (scheduledTime: number): CronStage[] => {
+  const start = ((Math.floor(scheduledTime / cronSlotMs) % cronStages.length) + cronStages.length) % cronStages.length;
+  return [...cronStages.slice(start), ...cronStages.slice(0, start)];
+};
 type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
 const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
@@ -385,55 +394,7 @@ api.get('/api/invitations', async (c) => c.json({ invitations: await getRepo(c).
 api.post('/api/invitations/:invitationId/accept', async (c) => { try { return c.json({ invitation: await getRepo(c).acceptInvitation(c.req.param('invitationId'), c.get('auth').id) }); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/invitations/:invitationId/reject', async (c) => { const rejected = await getRepo(c).rejectInvitation(c.req.param('invitationId'), c.get('auth').id); if (!rejected) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
 
-api.get('/api/groups/:groupId/expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); } catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); } try { const result = await x.repo.expensePage(c.req.param('groupId'), { q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor }); return c.json({ expenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.get('/api/groups/:groupId/transactions', async (c) => {
-  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
-  const offsetError = rejectOffset(c); if (offsetError) return offsetError;
-  const q = c.req.query(), limit = page(q.limit, 25, 100);
-  if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
-  if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense or settlement');
-  if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Currency filter is invalid');
-  try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); }
-  catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); }
-  try {
-    const result = await x.repo.transactionPage(c.req.param('groupId'), { kind: q.kind as 'expense' | 'settlement' | undefined, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
-    return c.json({ transactions: result.items, nextCursor: result.nextCursor });
-  } catch (error) { return repositoryError(c, error); }
-});
-api.get('/api/groups/:groupId/scheduled-expenses', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(); const limit = page(q.limit, 100, 100); const offset = q.offset === undefined ? undefined : page(q.offset, 0, Number.MAX_SAFE_INTEGER); if (limit < 1 || (offset !== undefined && offset < 0) || (q.cursor && q.offset !== undefined)) return jsonError(c, 400, 'INVALID_PAGINATION', q.cursor && q.offset !== undefined ? 'Use either cursor or offset pagination' : 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.scheduledExpenses(c.req.param('groupId'), { limit, offset, cursor: q.cursor }); return c.json({ scheduledExpenses: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-api.post('/api/groups/:groupId/scheduled-expenses', zValidator('json', scheduledExpenseInput), async (c) => {
-  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
-  const input = c.req.valid('json');
-  try { assertFinancialInput({ ...input, date: input.start_date }); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); }
-  if (!(await validPeople(x.repo, c.req.param('groupId'), [...input.payers, ...input.splits].map((person) => person.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member');
-  try { return c.json({ scheduledExpense: await x.repo.createScheduledExpense(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); }
-});
-api.post('/api/groups/:groupId/expenses', zValidator('json', expenseInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'); try { assertFinancialInput(input); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); } try { if (!(await validPeople(x.repo, c.req.param('groupId'), [...input.payers, ...input.splits].map((p) => p.person_id))) ) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member'); return c.json({ expense: await x.repo.createExpense(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
-api.put('/api/scheduled-expenses/:scheduledExpenseId', zValidator('json', scheduledExpenseInput), async (c) => {
-  const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x;
-  const input = c.req.valid('json');
-  try { assertFinancialInput({ ...input, date: input.start_date }); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); }
-  if (!(await validPeople(x.repo, x.scheduled.groupId, [...input.payers, ...input.splits].map((person) => person.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member');
-  try { return c.json({ scheduledExpense: await x.repo.updateScheduledExpense(c.req.param('scheduledExpenseId'), x.auth.id, input) }); } catch (error) { return repositoryError(c, error); }
-});
-api.get('/api/scheduled-expenses/:scheduledExpenseId', async (c) => { const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x; return c.json({ scheduledExpense: x.scheduled }); });
-for (const [action, method] of [['pause', 'pauseScheduledExpense'], ['resume', 'resumeScheduledExpense'], ['cancel', 'cancelScheduledExpense'] ] as const) {
-  api.post(`/api/scheduled-expenses/:scheduledExpenseId/${action}`, zValidator('json', scheduledExpenseStatusInput), async (c) => {
-    const x = await authorizedScheduled(c, c.req.param('scheduledExpenseId')); if (x instanceof Response) return x;
-    try { const result = await x.repo[method](c.req.param('scheduledExpenseId'), x.auth.id, c.req.valid('json').version); return c.json({ scheduledExpense: result }); } catch (error) { return repositoryError(c, error); }
-  });
-}
-  api.get('/api/expenses/:expenseId', async (c) => { const expense = await getRepo(c).expense(c.req.param('expenseId'), true); if (!expense || (expense.deletedAt && Date.now() - Date.parse(expense.deletedAt) > 30 * 24 * 60 * 60 * 1000)) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, expense.groupId); if (x instanceof Response) return x; return c.json({ expense, history: await x.repo.revisions('expense', c.req.param('expenseId')) }); });
-  api.put('/api/expenses/:expenseId', zValidator('json', expenseInput), async (c) => { const old = await getRepo(c).expense(c.req.param('expenseId')); if (!old) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, old.groupId); if (x instanceof Response) return x; const input = c.req.valid('json'); try { assertFinancialInput(input); } catch (error) { const balanceResponse = balanceError(c, error); if (balanceResponse) return balanceResponse; return jsonError(c, 400, 'INVALID_FINANCIAL_INPUT', error instanceof Error ? error.message : 'Invalid financial input'); } try { if (input.version === undefined) return jsonError(c, 409, 'CONFLICT', 'The loaded record version is required'); if (!(await validPeople(x.repo, old.groupId, [...input.payers, ...input.splits].map((p) => p.person_id)))) return jsonError(c, 400, 'INVALID_MEMBER', 'Every payer and split must be a group member'); const expense = await x.repo.updateExpense(c.req.param('expenseId'), x.auth.id, input); if (!expense) return jsonError(c, 409, 'CONFLICT', 'The record was deleted by another request'); return c.json({ expense }); } catch (error) { return repositoryError(c, error); } });
-  api.delete('/api/expenses/:expenseId', async (c) => { const old = await getRepo(c).expense(c.req.param('expenseId')); if (!old) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Expense not found'); const x = await authorizedGroup(c, old.groupId); if (x instanceof Response) return x; const version = page(c.req.query('version'), -1, Number.MAX_SAFE_INTEGER); if (version < 1) return jsonError(c, 400, 'INVALID_VERSION', 'A positive record version is required'); try { await x.repo.deleteExpense(c.req.param('expenseId'), x.auth.id, version); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
-  api.post('/api/expenses/:expenseId/restore', zValidator('json', transactionVersionInput), async (c) => { const expense = await getRepo(c).expense(c.req.param('expenseId'), true); if (!expense || !expense.deletedAt || Date.now() - Date.parse(expense.deletedAt) > 30 * 24 * 60 * 60 * 1000) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Deleted expense not found'); const x = await authorizedGroup(c, expense.groupId); if (x instanceof Response) return x; try { return c.json({ expense: await x.repo.restoreExpense(c.req.param('expenseId'), x.auth.id, c.req.valid('json').version) }); } catch (error) { return repositoryError(c, error); } });
-
-api.get('/api/groups/:groupId/settlements', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.settlementPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ settlements: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
-  api.post('/api/groups/:groupId/settlements', zValidator('json', settlementInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'), people = await x.repo.groupPeople(c.req.param('groupId')); if (input.from_person_id === input.to_person_id || !people.includes(input.from_person_id) || !people.includes(input.to_person_id)) return jsonError(c, 400, 'INVALID_SETTLEMENT', 'Settlement participants are invalid'); try { return c.json({ settlement: await x.repo.createSettlement(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
-  api.put('/api/settlements/:settlementId', zValidator('json', settlementInput), async (c) => { const input = c.req.valid('json'), repo = getRepo(c), row = await repo.settlement(c.req.param('settlementId')); if (!row) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; const people = await repo.groupPeople(row.groupId); if (input.version === undefined || input.from_person_id === input.to_person_id || !people.includes(input.from_person_id) || !people.includes(input.to_person_id)) return jsonError(c, 400, 'INVALID_SETTLEMENT', 'Settlement version or participants are invalid'); try { const settlement = await repo.updateSettlement(c.req.param('settlementId'), x.auth.id, input); if (!settlement) return jsonError(c, 409, 'CONFLICT', 'The record was deleted by another request'); return c.json({ settlement }); } catch (error) { return repositoryError(c, error); } });
-  api.delete('/api/settlements/:settlementId', async (c) => { const row = await getRepo(c).settlement(c.req.param('settlementId')); if (!row) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; const version = page(c.req.query('version'), -1, Number.MAX_SAFE_INTEGER); if (version < 1) return jsonError(c, 400, 'INVALID_VERSION', 'A positive record version is required'); try { await x.repo.deleteSettlement(c.req.param('settlementId'), x.auth.id, version); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
-  api.get('/api/settlements/:settlementId', async (c) => { const row = await getRepo(c).settlement(c.req.param('settlementId'), true); if (!row || (row.deletedAt && Date.now() - Date.parse(row.deletedAt) > 30 * 24 * 60 * 60 * 1000)) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; return c.json({ settlement: row, history: await x.repo.revisions('settlement', c.req.param('settlementId')) }); });
-  api.post('/api/settlements/:settlementId/restore', zValidator('json', transactionVersionInput), async (c) => { const row = await getRepo(c).settlement(c.req.param('settlementId'), true); if (!row || !row.deletedAt || Date.now() - Date.parse(row.deletedAt) > 30 * 24 * 60 * 60 * 1000) return jsonError(c, 404, 'SETTLEMENT_NOT_FOUND', 'Deleted settlement not found'); const x = await authorizedGroup(c, row.groupId); if (x instanceof Response) return x; try { return c.json({ settlement: await x.repo.restoreSettlement(c.req.param('settlementId'), x.auth.id, c.req.valid('json').version) }); } catch (error) { return repositoryError(c, error); } });
+registerExpenseSettlementRoutes(api, { authorizedGroup, authorizedScheduled, getRepo, jsonError, repositoryError, balanceError, validPeople, page, rejectOffset });
 
 api.get('/api/groups/:groupId/balances', async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const groupId = c.req.param('groupId');
@@ -469,7 +430,7 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
     headers.set('Pragma', 'no-cache');
   }
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
- }, async scheduled(controller: ScheduledController, env: Env['Bindings'], _ctx: ExecutionContext) {
+  }, async scheduled(controller: ScheduledController, env: Env['Bindings'], _ctx: ExecutionContext) {
   // Cron is deliberately bounded in the repository so a long-outage catch-up
   // cannot consume the entire invocation. A later tick resumes from the
   // template's next occurrence cursor.
@@ -478,35 +439,52 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
    let failure: unknown;
    let purge: Awaited<ReturnType<Repository['purgeExpiredData']>> | undefined;
    let generation: Awaited<ReturnType<Repository['generateDueScheduledExpenses']>> | undefined;
-    let projection: Awaited<ReturnType<Repository['projectionBackfill']>> | undefined;
     let sessions: Awaited<ReturnType<Repository['purgeExpiredApplicationSessions']>> | undefined;
-    for (const [stage, run] of [
-      ['purge', () => repo.purgeExpiredData(asOf)] as const,
-      ['sessions', () => repo.purgeExpiredApplicationSessions(asOf, 100)] as const,
-      ['generation', () => repo.generateDueScheduledExpenses(asOf)] as const,
-     ['projection', () => repo.projectionBackfill({ maxGroups: 2 })] as const,
-   ]) {
-     try {
-       const result = await run();
-       if (stage === 'purge') purge = result as typeof purge;
-        else if (stage === 'sessions') sessions = result as typeof sessions;
+    let summary: Awaited<ReturnType<Repository['monthlySummaryMaintenance']>> | undefined;
+    let buildGc: Awaited<ReturnType<Repository['ledgerPeriodBuildGarbageCollection']>> | undefined;
+    let capped = false;
+    let deadlineExhausted = false;
+    // Keep one deadline for every bounded Cron stage. The cursors and leases
+    // make an invocation that yields here safe to resume on the next tick.
+    const deadlineMs = Date.now() + 25_000;
+    const runs: Record<CronStage, () => Promise<unknown>> = {
+      // Application-session cleanup is part of purge, not a fifth rotating
+      // stage. Both operations share this invocation deadline.
+      purge: async () => {
+        sessions = await repo.purgeExpiredApplicationSessions(asOf, 100);
+        const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1, deadlineMs });
+        return result;
+      },
+      generation: () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2, deadlineMs }),
+      'monthly-summary': () => repo.monthlySummaryMaintenance({ maxGroups: 1, maxMonths: 2, chunkSize: 100, deadlineMs }),
+      'build-gc': () => repo.ledgerPeriodBuildGarbageCollection({ maxBuilds: 1, chunkSize: 100, deadlineMs }),
+    };
+    for (const stage of cronStageOrder(controller.scheduledTime)) {
+      if (Date.now() >= deadlineMs) { capped = true; deadlineExhausted = true; break; }
+      try {
+        const result = await runs[stage]();
+        if (stage === 'purge') purge = result as typeof purge;
         else if (stage === 'generation') generation = result as typeof generation;
-       else projection = result as typeof projection;
-     } catch (error) {
-       failure ??= error;
-       console.error(JSON.stringify({ event: 'bill-split.cron', scheduledTime: controller.scheduledTime, stage, outcome: 'failed', error: error instanceof RepositoryError ? error.code : 'UNEXPECTED_ERROR' }));
-     }
-   }
+        else if (stage === 'monthly-summary') summary = result as typeof summary;
+        else buildGc = result as typeof buildGc;
+        if ((result as { capped?: boolean }).capped) capped = true;
+      } catch (error) {
+        failure ??= error;
+        console.error(JSON.stringify({ event: 'bill-split.cron', scheduledTime: controller.scheduledTime, stage, outcome: 'failed', error: error instanceof RepositoryError ? error.code : 'UNEXPECTED_ERROR' }));
+      }
+    }
    console.log(JSON.stringify({
      event: 'bill-split.cron',
      scheduledTime: controller.scheduledTime,
      outcome: failure ? 'failed' : 'completed',
       purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, capped: purge.capped } : undefined,
       sessionsPurged: sessions?.purged ?? 0,
-     generated: generation?.generated ?? 0,
-     blocked: generation?.blocked ?? 0,
-     generationCapped: generation?.capped ?? false,
-     projection: projection ? { groupsScanned: projection.groupsScanned, groupsRebuilt: projection.groupsRebuilt, ready: !projection.capped, capped: projection.capped } : { ready: false },
+      generated: generation?.generated ?? 0,
+      blocked: generation?.blocked ?? 0,
+      generationCapped: generation?.capped ?? deadlineExhausted,
+      monthlySummary: summary ? { groupsScanned: summary.groupsScanned, monthsScanned: summary.monthsScanned, monthsVerified: summary.monthsVerified, chunks: summary.chunks, groupsFailed: summary.groupsFailed, monthsFailed: summary.monthsFailed, capped: summary.capped } : { ready: false, capped },
+      buildGc: buildGc ? { buildsScanned: buildGc.buildsScanned, buildsCompleted: buildGc.buildsCompleted, balancesDeleted: buildGc.balancesDeleted, totalsDeleted: buildGc.totalsDeleted, capped: buildGc.capped } : { buildsScanned: 0, buildsCompleted: 0, balancesDeleted: 0, totalsDeleted: 0, capped },
+      capped,
    }));
    if (failure) throw failure;
  } };

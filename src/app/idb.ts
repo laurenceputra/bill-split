@@ -537,6 +537,23 @@ export const saveExpenseDetails = (value: CachedExpenseDetails, generation = cap
   assertSessionGeneration(generation);
   return transaction('expenseDetails', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('expenseDetails').put(value); });
 };
+export async function saveExpenseDetailsIfGenerationMatches(value: CachedExpenseDetails, mutationGeneration: number, generation = captureSessionGeneration()) {
+  if (!isSessionGenerationCurrent(generation)) return false;
+  const db = await open();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(['expenseDetails', 'mutationGenerations'], 'readwrite');
+    const current = tx.objectStore('mutationGenerations').get(value.userId);
+    let saved = false;
+    current.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation) || ((current.result as MutationGeneration | undefined)?.generation ?? 0) !== mutationGeneration) return;
+      tx.objectStore('expenseDetails').put(value);
+      saved = true;
+    };
+    tx.oncomplete = () => { db.close(); resolve(saved); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
 export const readExpenseDetails = (userId: string, expenseId: string) => transaction<CachedExpenseDetails>('expenseDetails', 'readonly', (tx) => tx.objectStore('expenseDetails').get([userId, expenseId]));
 export const saveCategories = (value: CachedCategories, generation = captureSessionGeneration(), mutationGeneration?: number) => {
   assertSessionGeneration(generation);

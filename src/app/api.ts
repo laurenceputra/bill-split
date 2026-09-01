@@ -9,6 +9,7 @@ import type { ExpenseFilters } from './expense-filters';
 import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
 import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
 import { CSRF_COOKIE, CSRF_HEADER } from '../worker/application-session';
+import { persistActivityResponse, persistBalanceResponse, persistCategoriesResponse, persistExpenseDetailsResponse, persistExpenseResponse, persistGroupResponse, persistGroupsResponse, persistSettlementResponse, persistTransactionResponse } from './persisted-resources';
 
 export type CurrentUser = { id: string; email: string; personId: string; idleExpiresAt?: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -544,14 +545,6 @@ const cacheRead = async <T>(read: () => Promise<T | undefined>) => {
   try { return await read(); }
   catch (error) {
     if (error instanceof SessionGenerationMismatchError) throw error;
-    return undefined;
-  }
-};
-const cacheWrite = async <T>(write: () => Promise<T>) => {
-  try { return await write(); }
-  catch (error) {
-    if (error instanceof SessionGenerationMismatchError) throw error;
-    /* Private cache is an enhancement, not a request failure. */
     return undefined;
   }
 };
@@ -1850,7 +1843,7 @@ export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ gr
     const result = await apiWithMeta<{ groups: Group[] }>('/groups', { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     let persisted = true;
-    if (result.userId) { const responseUserId = result.userId; persisted = (await cacheWrite(() => saveGroupsIfGenerationMatches({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() }, requestGeneration, generation))) !== false; }
+    if (result.userId) { const responseUserId = result.userId; persisted = await persistGroupsResponse({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() }, requestGeneration, generation); }
     return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
@@ -1869,11 +1862,8 @@ export async function getGroup(id: string, signal?: AbortSignal): Promise<Cached
     const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[]; splitDefault?: GroupSplitDefault | null }>(`/groups/${id}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     const data = { ...result.data, historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: result.data.splitDefault ?? null };
-    if (result.userId) {
-      const persisted = await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants, splitDefault: data.splitDefault }, requestMutationGeneration, generation));
-      if (persisted === false) return { ...data, stale: true };
-    }
-    return data;
+    const persisted = result.userId ? await persistGroupResponse(result.userId, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants, splitDefault: data.splitDefault }, requestMutationGeneration, generation) : true;
+    return persisted ? data : { ...data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
@@ -1988,14 +1978,15 @@ export async function getExpenses(id: string, signal?: AbortSignal, filters: Exp
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
      const options = { limit: 50, ...filters };
      const query = new URLSearchParams(pageParams(options));
      for (const [key, value] of expenseFilterQuery(filters).entries()) query.set(key, value);
      const result = await apiWithMeta<ExpensePage>(`/groups/${id}/expenses?${query}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-     if (result.userId && !hasExpenseFilters(filters)) { await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { expenses: result.data.expenses }, generation)); const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
-    return result.data;
+      if (result.userId && !hasExpenseFilters(filters)) { const persisted = await persistExpenseResponse(result.userId, id, result.data.expenses, requestMutationGeneration, generation); if (!persisted) return { ...result.data, stale: true }; const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, id, result.data.expenses, generation, authEpoch)); if (reconciled) { await invalidateForMutation.expenseChanged(id, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); } }
+     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
@@ -2010,11 +2001,12 @@ export async function getExpenses(id: string, signal?: AbortSignal, filters: Exp
 export async function getBalances(id: string, signal?: AbortSignal): Promise<CachedResult<{ balances: Record<string, Balances> }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
     const result = await apiWithMeta<{ balances: Record<string, Balances> }>(`/groups/${id}/balances`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { balances: result.data.balances }, generation));
-    return result.data;
+    const persisted = result.userId ? await persistBalanceResponse(result.userId, id, result.data.balances, requestMutationGeneration, generation) : true;
+    return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
@@ -2036,6 +2028,7 @@ export async function getTransactionPage(groupId: string, options: TransactionPa
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const expectedUserId = getVerifiedUserId();
+  const requestMutationGeneration = expectedUserId ? (await cacheRead(() => readMutationGeneration(expectedUserId)) ?? 0) : 0;
   const query = new URLSearchParams(pageParams({ limit: options.limit ?? 25, cursor: options.cursor }));
   for (const [key, value] of transactionFilterQuery(options).entries()) query.set(key, value);
   try {
@@ -2048,8 +2041,7 @@ export async function getTransactionPage(groupId: string, options: TransactionPa
     }
     const firstUnfilteredPage = options.cursor === undefined && !hasTransactionFilters(options);
     if (result.userId && firstUnfilteredPage) {
-      const mutationGeneration = await cacheRead(() => readMutationGeneration(result.userId!)) ?? 0;
-      const persisted = await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, groupId, { transactions: result.data.transactions, transactionsNextCursor: result.data.nextCursor, transactionsLimit: options.limit ?? 25 }, mutationGeneration, generation));
+      const persisted = await persistTransactionResponse(result.userId!, groupId, result.data.transactions, result.data.nextCursor, options.limit ?? 25, requestMutationGeneration, generation);
       if (persisted === false || !isAuthEpochCurrent(authEpoch)) return { ...result.data, stale: true };
     }
     return result.data;
@@ -2072,7 +2064,7 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
     const result = await apiWithMeta<TransactionPage>(`/groups/${groupId}/transactions?${query}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     if (result.userId && !filtered) {
-      const persisted = await cacheWrite(() => updateGroupSnapshotIfGenerationMatches(result.userId!, groupId, { transactions: result.data.transactions, transactionsNextCursor: result.data.nextCursor, transactionsLimit: limit }, requestMutationGeneration, generation));
+      const persisted = await persistTransactionResponse(result.userId!, groupId, result.data.transactions, result.data.nextCursor, limit, requestMutationGeneration, generation);
       const expenseRows = result.data.transactions.filter((item): item is Extract<Transaction, { kind: 'expense' }> => item.kind === 'expense');
       const reconciled = await cacheRead(() => reconcileOutboxItems(result.userId!, groupId, expenseRows, generation, authEpoch));
       if (reconciled) { await invalidateForMutation.expenseChanged(groupId, undefined, result.userId, generation); if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-outbox-changed')); }
@@ -2093,11 +2085,12 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
 export async function getSettlements(id: string, signal?: AbortSignal): Promise<CachedResult<SettlementPage>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
      const result = await apiWithMeta<SettlementPage>(`/groups/${id}/settlements?limit=50`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => updateGroupSnapshot(result.userId!, id, { settlements: result.data.settlements }, generation));
-    return result.data;
+     const persisted = result.userId ? await persistSettlementResponse(result.userId, id, result.data.settlements, requestMutationGeneration, generation) : true;
+     return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
@@ -2142,11 +2135,12 @@ export async function changeScheduledExpenseStatus(id: string, action: 'pause' |
 export async function getExpenseDetails(id: string, signal?: AbortSignal): Promise<CachedResult<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
+  const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
     const result = await apiWithMeta<{ expense: Expense; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/expenses/${id}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => saveExpenseDetails({ userId: result.userId!, expenseId: id, expense: result.data.expense, history: result.data.history, fetchedAt: new Date().toISOString() }, generation));
-    return result.data;
+    const persisted = result.userId ? await persistExpenseDetailsResponse({ userId: result.userId!, expenseId: id, expense: result.data.expense, history: result.data.history, fetchedAt: new Date().toISOString() }, requestMutationGeneration, generation) : true;
+    return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) {
@@ -2199,7 +2193,7 @@ export async function getActivity(id?: string, signal?: AbortSignal): Promise<Ca
      const result = await apiWithMeta<ActivityPage>(id ? `/activity?group=${encodeURIComponent(id)}&limit=50` : '/activity?limit=50', { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
      const data = { activity: normalizeActivity(result.data.activity), nextCursor: result.data.nextCursor };
-    if (result.userId) await cacheWrite(() => saveActivity({ userId: result.userId!, groupId: id || 'all', activity: data.activity, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
+    if (result.userId) await persistActivityResponse({ userId: result.userId!, groupId: id || 'all', activity: data.activity, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration);
     return data;
   } catch (error) {
     assertRequestGeneration(generation);
@@ -2254,7 +2248,7 @@ export async function getCategories(signal?: AbortSignal): Promise<CachedResult<
     const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
     const result = await apiWithMeta<{ categories: string[] }>('/categories', { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    if (result.userId) await cacheWrite(() => saveCategories({ userId: result.userId!, categories: result.data.categories, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration));
+    if (result.userId) await persistCategoriesResponse({ userId: result.userId!, categories: result.data.categories, fetchedAt: new Date().toISOString() }, generation, requestMutationGeneration);
     return result.data;
   } catch (error) {
     assertRequestGeneration(generation);
