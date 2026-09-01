@@ -517,12 +517,12 @@ describe('frontend API errors and cache fallback', () => {
     expect(String((fetch as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('cursor=scheduled-cursor');
   });
 
-  it('marks API calls as AJAX requests and publishes auth-required state', async () => {
+  it('publishes auth-required state for API calls', async () => {
     const listener = vi.fn();
     const authEvent = vi.fn();
     vi.stubGlobal('window', { dispatchEvent: authEvent });
     const unsubscribe = subscribeAuthState(listener);
-    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => { expect(new Headers(init?.headers).get('X-Requested-With')).toBe('XMLHttpRequest'); expect(init?.credentials).toBe('same-origin'); return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }));
+    vi.stubGlobal('fetch', vi.fn(async (_request: RequestInfo | URL, init?: RequestInit) => { expect(new Headers(init?.headers).get('X-Requested-With')).toBeNull(); expect(init?.credentials).toBe('same-origin'); return json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in' } }, 401); }));
     await expect(api('/me')).rejects.toMatchObject({ status: 401, code: 'AUTH_REQUIRED' });
     expect(getAuthState()).toEqual({ required: true, code: 'AUTH_REQUIRED' });
     expect(listener).toHaveBeenCalled();

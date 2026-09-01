@@ -570,7 +570,6 @@ const releaseLocalLogoutBarrier = (generation: number) => {
 async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number, responseMode: 'json' | 'blob' = 'json'): Promise<ApiResponse<T>> {
   const headers = new Headers(init?.headers);
   headers.set('Content-Type', 'application/json');
-  headers.set('X-Requested-With', 'XMLHttpRequest');
   const method = (init?.method || 'GET').toUpperCase();
   if (isServerMutationMethod(method)) {
     const csrf = typeof document === 'undefined' ? undefined : document.cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1);
@@ -677,7 +676,6 @@ type SessionResponse = { idleExpiresAt: string; user?: CurrentUser };
 async function directSessionRequest<T>(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
-  headers.set('X-Requested-With', 'XMLHttpRequest');
   if (import.meta.env.DEV && !headers.has('X-Dev-Email')) headers.set('X-Dev-Email', devEmail());
   const response = await fetch(`/api${path}`, { ...init, headers, credentials: 'same-origin' });
   if (response.status === 204) return undefined as T;
