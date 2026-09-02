@@ -71,20 +71,27 @@ test('group page keeps primary actions, balances, and transactions before manage
 test('active auth banner stays clear of tablet navigation controls', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 768, height: 1024 });
   const page = await context.newPage();
-  let authReadyResolve!: () => void;
-  const authReady = new Promise<void>((resolve) => { authReadyResolve = resolve; });
-  page.on('response', (response) => {
-    if (response.url().endsWith('/api/me') && response.ok()) authReadyResolve();
-  });
-  await page.route('**/api/groups*', async (route) => {
-    // Publish the outage only after the bootstrap auth response so this tests
-    // the in-app connection banner rather than the verification-unavailable shell.
-    await authReady;
+  let groupsAttempts = 0;
+  await page.route(`${BASE_URL}/api/groups`, async (route) => {
+    groupsAttempts += 1;
+    if (groupsAttempts === 1) {
+      // Hold the specific home-resource request until the authenticated
+      // private shell has mounted. This avoids racing the coordinator's
+      // /api/me probe while still publishing the outage through the normal
+      // API wrapper.
+      await expect(page.locator('.auth-loading-shell')).toHaveCount(0);
+    }
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Fixture outage' } }) });
   });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Friends & groups' })).toBeVisible();
   try {
+    // The first response mounts the private shell and exposes the resource's
+    // own retry action. Trigger the outage again from that in-app action after
+    // startup requests are quiescent, so a late auth probe cannot overwrite
+    // the connection-issue state being asserted here.
+    await page.waitForLoadState('networkidle');
+    await page.locator('#groups-error').getByRole('button', { name: 'Retry' }).click();
     const banner = page.locator('.auth-banner');
     await expect(banner).toContainText('Connection issue');
     const nav = page.locator('.bottom-nav[aria-label="Primary navigation"]');

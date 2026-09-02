@@ -436,12 +436,14 @@ export const invalidateForMutation = {
   groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId)], userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); invalidateScheduledDetailsForGroup(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, transactions: true, transactionGroupId: groupId }); },
   splitDefaultChanged: async (groupId: string, splitDefault: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'], userId?: string, generation?: number) => {
     if (!userId) return;
+    const mutationGeneration = generation ?? captureSessionGeneration();
+    if (!isSessionGenerationCurrent(mutationGeneration)) return;
     // Abort/fence a GET that was started before the server mutation. The
     // persisted mutation generation below protects the same race in IDB.
     invalidateResource(resourceKeys.group(userId, groupId), userId, { revalidate: false });
     patchResourceData<{ group: unknown; members: unknown[]; splitDefault?: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'] }>(resourceKeys.group(userId, groupId), userId, (data) => ({ ...data, splitDefault }));
-    await invalidatePersistedCaches(userId, generation, { groups: false });
-    try { await updateGroupSnapshot(userId, groupId, { splitDefault }, generation); } catch { /* Local cache is an enhancement, not a mutation failure. */ }
+    await invalidatePersistedCaches(userId, mutationGeneration, { groups: false });
+    try { await updateGroupSnapshot(userId, groupId, { splitDefault }, mutationGeneration); } catch { /* Local cache is an enhancement, not a mutation failure. */ }
   },
   groupDeleted: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId, transactions: true, transactionGroupId: groupId }); },
   groupLeft: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId, transactions: true, transactionGroupId: groupId }); },

@@ -83,6 +83,7 @@ describe('home balance summaries against local D1', () => {
       '0014_projection_indexes.sql', '0015_audit_actor_snapshot.sql',
       '0016_projection_readiness_reset.sql', '0017_cleanup_indexes.sql', '0018_category_preferences.sql',
       '0019_group_membership_events.sql', '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql', '0022_application_sessions.sql', '0023_group_split_defaults.sql', '0024_incremental_projection_totals.sql',
+      '0025_expense_suggestion_lookup.sql',
     ];
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES

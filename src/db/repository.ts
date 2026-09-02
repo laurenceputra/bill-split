@@ -9,6 +9,7 @@ import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } fro
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
+import { normalizeExpenseSplitArrangement, sameGroupSplitArrangement } from '../shared/split-default';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -482,23 +483,47 @@ export class Repository {
     const row = await this.db.prepare('SELECT d.* FROM group_split_defaults d JOIN groups g ON g.id=d.group_id WHERE d.group_id=? AND g.deleted_at IS NULL').bind(groupId).first<Row>();
     return this.mapGroupSplitDefault(row);
   }
+  async getGroupSplitDefaultSuggestion(groupId: string, userId: string): Promise<GroupSplitDefault | null> {
+     // Return only the latest three matching expenses; the composite active-expense
+     // index supports the ordered lookup.
+    const rows = (await this.db.prepare(`SELECT e.id
+      FROM expenses e
+      JOIN groups g ON g.id=e.group_id
+      WHERE e.group_id=? AND e.created_by=? AND e.deleted_at IS NULL AND g.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM group_members viewer_member JOIN people viewer_person ON viewer_person.id=viewer_member.person_id
+          JOIN users viewer_user ON viewer_user.id=viewer_member.user_id
+          WHERE viewer_member.group_id=e.group_id AND viewer_member.user_id=? AND viewer_member.deleted_at IS NULL
+            AND viewer_person.deleted_at IS NULL AND viewer_user.deleted_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence.expense_id=e.id)
+      ORDER BY e.created_at DESC,e.id DESC LIMIT 3`).bind(groupId, userId, userId).all<Row>()).results;
+    if (rows.length !== 3) return null;
+    const members = await this.members(groupId);
+    const arrangements = await Promise.all(rows.map(async (row) => {
+      const splits = (await this.db.prepare('SELECT person_id,metadata_json FROM splits WHERE expense_id=? ORDER BY person_id').bind(text(row.id)).all<Row>()).results;
+      return normalizeExpenseSplitArrangement(splits.map((split) => ({ personId: text(split.person_id), metadata: (() => { try { return split.metadata_json == null ? undefined : JSON.parse(text(split.metadata_json)) as Record<string, unknown>; } catch { return undefined; } })() })), members);
+    }));
+    const suggestion = arrangements[0];
+    if (!suggestion || arrangements.some((arrangement) => !arrangement || !sameGroupSplitArrangement(suggestion, arrangement, members))) return null;
+    const current = await this.getGroupSplitDefault(groupId);
+    return current && sameGroupSplitArrangement(suggestion, current, members) ? null : suggestion;
+  }
   async upsertGroupSplitDefault(groupId: string, userId: string, input: GroupSplitDefaultInput): Promise<GroupSplitDefault> {
     const parsed = groupSplitDefaultInput.safeParse(input);
     if (!parsed.success) throw new RepositoryError('INVALID_SPLIT_DEFAULT', parsed.error.issues[0]?.message || 'The group split default is invalid');
     const value = parsed.data;
     const personIds = value.person_ids, timestamp = now();
     const values = 'values' in value ? value.values : undefined;
+    const actor = this.activeMutationGuard(groupId, userId);
     const result = await this.db.prepare(`INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at)
       SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL)
-      AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id
-        WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL)
+      AND ${actor.sql}
       AND NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (SELECT 1 FROM group_members gm JOIN people p ON p.id=gm.person_id
         WHERE gm.group_id=? AND gm.person_id=requested.value AND gm.deleted_at IS NULL AND p.deleted_at IS NULL))
-      ON CONFLICT(group_id) DO UPDATE SET method=excluded.method,person_ids_json=excluded.person_ids_json,values_json=excluded.values_json,updated_at=excluded.updated_at`).bind(groupId, value.method, JSON.stringify(personIds), values === undefined ? null : JSON.stringify(values), timestamp, groupId, groupId, userId, JSON.stringify(personIds), groupId).run();
+      ON CONFLICT(group_id) DO UPDATE SET method=excluded.method,person_ids_json=excluded.person_ids_json,values_json=excluded.values_json,updated_at=excluded.updated_at`).bind(groupId, value.method, JSON.stringify(personIds), values === undefined ? null : JSON.stringify(values), timestamp, groupId, ...actor.args, JSON.stringify(personIds), groupId).run();
     if (Number(result.meta?.changes ?? 0) === 0) {
       await this.throwIfDeleted(userId);
-      const owner = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
-      if (!owner) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update the split default');
+      const member = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN people p ON p.id=gm.person_id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
+      if (!member) throw new RepositoryError('MEMBER_REQUIRED', 'Only an active group member can update the split default');
       throw new RepositoryError('MEMBER_REQUIRED', 'Every split-default participant must be an active group member');
     }
     const saved = await this.getGroupSplitDefault(groupId);

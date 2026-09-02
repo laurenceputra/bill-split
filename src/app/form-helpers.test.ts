@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultSummary, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, settlementSuggestion, settlementSuggestionFingerprint } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, normalizeExpenseSplitArrangement, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, sameGroupSplitArrangement, settlementSuggestion, settlementSuggestionFingerprint, type FormSaveFence } from './form-helpers';
 import type { Balances, GroupMember } from '../shared/types';
 
 const member = (personId: string, name = personId): GroupMember => ({ personId, name, joinedAt: '', role: 'member' });
@@ -36,6 +36,38 @@ describe('expense form helpers', () => {
     const value = { method: 'percentage' as const, personIds: ['one', 'gone'], values: [5000, 5000] };
     expect(resolveGroupSplitDefault(value, members)).toMatchObject({ method: 'equal', selected: ['one', 'two'], applied: false, invalid: true });
     expect(groupSplitDefaultSummary(value, members)).toMatchObject({ warning: true });
+  });
+
+  it('normalizes arrangements by deterministic member order and compares allocations', () => {
+    const namedMembers = [member('two', 'Zed'), member('one', 'Amy')];
+    const percentage = normalizeExpenseSplitArrangement([
+      { personId: 'two', metadata: { method: 'percentage', value: 7500 } },
+      { personId: 'one', metadata: { method: 'percentage', value: 2500 } },
+    ], namedMembers);
+    expect(percentage).toEqual({ method: 'percentage', personIds: ['one', 'two'], values: [2500, 7500] });
+    expect(sameGroupSplitArrangement(percentage, { method: 'percentage', personIds: ['one', 'two'], values: [2500, 7500] }, namedMembers)).toBe(true);
+    expect(normalizeExpenseSplitArrangement([{ personId: 'one', metadata: { method: 'exact', value: 100 } }], namedMembers)).toBeNull();
+    expect(normalizeExpenseSplitArrangement([{ personId: 'one', metadata: { method: 'percentage', value: 5000 } }, { personId: 'two', metadata: { method: 'percentage', value: 4000 } }], namedMembers)).toBeNull();
+    expect(groupSplitDefaultFromDraft('exact', ['one'], { one: '1.00' }, namedMembers)).toMatchObject({ value: null, reason: 'exact' });
+    expect(groupSplitDefaultFromDraft('shares', ['one', 'two'], { one: '1', two: '2' }, namedMembers).value).toEqual({ method: 'shares', personIds: ['one', 'two'], values: [1, 2] });
+    expect(sameGroupSplitArrangement({ method: 'shares', personIds: ['one', 'two'], values: [1, 2] }, { method: 'shares', personIds: ['one', 'two'], values: [2, 4] }, namedMembers)).toBe(false);
+  });
+
+  it('uses strict expense allocation parsing when deriving saveable defaults', () => {
+    expect(groupSplitDefaultFromDraft('percentage', ['one', 'two'], { one: '33.336', two: '66.664' }, members)).toMatchObject({ value: null, reason: 'invalid' });
+    expect(groupSplitDefaultFromDraft('percentage', ['one', 'two'], { one: '33.33', two: '66.67' }, members).value).toEqual({ method: 'percentage', personIds: ['one', 'two'], values: [3333, 6667] });
+    for (const values of [{ one: '', two: '1' }, { one: '0', two: '1' }, { one: '1e2', two: '1' }, { one: '1000001', two: '1' }]) {
+      expect(groupSplitDefaultFromDraft('shares', ['one', 'two'], values, members)).toMatchObject({ value: null, reason: 'invalid' });
+      expect(previewAllocation(1000, ['one', 'two'], 'shares', values, 'USD').error).toBeTruthy();
+    }
+  });
+
+  it('rejects a stale default response after an A-to-B-to-A route switch', () => {
+    const captured: FormSaveFence = { token: 1, scope: 'user:group-a:expense:new', sessionGeneration: 4 };
+    const current: FormSaveFence = { token: 3, scope: 'user:group-a:expense:new', sessionGeneration: 4 };
+    expect(isCurrentSplitDefaultSave(captured, current)).toBe(false);
+    expect(isCurrentSplitDefaultSave(captured, { ...current, token: captured.token })).toBe(true);
+    expect(isCurrentSplitDefaultSave(captured, { ...current, token: captured.token, sessionGeneration: 5 })).toBe(false);
   });
 });
 

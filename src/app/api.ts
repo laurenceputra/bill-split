@@ -1942,6 +1942,9 @@ export async function updateGroup(id: string, input: { name: string; currency: G
 export async function updateGroupSplitDefault(id: string, input: GroupSplitDefaultInput) {
   return api<{ splitDefault: GroupSplitDefault }>(`/groups/${id}/split-default`, { method: 'PUT', body: JSON.stringify(input) });
 }
+export async function getGroupSplitDefaultSuggestion(id: string, signal?: AbortSignal) {
+  return (await apiWithMeta<{ suggestion: GroupSplitDefault | null }>(`/groups/${id}/split-default-suggestion`, { signal })).data;
+}
 export async function deleteGroupSplitDefault(id: string) {
   return api<void>(`/groups/${id}/split-default`, { method: 'DELETE' });
 }

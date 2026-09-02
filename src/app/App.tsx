@@ -4,16 +4,16 @@ import { SignInButton, SignUpButton, useAuth, useClerk, useUser } from '@clerk/r
 import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, HistoricalParticipant, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Transaction, Weekday } from '../shared/types';
 import { currencyOptions, groupSplitDefaultInput, scheduledExpenseInput, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
- import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, deleteGroupSplitDefault, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGlobalTransactionPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGlobalTransactions, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, recordSessionActivity, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeAllApplicationSessions, revokeApplicationSession, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateGroupSplitDefault, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, getVerifiedUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
+ import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, deleteGroupSplitDefault, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getExportPage, getGlobalTransactionPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getSettlementPage, getSettlements, getTransactionPage, getTransactions, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateExpenses, hydrateGlobalTransactions, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateSettlements, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, recordSessionActivity, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeAllApplicationSessions, revokeApplicationSession, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateGroupSplitDefault, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, getVerifiedUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
 import { ACCOUNT_DELETION_CONFIRMATION } from '../shared/schemas';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultSummary, hasNewerServerVersion, isExpenseConflict, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState } from './form-helpers';
+ import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, sameGroupSplitArrangement, splitArrangementFingerprint, settlementSuggestion, settlementSuggestionFingerprint, type AllocationState, type FormSaveFence } from './form-helpers';
 import { AuthLoadingShell, Button, Field, InstallAction, Layout, Modal, Money, PublicShell, Skeleton, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
 import { clearCachedData } from './idb';
 import { getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 import { groupBalanceDisplays, personalBalances } from './group-balance';
 import { expenseDetailPath, getNavigationContext, settlementDetailPath, transactionActivityPath } from './navigation';
-import { broadcastSessionCoordination, captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionState } from './session';
+import { broadcastSessionCoordination, captureSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, subscribeSessionState } from './session';
 import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOptions, timezoneSelectValue as timezoneSelectValueForState, timezoneValueFromSelection, weekdayLabels } from './scheduled-expense';
 import { categoryOptions } from './categories';
 import { localDateForTimeZone } from '../domain/recurrence';
@@ -371,7 +371,7 @@ function AddFriendForm({ groupId, userId, online }: { groupId: string; userId: s
 
 function SplitDefaultSummary({ value, members }: { value: GroupSplitDefault | null | undefined; members: GroupMember[] }) {
   const summary = groupSplitDefaultSummary(value, members);
-  return <><p className="muted">{summary.label}</p>{summary.warning ? <p className="warning" role="alert">This default includes removed members. New expenses will use an equal split across current members until the owner updates it.</p> : null}</>;
+  return <><p className="muted">{summary.label}</p><p className="muted">Saved defaults affect future entries for everyone. Members can save a shared default while adding an expense; only the owner can edit or clear it here.</p>{summary.warning ? <p className="warning" role="alert">This default includes removed members. New expenses will use an equal split across current members until it is updated.</p> : null}</>;
 }
 
 function SplitDefaultSettings({ groupId, userId, members, value, online, owner, onChanged }: { groupId: string; userId: string; members: GroupMember[]; value: GroupSplitDefault | null; online: boolean; owner: boolean; onChanged: (value: GroupSplitDefault | null) => void }) {
@@ -414,7 +414,7 @@ function SplitDefaultSettings({ groupId, userId, members, value, online, owner, 
   };
   const total = selected.reduce((sum, personId) => sum + (Number(values[personId]) || 0), 0);
   const summary = groupSplitDefaultSummary(value, members);
-  return <section className="split-default-settings" aria-labelledby="split-default-heading"><div className="section-title"><h2 id="split-default-heading">Party default split</h2>{owner ? <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Close' : value ? 'Edit' : 'Customize'}</Button> : <span className="muted">Read-only</span>}</div>{!open ? <><SplitDefaultSummary value={value} members={members} />{owner ? <p className="muted">Used only when starting a new expense or schedule. Each expense can override it.</p> : null}</> : <form onSubmit={save} aria-describedby={error ? 'split-default-error' : undefined}><fieldset><legend>Split new entries</legend><div className="radio-list"><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'equal'} onChange={() => setMethod('equal')} />Equal</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'percentage'} onChange={() => setMethod('percentage')} />Percentage</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'shares'} onChange={() => setMethod('shares')} />Shares</label></div></fieldset><fieldset><legend>Included members</legend><div className="participant-list">{members.map((member) => <label className="checkbox-row" key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => setSelected((current) => current.includes(member.personId) ? current.filter((id) => id !== member.personId) : [...current, member.personId])} />{member.name}</label>)}</div></fieldset>{method !== 'equal' ? <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <Field key={member.personId} label={`${member.name} ${method === 'percentage' ? 'percentage' : 'shares'}`} className="field--compact"><input required inputMode="decimal" value={values[member.personId] || ''} placeholder={method === 'percentage' ? '0.00%' : '1'} onChange={(event) => setValues((current) => ({ ...current, [member.personId]: event.target.value }))} /></Field>)}<p className="allocation-summary" role="status" aria-live="polite">{method === 'percentage' ? `Total ${total.toFixed(2)}% of 100%` : `Total shares ${total}`}</p>{method === 'percentage' ? <Button type="button" variant="secondary" onClick={evenly}>Split evenly</Button> : null}</div> : null}{error ? <ErrorBox error={error} id="split-default-error" /> : null}<div className="actions"><Button type="submit" disabled={!online || busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save'}</Button><Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={cancel}>Cancel</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy) || !value} onClick={() => void clear()}>Use automatic equal split</Button></div>{!online ? <p className="cache-status">Default split editing requires a connection. The cached summary remains available.</p> : null}</form>}{open && value && summary.warning ? <p className="warning" role="alert">Removed members must be removed before saving this default.</p> : null}</section>;
+  return <section className="split-default-settings" aria-labelledby="split-default-heading"><div className="section-title"><h2 id="split-default-heading">Party default split</h2>{owner ? <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Close' : value ? 'Edit' : 'Customize'}</Button> : <span className="muted">Owner-only editor</span>}</div>{!open ? <><SplitDefaultSummary value={value} members={members} />{owner ? <p className="muted">Used only when starting a new expense or schedule. Each expense can override it.</p> : <p className="muted">You can save a shared default while adding an expense. Only the owner can edit or clear it here.</p>}</> : <form onSubmit={save} aria-describedby={error ? 'split-default-error' : undefined}><fieldset><legend>Split new entries</legend><div className="radio-list"><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'equal'} onChange={() => setMethod('equal')} />Equal</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'percentage'} onChange={() => setMethod('percentage')} />Percentage</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'shares'} onChange={() => setMethod('shares')} />Shares</label></div></fieldset><fieldset><legend>Included members</legend><div className="participant-list">{members.map((member) => <label className="checkbox-row" key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => setSelected((current) => current.includes(member.personId) ? current.filter((id) => id !== member.personId) : [...current, member.personId])} />{member.name}</label>)}</div></fieldset>{method !== 'equal' ? <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <Field key={member.personId} label={`${member.name} ${method === 'percentage' ? 'percentage' : 'shares'}`} className="field--compact"><input required inputMode="decimal" value={values[member.personId] || ''} placeholder={method === 'percentage' ? '0.00%' : '1'} onChange={(event) => setValues((current) => ({ ...current, [member.personId]: event.target.value }))} /></Field>)}<p className="allocation-summary" role="status" aria-live="polite">{method === 'percentage' ? `Total ${total.toFixed(2)}% of 100%` : `Total shares ${total}`}</p>{method === 'percentage' ? <Button type="button" variant="secondary" onClick={evenly}>Split evenly</Button> : null}</div> : null}{error ? <ErrorBox error={error} id="split-default-error" /> : null}<div className="actions"><Button type="submit" disabled={!online || busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save'}</Button><Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={cancel}>Cancel</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy) || !value} onClick={() => void clear()}>Use automatic equal split</Button></div>{!online ? <p className="cache-status">Default split editing requires a connection. The cached summary remains available.</p> : null}</form>}{open && value && summary.warning ? <p className="warning" role="alert">Removed members must be removed before saving this default.</p> : null}</section>;
 }
 
 function ExpenseFilterDisclosure({ filterKey, filterCount, offline, children }: { filterKey: string; filterCount: number; offline: boolean; children: ReactNode }) {
@@ -645,6 +645,7 @@ function ScheduleListContent({ groupId, schedules, resource, online, userId }: S
 type PayerRow = { personId: string; amount: string };
 type ExpenseErrorTarget = 'description' | 'amount' | 'participants' | 'payers' | 'allocation' | 'form';
 type ExpenseFormError = { error: unknown; target: ExpenseErrorTarget };
+type SplitDefaultSaveState = { status: 'idle' | 'saving' | 'success' | 'error'; error?: unknown };
 
 function OneTimeOnlyDetails({ category, notes, customCategories = [], showNotes = true, suggested = false, onCategoryChange, onNotesChange }: { category: string; notes: string; customCategories?: string[]; showNotes?: boolean; suggested?: boolean; onCategoryChange: (value: string) => void; onNotesChange: (value: string) => void }) {
   const options = categoryOptions(customCategories);
@@ -707,6 +708,10 @@ function ExpenseForm() {
   const [defaultInvalid, setDefaultInvalid] = useState(false);
   const [updatedElsewhere, setUpdatedElsewhere] = useState(false);
   const [formReady, setFormReady] = useState(false);
+  const [savedPartyDefault, setSavedPartyDefault] = useState<GroupSplitDefault>();
+  const [splitDefaultSaveState, setSplitDefaultSaveState] = useState<SplitDefaultSaveState>({ status: 'idle' });
+  const [defaultSuggestion, setDefaultSuggestion] = useState<GroupSplitDefault | null>();
+  const [dismissedSuggestionFingerprint, setDismissedSuggestionFingerprint] = useState<string>();
   const routeKey = `${formUserId}:${id}:${scheduledExpenseId ? `schedule:${scheduledExpenseId}` : `expense:${expenseId || 'new'}`}`;
   const timezoneLabelDate = useMemo(() => new Date(), []);
   const availableTimezoneOptions = useMemo(() => scheduleMode ? timezoneOptions(usingCustomTimezone ? [] : [timezone]) : [], [scheduleMode, timezone, usingCustomTimezone]);
@@ -715,8 +720,14 @@ function ExpenseForm() {
   const selectedTimezone = timezoneValueFromSelection(timezoneSelectValue, customTimezone);
   const initializedRoute = useRef<string | undefined>(undefined);
   const initializedVersion = useRef<number | undefined>(undefined);
+  const formSaveToken = useRef(0);
+  const splitDefaultScopeRef = useRef(routeKey);
+  splitDefaultScopeRef.current = routeKey;
   const categoryTouchedRef = useRef(false);
   const suggestionRequest = useRef<AbortController>();
+  const defaultSuggestionRequest = useRef<AbortController>();
+  const previousDraftFingerprint = useRef<string>();
+  const newEntry = !expenseId && !scheduledExpenseId;
   const markDirty = () => { setDirty(true); setFormError(undefined); };
 
   useEffect(() => { if (routeGroupId) setTargetGroupId(routeGroupId); }, [routeGroupId]);
@@ -730,6 +741,7 @@ function ExpenseForm() {
 
   useEffect(() => {
     if (initializedRoute.current === routeKey) return;
+    formSaveToken.current += 1;
     initializedRoute.current = undefined;
     initializedVersion.current = undefined;
     suggestionRequest.current?.abort();
@@ -741,7 +753,8 @@ function ExpenseForm() {
     setUpdatedElsewhere(false);
      setFormError(undefined);
      setSplitCustomized(false); setDefaultApplied(false); setDefaultInvalid(false);
-  }, [routeKey]);
+     setSavedPartyDefault(undefined); setSplitDefaultSaveState({ status: 'idle' }); setDefaultSuggestion(undefined); setDismissedSuggestionFingerprint(undefined); previousDraftFingerprint.current = undefined;
+   }, [routeKey]);
 
   useEffect(() => {
     const groupResult = groupResource.data;
@@ -753,16 +766,17 @@ function ExpenseForm() {
       if (!groupResult?.group || !me || (expenseId && !expense) || (scheduledExpenseId && !schedule)) return;
 
      const serverVersion = formServerVersion(scheduleMode, expense?.version, schedule?.version);
-     if (initializedRoute.current === routeKey) {
-        if (serverVersion === initializedVersion.current || (!expense && !schedule && initializedVersion.current === undefined)) return;
-       if (dirty) {
-         if (hasNewerServerVersion(initializedVersion.current, serverVersion, true)) setUpdatedElsewhere(true);
-         return;
-       }
-      initializedRoute.current = undefined;
-    }
+      if (initializedRoute.current === routeKey) {
+         if (serverVersion === initializedVersion.current || (!expense && !schedule && initializedVersion.current === undefined)) return;
+        if (dirty) {
+          if (hasNewerServerVersion(initializedVersion.current, serverVersion, true)) setUpdatedElsewhere(true);
+          return;
+        }
+       initializedRoute.current = undefined;
+      }
 
-     const loadedMethod = (expense || schedule)?.splits[0]?.metadata?.method;
+      formSaveToken.current += 1;
+      const loadedMethod = (expense || schedule)?.splits[0]?.metadata?.method;
     const nextMethod: SplitMethod = loadedMethod === 'exact' || loadedMethod === 'percentage' || loadedMethod === 'shares' ? loadedMethod : 'equal';
      setCurrency(expense?.currency ?? schedule?.currency ?? groupResult.group.currency);
       if (expense || schedule) {
@@ -778,10 +792,28 @@ function ExpenseForm() {
      initializedVersion.current = expense?.version ?? schedule?.version;
     setDirty(false);
     setUpdatedElsewhere(false);
-    setFormReady(true);
-   }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey, scheduleMode, scheduleResource.data, scheduledExpenseId]);
+     setFormReady(true);
+     }, [detailResource.data, dirty, expenseId, groupResource.data, meResource.data, routeKey, scheduleMode, scheduleResource.data, scheduledExpenseId]);
 
-     const resourceError = meResource.error || groupResource.error || (expenseId && detailResource.error) || (scheduledExpenseId && scheduleResource.error);
+    const serverDefaultFingerprint = splitArrangementFingerprint(groupResource.data?.splitDefault, members);
+    useEffect(() => {
+     defaultSuggestionRequest.current?.abort();
+     if (!online || !newEntry || scheduleMode || !id || savedPartyDefault || !groupResource.data?.splitDefault) { setDefaultSuggestion(undefined); return; }
+     const controller = new AbortController(); defaultSuggestionRequest.current = controller;
+     void getGroupSplitDefaultSuggestion(id, controller.signal).then((result) => {
+       if (!controller.signal.aborted && defaultSuggestionRequest.current === controller) setDefaultSuggestion(result.suggestion);
+     }).catch(() => { /* Suggestions never block saving. */ }).finally(() => { if (defaultSuggestionRequest.current === controller) defaultSuggestionRequest.current = undefined; });
+     return () => controller.abort();
+     }, [id, newEntry, online, savedPartyDefault, scheduleMode, serverDefaultFingerprint]);
+
+   const draftDefault = groupSplitDefaultFromDraft(method, selected, allocationValues, members);
+   const draftFingerprint = splitArrangementFingerprint(draftDefault.value, members);
+   useEffect(() => {
+     if (previousDraftFingerprint.current !== undefined && previousDraftFingerprint.current !== draftFingerprint) setDismissedSuggestionFingerprint(undefined);
+     previousDraftFingerprint.current = draftFingerprint;
+   }, [draftFingerprint]);
+
+      const resourceError = meResource.error || groupResource.error || (expenseId && detailResource.error) || (scheduledExpenseId && scheduleResource.error);
      const isGlobalNewExpense = !routeGroupId && !expenseId && !scheduledExpenseId;
      const resourceErrorKey = meResource.error ? resourceKeys.identity() : groupResource.error ? resourceKeys.group(formUserId, id) : expenseId ? resourceKeys.expenseDetail(formUserId, expenseId) : scheduledExpenseId ? resourceKeys.scheduledExpense(formUserId, scheduledExpenseId) : resourceKeys.groups(formUserId);
      const routeReady = initializedRoute.current === routeKey && formReady;
@@ -792,23 +824,44 @@ function ExpenseForm() {
   const offlineData = Boolean(groupResource.offline || meResource.offline || detailResource.offline);
    const editUnavailable = scheduleMode ? !online : Boolean(expenseId) && (!online || offlineData);
   const amountMinor = (() => { try { return parseMoney(amount, currency); } catch { return 0; } })();
-  const preview = previewAllocation(amountMinor, selected, method, allocationValues, currency);
-  const isYou = (personId: string) => personId === currentPersonId;
+   const preview = previewAllocation(amountMinor, selected, method, allocationValues, currency);
+   const partyDefault = savedPartyDefault || groupResource.data?.splitDefault || null;
+    const suggestionMatches = Boolean(splitCustomized && defaultSuggestion && draftDefault.value && sameGroupSplitArrangement(draftDefault.value, defaultSuggestion, members));
+    const savePartyDefault = async (arrangement: GroupSplitDefault | null = draftDefault.value) => {
+      if (!online || splitDefaultSaveState.status === 'saving' || !arrangement) return;
+       const saveScope = routeKey;
+       const saveGroupId = id;
+       const saveUserId = currentUserId;
+       const generation = captureSessionGeneration();
+       const saveFence: FormSaveFence = { token: ++formSaveToken.current, scope: saveScope, sessionGeneration: generation };
+       setSplitDefaultSaveState({ status: 'saving' });
+      try {
+        const parsed = groupSplitDefaultInput.parse({ method: arrangement.method, person_ids: arrangement.personIds, ...('values' in arrangement ? { values: arrangement.values } : {}) });
+        const result = await updateGroupSplitDefault(saveGroupId, parsed);
+         const current = () => isCurrentSplitDefaultSave(saveFence, { token: formSaveToken.current, scope: splitDefaultScopeRef.current, sessionGeneration: captureSessionGeneration() });
+        if (current()) {
+          setSavedPartyDefault(result.splitDefault); setDefaultApplied(true); setSplitCustomized(false); setDismissedSuggestionFingerprint(undefined); setDefaultSuggestion(undefined); setSplitDefaultSaveState({ status: 'success' });
+        }
+        if (isSessionGenerationCurrent(generation)) await invalidateForMutation.splitDefaultChanged(saveGroupId, result.splitDefault, saveUserId, generation);
+      } catch (cause) {
+         if (isCurrentSplitDefaultSave(saveFence, { token: formSaveToken.current, scope: splitDefaultScopeRef.current, sessionGeneration: captureSessionGeneration() })) setSplitDefaultSaveState({ status: 'error', error: cause });
+      }
+    };
+   const isYou = (personId: string) => personId === currentPersonId;
   const setAmountAndPayer = (value: string) => { markDirty(); setAmount(value); if (payerRows.length === 1) setPayerRows((rows) => rows.map((row) => ({ ...row, amount: value }))); };
-   const markSplitDirty = () => { markDirty(); setSplitCustomized(true); };
+    const markSplitDirty = () => { markDirty(); setSplitCustomized(true); setSplitDefaultSaveState({ status: 'idle' }); };
    const toggleSplit = (personId: string) => { markSplitDirty(); setSelected((current) => current.includes(personId) ? current.filter((idValue) => idValue !== personId) : [...current, personId]); };
    const updateAllocation = (personId: string, value: string) => { markSplitDirty(); setAllocationValues((current) => ({ ...current, [personId]: value })); };
   const addPayer = () => { const personId = members.find((member) => !payerRows.some((payer) => payer.personId === member.personId))?.personId; if (personId) { markDirty(); setPayerRows((rows) => [...rows, { personId, amount: '' }]); } };
   const removePayer = (index: number) => { markDirty(); setPayerRows((rows) => normalizeSinglePayer(rows.filter((_, rowIndex) => rowIndex !== index), amount)); };
    const resetToServer = () => { setDirty(false); setUpdatedElsewhere(false); setFormError(undefined); };
-   const resetToPartyDefault = () => { const resolved = resolveGroupSplitDefault(groupResource.data?.splitDefault, members); setMethod(resolved.method); setSelected(resolved.selected); setAllocationValues(resolved.values); setSplitCustomized(false); setDefaultApplied(resolved.applied); setDefaultInvalid(resolved.invalid); setDirty(true); setFormError(undefined); };
+   const resetToPartyDefault = () => { const resolved = resolveGroupSplitDefault(partyDefault, members); setMethod(resolved.method); setSelected(resolved.selected); setAllocationValues(resolved.values); setSplitCustomized(false); setDefaultApplied(resolved.applied); setDefaultInvalid(resolved.invalid); setDirty(true); setFormError(undefined); };
   const payerIsFullTotal = payerRows.length === 1 && amount.trim() !== '' && amountMinor > 0 && (() => { try { return parseMoney(payerRows[0].amount, currency) === amountMinor; } catch { return false; } })();
   const payerSummary = payerRows.length === 1 ? `Paid by ${isYou(payerRows[0].personId) ? 'You' : nameOf(members, payerRows[0].personId)}` : payerRows.length ? `Paid by ${payerRows.length} people` : 'Choose who paid';
    const payerSummaryDetail = payerRows.length === 1 ? (payerIsFullTotal ? 'Entire total' : 'Amount needs review') : payerRows.length ? 'Configure exact amounts' : 'Choose a payer';
     const recurring = scheduleMode || recurrenceEnabled;
     const scheduleDraft = { startDate: date, endDate: endDate || null, frequency, interval: Number(interval) || 1, weekdays };
       const schedulePreview = recurring ? (() => { try { return previewScheduleDates(scheduleDraft, localDateForTimeZone(new Date(), selectedTimezone.trim() || 'UTC'), 3); } catch { return previewScheduleDates(scheduleDraft, today(), 3); } })() : [];
-   const newEntry = !expenseId && !scheduledExpenseId;
    const requestCategorySuggestion = async () => {
      if (!online || !newEntry || categoryTouchedRef.current || !description.trim()) return;
      const requestedDescription = description;
@@ -891,7 +944,7 @@ function ExpenseForm() {
           <Field label="Amount and currency" className={amountFieldClass(amount)}><CurrencySelect value={currency} onChange={(value) => { markDirty(); setCurrency(value); }} /><input id="expense-amount" className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-label="Expense amount" aria-invalid={formError?.target === 'amount'} aria-describedby={formError?.target === 'amount' ? 'expense-form-error' : undefined} placeholder="0.00" value={amount} onChange={(event) => setAmountAndPayer(event.target.value)} /></Field>
            <Field label="Description" className="field--compact"><input id="expense-description" required aria-invalid={formError?.target === 'description'} aria-describedby={formError?.target === 'description' ? 'expense-form-error' : undefined} placeholder="What was this for?" value={description} onChange={(event) => { const value = event.target.value; markDirty(); setDescription(value); if (!categoryTouchedRef.current) { setCategorySuggestion(undefined); setCategory(''); } }} onBlur={() => void requestCategorySuggestion()} /></Field>{!expenseId && !scheduledExpenseId ? <label className="checkbox-row recurrence-toggle" htmlFor="repeat-expense"><input id="repeat-expense" type="checkbox" checked={recurrenceEnabled} onChange={(event) => { markDirty(); setRecurrenceEnabled(event.target.checked); }} /><span>Repeat this expense</span></label> : null}
        <button className="summary-row" type="button" aria-invalid={formError?.target === 'payers'} aria-describedby={formError?.target === 'payers' ? 'expense-form-error' : undefined} onClick={() => setPayersOpen(true)}><span><span className="summary-row__label">{payerSummary}</span><small>{payerSummaryDetail}</small></span><strong>Change</strong></button>
-        {defaultApplied && !splitCustomized ? <p className="cache-status" role="status">Party default applied. You can override the split for this {scheduleMode ? 'schedule' : 'expense'}.{scheduleMode ? ' This arrangement is copied into the schedule; later default changes will not alter it.' : ''}</p> : null}{defaultInvalid ? <p className="warning" role="alert">The party default includes removed members, so this new entry uses an equal split across all current members. The saved default was not changed.</p> : null}{splitCustomized ? <p className="cache-status" role="status">Custom split for this {scheduleMode ? 'schedule' : 'expense'}. <button className="inline-action" type="button" onClick={resetToPartyDefault}>Reset to party default</button></p> : null}<fieldset aria-describedby={formError?.target === 'participants' ? 'expense-form-error' : undefined}><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} aria-invalid={formError?.target === 'participants'} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
+         {defaultApplied && !splitCustomized ? <p className="cache-status" role="status">Party default applied. This saved default affects future entries for everyone. You can override the split for this {scheduleMode ? 'schedule' : 'expense'}.{scheduleMode ? ' This arrangement is copied into the schedule; later default changes will not alter it.' : ''}</p> : null}{defaultInvalid ? <p className="warning" role="alert">The party default includes removed members, so this new entry uses an equal split across all current members. The saved default was not changed.</p> : null}{splitCustomized ? <p className="cache-status" role="status">Custom split for this {scheduleMode ? 'schedule' : 'expense'}. <button className="inline-action" type="button" onClick={resetToPartyDefault}>Reset to party default</button></p> : null}{newEntry && !scheduleMode && draftDefault.reason === 'exact' ? <p className="muted" role="note">Exact amounts are for this expense only and cannot be saved as the party default.</p> : null}{newEntry && !scheduleMode && !partyDefault && draftDefault.value ? <div className="split-default-action"><Button type="button" variant="secondary" disabled={!online || splitDefaultSaveState.status === 'saving'} onClick={() => void savePartyDefault()}>{splitDefaultSaveState.status === 'saving' ? 'Saving default…' : 'Save as party default'}</Button></div> : null}{suggestionMatches && dismissedSuggestionFingerprint !== draftFingerprint ? <div className="split-default-suggestion" role="status"><p>You’ve used this split for your last 3 expenses. Update the party default?</p><div className="actions"><Button type="button" onClick={() => void savePartyDefault(defaultSuggestion)}>Update party default</Button><Button type="button" variant="secondary" onClick={() => setDismissedSuggestionFingerprint(draftFingerprint)}>Not now</Button></div></div> : null}{splitDefaultSaveState.status === 'success' ? <p className="cache-status" role="status">Party default saved for everyone.</p> : null}{splitDefaultSaveState.status === 'error' ? <ErrorBox error={splitDefaultSaveState.error} id="split-default-save-error" /> : null}<fieldset aria-describedby={formError?.target === 'participants' ? 'expense-form-error' : undefined}><legend>Split between</legend><div className="participant-list">{members.map((member) => { const active = selected.includes(member.personId); return <button className="participant-row" type="button" aria-pressed={active} aria-invalid={formError?.target === 'participants'} key={member.personId} onClick={() => toggleSplit(member.personId)}><span className="participant-row__name"><span className="checkmark" aria-hidden="true">✓</span><span className="participant-row__label">{member.name}</span>{isYou(member.personId) ? <small>You</small> : null}</span>{active && method === 'equal' ? <span className="allocation-row__amount">{formatMoney(preview.allocations[member.personId] || 0, currency)}</span> : null}</button>; })}</div></fieldset>
         <div className="secondary-fields"><Field label="Split method" className="field--compact"><select value={method} onChange={(event) => { markSplitDirty(); setMethod(event.target.value as SplitMethod); }}><option value="equal">Equal</option><option value="exact">Exact amounts</option><option value="percentage">Percentage</option><option value="shares">Shares</option></select></Field>
           {method !== 'equal' && <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <div className="allocation-row" key={member.personId}><span className="allocation-row__person"><span>{member.name}{isYou(member.personId) ? ' · You' : ''}</span><span className="allocation-row__amount">{preview.allocations[member.personId] !== undefined ? formatMoney(preview.allocations[member.personId], currency) : '—'}</span></span><input className={amountInputClass(allocationValues[member.personId] || '')} data-amount-length={amountInputLength(allocationValues[member.personId] || '')} required inputMode="decimal" aria-label={`${member.name} ${method} value`} aria-invalid={formError?.target === 'allocation' || Boolean(preview.error)} aria-describedby={formError?.target === 'allocation' ? 'expense-form-error' : preview.error ? 'allocation-error' : undefined} placeholder={method === 'exact' ? '0.00' : method === 'percentage' ? '%' : 'Shares'} value={allocationValues[member.personId] || ''} onChange={(event) => updateAllocation(member.personId, event.target.value)} /></div>)}<p className="allocation-summary" role="status">{method === 'exact' ? `Remaining ${formatMoney(preview.remainingMinor ?? amountMinor, currency)}` : method === 'percentage' ? `Remaining ${preview.remainingPercent ?? 100}%` : `Total shares ${preview.totalValue || 0}`}</p>{preview.error ? <p className="error" id="allocation-error" role="alert">{preview.error}</p> : null}</div>}
              {scheduleMode ? <><div className="form-row"><Field label="Start date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field><Field label="End date (optional)" className="field--compact"><input type="date" value={endDate} min={date} onChange={(event) => { markDirty(); setEndDate(event.target.value); }} /></Field></div><div className="form-row"><Field label="Repeats" className="field--compact"><select value={frequency} onChange={(event) => { markDirty(); setFrequency(event.target.value as RecurrenceFrequency); if (event.target.value !== 'weekly') setWeekdays([]); }}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></Field><Field label="Every (interval)" className="field--compact"><input required type="number" min="1" max="366" value={interval} onChange={(event) => { markDirty(); setInterval(event.target.value); }} /></Field></div>{frequency === 'weekly' ? <fieldset><legend>On weekdays</legend><div className="weekday-list">{weekdayLabels.map((day) => <label className="checkbox-row" key={day.value}><input type="checkbox" checked={weekdays.includes(day.value)} onChange={() => { markDirty(); setWeekdays((current) => current.includes(day.value) ? current.filter((value) => value !== day.value) : [...current, day.value].sort((a, b) => a - b)); }} />{day.label}</label>)}</div></fieldset> : null}<Field label="Creator timezone" className="field--compact"><select id="creator-timezone" required value={timezoneSelectValue} aria-describedby="timezone-help" onChange={(event) => { markDirty(); if (event.target.value === otherTimezoneValue) { setUsingCustomTimezone(true); setCustomTimezone(''); } else { setUsingCustomTimezone(false); setCustomTimezone(''); setTimezone(event.target.value); } }}>{timezoneSelectOptions.map(({ zone, label }) => <option key={zone} value={zone}>{label}</option>)}<option value={otherTimezoneValue}>Other IANA timezone…</option></select>{usingCustomTimezone ? <input id="custom-timezone" required aria-label="Other IANA timezone" aria-describedby="timezone-help custom-timezone-help" placeholder="America/Los_Angeles" value={customTimezone} onChange={(event) => { markDirty(); setCustomTimezone(event.target.value); }} /> : null}<small id="timezone-help" className="muted">Choose an IANA timezone. Selected: {timezoneLabel(selectedTimezone || 'UTC', timezoneLabelDate)}. Dates are calendar dates in this timezone; the stored value remains the IANA ID.</small>{usingCustomTimezone ? <small id="custom-timezone-help" className="muted">Enter a valid IANA timezone ID, such as America/Los_Angeles.</small> : null}</Field><div className="schedule-preview"><strong>Next dates</strong>{schedulePreview.length ? <ol>{schedulePreview.map((previewDate) => <li key={previewDate}>{formatScheduleDate(previewDate)}</li>)}</ol> : <p className="muted">No occurrences match these settings.</p>}<p className="schedule-preview__continuation">{scheduleContinuationText(endDate, schedulePreview)}</p></div><p className="muted">Only future occurrences use edits. Already generated expenses stay in the ledger; occurrences affect balances only when posted. Creating or changing a schedule never enters the expense outbox.</p><OneTimeOnlyDetails category={category} customCategories={categoriesResource.data?.categories || []} notes={notes} showNotes={false} onCategoryChange={(value) => { markDirty(); setCategory(value); }} onNotesChange={(value) => { markDirty(); setNotes(value); }} /></> : <><div className="form-row"><Field label="Date" className="field--compact"><input required type="date" value={date} onChange={(event) => { markDirty(); setDate(event.target.value); }} /></Field></div>

@@ -192,6 +192,34 @@ class SplitDefaultStatement {
   async run() { return { meta: { changes: 1 } }; }
 }
 
+class SplitSuggestionDb {
+  readonly sql: string[] = [];
+  current: Record<string, unknown> | null = null;
+  expenses = [
+    { id: 'expense-3' },
+    { id: 'expense-2' },
+    { id: 'expense-1' },
+  ];
+  splits: Record<string, Array<Record<string, unknown>>> = {};
+  members: Array<Record<string, unknown>> = [{ person_id: suggestionPersonA, name: 'Amy', joined_at: '', role: 'owner' }, { person_id: suggestionPersonB, name: 'Bea', joined_at: '', role: 'member' }];
+  prepare(sql: string) { this.sql.push(sql); return new SplitSuggestionStatement(this, sql); }
+}
+const suggestionPersonA = '00000000-0000-4000-8000-000000000001';
+const suggestionPersonB = '00000000-0000-4000-8000-000000000002';
+class SplitSuggestionStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: SplitSuggestionDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() { return this.sql.includes('SELECT d.*') ? this.db.current as T | null : null; }
+  async all<T>() {
+    if (this.sql.includes('FROM expenses e')) return { results: this.db.expenses as T[] };
+    if (this.sql.includes('FROM people p JOIN group_members')) return { results: this.db.members as T[] };
+    if (this.sql.includes('FROM splits')) return { results: (this.db.splits[String(this.args[0])] || []) as T[] };
+    return { results: [] as T[] };
+  }
+  async run() { return { meta: { changes: 0 } }; }
+}
+
 class AuditPageDb {
   prepare(sql: string) { return new AuditPageStatement(sql); }
 }
@@ -1078,7 +1106,7 @@ describe('repository group split defaults', () => {
     await expect(repo.upsertGroupSplitDefault('group-1', 'user-1', { method: 'percentage', person_ids: personIds, values: [2500, 7500] })).resolves.toEqual({ method: 'percentage', personIds, values: [2500, 7500] });
     await expect(repo.deleteGroupSplitDefault('group-1', 'user-1')).resolves.toBe(true);
     const upsert = db.sql.find((sql) => sql.includes('INSERT INTO group_split_defaults')) || '';
-    expect(upsert).toContain("owner_member.role='owner'");
+    expect(upsert).toContain('auth_member.user_id=?');
     expect(upsert).toContain('gm.deleted_at IS NULL');
     expect(upsert).toContain('p.deleted_at IS NULL');
   });
@@ -1087,6 +1115,52 @@ describe('repository group split defaults', () => {
     const db = new SplitDefaultDb();
     await expect(new Repository(db as never).upsertGroupSplitDefault('group-1', 'user-1', { method: 'exact', person_ids: ['00000000-0000-4000-8000-000000000001'] } as never)).rejects.toMatchObject({ code: 'INVALID_SPLIT_DEFAULT' });
     expect(db.sql).toEqual([]);
+  });
+
+  it('suggests the normalized arrangement from the authenticated user latest three qualifying expenses', async () => {
+    const db = new SplitSuggestionDb();
+    for (const id of ['expense-1', 'expense-2', 'expense-3']) db.splits[id] = [
+      { person_id: suggestionPersonB, metadata_json: '{"method":"percentage","value":7500}' },
+      { person_id: suggestionPersonA, metadata_json: '{"method":"percentage","value":2500}' },
+    ];
+    const suggestion = await new Repository(db as never).getGroupSplitDefaultSuggestion('group-1', 'user-1');
+    expect(suggestion).toEqual({ method: 'percentage', personIds: [suggestionPersonA, suggestionPersonB], values: [2500, 7500] });
+    expect(db.sql[0]).toContain('e.created_by=?');
+    expect(db.sql[0]).toContain('e.deleted_at IS NULL');
+    expect(db.sql[0]).toContain('NOT EXISTS (SELECT 1 FROM scheduled_occurrences');
+    expect(db.sql[0]).toContain('ORDER BY e.created_at DESC,e.id DESC');
+  });
+
+  it('does not suggest an arrangement that already is the party default', async () => {
+    const db = new SplitSuggestionDb();
+    db.current = { method: 'equal', person_ids_json: `["${suggestionPersonA}","${suggestionPersonB}"]`, values_json: null };
+    for (const id of ['expense-1', 'expense-2', 'expense-3']) db.splits[id] = [
+      { person_id: suggestionPersonB, metadata_json: '{"method":"equal"}' },
+      { person_id: suggestionPersonA, metadata_json: '{"method":"equal"}' },
+    ];
+    await expect(new Repository(db as never).getGroupSplitDefaultSuggestion('group-1', 'user-1')).resolves.toBeNull();
+  });
+
+  it('does not suggest an arrangement containing a removed participant', async () => {
+    const db = new SplitSuggestionDb();
+    db.members = [{ person_id: suggestionPersonA, name: 'Amy', joined_at: '', role: 'owner' }];
+    for (const id of ['expense-1', 'expense-2', 'expense-3']) db.splits[id] = [
+      { person_id: suggestionPersonA, metadata_json: '{"method":"equal"}' },
+      { person_id: suggestionPersonB, metadata_json: '{"method":"equal"}' },
+    ];
+    await expect(new Repository(db as never).getGroupSplitDefaultSuggestion('group-1', 'user-1')).resolves.toBeNull();
+  });
+
+  it.each([
+    ['mismatch', (db: SplitSuggestionDb) => { db.splits['expense-2'] = []; }],
+  ])('returns no suggestion for %s patterns', async (_label, mutate) => {
+    const db = new SplitSuggestionDb();
+    for (const id of ['expense-1', 'expense-2', 'expense-3']) db.splits[id] = [
+      { person_id: suggestionPersonA, metadata_json: '{"method":"equal"}' },
+      { person_id: suggestionPersonB, metadata_json: '{"method":"equal"}' },
+    ];
+    mutate(db);
+    await expect(new Repository(db as never).getGroupSplitDefaultSuggestion('group-1', 'user-1')).resolves.toBeNull();
   });
 });
 
