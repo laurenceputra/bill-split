@@ -1,4 +1,4 @@
-import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
+import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
 import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGlobalTransactions, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
@@ -734,6 +734,15 @@ async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdent
   }
 }
 const offline = <T extends object>(value: T): CachedResult<T> => ({ ...value, offline: true, stale: true });
+const groupCurrentPersonId = (members: GroupMember[], currentPersonId: string | null | undefined, authenticatedPersonId?: string) => {
+  const candidate = currentPersonId === undefined ? authenticatedPersonId : currentPersonId;
+  return candidate && members.some((member) => member.personId === candidate) ? candidate : null;
+};
+const cachedPersonIdForUser = async (userId: string) => {
+  if (verifiedIdentity?.id === userId) return verifiedIdentity.personId;
+  const trust = await cacheRead(readOfflineTrust);
+  return trust && trust.userId === userId && isOfflineTrustUsable(trust) ? trust.personId : undefined;
+};
 const assertResponseIdentity = (responseUserId: string | undefined, identity: CacheIdentity | undefined) => {
   if (responseUserId && identity && responseUserId !== identity.user.id) {
     signalAuthRequired('IDENTITY_MISMATCH');
@@ -865,7 +874,7 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
       const token = startupCacheToken;
       const routeGeneration = ++provisionalRouteGeneration;
       const authEpoch = getAuthEpoch();
-      const restored = await restoreProvisionalRouteCache(trust.userId, effectiveRoute, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation);
+      const restored = await restoreProvisionalRouteCache(trust.userId, trust.personId, effectiveRoute, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation);
       if (!provisionalRouteIsCurrent(routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || !restored) {
         setAuthLifecycle({ status: 'provisional', privateCacheAvailable: false, privateCacheRouteKey: routeKey });
         return authLifecycle;
@@ -942,7 +951,7 @@ const seedProvisionalResource = <T>(key: string, userId: string, data: T, fetche
 /** Restore only the active route's persisted resources. This runs before the
  * private tree is mounted so the first private render can use the same
  * account-scoped keys and hydrators as a normal route visit. */
-async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrapRoute | undefined, token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number): Promise<boolean> {
+async function restoreProvisionalRouteCache(userId: string, authenticatedPersonId: string | undefined, route: AuthBootstrapRoute | undefined, token: number, routeGeneration: number, authEpoch: number, evidenceEpoch: number, generation: number): Promise<boolean> {
   if (!route) return provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation);
   if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return false;
   const pathname = normalizeAuthRoutePathname(route.pathname || '/');
@@ -956,7 +965,7 @@ async function restoreProvisionalRouteCache(userId: string, route: AuthBootstrap
     const cached = await snapshot(id);
     if (!cached || !provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, evidenceEpoch, generation)) return cached;
     const timestamp = cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt);
-    if (resources.includes('group') && cached.group && cached.members) seedProvisionalResource(resourceKeys.group(userId, id), userId, { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, timestamp, token, routeGeneration, authEpoch, evidenceEpoch, generation);
+     if (resources.includes('group') && cached.group && cached.members) seedProvisionalResource(resourceKeys.group(userId, id), userId, { group: cached.group, members: cached.members, currentPersonId: groupCurrentPersonId(cached.members, cached.currentPersonId, authenticatedPersonId), historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, timestamp, token, routeGeneration, authEpoch, evidenceEpoch, generation);
     const resourceTimestamp = (resource: keyof NonNullable<GroupSnapshot['cachedAtByResource']>) => cacheTimestamp(cached.cachedAtByResource?.[resource] || cached.cachedAt);
     if (resources.includes('balances') && cached.balances) seedProvisionalResource(resourceKeys.balances(userId, id), userId, { balances: cached.balances }, resourceTimestamp('balances'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
     if (resources.includes('expenses') && cached.expenses) seedProvisionalResource(resourceKeys.expenses(userId, id), userId, { expenses: cached.expenses }, resourceTimestamp('expenses'), token, routeGeneration, authEpoch, evidenceEpoch, generation);
@@ -1080,7 +1089,7 @@ const activateProvisionalOffline = async (trust: OfflineTrustRecord, expectedEvi
   seedResource('identity', '', { ...offline(user), authoritative: false }, Date.now(), { offline: true });
   clearAuthRequired();
   const restored = await deadline(
-    restoreProvisionalRouteCache(user.id, route, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation).then((ready) => ({ ready })),
+    restoreProvisionalRouteCache(user.id, user.personId, route, token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation).then((ready) => ({ ready })),
     2_000,
     () => { if (token === startupCacheToken) startupCacheToken += 1; return { ready: false, timedOut: true }; },
   );
@@ -1910,22 +1919,22 @@ export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ gr
   }
 }
 
-export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<{ group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[]; splitDefault: GroupSplitDefault | null }>> {
+export async function getGroup(id: string, signal?: AbortSignal): Promise<CachedResult<GroupResponse>> {
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
-    const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[]; splitDefault?: GroupSplitDefault | null }>(`/groups/${id}`, { signal });
+    const result = await apiWithMeta<{ group: Group; members: GroupMember[]; historicalParticipants?: HistoricalParticipant[]; splitDefault?: GroupSplitDefault | null; currentPersonId?: string | null }>(`/groups/${id}`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    const data = { ...result.data, historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: result.data.splitDefault ?? null };
-    const persisted = result.userId ? await persistGroupResponse(result.userId, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants, splitDefault: data.splitDefault }, requestMutationGeneration, generation) : true;
+    const data = { ...result.data, currentPersonId: groupCurrentPersonId(result.data.members, result.data.currentPersonId, identity?.user.personId), historicalParticipants: result.data.historicalParticipants || result.data.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: result.data.splitDefault ?? null };
+    const persisted = result.userId ? await persistGroupResponse(result.userId, id, { group: data.group, members: data.members, historicalParticipants: data.historicalParticipants, splitDefault: data.splitDefault, currentPersonId: data.currentPersonId }, requestMutationGeneration, generation) : true;
     return persisted ? data : { ...data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
-    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null });
+    if (cached?.group && cached.members) return offline({ group: cached.group, members: cached.members, currentPersonId: groupCurrentPersonId(cached.members, cached.currentPersonId, identity.user.personId), historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null });
     throw error;
   }
 }
@@ -1988,6 +1997,9 @@ export const getGroupInvitations = getOwnerInvitations;
 
 export async function createGroupInvitation(groupId: string, email: string) {
   return api<{ invitation: GroupInvitation }>(`/groups/${groupId}/invitations`, { method: 'POST', body: JSON.stringify({ email }) });
+}
+export async function createTargetedGroupInvitation(groupId: string, personId: string, email: string) {
+  return api<{ invitation: GroupInvitation }>(`/groups/${groupId}/members/${personId}/invitation`, { method: 'POST', body: JSON.stringify({ email }) });
 }
 export const createInvitation = createGroupInvitation;
 
@@ -2399,7 +2411,8 @@ export async function hydrateIdentity() {
 }
 export async function hydrateGroup(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
-  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
+  const authenticatedPersonId = await cachedPersonIdForUser(userId);
+  return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, currentPersonId: groupCurrentPersonId(cached.members, cached.currentPersonId, authenticatedPersonId), historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateExpenses(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));

@@ -18,7 +18,8 @@ export interface Group { id: string; name: string; currency: Currency; createdAt
 export interface GroupMember { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null }
 export type HistoricalParticipantStatus = 'active' | 'removed' | 'deleted';
 export interface HistoricalParticipant { personId: string; name: string; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null; status: HistoricalParticipantStatus }
-export interface GroupInvitation { id: string; groupId: string; email: string; createdBy: string; createdAt: string; expiresAt: string; revokedAt?: string | null; acceptedAt?: string | null; acceptedBy?: string | null; rejectedAt?: string | null }
+export interface GroupInvitation { id: string; groupId: string; email: string; createdBy: string; createdAt: string; expiresAt: string; targetPersonId?: string | null; revokedAt?: string | null; acceptedAt?: string | null; acceptedBy?: string | null; rejectedAt?: string | null }
+export interface GroupResponse { group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[]; splitDefault: GroupSplitDefault | null; currentPersonId: string | null }
 export interface Split { personId: string; amountMinor: number; metadata?: Record<string, unknown> }
 export interface Payer { personId: string; amountMinor: number }
 export interface Expense {

@@ -470,6 +470,63 @@ class DeletedMutationStatement {
   }
   async run() { return { meta: { changes: 0 } }; }
 }
+class TargetedInvitationDb {
+  batches: Array<TargetedInvitationStatement[]> = [];
+  existing = false;
+  represented = false;
+  target = true;
+  emailConflict?: 'generic' | 'other-target';
+  expired = false;
+  createdTarget: string | null = 'ledger-person';
+  existingEmail = 'friend@example.com';
+  revocationChanges = 0;
+  insertChanges = 1;
+  prepare(sql: string) { return new TargetedInvitationStatement(this, sql); }
+  async batch(statements: TargetedInvitationStatement[]) {
+    this.batches.push(statements);
+    this.existing = true;
+    this.createdTarget = statements[1]?.sql.includes('target_person_id') ? 'ledger-person' : null;
+    return statements.map((_, index) => ({ meta: { changes: index === 0 ? this.revocationChanges : this.insertChanges } }));
+  }
+}
+class TargetedInvitationStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: TargetedInvitationDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('owner_user.email')) return { owner_email: 'owner@example.com' } as T;
+    if (this.sql.includes("gm.role='member' AND gm.user_id IS NULL")) return this.db.target ? { person_id: 'ledger-person' } as T : null;
+    if (this.sql.includes('SELECT 1 FROM group_members gm JOIN users u')) return this.db.represented ? { represented: 1 } as T : null;
+    if (this.db.expired && this.sql.includes('FROM group_invitations') && this.sql.includes('expires_at>?') && !this.sql.includes('WHERE id=?')) return null;
+    if (this.sql.includes('ORDER BY CASE WHEN target_person_id IS NOT NULL THEN 0 ELSE 1 END') && (this.db.emailConflict || this.db.existing)) return { id: 'existing-email', group_id: 'group-1', email_normalized: this.db.existingEmail, created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.emailConflict === 'other-target' ? 'other-person' : null, revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('target_person_id IS NOT NULL') && this.db.emailConflict === 'other-target') return { id: 'existing-email', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'other-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('ORDER BY created_at DESC LIMIT 1') && this.db.existing) return { id: 'invitation-1', group_id: 'group-1', email_normalized: this.db.existingEmail, created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.createdTarget, revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    return null;
+  }
+}
+class TargetedAcceptanceDb {
+  batches: Array<Array<{ sql: string }>> = [];
+  wrongEmail = false;
+  acceptChanges = true;
+  ambiguous = false;
+  prepare(sql: string) { return new TargetedAcceptanceStatement(this, sql); }
+  async batch(statements: TargetedAcceptanceStatement[]) {
+    this.batches.push(statements);
+    return statements.map(() => ({ meta: { changes: this.acceptChanges ? 1 : 0 } }));
+  }
+}
+class TargetedAcceptanceStatement {
+  constructor(private readonly db: TargetedAcceptanceDb, readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async first<T>() {
+    if (this.sql.includes('SELECT * FROM users WHERE id=')) return { id: 'user-1', email: 'friend@example.com', deleted_at: null } as T;
+    if (this.sql.includes('FROM group_invitations WHERE id=? AND email_normalized=?')) return this.db.wrongEmail ? null : { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('SELECT id FROM group_invitations WHERE group_id=')) return this.db.ambiguous ? { id: 'other-invitation' } as T : null;
+    if (this.sql.includes('SELECT * FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: '2026-01-02T00:00:00.000Z', accepted_by: 'user-1', rejected_at: null } as T;
+    return null;
+  }
+}
 
 class StaleRemovalDb {
   invitationSql = '';
@@ -705,6 +762,121 @@ describe('repository authorization-scoped transaction lookups', () => {
   });
 });
 
+describe('repository targeted invitations', () => {
+  it('creates an owner-targeted invitation and makes a same-email retry idempotent', async () => {
+    const db = new TargetedInvitationDb();
+    const repository = new Repository(db as never);
+    const first = await repository.createTargetedInvitation('group-1', 'ledger-person', 'owner-1', ' Friend@Example.com ');
+    const retry = await repository.createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com');
+    expect(first).toMatchObject({ email: 'friend@example.com', targetPersonId: 'ledger-person' });
+    expect(retry.id).toBe(first.id);
+    expect(db.batches[0]).toHaveLength(2);
+    expect(db.batches[0][1].sql).toContain('target_person_id');
+  });
+
+  it('converts a generic pending invitation for the same participant but rejects another target', async () => {
+    const genericDb = new TargetedInvitationDb();
+    genericDb.emailConflict = 'generic';
+    await new Repository(genericDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com');
+    expect(genericDb.batches[0][0].sql).toContain('target_person_id IS NULL');
+
+    const otherTargetDb = new TargetedInvitationDb();
+    otherTargetDb.emailConflict = 'other-target';
+    await expect(new Repository(otherTargetDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+    expect(otherTargetDb.batches).toHaveLength(0);
+
+    const genericRequestDb = new TargetedInvitationDb();
+    genericRequestDb.emailConflict = 'other-target';
+    await expect(new Repository(genericRequestDb as never).createInvitation('group-1', 'owner-1', 'friend@example.com')).resolves.toMatchObject({ targetPersonId: 'other-person' });
+    expect(genericRequestDb.batches).toHaveLength(0);
+  });
+
+  it('revokes an expired targeted invitation before creating a generic invitation', async () => {
+    const db = new TargetedInvitationDb();
+    db.emailConflict = 'other-target';
+    db.expired = true;
+    db.revocationChanges = 1;
+
+    const invitation = await new Repository(db as never).createInvitation('group-1', 'owner-1', 'friend@example.com');
+
+    expect(invitation).toMatchObject({ email: 'friend@example.com', targetPersonId: null });
+    expect(db.batches).toHaveLength(1);
+    expect(db.batches[0][0].sql).toContain('email_normalized=?');
+    expect(db.batches[0][0].sql).toContain('expires_at<=?');
+    expect(db.batches[0][0].sql).not.toContain('target_person_id IS NULL');
+  });
+
+  it('revokes an expired targeted invitation before replacing it for the same or a new target', async () => {
+    const sameTargetDb = new TargetedInvitationDb();
+    sameTargetDb.existing = true;
+    sameTargetDb.expired = true;
+    sameTargetDb.revocationChanges = 1;
+    const sameTarget = await new Repository(sameTargetDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com');
+    expect(sameTarget).toMatchObject({ email: 'friend@example.com', targetPersonId: 'ledger-person' });
+
+    const newTargetDb = new TargetedInvitationDb();
+    newTargetDb.emailConflict = 'other-target';
+    newTargetDb.expired = true;
+    newTargetDb.revocationChanges = 1;
+    const newTarget = await new Repository(newTargetDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com');
+    expect(newTarget).toMatchObject({ email: 'friend@example.com', targetPersonId: 'ledger-person' });
+    expect(newTargetDb.batches[0][0].sql).toContain('target_person_id IS NOT NULL AND email_normalized=? AND expires_at<=?');
+    expect(newTargetDb.batches[0][0].sql).toContain('conflicting.expires_at>?');
+  });
+
+  it('does not revoke the old target invitation when replacement eligibility fails', async () => {
+    const db = new TargetedInvitationDb();
+    db.existing = true;
+    db.existingEmail = 'old@example.com';
+    db.revocationChanges = 0;
+    db.insertChanges = 0;
+    await expect(new Repository(db as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'new@example.com')).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.batches[0][0].sql).toContain('NOT EXISTS (SELECT 1 FROM group_members represented');
+    expect(db.batches[0][0].sql).toContain('NOT EXISTS (SELECT 1 FROM group_invitations conflicting');
+    expect(db.batches[0][1].sql).toContain('NOT EXISTS (SELECT 1 FROM group_invitations pending');
+  });
+
+  it('accepts a targeted invitation with the exact ledger participant and does not create a person', async () => {
+    const db = new TargetedAcceptanceDb();
+    const accepted = await new Repository(db as never).acceptInvitation('invitation-1', 'user-1');
+    expect(accepted).toMatchObject({ targetPersonId: 'ledger-person', acceptedBy: 'user-1' });
+    expect(db.batches[0]).toHaveLength(2);
+    expect(db.batches[0][1].sql).toContain('UPDATE group_members SET user_id=?');
+    expect(db.batches[0].some((statement) => statement.sql.includes('UPDATE people SET email='))).toBe(false);
+    expect(db.batches[0].some((statement) => statement.sql.includes('INSERT INTO people'))).toBe(false);
+    expect(db.batches[0].some((statement) => statement.sql.includes('INSERT INTO group_members'))).toBe(false);
+  });
+
+  it('rejects a target that is no longer ledger-only or an email already represented in the group', async () => {
+    const targetDb = new TargetedInvitationDb();
+    targetDb.target = false;
+    await expect(new Repository(targetDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+
+    const representedDb = new TargetedInvitationDb();
+    representedDb.represented = true;
+    await expect(new Repository(representedDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+  });
+
+  it('rejects a wrong-email acceptance and a competing acceptance without partial writes', async () => {
+    const wrongEmailDb = new TargetedAcceptanceDb();
+    wrongEmailDb.wrongEmail = true;
+    await expect(new Repository(wrongEmailDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+    expect(wrongEmailDb.batches).toHaveLength(0);
+
+    const raceDb = new TargetedAcceptanceDb();
+    raceDb.acceptChanges = false;
+    await expect(new Repository(raceDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(raceDb.batches[0]).toHaveLength(2);
+  });
+
+  it('fails closed when duplicate pending invitations exist for an accepting email', async () => {
+    const db = new TargetedAcceptanceDb();
+    db.ambiguous = true;
+    await expect(new Repository(db as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+    expect(db.batches).toHaveLength(0);
+  });
+});
+
 describe('repository mutation safety', () => {
   const settlementInput: SettlementInput = { from_person_id: '00000000-0000-4000-8000-000000000001', to_person_id: '00000000-0000-4000-8000-000000000002', amount_minor: 100, currency: 'USD', date: '2025-01-01', version: 1 };
 
@@ -797,10 +969,11 @@ describe('repository collaboration lifecycle', () => {
   it('cancels only templates created by a removed member', async () => {
     const db = new LifecycleDb();
     await expect(new Repository(db as never).removeMember('group-1', 'person-2', 'user-1')).resolves.toBe(true);
-     const cancellation = db.batches[0].find((statement) => statement.sql.includes("UPDATE scheduled_expenses SET status='cancelled'"));
-     expect(cancellation?.sql).toContain('created_by=(SELECT removed_member.user_id');
-     expect(cancellation?.sql).toContain('next_occurrence_date=NULL');
-     expect(cancellation?.sql).not.toContain("status='active'");
+      const cancellation = db.batches[0].find((statement) => statement.sql.includes("UPDATE scheduled_expenses SET status='cancelled'"));
+      expect(cancellation?.sql).toContain('created_by=(SELECT removed_member.user_id');
+      expect(cancellation?.sql).toContain('next_occurrence_date=NULL');
+      expect(cancellation?.sql).not.toContain("status='active'");
+      expect(db.batches[0].find((statement) => statement.sql.includes('UPDATE group_invitations SET revoked_at'))?.sql).toContain('target_person_id=?');
   });
 });
 

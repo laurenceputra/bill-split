@@ -72,6 +72,7 @@ export interface GroupSnapshot {
   splitDefault?: GroupSplitDefault | null;
   members?: GroupMember[];
   historicalParticipants?: HistoricalParticipant[];
+  currentPersonId?: string | null;
   expenses?: Expense[];
   balances?: Record<string, Balances>;
   settlements?: Settlement[];
