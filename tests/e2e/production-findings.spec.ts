@@ -125,7 +125,7 @@ test('disables targeted mutations during a stale invitation refresh while keepin
   await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeDisabled();
   await expect(authenticatedPage.getByText('Refreshing invitations…')).toBeVisible();
   releaseRefresh();
-  await expect(authenticatedPage.getByText('Showing cached invitations; they may be out of date.')).toBeVisible();
+  await expect(authenticatedPage.getByText('Showing cached invitations; it may be out of date.')).toBeVisible();
   await expect(authenticatedPage.getByRole('button', { name: 'Retry' })).toBeVisible();
   await expect(sam.getByRole('button', { name: 'Change' })).toBeDisabled();
   await expect(sam.getByRole('button', { name: 'Revoke' })).toBeDisabled();
@@ -165,9 +165,9 @@ test('stacks targeted email fields and actions within a member row on narrow scr
     const form = row.querySelector('form');
     const input = row.querySelector('input[type="email"]');
     const button = form?.querySelector('button');
-    return { formDirection: form ? getComputedStyle(form).flexDirection || getComputedStyle(form).gridTemplateColumns : '', inputBottom: input?.getBoundingClientRect().bottom, buttonTop: button?.getBoundingClientRect().top, rowRight: row.getBoundingClientRect().right, viewport: window.innerWidth };
+    return { formDisplay: form ? getComputedStyle(form).display : '', inputBottom: input?.getBoundingClientRect().bottom, buttonTop: button?.getBoundingClientRect().top, rowRight: row.getBoundingClientRect().right, viewport: window.innerWidth };
   });
-  expect(layout.formDirection).toContain('minmax');
+  expect(layout.formDisplay).toBe('grid');
   expect(layout.buttonTop).toBeGreaterThanOrEqual(layout.inputBottom || 0);
   expect(layout.rowRight).toBeLessThanOrEqual(layout.viewport);
 });
