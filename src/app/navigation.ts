@@ -108,7 +108,6 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   else if (group && segments[2] === 'expenses' && segments[3] && segments.length === 4) route = 'expense-detail';
   else if (segments[0] === 'expenses' && segments[1] && segments.length === 2) route = 'legacy-expense-detail';
 
-  const hasGroup = Boolean(group);
   const activeSection: NavigationSection =
     route === 'settings' ? 'settings' :
     route === 'activity' ? 'activity' :

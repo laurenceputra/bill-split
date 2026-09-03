@@ -1,7 +1,7 @@
 import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
 import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
-import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveActivity, saveCategories, saveGlobalTransactions, saveGroupsIfGenerationMatches, saveOfflineTrust, saveExpenseDetails, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
-import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
+import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
+import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { beginLocalLogoutCleanup, broadcastSessionCoordination, cancelLocalLogoutCleanup, captureAuthInvalidationNonce, captureSessionGeneration, clearSessionLogout, completeLocalLogoutCleanup, consumeAuthInvalidationNonce, getLocallyOwnedLogoutGeneration, getSessionGeneration, getSessionLogoutInProgress, hydrateSessionCoordination, isSessionGenerationCurrent, isSessionLogoutAdopted, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionCoordination, subscribeSessionLogout } from './session';
 import { beginMutationBarrier, isMutationBarrierActive, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
@@ -590,7 +590,6 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
     throw new ApiError(browserOffline ? 'Network connection unavailable.' : 'Connection issue. Retry when the connection is available.', { networkFailure: true, code: 'NETWORK_ERROR', reconnectRequired: !browserOffline });
   }
 
-  const finalUrl = (() => { try { return new URL(response.url); } catch { return undefined; } })();
   const contentType = response.headers.get('content-type') || '';
   const authResponse = response.status === 401 || (response.status >= 300 && response.status < 400 && path !== '/me') || (response.redirected && path !== '/me');
   const unexpectedFormat = !contentType.toLowerCase().includes('json') && response.status !== 204;

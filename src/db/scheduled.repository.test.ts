@@ -5,12 +5,12 @@ import { addCalendarDays } from '../domain/recurrence';
 
 class ScheduledDb {
   batches: string[][] = [];
-  prepare(sql: string) { return new ScheduledStatement(this, sql); }
+  prepare(sql: string) { return new ScheduledStatement(sql); }
   async batch(statements: ScheduledStatement[]) { this.batches.push(statements.map((statement) => statement.sql)); return []; }
 }
 class ScheduledStatement {
   args: unknown[] = [];
-  constructor(private readonly db: ScheduledDb, readonly sql: string) {}
+  constructor(readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
     if (this.sql.includes('FROM idempotency_keys')) return null;

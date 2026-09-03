@@ -1,6 +1,6 @@
 import type { Balances, Currency, GroupMember, GroupSplitDefault, PairwiseBalance, Split, SplitMethod } from '../shared/types';
 import { allocateByWeights, allocateEqual, allocatePercentage, checkedSumMinor, parseMoney } from '../domain/money';
-import { normalizeGroupSplitDefault, normalizeExpenseSplitArrangement, sameGroupSplitArrangement, splitArrangementFingerprint } from '../shared/split-default';
+import { normalizeGroupSplitDefault, sameGroupSplitArrangement } from '../shared/split-default';
 
 export { normalizeGroupSplitDefault, normalizeExpenseSplitArrangement, sameGroupSplitArrangement, splitArrangementFingerprint } from '../shared/split-default';
 

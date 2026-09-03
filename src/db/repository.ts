@@ -1349,9 +1349,6 @@ export class Repository {
   }
   private withinRestoreWindow(deletedAt: unknown) { return deletedAt != null && Date.now() - Date.parse(text(deletedAt)) <= 30 * 24 * 60 * 60 * 1000; }
 
-  private async claim(kind: string, userId: string, groupId: string, operationId: string, requestHash: string, entityId: string) {
-    await this.db.prepare('INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) VALUES(?,?,?,?,?,?,?)').bind(kind, userId, groupId, operationId, requestHash, entityId, now()).run();
-  }
   private async existingClaim(kind: string, userId: string, groupId: string, operationId: string) {
     return this.db.prepare('SELECT * FROM idempotency_keys WHERE kind=? AND user_id=? AND group_id=? AND operation_id=?').bind(kind, userId, groupId, operationId).first<Row>();
   }

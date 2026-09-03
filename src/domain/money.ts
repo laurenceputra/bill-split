@@ -1,6 +1,6 @@
 import type { Currency } from '../shared/types';
 import { supportedCurrencies } from '../shared/schemas';
-import { checkedAddMinor, checkedMinor, checkedSumMinor } from '../shared/money';
+import { checkedMinor, checkedSumMinor } from '../shared/money';
 
 export { BalanceOverflowError, BALANCE_OVERFLOW_CODE, checkedAddMinor, checkedMinor, checkedSumMinor } from '../shared/money';
 
