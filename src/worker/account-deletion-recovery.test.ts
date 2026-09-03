@@ -118,6 +118,18 @@ describe('production account deletion recovery boundary', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'AUTH_REQUIRED' } });
   });
 
+  it('rejects recovery when the expected Clerk identity belongs to another account', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/account', {
+      method: 'DELETE',
+      headers: { ...recoveryHeaders, 'X-BillSplit-Expected-Clerk-User-Id': 'clerk-other' },
+      body: JSON.stringify({ confirmation: 'DELETE MY ACCOUNT' }),
+    }), env(new RecoveryDb()), {} as ExecutionContext);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: 'IDENTITY_MISMATCH' } });
+    expect(clerkAuthenticateRequest).toHaveBeenCalledTimes(1);
+  });
+
   it('bootstraps successfully, preserves same-user device sessions, and revokes only the switched current device', async () => {
     const sameUserDb = new SessionDb();
     clerkAuthenticateRequest.mockResolvedValue({
