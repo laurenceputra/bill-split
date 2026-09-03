@@ -9,6 +9,7 @@ import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } fro
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
+import { normalizeExpenseSplitArrangement, sameGroupSplitArrangement } from '../shared/split-default';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -133,8 +134,10 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
     WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
     ORDER BY p.name LIMIT 1) AS counterpart_name
-  FROM groups g JOIN group_members gm ON gm.group_id=g.id
-  WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
+   FROM groups g JOIN group_members gm ON gm.group_id=g.id
+   WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
+
+const groupDisplayNameSql = (memberAlias: string) => `CASE WHEN (SELECT COUNT(*) FROM group_members display_member WHERE display_member.group_id=g.id AND display_member.deleted_at IS NULL)=2 THEN COALESCE((SELECT display_person.name FROM people display_person JOIN group_members display_other ON display_other.person_id=display_person.id WHERE display_other.group_id=g.id AND display_other.person_id<>${memberAlias}.person_id AND display_other.deleted_at IS NULL AND display_person.deleted_at IS NULL LIMIT 1),g.name) ELSE g.name END`;
 
 export class Repository {
   constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string) {}
@@ -480,23 +483,47 @@ export class Repository {
     const row = await this.db.prepare('SELECT d.* FROM group_split_defaults d JOIN groups g ON g.id=d.group_id WHERE d.group_id=? AND g.deleted_at IS NULL').bind(groupId).first<Row>();
     return this.mapGroupSplitDefault(row);
   }
+  async getGroupSplitDefaultSuggestion(groupId: string, userId: string): Promise<GroupSplitDefault | null> {
+     // Return only the latest three matching expenses; the composite active-expense
+     // index supports the ordered lookup.
+    const rows = (await this.db.prepare(`SELECT e.id
+      FROM expenses e
+      JOIN groups g ON g.id=e.group_id
+      WHERE e.group_id=? AND e.created_by=? AND e.deleted_at IS NULL AND g.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM group_members viewer_member JOIN people viewer_person ON viewer_person.id=viewer_member.person_id
+          JOIN users viewer_user ON viewer_user.id=viewer_member.user_id
+          WHERE viewer_member.group_id=e.group_id AND viewer_member.user_id=? AND viewer_member.deleted_at IS NULL
+            AND viewer_person.deleted_at IS NULL AND viewer_user.deleted_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence.expense_id=e.id)
+      ORDER BY e.created_at DESC,e.id DESC LIMIT 3`).bind(groupId, userId, userId).all<Row>()).results;
+    if (rows.length !== 3) return null;
+    const members = await this.members(groupId);
+    const arrangements = await Promise.all(rows.map(async (row) => {
+      const splits = (await this.db.prepare('SELECT person_id,metadata_json FROM splits WHERE expense_id=? ORDER BY person_id').bind(text(row.id)).all<Row>()).results;
+      return normalizeExpenseSplitArrangement(splits.map((split) => ({ personId: text(split.person_id), metadata: (() => { try { return split.metadata_json == null ? undefined : JSON.parse(text(split.metadata_json)) as Record<string, unknown>; } catch { return undefined; } })() })), members);
+    }));
+    const suggestion = arrangements[0];
+    if (!suggestion || arrangements.some((arrangement) => !arrangement || !sameGroupSplitArrangement(suggestion, arrangement, members))) return null;
+    const current = await this.getGroupSplitDefault(groupId);
+    return current && sameGroupSplitArrangement(suggestion, current, members) ? null : suggestion;
+  }
   async upsertGroupSplitDefault(groupId: string, userId: string, input: GroupSplitDefaultInput): Promise<GroupSplitDefault> {
     const parsed = groupSplitDefaultInput.safeParse(input);
     if (!parsed.success) throw new RepositoryError('INVALID_SPLIT_DEFAULT', parsed.error.issues[0]?.message || 'The group split default is invalid');
     const value = parsed.data;
     const personIds = value.person_ids, timestamp = now();
     const values = 'values' in value ? value.values : undefined;
+    const actor = this.activeMutationGuard(groupId, userId);
     const result = await this.db.prepare(`INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at)
       SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL)
-      AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id
-        WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL)
+      AND ${actor.sql}
       AND NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (SELECT 1 FROM group_members gm JOIN people p ON p.id=gm.person_id
         WHERE gm.group_id=? AND gm.person_id=requested.value AND gm.deleted_at IS NULL AND p.deleted_at IS NULL))
-      ON CONFLICT(group_id) DO UPDATE SET method=excluded.method,person_ids_json=excluded.person_ids_json,values_json=excluded.values_json,updated_at=excluded.updated_at`).bind(groupId, value.method, JSON.stringify(personIds), values === undefined ? null : JSON.stringify(values), timestamp, groupId, groupId, userId, JSON.stringify(personIds), groupId).run();
+      ON CONFLICT(group_id) DO UPDATE SET method=excluded.method,person_ids_json=excluded.person_ids_json,values_json=excluded.values_json,updated_at=excluded.updated_at`).bind(groupId, value.method, JSON.stringify(personIds), values === undefined ? null : JSON.stringify(values), timestamp, groupId, ...actor.args, JSON.stringify(personIds), groupId).run();
     if (Number(result.meta?.changes ?? 0) === 0) {
       await this.throwIfDeleted(userId);
-      const owner = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
-      if (!owner) throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update the split default');
+      const member = await this.db.prepare("SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN people p ON p.id=gm.person_id JOIN users u ON u.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL AND u.deleted_at IS NULL").bind(groupId, userId).first<Row>();
+      if (!member) throw new RepositoryError('MEMBER_REQUIRED', 'Only an active group member can update the split default');
       throw new RepositoryError('MEMBER_REQUIRED', 'Every split-default participant must be an active group member');
     }
     const saved = await this.getGroupSplitDefault(groupId);
@@ -1168,28 +1195,36 @@ export class Repository {
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.expense_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
   }
-  async transactionPage(groupId: string, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
+  private async transactionPageForScope(userId: string | undefined, groupId: string | undefined, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
     if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     assertLikeSearch(opts.q);
     for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates');
     if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
     const cursor = decodeTransactionCursor(opts.cursor);
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
-    const args: unknown[] = [groupId, groupId];
+    const args: unknown[] = [];
+    const scope = userId === undefined
+      ? `e.group_id=?`
+      : `EXISTS (SELECT 1 FROM group_members authorized_member JOIN groups authorized_group ON authorized_group.id=authorized_member.group_id
+          WHERE authorized_member.group_id=e.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL AND authorized_group.deleted_at IS NULL${groupId ? ' AND authorized_member.group_id=?' : ''})`;
+    const scopeArgs = userId === undefined ? [groupId] : [userId, ...(groupId ? [groupId] : [])];
+    const unionArgs = userId === undefined ? scopeArgs : [userId, ...scopeArgs];
+    args.push(...unionArgs, ...unionArgs);
+    const groupName = userId !== undefined && groupId === undefined ? groupDisplayNameSql('authorized_member') : 'NULL';
     let sql = `WITH transaction_rows AS (
-      SELECT e.id,e.group_id,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,
+      SELECT e.id,e.group_id,${groupName} AS group_name,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,
         e.category,e.notes,NULL AS note,NULL AS from_person_id,NULL AS to_person_id,NULL AS from_name,NULL AS to_name,
         e.created_by,e.created_at,e.client_operation_id,'expense' AS kind
-      FROM expenses e WHERE e.group_id=? AND e.deleted_at IS NULL
+      FROM expenses e JOIN groups g ON g.id=e.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=e.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL'} WHERE ${scope} AND e.deleted_at IS NULL
       UNION ALL
-      SELECT s.id,s.group_id,NULL,s.amount_minor,s.currency,s.settlement_date AS transaction_date,
+      SELECT s.id,s.group_id,${groupName},NULL,s.amount_minor,s.currency,s.settlement_date AS transaction_date,
         NULL,NULL,s.note,s.from_person_id,s.to_person_id,
         COALESCE(from_person.name,'Deleted account'),COALESCE(to_person.name,'Deleted account'),
         s.created_by,s.created_at,s.client_operation_id,'settlement' AS kind
-      FROM settlements s
+      FROM settlements s JOIN groups g ON g.id=s.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=s.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL'}
       LEFT JOIN people from_person ON from_person.id=s.from_person_id
       LEFT JOIN people to_person ON to_person.id=s.to_person_id
-      WHERE s.group_id=? AND s.deleted_at IS NULL
+      WHERE ${scope.replaceAll('e.', 's.')} AND s.deleted_at IS NULL
     ) SELECT * FROM transaction_rows tr WHERE 1=1`;
     if (opts.kind) { sql += ' AND tr.kind=?'; args.push(opts.kind); }
     if (opts.q) { const escaped = escapedLike(opts.q); assertLikeSearch(escaped); const pattern = `%${escaped}%`; sql += " AND (tr.description LIKE ? ESCAPE '\\' OR tr.notes LIKE ? ESCAPE '\\' OR tr.note LIKE ? ESCAPE '\\')"; args.push(pattern, pattern, pattern); }
@@ -1212,19 +1247,26 @@ export class Repository {
     const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
     const items: Transaction[] = pageRows.map((row) => {
       if (text(row.kind) === 'settlement') return {
-        kind: 'settlement', id: text(row.id), groupId: text(row.group_id), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
+         kind: 'settlement', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), note: row.note == null ? null : text(row.note), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id),
         fromName: text(row.from_name), toName: text(row.to_name), createdAt: text(row.created_at),
       };
       const operation = row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })();
       return {
-        kind: 'expense', id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
+        kind: 'expense', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
         createdBy: text(row.created_by), createdAt: text(row.created_at), clientOperationId: operation,
       };
     });
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeTransactionCursor({ date: text(last.transaction_date), createdAt: text(last.created_at), kind: text(last.kind) as Transaction['kind'], id: text(last.id) }) : undefined };
+  }
+  async transactionPage(groupId: string, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
+    return this.transactionPageForScope(undefined, groupId, opts);
+  }
+  /** One authorized keyset timeline across every active group for the user. */
+  async globalTransactionPage(userId: string, groupId?: string, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
+    return this.transactionPageForScope(userId, groupId, opts);
   }
   async expense(id: string, includeDeleted = false) { const row = await this.rawExpense(id); return row && (includeDeleted || !row.deleted_at) ? this.hydrateExpense(row) : null; }
   async expenseForUser(id: string, userId: string, includeDeleted = false) {
@@ -1654,7 +1696,7 @@ export class Repository {
     if (cursor) binds.push(cursor.createdAt, cursor.createdAt, cursor.id);
     binds.push(limit + 1);
     const rows = (await this.db.prepare(`
-      SELECT activity.*,g.name AS group_name FROM (
+      SELECT activity.*,${groupDisplayNameSql('gm')} AS group_name FROM (
         SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.group_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
         FROM expenses e WHERE e.deleted_at IS NULL
         UNION ALL

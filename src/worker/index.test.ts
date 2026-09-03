@@ -15,8 +15,8 @@ class MemberStatement extends Statement {
 class TransactionRouteStatement extends MemberStatement {
   async all<T>() {
     if (this.sql.includes('WITH transaction_rows')) return { results: [
-      { id: 'expense-1', group_id: '00000000-0000-0000-0000-000000000009', description: 'Dinner', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-02', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-02T00:00:00.000Z', client_operation_id: null, kind: 'expense' },
-      { id: 'settlement-1', group_id: '00000000-0000-0000-0000-000000000009', description: null, amount_minor: 50, currency: 'USD', transaction_date: '2026-01-01', note: 'Paid', from_person_id: 'person-1', to_person_id: 'person-2', from_name: 'Dev', to_name: 'Other', created_by: 'user-1', created_at: '2026-01-01T00:00:00.000Z', client_operation_id: null, kind: 'settlement' },
+      { id: 'expense-1', group_id: '00000000-0000-0000-0000-000000000009', group_name: 'Friend', description: 'Dinner', amount_minor: 100, currency: 'USD', transaction_date: '2026-01-02', category: 'Dining', notes: null, created_by: 'user-1', created_at: '2026-01-02T00:00:00.000Z', client_operation_id: null, kind: 'expense' },
+      { id: 'settlement-1', group_id: '00000000-0000-0000-0000-000000000009', group_name: 'Friend', description: null, amount_minor: 50, currency: 'USD', transaction_date: '2026-01-01', note: 'Paid', from_person_id: 'person-1', to_person_id: 'person-2', from_name: 'Dev', to_name: 'Other', created_by: 'user-1', created_at: '2026-01-01T00:00:00.000Z', client_operation_id: null, kind: 'settlement' },
     ] as T[] };
     return { results: [] as T[] };
   }
@@ -390,6 +390,11 @@ describe('worker boundary', () => {
     expect(response.status).toBe(404);
     expect(((await response.json()) as any).error.code).toBe('GROUP_NOT_FOUND');
   });
+  it('does not expose split default suggestions across group authorization boundaries', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/split-default-suggestion', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(((await response.json()) as any).error.code).toBe('GROUP_NOT_FOUND');
+  });
   it('does not leak global activity for an unauthorized group filter', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/activity?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(404);
@@ -408,6 +413,16 @@ describe('worker boundary', () => {
     expect(body.transactions[0]).not.toHaveProperty('fromName');
     expect(body.nextCursor).toEqual(expect.any(String));
   });
+  it('serves the authorized all-groups transaction route with group context', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/transactions?limit=1', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ transactions: [{ id: 'expense-1', groupId: '00000000-0000-0000-0000-000000000009', groupName: 'Friend' }] });
+  });
+  it('does not leak all-groups transactions for an unauthorized group filter', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/transactions?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND' } });
+  });
   it('returns not found for an unauthorized transaction route', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/transactions', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(404);
@@ -422,6 +437,17 @@ describe('worker boundary', () => {
     ['offset=1', 'INVALID_PAGINATION'],
   ])('rejects invalid transaction query %s', async (query, code) => {
     const response = await worker.fetch(new Request(`https://split.example/api/groups/00000000-0000-0000-0000-000000000009/transactions?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code } });
+  });
+  it.each([
+    ['offset=1', 'INVALID_PAGINATION'],
+    ['kind=invalid', 'INVALID_FILTER'],
+    ['currency=invalid', 'INVALID_FILTER'],
+    ['from=2026-02-30', 'INVALID_DATE'],
+    [`q=${encodeURIComponent('é'.repeat(25))}`, 'INVALID_SEARCH'],
+  ])('rejects invalid global transaction query %s', async (query, code) => {
+    const response = await worker.fetch(new Request(`https://split.example/api/transactions?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code } });
   });
@@ -451,7 +477,6 @@ describe('worker boundary', () => {
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/members/person-1', 'DELETE'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/transfer-ownership', 'POST'],
-      ['/api/groups/00000000-0000-0000-0000-000000000009/split-default', 'PUT'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/split-default', 'DELETE'],
     ];
     for (const [path, method] of paths) {
@@ -459,6 +484,14 @@ describe('worker boundary', () => {
       expect(response.status).toBe(403);
       expect(await response.json()).toMatchObject({ error: { code: 'OWNER_REQUIRED' } });
     }
+  });
+  it('allows an active non-owner member to update the shared split default', async () => {
+    const update = vi.spyOn(Repository.prototype, 'upsertGroupSplitDefault').mockResolvedValue({ method: 'equal', personIds: ['00000000-0000-0000-0000-000000000001'] });
+    try {
+      const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/split-default', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ method: 'equal', person_ids: ['00000000-0000-0000-0000-000000000001'] }) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+      expect(response.status).toBe(200);
+      expect(update).toHaveBeenCalledWith('00000000-0000-0000-0000-000000000009', 'user-1', { method: 'equal', person_ids: ['00000000-0000-0000-0000-000000000001'] });
+    } finally { update.mockRestore(); }
   });
   it('maps an expense deleted after authorization to a structured conflict', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/expenses/00000000-0000-4000-8000-000000000001', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2025-01-01', version: 1, payers: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000003', amount_minor: 100 }] }) }), env({ DB: new GoneOnUpdateDb() }), {} as ExecutionContext);

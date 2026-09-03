@@ -53,6 +53,7 @@ type ExpectedScenario = {
 type Scenario = {
   name: string;
   path: string;
+  finalPath?: string;
   auth: string | undefined;
   context: string;
   expected: ExpectedScenario;
@@ -80,6 +81,7 @@ const apiPaths = {
   balances: (id: string) => `/api/groups/${id}/balances`,
   settlements: (id: string) => `/api/groups/${id}/settlements`,
   transactions: (id: string) => `/api/groups/${id}/transactions`,
+  globalTransactions: '/api/transactions',
   scheduledExpenses: (id: string) => `/api/groups/${id}/scheduled-expenses`,
   categories: '/api/categories',
   expense: (id: string) => `/api/expenses/${id}`,
@@ -93,13 +95,14 @@ const scenarios: Scenario[] = [
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
   { name: 'empty-home', path: '/', auth: EMPTY_EMAIL, context: 'Home / empty groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'No groups yet', apiPaths: privateHomeApis } },
   { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
-  { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, auth: DEV_EMAIL, context: 'Transaction history / mixed cursor page fixture', expected: { mode: 'normal', heading: 'All transactions', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.transactions(ids.rich), apiPaths.categories] } },
+  { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, finalPath: `/activity?group=${ids.rich}&view=transactions`, auth: DEV_EMAIL, context: 'Legacy transaction route / canonical History transactions tab fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.group(ids.rich), apiPaths.globalTransactions, apiPaths.categories] } },
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with history fixture', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
-  { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'Global activity / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'Activity', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.activity(ids.rich)] } },
+  { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'History changes / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'History', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.activity(ids.rich)] } },
+  { name: 'all-groups-transactions', path: '/activity?view=transactions', auth: DEV_EMAIL, context: 'History transactions / all authorized groups fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.globalTransactions, apiPaths.categories] } },
   { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Trusted-device offline access', apiPaths: [apiPaths.me] } },
 ];
 
@@ -301,7 +304,8 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
   const finalUrl = new URL(page.url());
   const expectedOrigin = new URL(BASE_URL).origin;
   if (finalUrl.origin !== expectedOrigin) throw new Error(`Final URL origin is ${finalUrl.origin}; expected ${expectedOrigin}`);
-  if (routeFrom(page) !== scenario.path) throw new Error(`Final URL is ${routeFrom(page)}; expected ${scenario.path}`);
+  const expectedPath = scenario.finalPath || scenario.path;
+  if (routeFrom(page) !== expectedPath) throw new Error(`Final URL is ${routeFrom(page)}; expected ${expectedPath}`);
   if (!scenario.auth && expected.mode === 'normal') {
     if (await visibleCount(page, '.public-shell') !== 1 || await visibleCount(page, '.app-shell') !== 0) throw new Error('Public scenario did not render the signed-out landing shell');
     if (await page.getByRole('heading', { level: 1, name: expected.heading, exact: false }).count() === 0) throw new Error(`Expected public heading was not rendered: ${expected.heading}`);

@@ -36,6 +36,7 @@ export type NavigationContext = {
   contextualPath?: string;
   groupsPath: string;
   activityPath: string;
+  historyPath: string;
   addPath: string;
   morePath: string;
 };
@@ -77,10 +78,11 @@ function decodeSegment(segment: string) {
 }
 
 /** Classifies the current URL and supplies all navigation destinations for it. */
-export function getNavigationContext(pathname: string): NavigationContext {
+export function getNavigationContext(pathname: string, search = ''): NavigationContext {
   const path = pathname.split(/[?#]/, 1)[0].replace(/\/{2,}/g, '/').replace(/\/+$/, '') || HOME_PATH;
   const segments = path.split('/').filter(Boolean).map(decodeSegment);
-  const groupId = segments[0] === 'groups' && segments[1] ? segments[1] : undefined;
+  const queryGroupId = path === '/activity' ? new URLSearchParams(search).get('group') || undefined : undefined;
+  const groupId = segments[0] === 'groups' && segments[1] ? segments[1] : queryGroupId;
   const group = groupId
     ? {
         id: groupId,
@@ -113,6 +115,7 @@ export function getNavigationContext(pathname: string): NavigationContext {
     route === 'settle' ? 'settle' :
     route === 'new-expense' || route === 'edit-expense' ? 'add' :
     'groups';
+  const canonicalActivityPath = path === '/activity' ? `${path}${search}` : group ? `/activity?group=${encodeURIComponent(group.id)}&view=changes` : '/activity';
   const contextualPath = group
     ? route === 'activity' ? group.activityPath
       : route === 'settle' ? group.settlePath
@@ -132,7 +135,8 @@ export function getNavigationContext(pathname: string): NavigationContext {
     contextualPath,
     groupsPath: HOME_PATH,
     activityPath: '/activity',
-    addPath: '/expense/new',
+    historyPath: canonicalActivityPath,
+    addPath: group?.addPath || '/expense/new',
     morePath: '/settings',
   };
 }

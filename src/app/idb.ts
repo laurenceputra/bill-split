@@ -4,7 +4,7 @@ import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 10;
+export const DB_VERSION = 11;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -98,6 +98,14 @@ export interface CachedActivity {
   userId: string;
   groupId: string;
   activity: Activity[];
+  fetchedAt: string;
+}
+/** Account-fenced cache for the unfiltered first all-groups page. */
+export interface CachedGlobalTransactions {
+  userId: string;
+  transactions: Transaction[];
+  nextCursor?: string;
+  limit: number;
   fetchedAt: string;
 }
 
@@ -217,6 +225,7 @@ function open(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('activity')) database.createObjectStore('activity', { keyPath: ['userId', 'groupId'] });
       if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('categories')) database.createObjectStore('categories', { keyPath: 'userId' });
+      if (!database.objectStoreNames.contains('globalTransactions')) database.createObjectStore('globalTransactions', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('expenseOutbox')) {
         const store = database.createObjectStore('expenseOutbox', { keyPath: ['userId', 'clientOperationId'] });
         store.createIndex('userId', 'userId', { unique: false });
@@ -377,7 +386,7 @@ export async function invalidateCachedGroups(userId: string, generation = captur
   const staleAt = new Date(0).toISOString();
   const db = await open();
   await new Promise<void>((resolve, reject) => {
-    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.groupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
+    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.transactions ? ['globalTransactions'] : []), ...(options.groupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
     const tx = db.transaction(stores, 'readwrite');
     const generations = tx.objectStore('mutationGenerations');
     const current = generations.get(userId);
@@ -413,6 +422,7 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         details.onsuccess = () => { for (const row of details.result as CachedExpenseDetails[]) if (row.userId === userId && row.expense?.groupId === options.groupId) tx.objectStore('expenseDetails').delete([row.userId, row.expenseId]); };
       }
       if (options.transactions) {
+        tx.objectStore('globalTransactions').delete(userId);
         const snapshots = tx.objectStore('groupSnapshots').getAll();
         snapshots.onsuccess = () => {
           for (const row of snapshots.result as GroupSnapshot[]) {
@@ -533,6 +543,26 @@ export async function readActivity(userId: string, groupId: string) {
   return cached ? { ...cached, activity: normalizeActivity(cached.activity) } : undefined;
 }
 
+export const saveGlobalTransactions = (value: CachedGlobalTransactions, generation = captureSessionGeneration(), mutationGeneration?: number) => {
+  assertSessionGeneration(generation);
+  if (mutationGeneration === undefined) return transaction('globalTransactions', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('globalTransactions').put(value); });
+  return new Promise<boolean>((resolve, reject) => {
+    void open().then((db) => {
+      const tx = db.transaction(['globalTransactions', 'mutationGenerations'], 'readwrite');
+      const current = tx.objectStore('mutationGenerations').get(value.userId);
+      let saved = false;
+      current.onsuccess = () => {
+        if (!isSessionGenerationCurrent(generation) || ((current.result as MutationGeneration | undefined)?.generation ?? 0) !== mutationGeneration) return;
+        tx.objectStore('globalTransactions').put(value); saved = true;
+      };
+      tx.oncomplete = () => { db.close(); resolve(saved); };
+      tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+      tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    }).catch(reject);
+  });
+};
+export const readGlobalTransactions = (userId: string) => transaction<CachedGlobalTransactions>('globalTransactions', 'readonly', (tx) => tx.objectStore('globalTransactions').get(userId));
+
 export const saveExpenseDetails = (value: CachedExpenseDetails, generation = captureSessionGeneration()) => {
   assertSessionGeneration(generation);
   return transaction('expenseDetails', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('expenseDetails').put(value); });
@@ -578,15 +608,15 @@ export const readCategories = (userId: string) => transaction<CachedCategories>(
 
 /** Remove private cached data without touching the durable expense outbox. */
 export async function clearCachedData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
   });
 }
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
   });
 }
 

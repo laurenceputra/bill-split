@@ -1,4 +1,5 @@
 import { test as base, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { DB_NAME, DB_VERSION } from '../../src/app/idb';
 
 export const BASE_URL = 'http://127.0.0.1:8788';
 export const DEV_EMAIL = 'dev@example.com';
@@ -13,8 +14,8 @@ export async function newAuthenticatedContext(browser: Browser, email = DEV_EMAI
 }
 
 export async function seedOfflineTrust(page: Page) {
-  await page.evaluate(() => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.open('bill-split-local', 10);
+  await page.evaluate(({ dbName, dbVersion }) => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(dbName, dbVersion);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
@@ -23,7 +24,7 @@ export async function seedOfflineTrust(page: Page) {
       transaction.oncomplete = () => { db.close(); resolve(); };
       transaction.onerror = () => { db.close(); reject(transaction.error); };
     };
-  }));
+  }), { dbName: DB_NAME, dbVersion: DB_VERSION });
 }
 
 export const test = base.extend<{ authenticatedContext: BrowserContext; authenticatedPage: Page }>({

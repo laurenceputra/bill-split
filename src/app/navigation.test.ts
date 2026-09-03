@@ -52,10 +52,11 @@ describe('getNavigationContext', () => {
       addLabel: 'Add expense',
       groupsPath: '/',
       activityPath: '/activity',
-      addPath: '/expense/new',
+      addPath: '/groups/group-123/expense/new',
       morePath: '/settings',
       primaryPath: '/',
       contextualPath: '/groups/group-123/activity',
+      historyPath: '/activity?group=group-123&view=changes',
     });
     expect(context.group).toEqual({
       id: 'group-123',
@@ -63,6 +64,15 @@ describe('getNavigationContext', () => {
       activityPath: '/groups/group-123/activity',
       settlePath: '/groups/group-123/settle',
       addPath: '/groups/group-123/expense/new',
+    });
+  });
+
+  it('preserves the canonical History query context from the current activity URL', () => {
+    expect(getNavigationContext('/activity', '?group=group-123&view=transactions&from=2026-01-01')).toMatchObject({
+      route: 'activity',
+      groupId: 'group-123',
+      activeSection: 'activity',
+      historyPath: '/activity?group=group-123&view=transactions&from=2026-01-01',
     });
   });
 

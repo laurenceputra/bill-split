@@ -1,10 +1,24 @@
 import type { Balances, Currency, GroupMember, GroupSplitDefault, PairwiseBalance, Split, SplitMethod } from '../shared/types';
 import { allocateByWeights, allocateEqual, allocatePercentage, checkedSumMinor, parseMoney } from '../domain/money';
+import { normalizeGroupSplitDefault, normalizeExpenseSplitArrangement, sameGroupSplitArrangement, splitArrangementFingerprint } from '../shared/split-default';
+
+export { normalizeGroupSplitDefault, normalizeExpenseSplitArrangement, sameGroupSplitArrangement, splitArrangementFingerprint } from '../shared/split-default';
 
 export type AllocationState = Record<string, string>;
 export type PayerState = { personId: string; amount: string };
 const MAX_SHARE_VALUE = 1_000_000;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+
+export function groupSplitDefaultFromDraft(method: SplitMethod, selected: string[], values: AllocationState, members: GroupMember[]): { value: GroupSplitDefault | null; reason?: 'exact' | 'invalid' } {
+  if (method === 'exact') return { value: null, reason: 'exact' };
+  try {
+    const draftValues = method === 'equal' ? undefined : selected.map((personId) => method === 'percentage' ? percentageBasisPoints(values[personId] ?? '') : shareValue(values[personId] ?? ''));
+    const value = normalizeGroupSplitDefault({ method, personIds: selected, ...(draftValues ? { values: draftValues } : {}) }, members);
+    return value ? { value } : { value: null, reason: 'invalid' };
+  } catch {
+    return { value: null, reason: 'invalid' };
+  }
+}
 
 /** Apply a stored party arrangement only when every referenced member is still active. */
 export function resolveGroupSplitDefault(value: GroupSplitDefault | null | undefined, members: GroupMember[]): { method: SplitMethod; selected: string[]; values: AllocationState; applied: boolean; invalid: boolean } {
@@ -97,7 +111,7 @@ function checkedAllocations(selected: string[], allocations: number[], amountMin
   return Object.fromEntries(selected.map((id, index) => [id, allocations[index]]));
 }
 
-function percentageBasisPoints(value: string): number {
+export function percentageBasisPoints(value: string): number {
   if (!/^\d{1,3}(?:\.\d{1,2})?$/.test(value)) throw new Error('Percentages must be between 0% and 100% (up to two decimals).');
   const [whole, fraction = ''] = value.split('.');
   const basisPoints = Number(whole) * 100 + Number((fraction + '00').slice(0, 2));
@@ -105,11 +119,18 @@ function percentageBasisPoints(value: string): number {
   return basisPoints;
 }
 
-function shareValue(value: string): number {
+export function shareValue(value: string): number {
   if (!/^\d+(?:\.\d+)?$/.test(value)) throw new Error(`Shares must be finite values no greater than ${MAX_SHARE_VALUE}.`);
   const share = Number(value);
-  if (!Number.isFinite(share) || share < 0 || share > MAX_SHARE_VALUE) throw new Error(`Shares must be finite values no greater than ${MAX_SHARE_VALUE}.`);
+  if (!Number.isFinite(share) || share <= 0 || share > MAX_SHARE_VALUE) throw new Error(`Shares must be greater than zero and no greater than ${MAX_SHARE_VALUE}.`);
   return share;
+}
+
+export type FormSaveFence = { token: number; scope: string; sessionGeneration: number };
+
+/** A deferred default response may only update the form save that initiated it. */
+export function isCurrentSplitDefaultSave(captured: FormSaveFence, current: FormSaveFence): boolean {
+  return captured.token === current.token && captured.scope === current.scope && captured.sessionGeneration === current.sessionGeneration;
 }
 
 export function previewAllocation(amountMinor: number, selected: string[], method: SplitMethod, values: AllocationState, currency: Currency): AllocationPreview {

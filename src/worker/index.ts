@@ -4,7 +4,7 @@ import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
 import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
-import { Repository, RepositoryError } from '../db/repository';
+import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthenticationError } from './clerk-auth';
@@ -378,9 +378,10 @@ api.get('/api/groups', async (c) => c.json({ groups: await getRepo(c).groups(c.g
 api.post('/api/groups', zValidator('json', groupInput), async (c) => c.json({ group: await getRepo(c).createGroup(c.get('auth').id, c.get('auth').personId, c.req.valid('json')) }, 201));
 api.post('/api/friends', zValidator('json', friendInput), async (c) => { try { const input = c.req.valid('json'); return c.json({ group: await getRepo(c).createFriend(c.get('auth').id, c.get('auth').personId, input) }, 201); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const groupId = c.req.param('groupId'); const [members, historicalParticipants, splitDefault] = await Promise.all([x.repo.members(groupId), x.repo.historicalParticipants(groupId), x.repo.getGroupSplitDefault(groupId)]); return c.json({ group: x.group, members, historicalParticipants, splitDefault }); });
+api.get('/api/groups/:groupId/split-default-suggestion', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; try { return c.json({ suggestion: await x.repo.getGroupSplitDefaultSuggestion(c.req.param('groupId'), x.auth.id) }); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId/historical-participants', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; return c.json({ participants: await x.repo.historicalParticipants(c.req.param('groupId')) }); });
 api.put('/api/groups/:groupId', zValidator('json', groupInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; return c.json({ group: await x.repo.updateGroup(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); });
-api.put('/api/groups/:groupId/split-default', zValidator('json', groupSplitDefaultInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ splitDefault: await x.repo.upsertGroupSplitDefault(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); } });
+api.put('/api/groups/:groupId/split-default', zValidator('json', groupSplitDefaultInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; try { return c.json({ splitDefault: await x.repo.upsertGroupSplitDefault(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); } });
 api.delete('/api/groups/:groupId/split-default', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.deleteGroupSplitDefault(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.delete('/api/groups/:groupId', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { await x.repo.deleteGroup(c.req.param('groupId'), x.auth.id); return c.body(null, 204); } catch (error) { return repositoryError(c, error); } });
 api.post('/api/groups/:groupId/people', zValidator('json', personInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const denied = ownerOnly(c, x); if (denied) return denied; try { return c.json({ person: await x.repo.addPerson(c.req.param('groupId'), c.req.valid('json'), x.auth.id, x.auth.personId) }, 201); } catch (error) { return repositoryError(c, error); } });
@@ -395,6 +396,22 @@ api.post('/api/invitations/:invitationId/accept', async (c) => { try { return c.
 api.post('/api/invitations/:invitationId/reject', async (c) => { const rejected = await getRepo(c).rejectInvitation(c.req.param('invitationId'), c.get('auth').id); if (!rejected) return jsonError(c, 404, 'INVITATION_NOT_FOUND', 'Invitation not found'); return c.body(null, 204); });
 
 registerExpenseSettlementRoutes(api, { authorizedGroup, authorizedScheduled, getRepo, jsonError, repositoryError, balanceError, validPeople, page, rejectOffset });
+api.get('/api/transactions', async (c) => {
+  const q = c.req.query();
+  const offsetError = rejectOffset(c); if (offsetError) return offsetError;
+  const limit = page(q.limit, 25, 100);
+  if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
+  if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense or settlement');
+  if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Currency filter is invalid');
+  try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); }
+  catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); }
+  if (q.group && (await authorizedGroup(c, q.group)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
+  try {
+    const result = await getRepo(c).globalTransactionPage(c.get('auth').id, q.group || undefined, { kind: q.kind as 'expense' | 'settlement' | undefined, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
+    return c.json({ transactions: result.items, nextCursor: result.nextCursor });
+  } catch (error) { return repositoryError(c, error); }
+});
+
 
 api.get('/api/groups/:groupId/balances', async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const groupId = c.req.param('groupId');

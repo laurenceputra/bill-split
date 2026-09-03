@@ -1,4 +1,5 @@
 import { test, expect, newAuthenticatedContext, DEV_EMAIL, REGISTERED_EMAIL, BASE_URL, seedOfflineTrust } from './fixtures';
+import { DB_NAME, DB_VERSION } from '../../src/app/idb';
 
 const richGroupId = '00000000-0000-4000-8000-000000003002';
 
@@ -70,15 +71,27 @@ test('group page keeps primary actions, balances, and transactions before manage
 test('active auth banner stays clear of tablet navigation controls', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 768, height: 1024 });
   const page = await context.newPage();
-  await page.route('**/api/groups*', async (route) => {
-    // Let auth/bootstrap requests settle before publishing the outage; their
-    // successful responses otherwise clear the connection-issue banner.
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  let groupsAttempts = 0;
+  await page.route(`${BASE_URL}/api/groups`, async (route) => {
+    groupsAttempts += 1;
+    if (groupsAttempts === 1) {
+      // Hold the specific home-resource request until the authenticated
+      // private shell has mounted. This avoids racing the coordinator's
+      // /api/me probe while still publishing the outage through the normal
+      // API wrapper.
+      await expect(page.locator('.auth-loading-shell')).toHaveCount(0);
+    }
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Fixture outage' } }) });
   });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Friends & groups' })).toBeVisible();
   try {
+    // The first response mounts the private shell and exposes the resource's
+    // own retry action. Trigger the outage again from that in-app action after
+    // startup requests are quiescent, so a late auth probe cannot overwrite
+    // the connection-issue state being asserted here.
+    await page.waitForLoadState('networkidle');
+    await page.locator('#groups-error').getByRole('button', { name: 'Retry' }).click();
     const banner = page.locator('.auth-banner');
     await expect(banner).toContainText('Connection issue');
     const nav = page.locator('.bottom-nav[aria-label="Primary navigation"]');
@@ -86,7 +99,7 @@ test('active auth banner stays clear of tablet navigation controls', async ({ br
     await expect(nav).toBeVisible();
     await expect(nav.getByRole('link')).toHaveCount(4);
     await expect(nav.getByRole('link', { name: 'Groups' })).toBeVisible();
-    await expect(nav.getByRole('link', { name: 'Activity' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'History' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Add expense' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Settings' })).toBeVisible();
     await expect(banner).toContainText('Connection issue');
@@ -172,11 +185,34 @@ test('transaction filter disclosure remains native and opens for URL filters', a
 test('group overview exposes history and manage anchors', async ({ authenticatedPage: page }) => {
   await page.goto(`/groups/${richGroupId}`);
   await page.getByRole('link', { name: 'View all transactions' }).click();
-  await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
-  await page.getByRole('link', { name: 'Back to Europe trip' }).click();
+  await expect(page).toHaveURL(new RegExp(`/activity\\?group=${richGroupId}&view=transactions$`));
+  await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Transactions' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByLabel('Filter history by group')).toHaveValue(richGroupId);
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}$`));
+  await expect(page.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
   await page.getByRole('link', { name: 'Manage people' }).click();
   await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}/manage#people$`));
   await expect(page.locator('#people')).toBeFocused();
+});
+
+test('group navigation keeps History and Add expense scoped to the group', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const page = await context.newPage();
+  try {
+    await page.goto(`/groups/${richGroupId}`);
+    const expectedHistory = `/activity?group=${richGroupId}&view=changes`;
+    const expectedAdd = `/groups/${richGroupId}/expense/new`;
+    await expect(page.locator('.bottom-nav').getByRole('link', { name: 'History' })).toHaveAttribute('href', expectedHistory);
+    await expect(page.locator('.bottom-nav').getByRole('link', { name: 'Add expense' })).toHaveAttribute('href', expectedAdd);
+
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(page.locator('.desktop-nav').getByRole('link', { name: 'History' })).toHaveAttribute('href', expectedHistory);
+    await expect(page.locator('.desktop-nav').getByRole('link', { name: 'Add expense' })).toHaveAttribute('href', expectedAdd);
+  } finally {
+    await context.close();
+  }
 });
 
 test('member manage route renders an online retryable error without cached group data', async ({ browser }) => {
@@ -263,15 +299,34 @@ test('cold offline history hydrates the scoped first page and disables server-on
   const page = await context.newPage();
   let transactionRequests = 0;
   page.on('request', (request) => {
-    if (request.url().includes(`/api/groups/${richGroupId}/transactions`)) transactionRequests += 1;
+    if (request.url().includes('/api/transactions?')) transactionRequests += 1;
   });
   try {
     await page.goto(`/groups/${richGroupId}/transactions`);
-    await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/activity\\?group=${richGroupId}&view=transactions$`));
+    await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Transactions' })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByLabel('Filter history by group')).toHaveValue(richGroupId);
     await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
     await seedOfflineTrust(page);
-    await page.evaluate(() => new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('bill-split-local', 10);
+    await expect.poll(() => page.evaluate(({ dbName, dbVersion, userId, groupId }) => new Promise<boolean>((resolve, reject) => {
+      const request = indexedDB.open(dbName, dbVersion);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const transaction = db.transaction(['groups', 'groupSnapshots'], 'readonly');
+        const groups = transaction.objectStore('groups').get(userId);
+        const snapshot = transaction.objectStore('groupSnapshots').get([userId, groupId]);
+        transaction.oncomplete = () => {
+          db.close();
+          const cachedSnapshot = snapshot.result;
+          resolve(Boolean(groups.result && cachedSnapshot?.group && cachedSnapshot?.members && cachedSnapshot?.transactions && cachedSnapshot.transactionsLimit >= 25));
+        };
+        transaction.onerror = () => { db.close(); reject(transaction.error); };
+      };
+    }), { dbName: DB_NAME, dbVersion: DB_VERSION, userId: '00000000-0000-4000-8000-000000001001', groupId: richGroupId })).toBe(true);
+    await page.evaluate(({ dbName, dbVersion }) => new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open(dbName, dbVersion);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const db = request.result;
@@ -285,7 +340,7 @@ test('cold offline history hydrates the scoped first page and disables server-on
         transaction.oncomplete = () => { db.close(); resolve(); };
         transaction.onerror = () => { db.close(); reject(transaction.error); };
       };
-    }));
+    }), { dbName: DB_NAME, dbVersion: DB_VERSION });
     await page.waitForLoadState('networkidle');
     await context.setOffline(true);
     await page.evaluate(() => window.dispatchEvent(new Event('offline')));
@@ -295,9 +350,12 @@ test('cold offline history hydrates the scoped first page and disables server-on
     transactionRequests = 0;
     await page.reload({ waitUntil: 'domcontentloaded' });
 
-    await expect(page.getByRole('heading', { name: 'All transactions' })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/activity\\?group=${richGroupId}&view=transactions$`));
+    await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Transactions' })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByLabel('Filter history by group')).toHaveValue(richGroupId);
     await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
-    await expect(page.getByText('Offline: showing the cached first page only. History is incomplete; filters and loading more need a connection.')).toBeVisible();
+    await expect(page.getByText('Offline · transaction history and server filters need a connection.')).toBeVisible();
     await expect(page.getByLabel('Search')).toBeDisabled();
     await expect(page.locator('.transaction-filters select').first()).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Load more transactions' })).toBeDisabled();
