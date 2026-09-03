@@ -277,21 +277,30 @@ settings in `wrangler.toml`.
 
 ## Data and API
 
-Group owners may save one optional party split default using equal, percentage
-(integer basis points totaling 10,000), or shares (exact is not allowed).
-`GET /api/groups/:id` returns it as `splitDefault`; `PUT` and `DELETE`
-`/api/groups/:id/split-default` manage it online. New one-off expenses and
-scheduled templates copy the arrangement, while existing records and saved
-schedules are not changed by later default edits. If a saved arrangement names
-a removed member, it is retained and new entries fall back to equal across the
-current active members until the owner updates it. Individual expenses can
+Active group members may save or update one optional shared party split default
+from new one-off expense creation, using equal, percentage (integer basis points
+totaling 10,000), or shares (exact is not allowed). Group owners retain admin
+management and are the only members who may clear it. `GET /api/groups/:id`
+returns it as `splitDefault`; `PUT` and `DELETE` `/api/groups/:id/split-default`
+manage it online. New one-off expenses and scheduled templates copy the
+arrangement, while existing records and saved schedules are not changed by
+later default edits. If a saved arrangement names a removed member, it is
+retained and new entries fall back to equal across the current active members
+until an active member updates or repairs it. Individual expenses can
 override the copied arrangement and reset to the current party default.
+Suggestions are online-only
+and use the authenticated user's latest three active, non-scheduled-occurrence
+expenses; they appear only when a repeated arrangement differs from the
+current default.
 
 All SQL files in `migrations/` are applied in order; `0003_ledger_total_limits.sql` installs authoritative D1 triggers that conservatively cap active gross expense-plus-settlement totals at `Number.MAX_SAFE_INTEGER` per group and currency, including concurrent inserts and relevant restores/updates. `0013_projection_layer.sql` adds compact gross totals and per-person net projections in a pending state; existing groups are never published as ready by migration. Migration `0024_incremental_projection_totals.sql` stages existing groups as pending and installs hybrid overflow guards that use O(1) primary-key totals only when a group is ready. Bounded per-group maintenance later builds and atomically publishes those totals. The authoritative tables remain `expenses`, `payers`, `splits`, and `settlements`; pending, dirty, missing, and failed groups use direct aggregation until bounded maintenance publishes readiness, while ready groups are maintained incrementally from exact old/new payer, split, and settlement contributions. The legacy `projection_state` records mutation count, last reconciliation time, and a reconciliation-due flag for compatibility; current readiness and maintenance do not use a mutation-count threshold. Full recomputation is reserved for bounded Cron backfill/reconciliation. `0014_projection_indexes.sql` adds stable keyset and person-leading indexes, `0015_audit_actor_snapshot.sql` adds non-email actor snapshots, `0016_projection_readiness_reset.sql` safely repairs installations that applied the earlier ready-state projection migration before deploying the Worker, and `0017_cleanup_indexes.sql` removes only exact duplicate indexes. `0018_category_preferences.sql` adds private, per-user learned categories keyed by `trim(description)` followed by lowercase; explicitly chosen categories remain preferences even when their originating schedule is cancelled. `0019_group_membership_events.sql` records owner transfers, self-leaves, and owner removals with actor/name snapshots (never email) and enforces one active owner per group. `0020_account_deletion.sql` adds the user soft-delete marker needed to retain financial/audit foreign-key anchors while pseudonymizing personal identity. `0021_deleted_identity_tombstones.sql` stores keyed HMAC-SHA-256 email/Clerk identity tombstones so a deleted account cannot be silently relinked after live identity fields are cleared. `0022_application_sessions.sql` adds opaque server-managed sessions, and `0023_group_split_defaults.sql` adds one optional persisted split arrangement per group. Seed data, when used locally, must remain local.
 
 The migration 0024 rollout details and current readiness guarantees are in the
 Operations section below; it is staged per group and does not perform a
 whole-database totals rebuild.
+
+Migration `0025_expense_suggestion_lookup.sql` adds the partial lookup index
+used for private split-default suggestions.
 
 The older projection wording in the preceding historical paragraph is retained
 for migration context only. The current Worker uses the monthly/checkpoint

@@ -626,7 +626,11 @@ class TransactionPageStatement {
     }
     rows.sort((left, right) => String(right.transaction_date).localeCompare(String(left.transaction_date)) || String(right.created_at).localeCompare(String(left.created_at)) || String(left.kind).localeCompare(String(right.kind)) || String(right.id).localeCompare(String(left.id)));
     const limit = Number(this.args[this.args.length - 1]);
-    return { results: rows.slice(0, limit) as T[] };
+    const projectedRows = this.sql.includes('NULL AS group_name') ? rows.map((row) => {
+      const { group_name: _groupName, ...projected } = row;
+      return projected;
+    }) : rows;
+    return { results: projectedRows.slice(0, limit) as T[] };
   }
 }
 
@@ -959,15 +963,31 @@ describe('repository transaction pagination', () => {
     expect(page.items.filter((item): item is Extract<Transaction, { kind: 'settlement' }> => item.kind === 'settlement')[0]).toMatchObject({ fromName: 'Former payer', toName: 'Removed participant' });
   });
 
-  it('supports an authorized all-groups page and includes the display group name', async () => {
+  it('supports an authorized unscoped all-groups page and includes the display group name', async () => {
     const rows = transactionRows.map((row) => ({ ...row, group_name: row.group_id === 'group-1' ? 'Friend' : 'Other group' }));
     const db = new TransactionPageDb(rows);
     const page = await new Repository(db as never).globalTransactionPage('user-1', undefined, { limit: 2 });
 
     expect(page.items).toHaveLength(2);
     expect(page.items.every((item) => item.groupName === 'Friend')).toBe(true);
+    expect(db.lastSql).toContain('CASE WHEN');
     expect(db.lastSql).toContain('authorized_member.user_id=?');
     expect(db.lastSql).toContain('authorized_group.deleted_at IS NULL');
+  });
+
+  it('omits group display names from scoped transaction pages', async () => {
+    const rows = transactionRows.map((row) => ({ ...row, group_name: 'Friend' }));
+    const groupDb = new TransactionPageDb(rows);
+    const groupPage = await new Repository(groupDb as never).transactionPage('group-1', { limit: 2 });
+    expect(groupPage.items.every((item) => !('groupName' in item))).toBe(true);
+    expect(groupDb.lastSql).toContain('NULL AS group_name');
+    expect(groupDb.lastSql).not.toContain('CASE WHEN');
+
+    const scopedGlobalDb = new TransactionPageDb(rows);
+    const scopedGlobalPage = await new Repository(scopedGlobalDb as never).globalTransactionPage('user-1', 'group-1', { limit: 2 });
+    expect(scopedGlobalPage.items.every((item) => !('groupName' in item))).toBe(true);
+    expect(scopedGlobalDb.lastSql).toContain('NULL AS group_name');
+    expect(scopedGlobalDb.lastSql).not.toContain('CASE WHEN');
   });
 
   it('rejects invalid cursors, dates, and offset pagination', async () => {

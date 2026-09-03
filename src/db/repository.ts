@@ -1210,7 +1210,7 @@ export class Repository {
     const scopeArgs = userId === undefined ? [groupId] : [userId, ...(groupId ? [groupId] : [])];
     const unionArgs = userId === undefined ? scopeArgs : [userId, ...scopeArgs];
     args.push(...unionArgs, ...unionArgs);
-    const groupName = userId === undefined ? 'g.name' : groupDisplayNameSql('authorized_member');
+    const groupName = userId !== undefined && groupId === undefined ? groupDisplayNameSql('authorized_member') : 'NULL';
     let sql = `WITH transaction_rows AS (
       SELECT e.id,e.group_id,${groupName} AS group_name,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,
         e.category,e.notes,NULL AS note,NULL AS from_person_id,NULL AS to_person_id,NULL AS from_name,NULL AS to_name,
