@@ -1915,6 +1915,11 @@ details:not([open]) > :not(summary) {
   gap: var(--space-3);
 }
 
+.allocation-row {
+  grid-template-areas: "person input";
+  align-items: start;
+}
+
 .payer-row {
   grid-template-areas: "select amount";
 }
@@ -1941,24 +1946,48 @@ details:not([open]) > :not(summary) {
 }
 
 .allocation-row__person {
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
+  grid-area: person;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-3);
 }
 
 .allocation-row__person > span:first-child {
   min-width: 0;
   overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .allocation-row > input {
+  grid-area: input;
+  align-self: start;
   min-width: 0;
   overflow: auto;
+  text-align: right;
 }
 
 .allocation-row__amount {
+  min-width: 0;
+  max-width: 100%;
   color: var(--color-ink-muted);
   font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.allocation-row:has(> input[aria-invalid="true"]) .allocation-row__amount {
+  display: none;
+}
+
+.amount-input {
+  text-align: right;
+}
+
+/* Keep decimal financial fields aligned even in compact editors without a field wrapper. */
+input[inputmode="decimal"] {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -1967,6 +1996,21 @@ details:not([open]) > :not(summary) {
   margin: 0;
   color: var(--color-ink-muted);
   font-size: var(--text-sm);
+}
+
+.split-default-choices {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  padding: var(--space-3) var(--space-4);
+}
+
+.split-default-choices p {
+  margin: 0 0 var(--space-3);
+}
+
+.split-default-choices .actions {
+  margin: 0;
 }
 
 .full-width-button {
@@ -2260,6 +2304,18 @@ details:not([open]) > :not(summary) {
 
   .member-row__actions {
     justify-content: flex-start;
+  }
+
+  .allocation-row {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "person"
+      "input";
+    align-items: stretch;
+  }
+
+  .allocation-row > input {
+    width: 100%;
   }
 }
 

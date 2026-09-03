@@ -29,6 +29,28 @@ export function resolveGroupSplitDefault(value: GroupSplitDefault | null | undef
   return { method: value.method, selected: [...value.personIds], values: Object.fromEntries(value.personIds.map((personId, index) => [personId, value.method === 'percentage' ? String(value.values![index] / 100) : String(value.values![index])])), applied: true, invalid: false };
 }
 
+/** Return the arrangement actually used when a new entry starts. */
+export function effectiveGroupSplitDefault(value: GroupSplitDefault | null | undefined, members: GroupMember[]): GroupSplitDefault | null {
+  return normalizeGroupSplitDefault(value, members) || normalizeGroupSplitDefault({ method: 'equal', personIds: members.map((member) => member.personId) }, members);
+}
+
+export function splitDefaultChoiceState({ newEntry, scheduleMode, method, saveable, draft, effective, selected, values, members }: { newEntry: boolean; scheduleMode: boolean; method: SplitMethod; saveable: boolean; draft: GroupSplitDefault | null; effective: GroupSplitDefault | null; selected: string[]; values: AllocationState; members: GroupMember[] }): { returnToDefault: boolean; makeNewDefault: boolean } {
+  if (!newEntry || scheduleMode) return { returnToDefault: false, makeNewDefault: false };
+  let differs = method === 'exact';
+  if (!differs && draft) differs = !sameGroupSplitArrangement(draft, effective, members);
+  if (!differs && method !== effective?.method) differs = true;
+  if (!differs && (!effective || selected.length !== effective.personIds.length || selected.some((personId) => !effective.personIds.includes(personId)))) differs = true;
+  if (!differs && method !== 'equal') {
+    const effectiveValues = new Map(effective!.personIds.map((personId, index) => [personId, effective!.values![index]]));
+    differs = selected.some((personId) => {
+      const raw = values[personId]?.trim() || '';
+      if (!raw) return true;
+      try { return (method === 'percentage' ? percentageBasisPoints(raw) : shareValue(raw)) !== effectiveValues.get(personId); } catch { return true; }
+    });
+  }
+  return { returnToDefault: differs, makeNewDefault: differs && method !== 'exact' && saveable && Boolean(draft) };
+}
+
 export function groupSplitDefaultSummary(value: GroupSplitDefault | null | undefined, members: GroupMember[]): { label: string; warning: boolean } {
   if (!value) return { label: 'Automatic equal split', warning: false };
   const missing = value.personIds.filter((personId) => !members.some((member) => member.personId === personId));
@@ -99,6 +121,10 @@ export type AllocationPreview = {
 
 const emptyPreview = (error?: string): AllocationPreview => ({ allocations: {}, remainingMinor: null, remainingPercent: null, totalValue: 0, error });
 
+export function neutralAllocationPreview(): AllocationPreview {
+  return emptyPreview();
+}
+
 function safeAllocation(amountMinor: number, weights: number[]): boolean {
   const maxWeight = Math.max(...weights);
   return Number.isSafeInteger(amountMinor) && amountMinor >= 0 && Number.isFinite(maxWeight) && maxWeight > 0 && amountMinor <= MAX_SAFE / maxWeight;
@@ -131,6 +157,19 @@ export type FormSaveFence = { token: number; scope: string; sessionGeneration: n
 /** A deferred default response may only update the form save that initiated it. */
 export function isCurrentSplitDefaultSave(captured: FormSaveFence, current: FormSaveFence): boolean {
   return captured.token === current.token && captured.scope === current.scope && captured.sessionGeneration === current.sessionGeneration;
+}
+
+export function splitDefaultSaveOutcome(captured: FormSaveFence, current: FormSaveFence, capturedDraftToken: number, currentDraftToken: number): { requestCurrent: boolean; draftCurrent: boolean } {
+  const requestCurrent = isCurrentSplitDefaultSave(captured, current);
+  return { requestCurrent, draftCurrent: requestCurrent && capturedDraftToken === currentDraftToken };
+}
+
+export function isSplitDefaultSaveLockedForScope(pendingScope: string | undefined, scope: string): boolean {
+  return pendingScope === scope;
+}
+
+export function releaseSplitDefaultSaveLock(pendingScope: string | undefined, completedScope: string): string | undefined {
+  return pendingScope === completedScope ? undefined : pendingScope;
 }
 
 export function previewAllocation(amountMinor: number, selected: string[], method: SplitMethod, values: AllocationState, currency: Currency): AllocationPreview {
