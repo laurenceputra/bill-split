@@ -1,0 +1,9 @@
+name = "bill-split-vitest"
+main = "src/worker/index.ts"
+compatibility_date = "2025-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bill-split-vitest"
+database_id = "00000000-0000-4000-8000-000000000006"
+migrations_dir = "migrations"

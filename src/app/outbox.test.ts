@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as idb from './idb';
 import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOutbox, readGroups, readOutboxItem, removeOutboxIfOwned, recoverStaleSyncing, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity, updateOutboxIfOwned } from './idb';
-import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OUTBOX_LEASE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
+import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OUTBOX_LEASE_MS, OUTBOX_LOGOUT_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
 import { clearEverythingForLogout, coordinateAuthBootstrap, getAuthEpoch, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 import { clearSessionLogout } from './session';
 
@@ -266,9 +266,12 @@ describe('durable expense outbox', () => {
 
   it('reconciles a claim which completes after the 500ms storage deadline and flushes it', async () => {
     let releaseClaim!: () => void;
+    let claimStarted!: () => void;
+    const claimStartedPromise = new Promise<void>((resolve) => { claimStarted = resolve; });
     const realClaim = idb.claimOutboxItem;
     vi.spyOn(idb, 'claimOutboxItem').mockImplementationOnce(async (...args) => {
       const claimed = await realClaim(...args);
+      claimStarted();
       return new Promise((resolve) => { releaseClaim = () => resolve(claimed); });
     });
     let expenseCalls = 0;
@@ -278,8 +281,10 @@ describe('durable expense outbox', () => {
       return response({ expense: { id: 'late-claim-server-id' } }, 201);
     }));
     await queue('late-claim');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const flush = flushOutbox();
-    await new Promise<void>((resolve) => setTimeout(resolve, OUTBOX_IDB_DEADLINE_MS + 25));
+    await claimStartedPromise;
+    await vi.advanceTimersByTimeAsync(OUTBOX_IDB_DEADLINE_MS + 25);
     await flush;
     expect(await readOutboxItem('late-claim')).toMatchObject({ status: 'syncing', leaseOwner: expect.any(String) });
 
@@ -291,18 +296,23 @@ describe('durable expense outbox', () => {
   it('bounds logout quiescence when an aborted transport never settles', async () => {
     let expenseCalls = 0;
     let abortObserved = false;
+    let transportStarted!: () => void;
+    const transportStartedPromise = new Promise<void>((resolve) => { transportStarted = resolve; });
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
       const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init);
       if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
       expenseCalls += 1;
+      transportStarted();
       actual.signal?.addEventListener('abort', () => { abortObserved = true; });
       return new Promise<Response>(() => undefined);
     }));
     await queue('never-settles');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const flush = flushOutbox(1_000);
-    await vi.waitFor(() => expect(expenseCalls).toBe(1));
+    await transportStartedPromise;
     const logout = clearEverythingForLogout(false);
-    await expect(Promise.race([logout, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('logout deadline exceeded')), 2_000))])).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(OUTBOX_IDB_DEADLINE_MS + OUTBOX_LOGOUT_DEADLINE_MS);
+    await expect(logout).resolves.toBeUndefined();
     expect(abortObserved).toBe(true);
     await flush;
   });
@@ -501,17 +511,20 @@ describe('durable expense outbox', () => {
     await saveOutboxItem({ ...item, status: 'auth-required', lastError: { code: 'AUTH_REQUIRED', message: 'Sign in', status: 401 } });
     const originalReactivate = idb.reactivateAuthRequired;
     let release!: () => void;
+    let reactivationStarted!: () => void;
+    const reactivationStartedPromise = new Promise<void>((resolve) => { reactivationStarted = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    vi.spyOn(idb, 'reactivateAuthRequired').mockImplementation(async (...args) => { await gate; return originalReactivate(...args); });
+    vi.spyOn(idb, 'reactivateAuthRequired').mockImplementation(async (...args) => { reactivationStarted(); await gate; return originalReactivate(...args); });
     let expenseCalls = 0;
     vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
       if (String(request).endsWith('/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' });
       expenseCalls += 1;
       return response({ expense: { id: 'late-resume-server-id' } }, 201);
     }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const recovery = handleAuthenticatedUser('user-a', undefined, 701);
-    await vi.waitFor(() => expect(idb.reactivateAuthRequired).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, OUTBOX_IDB_DEADLINE_MS + 50));
+    await reactivationStartedPromise;
+    await vi.advanceTimersByTimeAsync(OUTBOX_IDB_DEADLINE_MS + 50);
     expect(expenseCalls).toBe(0);
     expect((await readOutboxItem('late-resume-reactivation'))?.status).toBe('auth-required');
     release();

@@ -4,7 +4,7 @@ A small, private BillSplit PWA built for Cloudflare Workers. It uses React/Vite 
 
 ## Development
 
-Requirements: Node 20.9+ and npm. The intended package manager is npm (the lockfile is checked in).
+Requirements: Node 22+ and npm. The intended package manager is npm (the lockfile is checked in).
 
 ```sh
 npm install
@@ -13,6 +13,22 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+Vitest is split into required fast unit and local-D1 integration tiers while
+`npm test` remains the complete non-E2E suite:
+
+```sh
+npm run test:unit         # fast fake-D1/unit and source-contract checks
+npm run test:integration  # focused real local-D1 migration and summary checks
+npm test                  # complete required non-E2E suite
+npm run test:performance  # optional large-workload and query-plan checks
+npm run test:all          # required suite plus performance checks
+```
+
+Cloudflare Workers Builds runs `npm run test:unit` before the production
+bundle build; it does not run the optional performance tier. GitHub Actions
+runs the unit/build and local-D1 integration jobs in parallel for pull requests
+and pushes to `main`. Playwright remains a separate E2E suite.
 
 For a Clerk-backed Vite build, copy `.env.example` to the mode-specific local
 file and set the publishable key from your Clerk instance:
@@ -130,7 +146,7 @@ production migrations or deploy the production Worker.
 Keep runtime secrets such as `CLERK_SECRET_KEY` and
 `IDENTITY_TOMBSTONE_KEY` managed by the Worker dashboard/Wrangler secrets, not
 as build variables and never in the base64 config secret. `cf:build` validates
-the supplied config and frontend key, runs tests, and builds the bundle;
+the supplied config and frontend key, runs the fast unit tier, and builds the bundle;
 `cf:deploy` validates the config again, dry-runs Wrangler, applies remote D1
 migrations, and deploys the already-built `dist/` without rebuilding.
 The base64 config must contain the existing `[secrets].required` declaration for

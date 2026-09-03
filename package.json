@@ -3,17 +3,24 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "npm run typecheck && vite build && node scripts/finalize-service-worker.mjs",
     "typecheck": "tsc -b",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "vitest run --config vitest.config.ts --exclude=**/*.integration.test.ts --exclude=**/*.performance.test.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts --exclude=src/db/group-summary.performance.test.ts && vitest run --config vitest.migration.config.ts",
+    "test:performance": "vitest run --config vitest.integration.config.ts src/db/group-summary.performance.test.ts",
+    "test:all": "npm test && npm run test:performance",
+    "test:watch": "vitest --config vitest.config.ts --exclude=**/*.integration.test.ts --exclude=**/*.performance.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:audit": "playwright test tests/e2e/audit.spec.ts",
     "e2e:prepare": "node tests/e2e/prepare-db.mjs",
     "e2e:server": "node tests/e2e/start-server.mjs",
-    "cf:build": "node scripts/prepare-cloudflare-build.mjs && npm test && npm run build",
+    "cf:build": "node scripts/prepare-cloudflare-build.mjs && npm run test:unit && npm run build",
     "cf:deploy": "node scripts/deploy-cloudflare-build.mjs",
     "validate:deploy": "node scripts/validate-cloudflare-deploy.mjs",
     "deploy": "npm run build && npm run validate:deploy && wrangler deploy --config=wrangler.deploy.toml --keep-vars",
@@ -36,7 +43,8 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250821.0",
+    "@cloudflare/vitest-plugin": "^1.1.3",
+    "@cloudflare/workers-types": "^5.20260831.1",
     "@playwright/test": "^1.62.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
@@ -44,7 +52,7 @@
     "fake-indexeddb": "^6.2.5",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
-    "vitest": "^3.0.5",
-    "wrangler": "^4.23.0"
+    "vitest": "^4.1.11",
+    "wrangler": "4.128.0"
   }
 }
