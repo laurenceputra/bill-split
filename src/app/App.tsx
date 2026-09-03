@@ -125,6 +125,9 @@ function CurrencySelect({ value, onChange }: { value: Currency; onChange: (value
 }
 const nameOf = (members: GroupMember[], id: string) => members.find((member) => member.personId === id)?.name || `Unknown member (${id})`;
 const moneyInput = (minor: number) => (minor / 100).toFixed(2);
+const isPendingInvitation = (invitation?: GroupInvitation) => Boolean(invitation && !invitation.revokedAt && !invitation.acceptedAt && !invitation.rejectedAt && Date.parse(invitation.expiresAt) > Date.now());
+type TargetedInvitationMutationState = 'available' | 'checking' | 'unavailable';
+const targetedInvitationMutationState = (resource: ResourceSnapshot<{ invitations: GroupInvitation[] }>): TargetedInvitationMutationState => resource.data === undefined ? resource.error ? 'unavailable' : 'checking' : resource.error ? 'unavailable' : resource.revalidating || resource.stale ? 'checking' : 'available';
 
 function PendingInvitations({ userId, online }: { userId?: string; online: boolean }) {
   const invitationsResource = useResource<{ invitations: GroupInvitation[] }>(resourceKeys.invitations(userId || 'pending'), userId, (signal) => getPendingInvitations(signal), RESOURCE_FRESHNESS.invitations);
@@ -300,7 +303,7 @@ function Home() {
   </Layout>;
 }
 
-function MemberDirectory({ groupId, userId, members, currentPersonId, online, owner }: { groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; owner: boolean }) {
+function MemberDirectory({ groupId, userId, members, currentPersonId, online, owner, invitationsResource, targetedMutationState }: { groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; owner: boolean; invitationsResource?: ResourceSnapshot<{ invitations: GroupInvitation[] }>; targetedMutationState?: TargetedInvitationMutationState }) {
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<unknown>();
   const remove = async (member: GroupMember) => {
@@ -317,63 +320,86 @@ function MemberDirectory({ groupId, userId, members, currentPersonId, online, ow
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
   };
+  const invitations = invitationsResource?.data?.invitations;
   return <>
     <ul className="member-list" aria-label="Group members">{members.map((member) => <li className="member-row" key={member.personId}>
-      <div className="member-row__identity"><strong>{member.personId === currentPersonId ? 'You' : member.name}</strong>{member.email ? <span className="email">{member.email}</span> : <span className="muted">No email linked</span>}<span className="muted">Role: {member.role === 'owner' ? 'Owner' : 'Member'}{member.linked ? '' : ' · ledger-only'}</span></div>
+       <div className="member-row__identity"><strong>{member.personId === currentPersonId ? 'You' : member.name}</strong>{member.email ? <span className="email">{member.email}</span> : <span className="muted">No email linked</span>}<span className="muted">Role: {member.role === 'owner' ? 'Owner' : 'Member'}{member.linked ? '' : ' · ledger-only'}</span></div>
+      {owner && member.role === 'member' && !member.linked ? invitationsResource?.data !== undefined ? <TargetedInvitationControl groupId={groupId} userId={userId} member={member} invitation={invitations?.find((candidate) => candidate.targetPersonId === member.personId)} online={online} mutationState={targetedMutationState || 'checking'} /> : <InvitationAvailabilityStatus resource={invitationsResource} /> : null}
       {owner && member.role !== 'owner' ? <div className="member-row__actions" aria-label={`Actions for ${member.name}`}><Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void remove(member)}>Remove</Button>{member.linked ? <Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void transfer(member)}>Transfer ownership</Button> : null}</div> : null}
     </li>)}</ul>{error ? <ErrorBox error={error} id="member-management-error" /> : null}
   </>;
 }
 
-function TargetedInvitationControl({ groupId, userId, member, invitation, online }: { groupId: string; userId: string; member: GroupMember; invitation?: GroupInvitation; online: boolean }) {
+function InvitationAvailabilityStatus({ resource }: { resource?: ResourceSnapshot<{ invitations: GroupInvitation[] }> }) {
+  const message = resource?.error || resource?.status === 'error' || resource?.status === 'auth-blocked' ? 'Email actions unavailable. Retry below.' : resource?.offline || (typeof navigator !== 'undefined' && navigator.onLine === false) ? 'Email actions unavailable offline.' : 'Checking invitation status…';
+  return <div className="member-email-control member-email-control--unavailable"><p className="muted" role="status">{message}</p></div>;
+}
+
+function TargetedInvitationControl({ groupId, userId, member, invitation, online, mutationState }: { groupId: string; userId: string; member: GroupMember; invitation?: GroupInvitation; online: boolean; mutationState: TargetedInvitationMutationState }) {
   const [email, setEmail] = useState(invitation?.email || member.email || '');
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<'save' | 'revoke'>();
   const [error, setError] = useState<unknown>();
-  const pending = invitation && !invitation.revokedAt && !invitation.acceptedAt && !invitation.rejectedAt && Date.parse(invitation.expiresAt) > Date.now() ? invitation : undefined;
+  const pending = isPendingInvitation(invitation) ? invitation : undefined;
+  const mutationAvailable = online && mutationState === 'available';
+  const mutationStatus = !online ? 'Email actions unavailable offline.' : mutationState === 'checking' ? 'Refreshing invitation status…' : 'Email actions unavailable. Retry below.';
   useEffect(() => { setEmail(invitation?.email || member.email || ''); }, [invitation?.email, member.email]);
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!online || busy || !email.trim()) return;
+    if (!mutationAvailable || busy || !email.trim()) return;
     setBusy('save'); setError(undefined);
-    try { await createTargetedGroupInvitation(groupId, member.personId, email.trim()); await invalidateForMutation.invitationsChanged(groupId, userId); }
+    try { await createTargetedGroupInvitation(groupId, member.personId, email.trim()); setOpen(false); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
   };
   const revoke = async () => {
-    if (!pending || !online || busy || !confirm(`Revoke the invitation for ${member.name}?`)) return;
+    if (!pending || !mutationAvailable || busy || !confirm(`Revoke the invitation for ${member.name}?`)) return;
     setBusy('revoke'); setError(undefined);
-    try { await revokeGroupInvitation(groupId, pending.id); await invalidateForMutation.invitationsChanged(groupId, userId); }
+    try { await revokeGroupInvitation(groupId, pending.id); setOpen(false); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
   };
-  return <div className="member-email-control"><form onSubmit={save} aria-describedby={error ? `target-invite-error-${member.personId}` : undefined}><Field label={`${member.email ? 'Change' : 'Add'} email for ${member.name}`}><input id={`target-email-${member.personId}`} className="email" type="email" required value={email} disabled={!online || Boolean(busy)} onChange={(event) => { setError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" variant="secondary" disabled={!online || Boolean(busy)}>{busy === 'save' ? 'Saving…' : member.email ? 'Change email' : 'Add email'}</Button></form>{pending ? <p className="muted" role="status">Pending invitation for {pending.email}. It will link this exact ledger participant after acceptance.<Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void revoke()}>{busy === 'revoke' ? 'Revoking…' : 'Revoke'}</Button></p> : null}{error ? <ErrorBox error={error} id={`target-invite-error-${member.personId}`} /> : null}</div>;
+  return <div className="member-email-control">
+    {pending ? <p className="member-email-control__pending" role="status"><span>Pending invitation for <strong>{pending.email}</strong>.</span><span className="member-email-control__pending-actions"><Button type="button" variant="secondary" disabled={!mutationAvailable || Boolean(busy)} onClick={() => setOpen((current) => !current)}>{open ? 'Close' : 'Change'}</Button><Button type="button" variant="danger" disabled={!mutationAvailable || Boolean(busy)} onClick={() => void revoke()}>{busy === 'revoke' ? 'Revoking…' : 'Revoke'}</Button></span></p> : null}
+    {pending && (!mutationAvailable || mutationState !== 'available') ? <p className="member-email-control__availability muted" role="status">{mutationStatus}</p> : null}
+    {!pending ? mutationState === 'available' ? <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>Add email</summary>
+      <TargetedInvitationForm member={member} email={email} setEmail={setEmail} clearError={() => setError(undefined)} busy={busy} error={error} online={mutationAvailable} save={save} />
+    </details> : <><p className="member-email-control__availability muted" role="status">{mutationStatus}</p><Button type="button" variant="secondary" disabled>Add email</Button></> : open ? <div className="member-email-control__form"><TargetedInvitationForm member={member} email={email} setEmail={setEmail} clearError={() => setError(undefined)} busy={busy} error={error} online={mutationAvailable} save={save} /></div> : null}
+    {error && pending && !open ? <ErrorBox error={error} id={`target-invite-error-${member.personId}`} /> : null}
+  </div>;
 }
 
-function OwnerMemberControls({ groupId, userId, members, online }: { groupId: string; userId: string; members: GroupMember[]; online: boolean }) {
-  const effectiveOnline = online && (typeof navigator === 'undefined' || navigator.onLine !== false);
-  const invitationsResource = useResource<{ invitations: GroupInvitation[] }>(resourceKeys.groupInvitations(userId, groupId), userId, (signal) => getOwnerInvitations(groupId, signal), RESOURCE_FRESHNESS.invitations, undefined, { skipWhenOffline: !effectiveOnline });
+function TargetedInvitationForm({ member, email, setEmail, clearError, busy, error, online, save }: { member: GroupMember; email: string; setEmail: (email: string) => void; clearError: () => void; busy?: 'save' | 'revoke'; error?: unknown; online: boolean; save: (event: FormEvent) => Promise<void> }) {
+  return <form onSubmit={save} aria-describedby={error ? `target-invite-error-${member.personId}` : undefined}><Field label={`Email for ${member.name}`}><input id={`target-email-${member.personId}`} className="email" type="email" required value={email} disabled={!online || Boolean(busy)} onChange={(event) => { clearError(); setEmail(event.target.value); }} /></Field><Button type="submit" variant="secondary" disabled={!online || Boolean(busy)}>{busy === 'save' ? 'Saving…' : 'Save email'}</Button>{error ? <ErrorBox error={error} id={`target-invite-error-${member.personId}`} /> : null}</form>;
+}
+
+function GenericInvitationControls({ groupId, userId, online, invitationsResource }: { groupId: string; userId: string; online: boolean; invitationsResource: ResourceSnapshot<{ invitations: GroupInvitation[] }> }) {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<unknown>();
   const [inviteError, setInviteError] = useState<unknown>();
-  const invitations = invitationsResource.data?.invitations || [];
+  const effectiveOnline = online && (typeof navigator === 'undefined' || navigator.onLine !== false);
+  const mutationState = targetedInvitationMutationState(invitationsResource);
+  const mutationAvailable = effectiveOnline && mutationState === 'available';
+  const mutationStatus = !effectiveOnline ? 'Invitation actions unavailable offline.' : mutationState === 'checking' ? 'Refreshing invitation status…' : 'Invitation actions unavailable. Retry below.';
+  const invitations = invitationsResource.data?.invitations?.filter((invitation) => invitation.targetPersonId == null);
   const invite = async (event: FormEvent) => {
-    event.preventDefault(); if (!effectiveOnline || busy) return;
+    event.preventDefault(); if (!mutationAvailable || busy || !email.trim()) return;
     setBusy('invite'); setInviteError(undefined);
     try { await createGroupInvitation(groupId, email.trim()); setEmail(''); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setInviteError(cause); }
     finally { setBusy(undefined); }
   };
   const revoke = async (invitation: GroupInvitation) => {
-    if (!effectiveOnline || busy || !confirm(`Revoke the invitation for ${invitation.email}?`)) return;
+    if (!mutationAvailable || busy || !confirm(`Revoke the invitation for ${invitation.email}?`)) return;
     setBusy(invitation.id); setError(undefined);
     try { await revokeGroupInvitation(groupId, invitation.id); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
   };
   const offlineWithoutCache = !effectiveOnline && invitationsResource.data === undefined;
-  const ledgerOnlyMembers = members.filter((member) => member.role === 'member' && !member.linked);
-  return <section aria-labelledby="invitations-heading"><div className="section-title"><h2 id="invitations-heading">Invitations</h2><span className="muted">Owner · online-only</span></div><p className="muted">Use a generic invitation for a new group member, or assign an email to an existing ledger-only participant below. The participant’s history and ID are preserved; access is granted only when the matching account accepts.</p><form onSubmit={invite} aria-describedby={inviteError ? 'invite-error' : undefined}><Field label="Invite by email"><input className="email" type="email" required value={email} onChange={(event) => { setInviteError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" disabled={!effectiveOnline || busy === 'invite'}>{busy === 'invite' ? 'Inviting…' : 'Invite'}</Button></form>{inviteError ? <ErrorBox error={inviteError} id="invite-error" /> : null}{offlineWithoutCache ? <p className="cache-status">Invitations aren’t cached on this device and need a connection.</p> : <ResourceNotice resource={invitationsResource} label="invitations" retry={retryFor(resourceKeys.groupInvitations(userId, groupId), userId)} />}{ledgerOnlyMembers.length ? <div className="list" aria-label="Ledger-only participant email assignments">{ledgerOnlyMembers.map((member) => <TargetedInvitationControl key={member.personId} groupId={groupId} userId={userId} member={member} invitation={invitations.find((candidate) => candidate.targetPersonId === member.personId)} online={effectiveOnline} />)}</div> : null}{invitationsResource.data !== undefined ? invitations.length ? <div className="list">{invitations.map((invitation) => { const pending = !invitation.revokedAt && !invitation.acceptedAt && !invitation.rejectedAt && Date.parse(invitation.expiresAt) > Date.now(); return <div className="row" key={invitation.id}><span>{invitation.targetPersonId ? `For ${members.find((member) => member.personId === invitation.targetPersonId)?.name || 'ledger participant'} · ${invitation.email}` : invitation.email}<small>{invitation.acceptedAt ? 'Accepted' : invitation.revokedAt ? 'Revoked' : invitation.rejectedAt ? 'Rejected' : pending ? `Pending · expires ${new Date(invitation.expiresAt).toLocaleDateString()}` : 'Expired'}</small></span>{pending ? <Button type="button" variant="secondary" disabled={!effectiveOnline || busy === invitation.id} onClick={() => void revoke(invitation)}>Revoke</Button> : null}</div>; })}</div> : <Empty>No invitations yet.</Empty> : null}{error ? <ErrorBox error={error} id="invitation-management-error" /> : null}{invitationsResource.data !== undefined && !effectiveOnline ? <p className="cache-status">Showing cached invitations; they may be out of date. Invitation changes require a connection.</p> : null}</section>;
+  return <section className="invitations-panel" aria-labelledby="invitations-heading"><div className="section-title"><h2 id="invitations-heading">Invitations</h2><span className="muted">Owner · generic only</span></div><details className="generic-invitation-disclosure"><summary>Invite a new member</summary><p className="muted">Send an invitation to someone who is not in this ledger yet.</p><form onSubmit={invite} aria-describedby={inviteError ? 'invite-error' : undefined}><Field label="Invite by email"><input className="email" type="email" required value={email} disabled={!mutationAvailable || Boolean(busy)} onChange={(event) => { setInviteError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" disabled={!mutationAvailable || busy === 'invite'}>{busy === 'invite' ? 'Inviting…' : 'Invite'}</Button></form>{inviteError ? <ErrorBox error={inviteError} id="invite-error" /> : null}</details>{!mutationAvailable ? <p className="member-email-control__availability muted" role="status">{mutationStatus}</p> : null}{offlineWithoutCache ? <p className="cache-status">Invitations aren’t cached on this device and need a connection.</p> : <><ResourceNotice resource={invitationsResource} label="invitations" retry={retryFor(resourceKeys.groupInvitations(userId, groupId), userId)} />{!effectiveOnline && invitationsResource.data !== undefined ? <p className="cache-status">Showing cached invitations; they may be out of date. Invitation changes require a connection.</p> : null}</>}{invitationsResource.data !== undefined ? invitations?.length ? <div className="list" aria-label="Generic invitation history">{invitations.map((invitation) => { const pending = isPendingInvitation(invitation); const status = pending ? 'Pending' : invitation.acceptedAt ? 'Accepted' : invitation.rejectedAt ? 'Declined' : invitation.revokedAt ? 'Revoked' : 'Expired'; return <div className="row invitation-history-row" key={invitation.id}><span><strong>{invitation.email}</strong><small>{status} · Created {new Date(invitation.createdAt).toLocaleDateString()}</small></span>{pending ? <Button type="button" variant="danger" disabled={!mutationAvailable || Boolean(busy)} onClick={() => void revoke(invitation)}>{busy === invitation.id ? 'Revoking…' : 'Revoke'}</Button> : null}</div>; })}</div> : <p className="muted">No invitations yet.</p> : null}{error ? <ErrorBox error={error} id="invitation-management-error" /> : null}</section>;
 }
 
 function AddFriendForm({ groupId, userId, online }: { groupId: string; userId: string; online: boolean }) {
@@ -441,6 +467,29 @@ function SplitDefaultSettings({ groupId, userId, members, value, online, owner, 
   return <section className="split-default-settings" aria-labelledby="split-default-heading"><div className="section-title"><h2 id="split-default-heading">Party default split</h2>{owner ? <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Close' : value ? 'Edit' : 'Customize'}</Button> : <span className="muted">Owner-only editor</span>}</div>{!open ? <><SplitDefaultSummary value={value} members={members} />{owner ? <p className="muted">Used only when starting a new expense or schedule. Each expense can override it.</p> : <p className="muted">You can save a shared default while adding an expense. Only the owner can edit or clear it here.</p>}</> : <form onSubmit={save} aria-describedby={error ? 'split-default-error' : undefined}><fieldset><legend>Split new entries</legend><div className="radio-list"><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'equal'} onChange={() => setMethod('equal')} />Equal</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'percentage'} onChange={() => setMethod('percentage')} />Percentage</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'shares'} onChange={() => setMethod('shares')} />Shares</label></div></fieldset><fieldset><legend>Included members</legend><div className="participant-list">{members.map((member) => <label className="checkbox-row" key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => setSelected((current) => current.includes(member.personId) ? current.filter((id) => id !== member.personId) : [...current, member.personId])} />{member.name}</label>)}</div></fieldset>{method !== 'equal' ? <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <Field key={member.personId} label={`${member.name} ${method === 'percentage' ? 'percentage' : 'shares'}`} className="field--compact"><input required inputMode="decimal" value={values[member.personId] || ''} placeholder={method === 'percentage' ? '0.00%' : '1'} onChange={(event) => setValues((current) => ({ ...current, [member.personId]: event.target.value }))} /></Field>)}<p className="allocation-summary" role="status" aria-live="polite">{method === 'percentage' ? `Total ${total.toFixed(2)}% of 100%` : `Total shares ${total}`}</p>{method === 'percentage' ? <Button type="button" variant="secondary" onClick={evenly}>Split evenly</Button> : null}</div> : null}{error ? <ErrorBox error={error} id="split-default-error" /> : null}<div className="actions"><Button type="submit" disabled={!online || busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save'}</Button><Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={cancel}>Cancel</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy) || !value} onClick={() => void clear()}>Use automatic equal split</Button></div>{!online ? <p className="cache-status">Default split editing requires a connection. The cached summary remains available.</p> : null}</form>}{open && value && summary.warning ? <p className="warning" role="alert">Removed members must be removed before saving this default.</p> : null}</section>;
 }
 
+type GroupManagementContentProps = { group: Group; groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; offline: boolean; groupResource: ResourceSnapshot<GroupResponse>; splitDefault: GroupSplitDefault | null; onSplitDefaultChanged: (value: GroupSplitDefault | null) => void; onDeleted: () => void; onLeft: () => void };
+type GroupManagementLayoutProps = Pick<GroupManagementContentProps, 'group' | 'groupId' | 'userId' | 'online' | 'offline' | 'groupResource' | 'onDeleted' | 'onLeft'> & { children: ReactNode };
+
+function GroupManagementLayout({ group, groupId, userId, online, offline, groupResource, children, onDeleted, onLeft }: GroupManagementLayoutProps) {
+  const owner = group.role === 'owner';
+  return <Layout><Link className="back" to={`/groups/${groupId}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Group management</p><h1>Manage group</h1></div></div>{offline ? <ConnectionBanner detail="cached group data is available. Member changes, invitations, exports, and settings require a connection." /> : null}<ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, groupId), userId)} />{children}<GroupExports groupId={groupId} online={online && !offline} /><div id="settings" tabIndex={-1}><GroupSettings group={group} groupId={groupId} userId={userId} online={online && !offline} role={owner ? 'owner' : 'member'} onDeleted={onDeleted} onLeft={onLeft} /></div></Layout>;
+}
+
+function PeopleSection({ groupId, userId, members, currentPersonId, online, owner, invitationsResource, targetedMutationState }: { groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; owner: boolean; invitationsResource?: ResourceSnapshot<{ invitations: GroupInvitation[] }>; targetedMutationState?: TargetedInvitationMutationState }) {
+  return <section id="people" tabIndex={-1} aria-labelledby="people-heading"><div className="section-title"><h2 id="people-heading">People</h2><span className="muted">{owner ? 'Owner controls' : 'Members can view this list'}</span></div><MemberDirectory groupId={groupId} userId={userId} members={members} currentPersonId={currentPersonId} online={online} owner={owner} invitationsResource={invitationsResource} targetedMutationState={targetedMutationState} /></section>;
+}
+
+function OwnerGroupManagement({ group, groupId, userId, members, currentPersonId, online, offline, groupResource, splitDefault, onSplitDefaultChanged, onDeleted, onLeft }: GroupManagementContentProps) {
+  const effectiveOnline = online && !offline && (typeof navigator === 'undefined' || navigator.onLine !== false);
+  const invitationsResource = useResource<{ invitations: GroupInvitation[] }>(resourceKeys.groupInvitations(userId, groupId), userId, (signal) => getOwnerInvitations(groupId, signal), RESOURCE_FRESHNESS.invitations, undefined, { skipWhenOffline: !effectiveOnline });
+  return <GroupManagementLayout group={group} groupId={groupId} userId={userId} online={online} offline={offline} groupResource={groupResource} onDeleted={onDeleted} onLeft={onLeft}><PeopleSection groupId={groupId} userId={userId} members={members} currentPersonId={currentPersonId} online={effectiveOnline} owner invitationsResource={invitationsResource} targetedMutationState={targetedInvitationMutationState(invitationsResource)} /><AddFriendForm groupId={groupId} userId={userId} online={effectiveOnline} /><GenericInvitationControls groupId={groupId} userId={userId} online={effectiveOnline} invitationsResource={invitationsResource} /><SplitDefaultSettings groupId={groupId} userId={userId} members={members} value={splitDefault} online={effectiveOnline} owner onChanged={onSplitDefaultChanged} /></GroupManagementLayout>;
+}
+
+function MemberGroupManagement({ group, groupId, userId, members, currentPersonId, online, offline, groupResource, splitDefault, onSplitDefaultChanged, onDeleted, onLeft }: GroupManagementContentProps) {
+  const effectiveOnline = online && !offline && (typeof navigator === 'undefined' || navigator.onLine !== false);
+  return <GroupManagementLayout group={group} groupId={groupId} userId={userId} online={online} offline={offline} groupResource={groupResource} onDeleted={onDeleted} onLeft={onLeft}><PeopleSection groupId={groupId} userId={userId} members={members} currentPersonId={currentPersonId} online={effectiveOnline} owner={false} /><SplitDefaultSettings groupId={groupId} userId={userId} members={members} value={splitDefault} online={effectiveOnline} owner={false} onChanged={onSplitDefaultChanged} /></GroupManagementLayout>;
+}
+
 function GroupManagementPage() {
   const online = useOnlineStatus();
   const { id = '' } = useParams();
@@ -460,8 +509,8 @@ function GroupManagementPage() {
   }, [group, id]);
   if ((me.error || groupResource.error) && !group) return <Layout><ErrorBox error={me.error || groupResource.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-manage-error" retryLabel={me.error ? 'Retry identity check' : 'Retry'} /><Link className="back" to={`/groups/${id}`}>← Back to group</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
-  const owner = group.role === 'owner';
-  return <Layout><Link className="back" to={`/groups/${id}`}>← <span className="back__label">Back to {group.memberCount === 2 && group.counterpartName ? group.counterpartName : group.name}</span></Link><div className="page-title"><div><p className="eyebrow">Group management</p><h1>Manage group</h1></div></div>{offline ? <ConnectionBanner detail="cached group data is available. Member changes, invitations, exports, and settings require a connection." /> : null}<ResourceNotice resource={groupResource} label="group" retry={retryFor(resourceKeys.group(userId, id), me.data?.id)} /><section id="people" tabIndex={-1} aria-labelledby="people-heading"><div className="section-title"><h2 id="people-heading">People</h2><span className="muted">{owner ? 'Owner controls' : 'Members can view this list'}</span></div><MemberDirectory groupId={id} userId={userId} members={members} currentPersonId={groupResource.data?.currentPersonId ?? null} online={!offline} owner={owner} /></section><SplitDefaultSettings groupId={id} userId={userId} members={members} value={splitDefault} online={!offline} owner={owner} onChanged={(next) => { setSplitDefault(next); void invalidateForMutation.splitDefaultChanged(id, next, userId, captureSessionGeneration()); }} />{owner ? <AddFriendForm groupId={id} userId={userId} online={!offline} /> : null}{owner ? <OwnerMemberControls groupId={id} userId={userId} members={members} online={!offline} /> : null}<GroupExports groupId={id} online={!offline} /><div id="settings" tabIndex={-1}><GroupSettings group={group} groupId={id} userId={userId} online={!offline} role={owner ? 'owner' : 'member'} onDeleted={() => nav('/')} onLeft={() => nav('/')} /></div></Layout>;
+  const contentProps = { group, groupId: id, userId, members, currentPersonId: groupResource.data?.currentPersonId ?? null, online, offline, groupResource, splitDefault, onSplitDefaultChanged: (next: GroupSplitDefault | null) => { setSplitDefault(next); void invalidateForMutation.splitDefaultChanged(id, next, userId, captureSessionGeneration()); }, onDeleted: () => nav('/'), onLeft: () => nav('/') };
+  return group.role === 'owner' ? <OwnerGroupManagement {...contentProps} /> : <MemberGroupManagement {...contentProps} />;
 }
 
 function GroupOverview() {

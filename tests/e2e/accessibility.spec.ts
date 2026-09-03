@@ -35,8 +35,13 @@ test('owner manage route exposes semantic member rows and owner controls', async
   await expect(members.getByRole('listitem')).toHaveCount(5);
   await expect(members.getByRole('listitem').filter({ hasText: 'Dev User' }).getByRole('button')).toHaveCount(0);
   await expect(members.getByRole('listitem').filter({ hasText: 'Sam Rivera' }).getByRole('button', { name: 'Remove' })).toBeVisible();
-  await expect(page.getByLabel('Invite by email')).toBeVisible();
+  const sam = members.getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await expect(sam.locator('summary')).toHaveText('Add email');
+  await expect(page.getByLabel('Email for Sam Rivera')).toHaveCount(0);
+  await sam.locator('summary').click();
+  await expect(page.getByLabel('Email for Sam Rivera')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Invitations' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Invite a new member' })).toBeVisible();
   await expect(page.getByText('No invitations yet.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Export JSON' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Delete group' })).toBeVisible();
@@ -249,6 +254,7 @@ test('manage route shows loading and then concise offline state', async ({ brows
     await expect(page.locator('.offline-banner')).toContainText('cached group data');
     await expect(page.getByText('Showing cached invitations; they may be out of date. Invitation changes require a connection.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Invite a new member' }).click();
     await expect(page.getByRole('button', { name: 'Invite' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Add friend' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Export JSON' })).toBeDisabled();
@@ -287,6 +293,7 @@ test('cold offline manage route does not fetch uncached owner invitations', asyn
     await expect(page.getByText('Invitations aren’t cached on this device and need a connection')).toBeVisible();
     await expect(page.getByText('Loading…')).toHaveCount(0);
     await expect(page.locator('#invitation-management-error')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Invite a new member' }).click();
     await expect(page.getByRole('button', { name: 'Invite' })).toBeDisabled();
     expect(invitationRequests).toBe(0);
   } finally {

@@ -1435,6 +1435,7 @@ details:not([open]) > :not(summary) {
   min-width: 0;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1444,6 +1445,7 @@ details:not([open]) > :not(summary) {
 .member-row__identity {
   display: grid;
   min-width: 0;
+  order: 1;
   gap: var(--space-1);
 }
 
@@ -1454,6 +1456,7 @@ details:not([open]) > :not(summary) {
 .member-row__actions {
   display: flex;
   min-width: 0;
+  order: 2;
   flex: 0 0 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -1465,6 +1468,9 @@ details:not([open]) > :not(summary) {
 }
 
 .member-email-control {
+  width: 100%;
+  flex: 1 1 100%;
+  order: 3;
   display: grid;
   gap: var(--space-2);
   margin-top: var(--space-2);
@@ -1477,6 +1483,42 @@ details:not([open]) > :not(summary) {
   align-items: end;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.member-email-control details > summary,
+.generic-invitation-disclosure > summary {
+  min-height: 2.75rem;
+  cursor: pointer;
+  color: var(--color-primary-strong);
+  font-weight: 800;
+}
+
+.member-email-control__pending,
+.member-email-control__pending-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.member-email-control__pending {
+  justify-content: space-between;
+}
+
+.member-email-control__pending-actions {
+  flex: 0 0 auto;
+}
+
+.member-email-control__form {
+  margin-top: var(--space-2);
+}
+
+.invitations-panel > .generic-invitation-disclosure {
+  margin-top: var(--space-2);
+}
+
+.invitation-history-row {
+  align-items: flex-start;
 }
 
 .member-email-control .field {
@@ -2300,9 +2342,11 @@ input[inputmode="decimal"] {
 
   .member-row {
     flex-direction: column;
+    gap: var(--space-2);
   }
 
   .member-row__actions {
+    order: 3;
     justify-content: flex-start;
   }
 
@@ -2316,6 +2360,33 @@ input[inputmode="decimal"] {
 
   .allocation-row > input {
     width: 100%;
+  }
+
+  .member-email-control {
+    order: 2;
+  }
+
+  .member-email-control form {
+    display: grid;
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .member-email-control form > button {
+    justify-self: stretch;
+  }
+
+  .member-email-control__pending {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .member-email-control__pending-actions {
+    width: 100%;
+  }
+
+  .member-email-control__pending-actions button {
+    flex: 1 1 8rem;
   }
 }
 
