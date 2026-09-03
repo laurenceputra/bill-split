@@ -1,12 +1,22 @@
-import { test, expect, newAuthenticatedContext, REGISTERED_EMAIL } from './fixtures';
+import { test, expect, newAuthenticatedContext, REGISTERED_EMAIL, BASE_URL } from './fixtures';
 
 const GROUP_ID = '00000000-0000-4000-8000-000000003002';
 const EMPTY_GROUP_ID = '00000000-0000-4000-8000-000000003001';
 
 test('shows targeted participant controls to owners but not regular members', async ({ authenticatedPage, browser }) => {
+  let invitationGets = 0;
+  authenticatedPage.on('request', (request) => {
+    if (request.method() === 'GET' && request.url().includes(`/api/groups/${GROUP_ID}/invitations`)) invitationGets += 1;
+  });
   await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const people = authenticatedPage.getByRole('list', { name: 'Group members' });
+  const sam = people.getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await expect(sam.locator('summary')).toHaveText('Add email');
+  await sam.locator('summary').click();
+  await expect(sam.getByLabel('Email for Sam Rivera')).toBeVisible();
   await expect(authenticatedPage.getByRole('heading', { name: 'Invitations' })).toBeVisible();
-  await expect(authenticatedPage.getByLabel('Ledger-only participant email assignments')).toBeVisible();
+  await expect(authenticatedPage.getByLabel('Generic invitation history')).toHaveCount(0);
+  await expect.poll(() => invitationGets).toBe(1);
 
   const memberContext = await newAuthenticatedContext(browser, REGISTERED_EMAIL);
   const memberPage = await memberContext.newPage();
@@ -14,9 +24,152 @@ test('shows targeted participant controls to owners but not regular members', as
     await memberPage.goto(`/groups/${GROUP_ID}/manage`);
     await expect(memberPage.getByRole('heading', { name: 'Invitations' })).toHaveCount(0);
     await expect(memberPage.getByRole('heading', { name: 'People' })).toBeVisible();
+    await expect(memberPage.getByRole('list', { name: 'Group members' }).locator('summary')).toHaveCount(0);
   } finally {
     await memberContext.close();
   }
+});
+
+test('keeps Add email unavailable while owner invitations are loading', async ({ authenticatedPage }) => {
+  let release!: () => void;
+  const delayed = new Promise<void>((resolve) => { release = resolve; });
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, async (route) => {
+    await delayed;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations: [] }) });
+  });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await authenticatedPage.getByRole('button', { name: 'Invite a new member' }).click();
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeDisabled();
+  await expect(sam).toContainText('Checking invitation status…');
+  await expect(sam.locator('summary')).toHaveCount(0);
+  release();
+  await expect(sam.locator('summary')).toHaveText('Add email');
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeEnabled();
+});
+
+test('keeps Add email unavailable when owner invitations fail to load', async ({ authenticatedPage }) => {
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, async (route) => {
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INVITATIONS_UNAVAILABLE', message: 'Invitation service unavailable' } }) });
+  });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await authenticatedPage.getByRole('button', { name: 'Invite a new member' }).click();
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeDisabled();
+  await expect(sam).toContainText('Email actions unavailable. Retry below.');
+  await expect(sam.locator('summary')).toHaveCount(0);
+  await expect(authenticatedPage.locator('#invitations-error')).toBeVisible();
+});
+
+test('keeps pending targeted invitations in their participant row with change and revoke actions', async ({ authenticatedPage }) => {
+  let revoked = false;
+  const invitation = { id: 'targeted-invitation', groupId: GROUP_ID, email: 'sam-login@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', targetPersonId: '00000000-0000-4000-8000-000000002003' };
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, async (route) => {
+    if (route.request().method() === 'DELETE') {
+      revoked = true;
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations: revoked ? [] : [invitation] }) });
+  });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await expect(sam).toContainText('sam-login@example.com');
+  await expect(sam.getByRole('button', { name: 'Change' })).toBeVisible();
+  await expect(sam.getByRole('button', { name: 'Revoke' })).toBeVisible();
+  await expect(authenticatedPage.getByLabel('Generic invitation history')).toHaveCount(0);
+  authenticatedPage.on('dialog', (dialog) => void dialog.accept());
+  await sam.getByRole('button', { name: 'Revoke' }).click();
+  await expect(sam.locator('summary')).toHaveText('Add email');
+  await expect(authenticatedPage.getByText('sam-login@example.com')).toHaveCount(0);
+});
+
+test('disables targeted mutations during a stale invitation refresh while keeping cached context', async ({ authenticatedPage }) => {
+  let invitationGets = 0;
+  let releaseRefresh!: () => void;
+  let refreshFailed = false;
+  const refresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const targetInvitation = { id: 'targeted-invitation', groupId: GROUP_ID, email: 'sam-login@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', targetPersonId: '00000000-0000-4000-8000-000000002003' };
+  const genericInvitation = { id: 'generic-invitation', groupId: GROUP_ID, email: 'new-member@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' };
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, async (route) => {
+    if (route.request().method() === 'DELETE') {
+      refreshFailed = true;
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
+    invitationGets += 1;
+    if (invitationGets > 1) {
+      await refresh;
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INVITATIONS_REFRESH_FAILED', message: 'Invitation refresh failed' } }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations: [targetInvitation, genericInvitation] }) });
+  });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  const priya = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Priya Shah' });
+  const genericHistory = authenticatedPage.getByLabel('Generic invitation history');
+  await authenticatedPage.getByRole('button', { name: 'Invite a new member' }).click();
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeEnabled();
+  await expect(sam.getByRole('button', { name: 'Change' })).toBeEnabled();
+  await expect(genericHistory.getByRole('button', { name: 'Revoke' })).toBeEnabled();
+  await expect(priya.locator('summary')).toHaveText('Add email');
+  authenticatedPage.on('dialog', (dialog) => void dialog.accept());
+  await genericHistory.getByRole('button', { name: 'Revoke' }).click();
+  await expect.poll(() => refreshFailed).toBe(true);
+  await expect(sam).toContainText('Pending invitation for sam-login@example.com');
+  await expect(sam.getByRole('button', { name: 'Change' })).toBeDisabled();
+  await expect(sam.getByRole('button', { name: 'Revoke' })).toBeDisabled();
+  await expect(priya.getByRole('button', { name: 'Add email' })).toBeDisabled();
+  await expect(genericHistory.getByRole('button', { name: 'Revoke' })).toBeDisabled();
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeDisabled();
+  await expect(authenticatedPage.getByText('Refreshing invitations…')).toBeVisible();
+  releaseRefresh();
+  await expect(authenticatedPage.getByText('Showing cached invitations; they may be out of date.')).toBeVisible();
+  await expect(authenticatedPage.getByRole('button', { name: 'Retry' })).toBeVisible();
+  await expect(sam.getByRole('button', { name: 'Change' })).toBeDisabled();
+  await expect(sam.getByRole('button', { name: 'Revoke' })).toBeDisabled();
+  await expect(priya.getByRole('button', { name: 'Add email' })).toBeDisabled();
+  await expect(genericHistory.getByRole('button', { name: 'Revoke' })).toBeDisabled();
+  await expect(authenticatedPage.getByRole('button', { name: 'Invite' })).toBeDisabled();
+});
+
+test('saves an email from the participant disclosure as a targeted invitation', async ({ authenticatedPage }) => {
+  let savedBody: unknown;
+  let saved = false;
+  const targetPersonId = '00000000-0000-4000-8000-000000002003';
+  const invitation = { id: 'targeted-invitation', groupId: GROUP_ID, email: 'sam-login@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', targetPersonId };
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/members/${targetPersonId}/invitation`, async (route) => {
+    savedBody = route.request().postDataJSON();
+    saved = true;
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ invitation }) });
+  });
+  await authenticatedPage.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations: saved ? [invitation] : [] }) });
+  });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await sam.locator('summary').click();
+  await sam.getByLabel('Email for Sam Rivera').fill('sam-login@example.com');
+  await sam.getByRole('button', { name: 'Save email' }).click();
+  await expect.poll(() => savedBody).toEqual({ email: 'sam-login@example.com' });
+  await expect(sam).toContainText('Pending invitation for sam-login@example.com');
+});
+
+test('stacks targeted email fields and actions within a member row on narrow screens', async ({ authenticatedPage }) => {
+  await authenticatedPage.setViewportSize({ width: 390, height: 844 });
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+  await sam.locator('summary').click();
+  const layout = await sam.evaluate((row) => {
+    const form = row.querySelector('form');
+    const input = row.querySelector('input[type="email"]');
+    const button = form?.querySelector('button');
+    return { formDirection: form ? getComputedStyle(form).flexDirection || getComputedStyle(form).gridTemplateColumns : '', inputBottom: input?.getBoundingClientRect().bottom, buttonTop: button?.getBoundingClientRect().top, rowRight: row.getBoundingClientRect().right, viewport: window.innerWidth };
+  });
+  expect(layout.formDirection).toContain('minmax');
+  expect(layout.buttonTop).toBeGreaterThanOrEqual(layout.inputBottom || 0);
+  expect(layout.rowRight).toBeLessThanOrEqual(layout.viewport);
 });
 
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {

@@ -183,9 +183,16 @@ describe('responsive navigation layout contract', () => {
   it('keeps targeted participant email controls owner-only and group-scoped', () => {
     expect(appSource).toContain('function TargetedInvitationControl');
     expect(appSource).toContain('createTargetedGroupInvitation(groupId, member.personId, email.trim())');
-    expect(appSource).toContain('currentPersonId={groupResource.data?.currentPersonId ?? null}');
+    expect(appSource).toContain('invitationsResource={invitationsResource}');
+    expect(appSource).toContain('function OwnerGroupManagement');
+    expect(appSource).toContain('getOwnerInvitations(groupId, signal)');
+    expect(appSource).toContain('invitationsResource?.data !== undefined ? <TargetedInvitationControl');
+    expect(appSource).toContain('summary>Add email</summary>');
+    expect(appSource).toContain('filter((invitation) => invitation.targetPersonId == null)');
+    expect(appSource).toContain('currentPersonId={currentPersonId}');
     expect(appSource).toContain('expensePersonLabel(payer.personId)');
     expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.member-email-control form\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
   });
 
   it('defines every spacing token referenced by the authored stylesheets', () => {
