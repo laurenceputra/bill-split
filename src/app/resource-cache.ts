@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { invalidateCachedGroups, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { invalidateCachedGroups, updateGroupSnapshot } from './idb';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
 /** The shortest freshness window used by the application. */

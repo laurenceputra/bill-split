@@ -25,9 +25,8 @@ class RecoveryDb {
 }
 
 class SessionStatement {
-  private args: unknown[] = [];
   constructor(private readonly sql: string, private readonly db: SessionDb) {}
-  bind(...args: unknown[]) { this.args = args; return this; }
+  bind(..._args: unknown[]) { return this; }
   async first() {
     if (this.sql.includes('s.id,s.user_id')) return this.db.sessionExpired ? null : {
       id: 'session-current', user_id: 'user-current', created_at: '2026-08-01T00:00:00.000Z', last_activity_at: this.db.lastActivity,

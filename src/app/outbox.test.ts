@@ -412,8 +412,8 @@ describe('durable expense outbox', () => {
   it('uses bounded exponential retry scheduling without a hot loop', async () => {
     expect(retryDelay(1)).toBe(1_000);
     expect(retryDelay(20)).toBe(60_000);
-    let scheduledDelay = 0; let scheduledCallback: (() => void) | undefined;
-    const restoreScheduler = setRetrySchedulerForTests((callback, delay) => { scheduledCallback = callback; scheduledDelay = delay; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+    let scheduledDelay = 0;
+    const restoreScheduler = setRetrySchedulerForTests((_callback, delay) => { scheduledDelay = delay; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
     const calls: string[] = [];
     try {
       vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => { const actual = new Request(typeof request === 'string' ? new URL(request, 'https://test.local') : request, init); calls.push(actual.url); if (actual.url.endsWith('/api/me')) return response({ id: 'user-a', email: 'a@example.com', personId: 'person-a' }); return response({}, 503); }));

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { accountDeletionInput, assertFinancialInput, categorySuggestionInput, currency, date, expenseInput, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
+import { accountDeletionInput, categorySuggestionInput, currency, date, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';

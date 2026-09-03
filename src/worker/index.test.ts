@@ -107,11 +107,11 @@ class OverflowStatement extends Statement {
 const scheduledRow = { id: '00000000-0000-0000-0000-000000000010', group_id: '00000000-0000-0000-0000-000000000009', description: 'Rent', amount_minor: 1000, currency: 'USD', start_date: '2026-01-01', end_date: null, frequency: 'monthly', interval_count: 1, weekdays_json: '[]', timezone: 'UTC', status: 'active', blocked_reason: null, next_occurrence_date: '2026-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1, client_operation_id: null };
 class ScheduledRouteDb {
   batches: unknown[][] = [];
-  prepare(sql: string) { return new ScheduledRouteStatement(this, sql); }
+  prepare(sql: string) { return new ScheduledRouteStatement(sql); }
   async batch(statements: unknown[]) { this.batches.push(statements); return []; }
 }
 class ScheduledRouteStatement extends Statement {
-  constructor(private readonly db: ScheduledRouteDb, sql: string) { super(sql); }
+  constructor(sql: string) { super(sql); }
   async first<T>() {
     if (this.sql.includes('deleted_email_hash')) return null;
     if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' } as T;
@@ -146,10 +146,6 @@ class ProjectionFailureStatement extends Statement {
 class ProjectionFailureDb {
   prepare(sql: string) { return new ProjectionFailureStatement(sql); }
   async batch() { throw new Error('monthly summary unavailable'); }
-}
-class MutationDb {
-  prepare(sql: string) { return new Statement(sql); }
-  async batch(_statements: unknown[]) { return []; }
 }
 class IdentifiedStatement extends Statement {
   constructor(sql: string, private readonly userId: string) { super(sql); }

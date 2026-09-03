@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, normalizeExpenseSplitArrangement, normalizeSinglePayer, previewAllocation, resolveGroupSplitDefault, sameGroupSplitArrangement, settlementSuggestion, settlementSuggestionFingerprint, type FormSaveFence } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, effectiveGroupSplitDefault, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, isSplitDefaultSaveLockedForScope, neutralAllocationPreview, normalizeExpenseSplitArrangement, normalizeSinglePayer, previewAllocation, releaseSplitDefaultSaveLock, resolveGroupSplitDefault, sameGroupSplitArrangement, settlementSuggestion, settlementSuggestionFingerprint, splitDefaultChoiceState, splitDefaultSaveOutcome, type FormSaveFence } from './form-helpers';
 import type { Balances, GroupMember } from '../shared/types';
 
 const member = (personId: string, name = personId): GroupMember => ({ personId, name, joinedAt: '', role: 'member' });
@@ -32,10 +32,33 @@ describe('expense form helpers', () => {
     expect(shares.error).toContain('safe amount calculation');
     expect(Object.values(shares.allocations).every(Number.isSafeInteger)).toBe(true);
   });
+
+  it('does not calculate allocations without a usable expense amount', () => {
+    expect(neutralAllocationPreview()).toMatchObject({ allocations: {}, error: undefined, remainingMinor: null });
+  });
   it('falls back to equal for defaults containing a removed member', () => {
     const value = { method: 'percentage' as const, personIds: ['one', 'gone'], values: [5000, 5000] };
     expect(resolveGroupSplitDefault(value, members)).toMatchObject({ method: 'equal', selected: ['one', 'two'], applied: false, invalid: true });
     expect(groupSplitDefaultSummary(value, members)).toMatchObject({ warning: true });
+  });
+
+  it('uses the current equal arrangement when no valid default is saved', () => {
+    expect(effectiveGroupSplitDefault(null, members)).toEqual({ method: 'equal', personIds: ['one', 'two'] });
+    expect(effectiveGroupSplitDefault({ method: 'percentage', personIds: ['gone'], values: [10000] }, members)).toEqual({ method: 'equal', personIds: ['one', 'two'] });
+  });
+
+  it('offers immediate default choices only for saveable one-time differences', () => {
+    const effective = { method: 'equal' as const, personIds: ['one', 'two'] };
+    const custom = { method: 'percentage' as const, personIds: ['one', 'two'], values: [2500, 7500] };
+    const effectivePercentage = { method: 'percentage' as const, personIds: ['one', 'two'], values: [2500, 7500] };
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'percentage', saveable: true, draft: custom, effective, selected: ['one', 'two'], values: { one: '25', two: '75' }, members })).toEqual({ returnToDefault: true, makeNewDefault: true });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'equal', saveable: true, draft: effective, effective, selected: ['one', 'two'], values: {}, members })).toEqual({ returnToDefault: false, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'exact', saveable: false, draft: null, effective, selected: ['one', 'two'], values: { one: '', two: '' }, members })).toEqual({ returnToDefault: true, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'percentage', saveable: false, draft: null, effective, selected: ['one', 'two'], values: { one: '', two: '' }, members })).toEqual({ returnToDefault: true, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'percentage', saveable: false, draft: custom, effective, selected: ['one', 'two'], values: { one: '25', two: '75' }, members })).toEqual({ returnToDefault: true, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: false, method: 'percentage', saveable: false, draft: null, effective: effectivePercentage, selected: ['one', 'two'], values: { one: '25', two: '' }, members })).toEqual({ returnToDefault: true, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: true, scheduleMode: true, method: 'percentage', saveable: true, draft: custom, effective, selected: ['one', 'two'], values: { one: '25', two: '75' }, members })).toEqual({ returnToDefault: false, makeNewDefault: false });
+    expect(splitDefaultChoiceState({ newEntry: false, scheduleMode: false, method: 'percentage', saveable: true, draft: custom, effective, selected: ['one', 'two'], values: { one: '25', two: '75' }, members })).toEqual({ returnToDefault: false, makeNewDefault: false });
   });
 
   it('normalizes arrangements by deterministic member order and compares allocations', () => {
@@ -68,6 +91,20 @@ describe('expense form helpers', () => {
     expect(isCurrentSplitDefaultSave(captured, current)).toBe(false);
     expect(isCurrentSplitDefaultSave(captured, { ...current, token: captured.token })).toBe(true);
     expect(isCurrentSplitDefaultSave(captured, { ...current, token: captured.token, sessionGeneration: 5 })).toBe(false);
+  });
+
+  it('reconciles a save response without applying it to an edited draft', () => {
+    const request = { token: 2, scope: 'user:group-a:expense:new', sessionGeneration: 4 };
+    expect(splitDefaultSaveOutcome(request, request, 7, 7)).toEqual({ requestCurrent: true, draftCurrent: true });
+    expect(splitDefaultSaveOutcome(request, request, 7, 8)).toEqual({ requestCurrent: true, draftCurrent: false });
+    expect(splitDefaultSaveOutcome(request, { ...request, token: 3 }, 7, 7)).toEqual({ requestCurrent: false, draftCurrent: false });
+  });
+
+  it('locks split-default saves per scope and does not release a newer scope lock', () => {
+    expect(isSplitDefaultSaveLockedForScope('route-a', 'route-a')).toBe(true);
+    expect(isSplitDefaultSaveLockedForScope('route-a', 'route-b')).toBe(false);
+    expect(releaseSplitDefaultSaveLock('route-a', 'route-a')).toBeUndefined();
+    expect(releaseSplitDefaultSaveLock('route-b', 'route-a')).toBe('route-b');
   });
 });
 

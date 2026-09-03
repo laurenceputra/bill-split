@@ -80,7 +80,6 @@ describe('persisted logout coordination', () => {
   });
 
   it('keeps a complete target-user verification alive across a simultaneous account-switch message', async () => {
-    const values = new Map<string, string>();
     const channels: Array<{ listener?: (event: MessageEvent) => void; emit: (data: unknown) => void }> = [];
     class FakeChannel {
       listener?: (event: MessageEvent) => void;

@@ -451,7 +451,7 @@ class LifecycleStatement {
 
 class DeletedMutationDb {
   batches: Array<Array<string>> = [];
-  prepare(sql: string) { return new DeletedMutationStatement(this, sql); }
+  prepare(sql: string) { return new DeletedMutationStatement(sql); }
   async batch(statements: DeletedMutationStatement[]) {
     this.batches.push(statements.map((statement) => statement.sql));
     return statements.map(() => ({ meta: { changes: 0 } }));
@@ -459,7 +459,7 @@ class DeletedMutationDb {
 }
 class DeletedMutationStatement {
   args: unknown[] = [];
-  constructor(private readonly db: DeletedMutationDb, readonly sql: string) {}
+  constructor(readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
     if (this.sql.includes('SELECT deleted_at FROM users')) return { deleted_at: '2026-01-01T00:00:00.000Z' } as T;
@@ -530,14 +530,14 @@ class TargetedAcceptanceStatement {
 
 class StaleRemovalDb {
   invitationSql = '';
-  prepare(sql: string) { return new StaleRemovalStatement(this, sql); }
+  prepare(sql: string) { return new StaleRemovalStatement(sql); }
   async batch(statements: StaleRemovalStatement[]) {
     this.invitationSql = statements.find((statement) => statement.sql.includes('UPDATE group_invitations'))?.sql ?? '';
     return statements.map(() => ({ meta: { changes: 0 } }));
   }
 }
 class StaleRemovalStatement {
-  constructor(private readonly db: StaleRemovalDb, readonly sql: string) {}
+  constructor(readonly sql: string) {}
   bind(..._args: unknown[]) { return this; }
   async first<T>() {
     if (this.sql.includes('SELECT role,deleted_at')) return { role: 'member', deleted_at: null } as T;
