@@ -180,6 +180,14 @@ describe('responsive navigation layout contract', () => {
     expect(proofItemRule).not.toContain('padding-top');
   });
 
+  it('keeps targeted participant email controls owner-only and group-scoped', () => {
+    expect(appSource).toContain('function TargetedInvitationControl');
+    expect(appSource).toContain('createTargetedGroupInvitation(groupId, member.personId, email.trim())');
+    expect(appSource).toContain('currentPersonId={groupResource.data?.currentPersonId ?? null}');
+    expect(appSource).toContain('expensePersonLabel(payer.personId)');
+    expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
+  });
+
   it('defines every spacing token referenced by the authored stylesheets', () => {
     const references = [...`${css}\n${baseCss}`.matchAll(/var\(--(space-\d+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].every((token) => new RegExp(`--${token}\\s*:`).test(tokensCss))).toBe(true);

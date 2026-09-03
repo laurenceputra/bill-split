@@ -1,7 +1,52 @@
-import { test, expect } from './fixtures';
+import { test, expect, newAuthenticatedContext, REGISTERED_EMAIL } from './fixtures';
 
 const GROUP_ID = '00000000-0000-4000-8000-000000003002';
 const EMPTY_GROUP_ID = '00000000-0000-4000-8000-000000003001';
+
+test('shows targeted participant controls to owners but not regular members', async ({ authenticatedPage, browser }) => {
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  await expect(authenticatedPage.getByRole('heading', { name: 'Invitations' })).toBeVisible();
+  await expect(authenticatedPage.getByLabel('Ledger-only participant email assignments')).toBeVisible();
+
+  const memberContext = await newAuthenticatedContext(browser, REGISTERED_EMAIL);
+  const memberPage = await memberContext.newPage();
+  try {
+    await memberPage.goto(`/groups/${GROUP_ID}/manage`);
+    await expect(memberPage.getByRole('heading', { name: 'Invitations' })).toHaveCount(0);
+    await expect(memberPage.getByRole('heading', { name: 'People' })).toBeVisible();
+  } finally {
+    await memberContext.close();
+  }
+});
+
+test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {
+  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
+  const existingAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'empty@example.com' };
+  const laterAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'target-created-after@example.com' };
+  const samId = '00000000-0000-4000-8000-000000002003';
+  const priyaId = '00000000-0000-4000-8000-000000002004';
+
+  const existingInviteResponse = await request.post(`/api/groups/${GROUP_ID}/members/${samId}/invitation`, { headers: ownerHeaders, data: { email: 'empty@example.com' } });
+  expect(existingInviteResponse.status(), await existingInviteResponse.text()).toBe(201);
+  const existingInvite = (await existingInviteResponse.json()) as { invitation: { id: string; targetPersonId: string } };
+  expect(existingInvite.invitation.targetPersonId).toBe(samId);
+  const existingAccepted = await request.post(`/api/invitations/${existingInvite.invitation.id}/accept`, { headers: existingAccountHeaders });
+  expect(existingAccepted.status(), await existingAccepted.text()).toBe(200);
+
+  const laterInviteResponse = await request.post(`/api/groups/${GROUP_ID}/members/${priyaId}/invitation`, { headers: ownerHeaders, data: { email: 'target-created-after@example.com' } });
+  expect(laterInviteResponse.status(), await laterInviteResponse.text()).toBe(201);
+  const laterInvite = (await laterInviteResponse.json()) as { invitation: { id: string; targetPersonId: string } };
+  expect(laterInvite.invitation.targetPersonId).toBe(priyaId);
+  const laterAccepted = await request.post(`/api/invitations/${laterInvite.invitation.id}/accept`, { headers: laterAccountHeaders });
+  expect(laterAccepted.status(), await laterAccepted.text()).toBe(200);
+
+  const group = await request.get(`/api/groups/${GROUP_ID}`, { headers: laterAccountHeaders });
+  expect(group.status(), await group.text()).toBe(200);
+  const members = (await group.json()) as { members: Array<{ personId: string; linked?: boolean; email?: string | null }> };
+  expect(members.members.find((member) => member.personId === samId)).toMatchObject({ personId: samId, linked: true, email: 'empty@example.com' });
+  expect(members.members.find((member) => member.personId === priyaId)).toMatchObject({ personId: priyaId, linked: true, email: 'target-created-after@example.com' });
+});
 
 test('does not grant an existing registered email group access until its invitation is accepted', async ({ request }) => {
   const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };

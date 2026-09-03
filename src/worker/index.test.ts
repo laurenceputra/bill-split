@@ -12,6 +12,15 @@ class Statement {
 class MemberStatement extends Statement {
   async first() { if (this.sql.includes('deleted_email_hash')) return null; if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
 }
+class CurrentPersonStatement extends MemberStatement {
+  async first(): Promise<any> {
+    if (this.sql.includes('SELECT gm.person_id')) return { person_id: 'person-group-scoped' };
+    return super.first();
+  }
+}
+class CurrentPersonDb {
+  prepare(sql: string) { return new CurrentPersonStatement(sql); }
+}
 class TransactionRouteStatement extends MemberStatement {
   async all<T>() {
     if (this.sql.includes('WITH transaction_rows')) return { results: [
@@ -261,6 +270,7 @@ describe('worker boundary', () => {
     expect(rateLimitOperationFor('POST', '/api/groups')).toBe('group-create');
     expect(rateLimitOperationFor('POST', '/api/friends')).toBe('friend-create');
     expect(rateLimitOperationFor('POST', '/api/groups/group-1/invitations')).toBe('invitation-create');
+    expect(rateLimitOperationFor('POST', '/api/groups/group-1/members/person-1/invitation')).toBe('invitation-target-create');
     expect(rateLimitOperationFor('POST', '/api/invitations/inv-1/accept')).toBe('invitation-accept');
     expect(rateLimitOperationFor('POST', '/api/invitations/inv-1/reject')).toBe('invitation-reject');
     expect(rateLimitOperationFor('POST', '/api/groups/group-1/expenses')).toBeUndefined();
@@ -404,6 +414,16 @@ describe('worker boundary', () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
     expect(response.status).toBe(200);
     expect(((await response.json()) as any).group).toMatchObject({ role: 'member', currency: 'USD' });
+  });
+  it('keeps targeted invitations owner-only', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/members/00000000-0000-0000-0000-000000000004/invitation', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'friend@example.com' }) }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: 'OWNER_REQUIRED' } });
+  });
+  it('returns the current person for the authenticated group membership rather than /api/me identity', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new CurrentPersonDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect((await response.json() as any).currentPersonId).toBe('person-group-scoped');
   });
   it('serves the authorized transaction route with discriminated items and a cursor', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/transactions?limit=1', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveLastVerifiedClerkUserId, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -469,6 +469,49 @@ describe('frontend API errors and cache fallback', () => {
     }));
     const result = await getGroup('group-a');
     expect(result.historicalParticipants).toEqual(expect.arrayContaining([expect.objectContaining({ personId: 'person-removed', status: 'removed' })]));
+  });
+
+  it('uses the group-scoped current person and persists it with the cached group', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request), 'https://billsplit.test').pathname;
+      if (path === '/api/me') return json({ id: 'user-a', email: 'a@example.com', personId: 'person-global' }, 200, 'user-a');
+      return json({ group: { id: 'group-a', name: 'Trip', currency: 'USD', createdAt: '', updatedAt: '' }, members: [{ personId: 'person-target', name: 'A', joinedAt: '', role: 'member', linked: true }], historicalParticipants: [], splitDefault: null, currentPersonId: 'person-target' }, 200, 'user-a');
+    }));
+
+    const result = await getGroup('group-a');
+    expect(result.currentPersonId).toBe('person-target');
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.currentPersonId).toBe('person-target');
+  });
+
+  it('fails closed for a legacy cached group when the authenticated person is absent', async () => {
+    await updateGroupSnapshot('user-a', 'group-a', {
+      group: { id: 'group-a', name: 'Trip', currency: 'USD', createdAt: '', updatedAt: '' },
+      members: [
+        { personId: 'person-other-a', name: 'Other A', joinedAt: '', role: 'member', linked: true },
+        { personId: 'person-other-b', name: 'Other B', joinedAt: '', role: 'member', linked: true },
+      ],
+    });
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request), 'https://billsplit.test').pathname;
+      if (path === '/api/me') return json({ id: 'user-a', email: 'a@example.com', personId: 'person-missing' }, 200, 'user-a');
+      throw new TypeError('offline');
+    }));
+
+    const result = await getGroup('group-a');
+    expect(result.currentPersonId).toBeNull();
+    await establishAuthenticatedMutationSession();
+  });
+
+  it('sends targeted invitations to the owner-only participant endpoint', async () => {
+    await establishAuthenticatedMutationSession();
+    const calls: Array<{ path: string; method: string; body?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(request), 'https://billsplit.test');
+      calls.push({ path: url.pathname, method: init?.method || 'GET', body: init?.body as string | undefined });
+      return json({ invitation: { id: 'inv-1' } }, 201, 'user-a');
+    }));
+    await expect(createTargetedGroupInvitation('group-a', 'person-a', 'new@example.com')).resolves.toEqual({ invitation: { id: 'inv-1' } });
+    expect(calls).toEqual([{ path: '/api/groups/group-a/members/person-a/invitation', method: 'POST', body: JSON.stringify({ email: 'new@example.com' }) }]);
   });
 
   it('uses scheduled expense routes online without entering the expense outbox', async () => {

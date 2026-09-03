@@ -27,6 +27,7 @@ const applicationSessionsSql = readFileSync(new URL('../../migrations/0022_appli
 const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split_defaults.sql', moduleUrl), 'utf8');
 const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/0024_incremental_projection_totals.sql', moduleUrl), 'utf8');
 const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_expense_suggestion_lookup.sql', moduleUrl), 'utf8');
+const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
@@ -276,5 +277,15 @@ describe('expense suggestion lookup migration', () => {
     expect(expenseSuggestionLookupSql).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP INDEX|CREATE TRIGGER/i);
     expect(repositorySql).toMatch(/NOT EXISTS \(SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence\.expense_id=e\.id\)/i);
     expect(incrementalProjectionTotalsSql).toMatch(/idx_scheduled_occurrence_expense_purge ON scheduled_occurrences\(expense_id\)/i);
+  });
+});
+
+describe('targeted invitation migration', () => {
+  it('adds a nullable participant target and one pending invitation per target', () => {
+    expect(targetedInvitationSql).toMatch(/ALTER TABLE group_invitations ADD COLUMN target_person_id TEXT REFERENCES people\(id\)/i);
+    expect(targetedInvitationSql).toMatch(/CREATE INDEX[\s\S]*idx_group_invitations_target[\s\S]*group_id,target_person_id,created_at DESC/i);
+    expect(targetedInvitationSql).toMatch(/CREATE UNIQUE INDEX[\s\S]*idx_group_invitations_pending_target[\s\S]*WHERE target_person_id IS NOT NULL[\s\S]*revoked_at IS NULL[\s\S]*accepted_at IS NULL[\s\S]*rejected_at IS NULL/i);
+    expect(targetedInvitationSql).toMatch(/UPDATE group_invitations[\s\S]*SET revoked_at[\s\S]*keeper\.target_person_id IS NOT NULL/i);
+    expect(targetedInvitationSql).toMatch(/CREATE UNIQUE INDEX[\s\S]*idx_group_invitations_pending_email[\s\S]*ON group_invitations\(group_id,email_normalized\)/i);
   });
 });
