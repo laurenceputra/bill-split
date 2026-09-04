@@ -153,7 +153,17 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
     const modalIsVisible = Boolean(modal && visible(modal));
     const auditTarget = (element: Element) => visible(element) && !element.matches('.skip-link') && !(modalIsVisible && !modal?.contains(element));
     if (touchViewport) {
-      const tapTargets = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role="button"]')).filter(auditTarget);
+      const tapTargets = Array.from(document.querySelectorAll('a,button,input,select,textarea,summary,[role="button"]')).filter(auditTarget).filter((element) => {
+        // The native checkbox/radio is intentionally smaller than its label.
+        // Audit the label's hit area instead of reporting the visual input.
+        if (!element.matches('input[type="checkbox"],input[type="radio"]')) return true;
+        const label = element.closest('label');
+        return !label || boxOf(label).width < 44 || boxOf(label).height < 44;
+      });
+      for (const label of Array.from(document.querySelectorAll('label:has(> input[type="checkbox"]),label:has(> input[type="radio"])')).filter(auditTarget)) {
+        const box = boxOf(label);
+        if (box.width < 44 || box.height < 44) add('project-touch-target-policy', 'minor', `Project touch-target policy: checkbox/radio label is ${Math.round(box.width)}×${Math.round(box.height)}px; project minimum is 44×44px`, selector(label), Math.min(box.width, box.height));
+      }
       for (const element of tapTargets) {
         const box = boxOf(element);
         if (box.width < 44 || box.height < 44) add('project-touch-target-policy', 'minor', `Project touch-target policy: interactive target is ${Math.round(box.width)}×${Math.round(box.height)}px; project minimum is 44×44px`, selector(element), Math.min(box.width, box.height));
@@ -495,6 +505,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   }
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
     'The 44×44 policy is the project touch-target policy and is audited only at touch/mobile/tablet widths (<896px), not as a universal standards failure.',
+    'Playwright cannot reliably inject CSS env(safe-area-inset-*) values into Chromium; source assertions cover the safe-area contracts, while real-device inset behavior remains to be checked on notched iOS/Android hardware.',
     'Payer modal coverage is exercised at 390px and 768px; 895px, 896px, and 1440px modal states are not opened.',
     'The matrix reports broad route/fixture coverage separately from actual geometry violations. Findings from a few routes do not establish a global architecture defect.',
   ]);
@@ -577,6 +588,7 @@ test('intercepted loading, API error, offline, and modal states render their int
   }
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
     'Intercepted loading, API-error, and offline states are covered at 390px and 768px only; wider route states use the normal matrix.',
+    'The schedule disclosure state matrix uses bounded fixture/interception coverage at 390px; populated disclosure geometry is exercised across the full responsive matrix.',
     'Payer modal coverage is touch/mobile-tablet only (390px and 768px) because the matrix does not open it at wider viewports.',
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The intercepted-state audit must not contain critical or major geometry findings').toEqual([]);

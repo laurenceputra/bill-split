@@ -587,7 +587,7 @@ type ScheduleListProps = { groupId: string; schedules: ScheduledExpense[]; resou
 function CompactScheduleList(props: ScheduleListProps) {
   const active = props.schedules.filter((schedule) => schedule.status === 'active');
   const next = active.map((schedule) => schedule.nextOccurrenceDate).filter((date): date is string => Boolean(date)).sort()[0];
-  return <section className="scheduled-summary" aria-labelledby="scheduled-summary-heading"><div className="section-title"><h2 id="scheduled-summary-heading">Scheduled expenses</h2><span className="muted">{active.length} active{next ? ` · Next ${formatScheduleDate(next)}` : ''}</span></div><details><summary>View scheduled expenses and actions</summary><ScheduleList {...props} /></details></section>;
+  return <section className="scheduled-summary" aria-labelledby="scheduled-summary-heading"><div className="section-title"><h2 id="scheduled-summary-heading">Scheduled expenses</h2><span className="muted">{active.length} active{next ? ` · Next ${formatScheduleDate(next)}` : ''}</span></div><details><summary>View scheduled expenses and actions</summary><div className="schedule-list-content"><ScheduleList {...props} /></div></details></section>;
 }
 
 function ScheduleList({ groupId, schedules: initialSchedules, resource, online, userId }: ScheduleListProps) {

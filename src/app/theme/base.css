@@ -89,7 +89,7 @@ button,
 input,
 select,
 textarea {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
 }
 
 input,
@@ -116,7 +116,8 @@ textarea {
 select {
   -webkit-appearance: none;
   appearance: none;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
+  /* Keep the native caret clearance separate from flow spacing tokens. */
   padding: 0.65rem 2.5rem 0.65rem 0.875rem;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%2373788f' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position: right 0.875rem center;
