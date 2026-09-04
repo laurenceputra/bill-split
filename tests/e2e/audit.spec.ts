@@ -84,17 +84,20 @@ const apiPaths = {
   globalTransactions: '/api/transactions',
   scheduledExpenses: (id: string) => `/api/groups/${id}/scheduled-expenses`,
   categories: '/api/categories',
+  invitations: (id: string) => `/api/groups/${id}/invitations`,
   expense: (id: string) => `/api/expenses/${id}`,
   activity: (_id: string) => '/api/activity',
 };
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups];
 const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id)];
+const groupManagementApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.invitations(id)];
 const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
   { name: 'empty-home', path: '/', auth: EMPTY_EMAIL, context: 'Home / empty groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'No groups yet', apiPaths: privateHomeApis } },
   { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
+  { name: 'group-management', path: `/groups/${ids.rich}/manage`, auth: DEV_EMAIL, context: 'GroupManagement / owner people, invitations, and split-default controls', expected: { mode: 'normal', heading: 'Manage group', content: 'People', apiPaths: groupManagementApis(ids.rich) } },
   { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, finalPath: `/activity?group=${ids.rich}&view=transactions`, auth: DEV_EMAIL, context: 'Legacy transaction route / canonical History transactions tab fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.group(ids.rich), apiPaths.globalTransactions, apiPaths.categories] } },
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
@@ -456,6 +459,20 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
         await assertRendered(page, scenario, observations);
         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
         await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+        if (scenario.name === 'group-management') {
+          try {
+            const mateo = page.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Mateo Silva' });
+            await expect(mateo.locator('summary')).toHaveText('Add email');
+            await mateo.locator('summary').click();
+            await expect(mateo.getByLabel('Email for Mateo Silva')).toBeVisible();
+            const expandedScenario: Scenario = { ...scenario, name: 'group-management-add-email', context: 'GroupManagement / Mateo Silva (ledger-only person 002005) Add email disclosure open', expected: { ...scenario.expected } };
+            await assertRendered(page, expandedScenario, observations);
+            coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [add email]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+            await reportForPage(page, expandedScenario, `${scenario.path} [add email]`, viewport, artifactDirectory, findings, failures);
+          } catch (error) {
+            failures.push({ scenarioName: 'group-management-add-email', authState: authState(scenario.auth), route: `${scenario.path} [add email]`, viewport, detail: `Add-email disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+          }
+        }
         if (scenario.name === 'expense-form' && viewport.width <= 768) {
           try {
             await page.locator('.summary-row').click();
