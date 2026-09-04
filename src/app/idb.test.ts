@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
 import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
@@ -206,7 +206,7 @@ describe('user-scoped IndexedDB', () => {
     } finally {
       rollbackSessionLogout(logoutGeneration, false);
     }
-    expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined();
+    await vi.waitFor(async () => expect(await readGroupSnapshot('user-a', 'group-a')).toBeUndefined());
   });
 
   it('rejects late groups, ledger snapshots, and detail writes after one mutation generation advances', async () => {

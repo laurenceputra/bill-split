@@ -222,17 +222,34 @@ To create the single-line build secret value on Linux, use
    but never contains their values:
 
    ```sh
-   npx wrangler secret put CLERK_SECRET_KEY --config wrangler.deploy.toml
-   npx wrangler secret put IDENTITY_TOMBSTONE_KEY --config wrangler.deploy.toml
-   ```
+    npx wrangler secret put CLERK_SECRET_KEY --config wrangler.deploy.toml
+    npx wrangler secret put IDENTITY_TOMBSTONE_KEY --config wrangler.deploy.toml
+    npx wrangler secret put VAPID_PRIVATE_KEY --config wrangler.deploy.toml
+    npx wrangler secret put PUSH_SUBSCRIPTION_ENCRYPTION_KEY --config wrangler.deploy.toml
+    ```
 
    `IDENTITY_TOMBSTONE_KEY` is a stable production secret used only for keyed
    HMAC-SHA-256 deletion tombstones; do not derive it from or rotate it with a
-   Clerk secret. `CLERK_SECRET_KEY` is required by the installed Clerk backend
+    Clerk secret. `CLERK_SECRET_KEY` is required by the installed Clerk backend
    client even when `CLERK_JWT_KEY` enables networkless token verification.
    Set the same `VITE_CLERK_PUBLISHABLE_KEY` in `.env.production.local` before
    building. Never put keys, credentials, tokens, or additional domains in
-   tracked files.
+    tracked files.
+
+    Push delivery also requires the P-256 VAPID public key and contact value in
+    `[vars]`, matching `VAPID_PRIVATE_KEY`. The encryption key protects stored
+     endpoint and browser-key material. Create the notification and dead-letter
+     queues named in `wrangler.deploy.toml`; the Worker remains cleanly disabled
+     until all push secrets and the queue binding are present. Notification
+     outbox history is retained for 30 days and purged in bounded Cron work;
+       transient push failures retry the current Queue message (preserving its
+       attempt count) four times after the initial send attempt; Queue then
+       applies its configured dead-letter policy. D1 records the same five total
+       provider attempts and logs a terminal delivery failure. Terminal provider
+       failures are acknowledged rather than retried. If another recipient page
+       remains, the consumer enqueues a fresh continuation message before that
+       acknowledgement, so pagination has its own Queue retry budget and cannot
+       be stranded behind a terminal page failure.
 
 5. Apply and verify all remote migrations before deploying:
 
@@ -334,6 +351,7 @@ Important endpoints include:
 - `POST /api/session/bootstrap`, `GET /api/me`, explicit `POST /api/session/activity`, current/all-device logout (`DELETE /api/session`, `DELETE /api/sessions`), `GET/POST /api/groups`, group updates/deletion, owner-only member administration/removal, owner transfer (`POST /api/groups/:id/transfer-ownership`), member self-leave (`POST /api/groups/:id/leave`), historical settlement participants (`GET /api/groups/:id/historical-participants`), and in-app email-targeted invitations (`/api/groups/:id/invitations`, `/api/invitations`)
 - `DELETE /api/account` with the exact JSON confirmation `{"confirmation":"DELETE MY ACCOUNT"}`. Deletion is blocked with a structured conflict containing only the active owned-group count. Eligible deletion soft-leaves non-owned memberships, revokes pending invitations, pseudonymizes every invitation history row addressed to the deleted email, removes private category/idempotency data, clears the Clerk linkage, and pseudonymizes the user/person while retaining financial rows and audit actor-name snapshots for referential integrity.
 - `GET/POST /api/groups/:id/expenses`, `GET/PUT/DELETE /api/expenses/:id`
+- `GET /api/notifications/status`, `GET /api/notifications/preferences`, authenticated preference updates, and authenticated push subscription upsert/delete under `/api/notifications/subscription`
 - `GET/POST /api/groups/:id/settlements`, `GET/PUT/DELETE /api/settlements/:id`, and versioned restore endpoints
 - `GET/POST /api/groups/:id/scheduled-expenses`, `GET/PUT /api/scheduled-expenses/:id`, and pause/resume/cancel actions
 - balances (raw and deterministic simplified debts), activity, versioned JSON export, group JSON/expense CSV/settlement CSV export
@@ -345,7 +363,7 @@ Historical settlement participants are authorized separately from active members
 
 The expense, settlement, scheduled-expense, and audit lists support bounded opaque keyset pagination. Expense and settlement pages are ordered by `(expense_date|settlement_date, created_at, id)`, scheduled templates by `(created_at, id)`, and audit pages by `(occurred_at, id)`, all descending with the ID tie-breaker. Responses expose `nextCursor`; an `offset` on expense, settlement, or audit endpoints returns structured `400 INVALID_PAGINATION` rather than being ignored. Offset pagination remains explicitly supported only on scheduled-expense list requests for one deployed-client grace release so old cached PWA clients do not repeat page one. The current client always uses the cursor. Expense search accepts description/notes, member, category, date range, and currency filters and rejects a complete UTF-8 LIKE pattern over 50 bytes (including wildcards). JSON responses use `{ error: { code, message } }` for structured failures.
 
-Scheduled expenses are recurring templates, not ledger rows. From a group or friend ledger, choose **Add expense**, leave it one-time, or turn on **Repeat this expense** to configure a custom daily, weekly, monthly, or yearly interval. Weekly schedules require one or more weekdays; an optional end date is inclusive. The creator timezone defaults from the browser and can be edited as an IANA timezone. The form previews up to three localized next dates and explains whether the schedule continues until paused/cancelled or through its end date. A Worker cron generates ordinary expenses only when their occurrence is due, so occurrences affect balances only when posted; future templates do not affect balances. Generated expenses remain in the ledger even if the template is later edited, paused, or cancelled. Edits are online-only and apply only to future occurrences. Schedules show their status, next occurrence, and any blocked reason, and can be paused, resumed, or cancelled online. Schedule mutations never enter the expense outbox. Cron catch-up is bounded to 20 occurrences per invocation and 20 occurrences per template, processed round-robin so a stale template cannot starve other schedules. When a cursor reaches a cap it remains due and is continued by later invocations; dates are not silently skipped, and operators should edit, pause, or cancel a template if historical catch-up is not wanted. The same scheduled handler performs bounded deleted-group cleanup, generation, and projection backfill and logs structured outcomes. Generated occurrence tombstones remain after a generated expense purge, preventing Cron from regenerating that occurrence; transaction idempotency tombstones are retained where needed for safe retries.
+Scheduled expenses are recurring templates, not ledger rows. From a group or friend ledger, choose **Add expense**, leave it one-time, or turn on **Repeat this expense** to configure a custom daily, weekly, monthly, or yearly interval. Weekly schedules require one or more weekdays; an optional end date is inclusive. The creator timezone defaults from the browser and can be edited as an IANA timezone. The form previews up to three localized next dates and explains whether the schedule continues until paused/cancelled or through its end date. A Worker cron generates ordinary expenses only when their occurrence is due, so occurrences affect balances only when posted; future templates do not affect balances. Generated expenses remain in the ledger even if the template is later edited, paused, or cancelled. Edits are online-only and apply only to future occurrences. Schedules show their status, next occurrence, and any blocked reason, and can be paused, resumed, or cancelled online. Schedule mutations never enter the expense outbox. Cron catch-up is bounded to 20 occurrences per invocation and 20 occurrences per template, processed round-robin so a stale template cannot starve other schedules. When a cursor reaches a cap it remains due and is continued by later invocations; dates are not silently skipped, and operators should edit, pause, or cancel a template if historical catch-up is not wanted. The same scheduled handler performs bounded deleted-group cleanup, generation, and projection backfill and logs structured outcomes. Deleted-group notification events and deliveries are drained child-first in bounded retention pages before the group parent is physically purged. Generated occurrence tombstones remain after a generated expense purge, preventing Cron from regenerating that occurrence; transaction idempotency tombstones are retained where needed for safe retries.
 The former `/groups/:id/scheduled-expense/new` URL redirects to the combined expense form; existing schedule edit URLs remain available for recurring schedule management.
 
 ## Client features and limitations
@@ -358,7 +376,40 @@ Expense, settlement, scheduled-expense, activity, and audit lists use opaque key
 
 The app supports trusted-device offline capture for **new expenses only**. After a successful online visit, the unlocked browser profile stores one atomic offline-trust record bound to the application's server-provided `idleExpiresAt`, the verified internal identity, and the current Clerk user ID. Legacy split identity records never establish offline trust; explicit logout, account changes, or an expired idle boundary durably revoke the record. A new expense is written to a durable, leased IndexedDB outbox before any network attempt, then replayed with the same payload and `client_operation_id` once connectivity and an application session are available. Pending rows show Waiting to sync, Syncing, Sign in to sync, or Sync failed and can be retried or discarded (with confirmation); hung writes time out and remain retryable. If verification is unavailable, the shell shows bounded retry guidance rather than claiming the user is signed out. During phone sleep/wake, matching cached private data remains on the current route while the application session is checked; server mutations and outbox replay wait for authoritative verification. No reload is attempted while offline, and queued expenses remain in IndexedDB and resume after an application-session bootstrap. Offline edits, deletes, settlements, membership changes, exports, and other reads without a matching cached snapshot remain unavailable. Local cache access is not server authorization: replay still requires the server's application session, and no local token bypasses it.
 
-Settings can clear cached identity, groups, snapshots, and recent preferences without deleting pending or delivery-uncertain outbox operations. Those operations must be resolved through their queue controls. Logging out first revokes the current server application session while online, then quiesces mutations and clears local private data before asking Clerk to end the session and redirect to `/`; a failed revocation leaves local data intact. All-device logout revokes every application session. State-changing API requests and destructive logout use the Web Locks API when available, so supported Chromium browsers and installed PWAs wait for every dispatched mutation to settle before local data is cleared. Browsers without Web Locks still block new mutations through the same-tab registry plus the storage/BroadcastChannel session barrier, but cannot observe a fetch still in flight in another tab; users should finish logout in a Web Locks-capable browser when that cross-tab guarantee matters.
+Push notifications are an optional, per-device enhancement. The Settings control requests browser permission only from the explicit **Enable notifications** button; startup and foreground reconciliation never prompt. Each account may have at most **10 active push subscriptions**; refreshing the same endpoint is idempotent, while an endpoint moving between accounts must fit the destination cap. Account-wide content preferences cover money changes, scheduled events, and generic versus detailed lock-screen text (generic is the default); enabling or disabling a device revokes that device's active subscription while retaining its delivery history for bounded maintenance. A cross-account endpoint transfer likewise revokes the old subscription and creates a new subscription ID, so old deliveries remain isolated from the new account. Subscription credentials are sent only over the authenticated same-origin application session and are encrypted at rest by the Worker. Only HTTPS endpoints from Apple Web Push (`web.push.apple.com`), Google FCM (`fcm.googleapis.com`), or Mozilla desktop push (`updates.push.services.mozilla.com` / `push.services.mozilla.com`) are accepted. Logout/account changes write a separate token-free local revocation marker that the service worker checks against the recipient's internal user ID. The service worker also validates notification routes, focuses or opens the app on click, and maintains a small local activity badge where the platform supports App Badging. The badge is not an exact cross-device unread count and is cleared when History is opened.
+
+On iOS/iPadOS, Web Push requires an HTTPS site added to the Home Screen and opened as the standalone PWA. The app explains this installation gate instead of requesting permission from a browser tab. App Badging is used when the installed PWA exposes it; unsupported browsers show an unavailable state without calling the API. Background Sync is feature-detected as a wake-up hint for queued new expenses only. It never sends an expense from the service worker because the authenticated application-session cookie, internal-user binding, lease protocol, and logout barrier remain authoritative in the foreground; foreground replay is always the fallback.
+
+Settings can clear cached identity, groups, snapshots, and recent preferences without deleting pending or delivery-uncertain outbox operations. Those operations must be resolved through their queue controls. Logging out first revokes the current server application session while online, then quiesces mutations and clears private cache data while preserving the user-scoped expense outbox; queued expenses cannot replay until that same internal account is verified again. Clerk is then asked to end the session and redirect to `/`; a failed revocation leaves local data intact. All-device logout revokes every application session. State-changing API requests and destructive logout use the Web Locks API when available, so supported Chromium browsers and installed PWAs wait for every dispatched mutation to settle before local data is cleared. Browsers without Web Locks still block new mutations through the same-tab registry plus the storage/BroadcastChannel session barrier, but cannot observe a fetch still in flight in another tab; users should finish logout in a Web Locks-capable browser when that cross-tab guarantee matters.
+
+### Push notification provisioning
+
+Apply migrations `0026_notifications.sql` and `0027_notification_maintenance_indexes.sql` before enabling delivery. Create the
+notification queue and dead-letter queue named in the production config, then
+set the following values in Worker runtime configuration (never in Vite files
+or tracked config):
+
+- `VAPID_PRIVATE_KEY`: encrypted Worker secret for the P-256 VAPID key.
+- `PUSH_SUBSCRIPTION_ENCRYPTION_KEY`: encrypted Worker secret used to protect
+  browser endpoints and key material at rest.
+- `VAPID_PUBLIC_KEY`: the matching URL-safe P-256 public key in `[vars]`.
+- `VAPID_CONTACT`: a `mailto:` contact in `[vars]`.
+
+The example deployment config declares these secrets and queue bindings, but
+contains placeholders only. Delivery stays disabled until the queue, all VAPID
+values, and the encryption key are present. Queue messages contain only opaque
+event IDs; the Worker resolves recipients and current preferences from D1 and
+includes a bounded internal route plus recipient identity in the encrypted push
+payload. No Clerk token is stored by the client, service worker, or push tables.
+Expired or revoked push subscriptions are removed only by bounded Cron purge
+work, never by queue delivery. Each 15-minute Cron run first removes at most
+100 delivery rows belonging to expired/revoked subscriptions, then removes at
+most 100 of those subscriptions only when no delivery rows remain. Terminal
+delivery retention and completed-event retention are each capped at 100 rows
+per run, and the maintenance uses a fixed set of five D1 statements; no parent delete
+relies on an unbounded foreign-key cascade. The notification Queue consumer uses
+`max_batch_size = 1`: one page is capped at three recipients and stays within
+the documented 18-query worst-case D1 budget.
 Account deletion is separate from Clerk account management: the server deletion succeeds first and writes an identity-bound, non-sensitive pending-deletion marker outside IndexedDB. The app processes that marker before private hydration; a `server-pending` marker retries the authenticated, idempotent server DELETE with the marker's exact Clerk ID in `X-BillSplit-Expected-Clerk-User-Id`, and never clears local data or calls Clerk until the server commit is confirmed. The Worker requires both the application session and a fresh matching Clerk identity, then revokes all application sessions atomically with repository deletion. It then clears all local BillSplit data and calls the installed Clerk client's typed `UserResource.delete()` API. If the session expires or the user signs out after server/local cleanup, the marker remains and the app requires sign-in to the same Clerk account before provider deletion; only a confirmed `provider-deleted` marker may be cleared while signed out. Actor-name snapshots in financial audit and membership history are intentionally retained without email/contact details. Signed Clerk deletion/disable webhooks are intentionally deferred until a verified webhook API and secret are available; no pseudo-signature validation is used.
 
 Remaining intentional MVP limitations are no offline editing/deletion/settlement/membership sync, no offline schedule management, no currency conversion, and no receipt upload UI. Scheduled templates are fetched online and are not cached for offline use. IndexedDB can be cleared by the browser or unavailable in private/restricted contexts; those conditions are surfaced rather than silently dropping queued expenses. The `attachments` table and optional `RECEIPTS` R2 binding remain an extension point; any future routes must check group membership before issuing object access. D1 migrations must be applied explicitly in each environment, and production Clerk configuration remains an operator responsibility.
@@ -374,7 +425,8 @@ development has no rate-limit binding; a missing limiter is permitted only when
 `ENVIRONMENT` is exactly `development` or `test`. Each authenticated internal
 user ID gets a separate operation bucket, limited to five calls per minute at
 each location, for group creation,
-friend creation, invitation creation, and invitation accept/reject. The Worker
+friend creation, invitation creation, invitation accept/reject, and push
+subscription enrollment. The Worker
 returns structured `429 RATE_LIMITED` JSON with `Retry-After: 60` when a limit
 is exceeded.
 

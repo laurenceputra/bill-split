@@ -70,6 +70,23 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
   });
 
+  it('keeps every mobile editable control at the iOS zoom floor without shrinking the main amount', () => {
+    expect(baseCss).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*input,[\s\S]*select,[\s\S]*textarea\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.dev-identity input\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-input--long\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-input--very-long\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-field > input\s*\{[\s\S]*font-size: var\(--text-amount\);/);
+    expect(css).not.toContain('font-size: 0.76rem;');
+    expect(css).not.toContain('font-size: 0.6rem;');
+  });
+
+  it('extends the active add highlight through the safe-area while keeping content in the nav item', () => {
+    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\]::before\s*\{[\s\S]*top: calc\(-1 \* var\(--space-1\)\);[\s\S]*bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\);[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;/);
+    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\] \.nav-item__capsule\s*\{[\s\S]*z-index: 1;[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.nav-item--add:not\(\[aria-current="page"\]\):hover \.nav-item__capsule\s*\{/);
+    expect(uiSource).toContain('className="nav-item nav-item--add"');
+  });
+
   it('keeps the activity filter separated from the result list at every responsive size', () => {
     expect(css).toMatch(/\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-4\);/);
     expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-5\);/);

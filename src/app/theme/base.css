@@ -103,6 +103,16 @@ textarea {
   padding: 0.65rem 0.8rem;
 }
 
+/* iOS zooms focused controls rendered below 16 CSS px. Keep this scoped to
+   narrow layouts so the desktop type scale remains unchanged. */
+@media (max-width: 55.999rem) {
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+}
+
 select {
   -webkit-appearance: none;
   appearance: none;

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { checkedSumMinor } from './money';
 import type { Weekday } from './types';
+import { isSupportedPushEndpoint } from './push-endpoints';
 export { normalizeCategoryDescription } from './category';
 
 export const id = z.string().uuid();
@@ -48,6 +49,16 @@ export const scheduledExpenseInput = z.object({
 export const scheduledExpenseStatusInput = z.object({ version: z.number().int().positive() });
 export const ACCOUNT_DELETION_CONFIRMATION = 'DELETE MY ACCOUNT' as const;
 export const accountDeletionInput = z.object({ confirmation: z.literal(ACCOUNT_DELETION_CONFIRMATION) });
+const base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/, 'Push key must be base64url encoded');
+export const pushSubscriptionInput = z.object({
+  endpoint: z.string().trim().url().max(2048).refine(isSupportedPushEndpoint, 'Push endpoint is not a supported browser push service'),
+  expirationTime: z.number().int().nonnegative().nullable().optional(),
+  keys: z.object({ p256dh: base64Url.min(40).max(256), auth: base64Url.min(16).max(128) }).strict(),
+}).strict();
+export const pushSubscriptionDeleteInput = z.object({ endpoint: pushSubscriptionInput.shape.endpoint }).strict();
+export const notificationPreferencesInput = z.object({
+  money_changes: z.boolean().default(true), scheduled_events: z.boolean().default(true), detail_level: z.enum(['generic', 'detailed']).default('generic'),
+}).strict();
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
 const splitDefaultPersonIds = z.array(id).min(1).max(100).refine((values) => new Set(values).size === values.length, 'Included members must be unique');
 const splitDefaultValues = z.array(z.number().finite().positive()).min(1).max(100);
@@ -69,6 +80,8 @@ export type FriendInput = z.infer<typeof friendInput>;
 export type InvitationInput = z.infer<typeof invitationInput>;
 export type ScheduledExpenseInput = z.infer<typeof scheduledExpenseInput>;
 export type CategorySuggestionInput = z.infer<typeof categorySuggestionInput>;
+export type PushSubscriptionInput = z.infer<typeof pushSubscriptionInput>;
+export type NotificationPreferencesInput = z.infer<typeof notificationPreferencesInput>;
 
 export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));

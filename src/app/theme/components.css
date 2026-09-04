@@ -696,7 +696,7 @@
   width: 10rem;
   min-height: 2rem;
   padding: var(--space-1) var(--space-2);
-  font-size: var(--text-xs);
+  font-size: 1rem;
 }
 
 .app-main {
@@ -1779,7 +1779,8 @@ details:not([open]) > :not(summary) {
 }
 
 .amount-input--long {
-  font-size: 0.76rem;
+  /* Detached payer/allocation fields must also stay above iOS's zoom floor. */
+  font-size: 1rem;
   letter-spacing: 0;
 }
 
@@ -1788,7 +1789,7 @@ details:not([open]) > :not(summary) {
 }
 
 .amount-input--very-long {
-  font-size: 0.6rem;
+  font-size: 1rem;
   letter-spacing: 0;
 }
 
@@ -2170,6 +2171,12 @@ input[inputmode="decimal"] {
   accent-color: var(--color-primary);
 }
 
+.notification-preferences {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
 .bottom-nav {
   position: fixed;
   z-index: 10;
@@ -2192,6 +2199,37 @@ input[inputmode="decimal"] {
   padding-bottom: calc(var(--space-1) + var(--safe-bottom));
   padding-left: max(var(--space-1), var(--safe-left));
   backdrop-filter: blur(18px);
+}
+
+.update-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-primary-strong);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.update-control > span {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-action {
+  min-height: 2.35rem;
+  border-color: var(--color-border-strong);
+  background: var(--color-primary-soft);
+  color: var(--color-primary-strong);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.update-action:hover {
+  background: var(--color-secondary-hover);
 }
 
 .nav-item {
@@ -2222,6 +2260,8 @@ input[inputmode="decimal"] {
 }
 
 .nav-item--add {
+  position: relative;
+  isolation: isolate;
   align-self: stretch;
   align-items: stretch;
   background: transparent;
@@ -2247,8 +2287,33 @@ input[inputmode="decimal"] {
   color: var(--color-ink-muted);
 }
 
-.nav-item--add:hover .nav-item__capsule,
+.nav-item--add[aria-current="page"]::before {
+  position: absolute;
+  z-index: 0;
+  top: calc(-1 * var(--space-1));
+  right: calc(-1 * var(--space-1));
+  bottom: calc(-1 * (var(--space-1) + var(--safe-bottom)));
+  left: calc(-1 * var(--space-1));
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--color-primary-strong);
+  content: '';
+}
+
+.nav-item--add .nav-item__capsule {
+  position: relative;
+  z-index: 1;
+  background: var(--color-primary);
+  box-shadow: var(--shadow-primary);
+}
+
 .nav-item--add[aria-current="page"] .nav-item__capsule {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  box-shadow: none;
+}
+
+.nav-item--add:not([aria-current="page"]):hover .nav-item__capsule {
   background: var(--color-primary-strong);
   color: var(--color-on-primary);
 }
