@@ -48,7 +48,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).toContain('.install-slot > .install-control {\n    width: auto;\n  }');
     expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*align-self: stretch;/);
-    expect(css).toMatch(/\.install-action\s*\{[\s\S]*min-height: 2\.75rem;/);
+    expect(css).toMatch(/\.install-action\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
   });
 
   it('uses explicit action gaps and a predictable single-column mobile layout', () => {
@@ -56,18 +56,70 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
     expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
-    expect(css).toMatch(/\.section-title \+ \.member-list\s*\{[\s\S]*margin-top: var\(--space-3\);/);
-    expect(css).toMatch(/:where\(\.section-title\) \+ p\s*\{[\s\S]*margin-top: var\(--space-3\);/);
+    expect(css).toMatch(/\.section-title \+ \.member-list\s*\{[\s\S]*margin-top: 0;/);
+    expect(css).toMatch(/:where\(\.section-title\) \+ p\s*\{[\s\S]*margin-top: 0;/);
   });
 
-  it('styles the native expense filter disclosure at its actual DOM depth', () => {
-    expect(css).toMatch(/\.expense-filters-disclosure\s*>\s*details\s*>\s*summary\s*\{/);
-    expect(css).toMatch(/\.expense-filters-disclosure\s*>\s*details\[open\]\s*>\s*summary\s*\{/);
-    expect(css).not.toMatch(/\.expense-filters-disclosure\s*>\s*summary\s*\{/);
+  it('normalizes disclosure flow and nested surfaces without changing semantic sections', () => {
+    expect(tokensCss).toContain('--control-min-height: 2.75rem;');
+    expect(css).toMatch(/\.section-title\s*>\s*h2\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/section\s*>\s*form,[\s\S]*?\.surface\s*>\s*form,[\s\S]*?section\s*>\s*\.cache-status,[\s\S]*?\.surface\s*>\s*\.cache-status,[\s\S]*?\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/details\s*>\s*:is\(p, form, \.cache-status, \.error, \.offline-banner, \.empty, \.status\)\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.balance-breakdown\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.generic-invitation-disclosure\[open\]\s*\{[\s\S]*gap: var\(--space-3\);/);
+    expect(css).toMatch(/\.transaction-filters-disclosure\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.transaction-filters\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;/);
+    expect(css).toMatch(/\.pending-transactions\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
+    expect(css).toMatch(/\.split-default-choices\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
+    expect(appSource).toContain('className="transaction-filters-disclosure"');
+    expect(appSource).toContain('className="schedule-list-content"');
+  });
+
+  it('keeps standalone section actions content-sized without shrinking grouped controls', () => {
+    expect(css).toMatch(/section\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\),[\s\S]*?\.surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\)\s*\{[\s\S]*?justify-self:\s*start;/);
+    expect(css).toMatch(/\.full-width-button\s*\{[\s\S]*width:\s*100%;/);
+    expect(css).toMatch(/\.home-actions\s*>\s*button\s*\{[\s\S]*width:\s*100%;/);
+    expect(css).toMatch(/\.member-email-control form\s*>\s*button\s*\{[\s\S]*justify-self:\s*stretch;/);
+    expect(css).toMatch(/\.actions\s*\{[\s\S]*display:\s*flex;/);
+    expect(css).toMatch(/form\s*\{[\s\S]*display:\s*grid;/);
+    expect(css).toMatch(/\.list\s*\{[\s\S]*display:\s*grid;/);
+    expect(appSource).toContain('Load more audit events');
+    expect(appSource).toContain('Enable notifications on this device');
+    expect(appSource).toContain('Clear cached data');
+    expect(appSource).toContain('>Manage people</Link>');
+  });
+
+  it('lets conditional status messages use the containing form grid gap', () => {
+    expect(css).toMatch(/form\s*>\s*:is\(\.cache-status, \.warning\)\s*\{[\s\S]*margin: 0;/);
+  });
+
+  it('keeps safe-area spacing sourced from environment in the authored theme', () => {
+    expect(tokensCss).toMatch(/--safe-(top|right|bottom|left): env\(safe-area-inset-/);
+    expect(css).toContain('var(--safe-bottom)');
+    expect(css).toContain('var(--safe-left)');
+    expect(css).toContain('var(--safe-right)');
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {
     expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
+  });
+
+  it('keeps every mobile editable control at the iOS zoom floor without shrinking the main amount', () => {
+    expect(baseCss).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*input,[\s\S]*select,[\s\S]*textarea\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.dev-identity input\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-input--long\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-input--very-long\s*\{[\s\S]*font-size: 1rem;/);
+    expect(css).toMatch(/\.amount-field > input\s*\{[\s\S]*font-size: var\(--text-amount\);/);
+    expect(css).not.toContain('font-size: 0.76rem;');
+    expect(css).not.toContain('font-size: 0.6rem;');
+  });
+
+  it('extends the active add highlight through the safe-area while keeping content in the nav item', () => {
+    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\]::before\s*\{[\s\S]*top: calc\(-1 \* var\(--space-1\)\);[\s\S]*bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\);[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;/);
+    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\] \.nav-item__capsule\s*\{[\s\S]*z-index: 1;[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.nav-item--add:not\(\[aria-current="page"\]\):hover \.nav-item__capsule\s*\{/);
+    expect(uiSource).toContain('className="nav-item nav-item--add"');
   });
 
   it('keeps the activity filter separated from the result list at every responsive size', () => {
@@ -145,7 +197,7 @@ describe('responsive navigation layout contract', () => {
   it('keeps the tablet auth banner above the fixed navigation and mirrors group actions', () => {
     expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--space-4\) \+ var\(--safe-bottom\)\);/);
     expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--nav-height\)[\s\S]*var\(--safe-bottom\)\);/);
-    expect(css).toMatch(/\.skeleton--back\s*\{[\s\S]*min-height: 2\.75rem;/);
+    expect(css).toMatch(/\.skeleton--back\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
     expect(css).toMatch(/\.route-loading__actions--expense\s*\{[\s\S]*flex-wrap: nowrap;/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.route-loading__actions--expense\s*\{[\s\S]*flex-direction: row;/);
     expect(appSource).toContain('className="route-loading__actions route-loading__actions--expense"');

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { checkedSumMinor } from './money';
 import type { Weekday } from './types';
+import { isSupportedPushEndpoint } from './push-endpoints';
 export { normalizeCategoryDescription } from './category';
 
 export const id = z.string().uuid();
@@ -48,6 +49,51 @@ export const scheduledExpenseInput = z.object({
 export const scheduledExpenseStatusInput = z.object({ version: z.number().int().positive() });
 export const ACCOUNT_DELETION_CONFIRMATION = 'DELETE MY ACCOUNT' as const;
 export const accountDeletionInput = z.object({ confirmation: z.literal(ACCOUNT_DELETION_CONFIRMATION) });
+const base64Url = z.string().regex(/^[A-Za-z0-9_-]+$/, 'Push key must be base64url encoded');
+const decodeBase64Url = (value: string) => {
+  if (value.length % 4 === 1) return undefined;
+  try {
+    const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
+    return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+  } catch {
+    return undefined;
+  }
+};
+const p256Prime = BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff');
+const p256Coefficient = p256Prime - 3n;
+const p256Constant = BigInt('0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b');
+const mod = (value: bigint) => { const result = value % p256Prime; return result < 0n ? result + p256Prime : result; };
+const modPow = (base: bigint, exponent: bigint) => {
+  let result = 1n, current = mod(base), remaining = exponent;
+  while (remaining > 0n) {
+    if (remaining & 1n) result = mod(result * current);
+    current = mod(current * current);
+    remaining >>= 1n;
+  }
+  return result;
+};
+const bytesToBigInt = (bytes: Uint8Array) => BigInt(`0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`);
+const isP256Point = (value: string) => {
+  const bytes = decodeBase64Url(value);
+  if (!bytes || bytes.length !== 65 || bytes[0] !== 4) return false;
+  const x = bytesToBigInt(bytes.slice(1, 33)), y = bytesToBigInt(bytes.slice(33, 65));
+  if (x >= p256Prime || y >= p256Prime) return false;
+  return mod(y * y) === mod(modPow(x, 3n) + p256Coefficient * x + p256Constant);
+};
+const isAuthKey = (value: string) => decodeBase64Url(value)?.length === 16;
+export const isValidPushSubscriptionKeyMaterial = (keys: { p256dh: string; auth: string }) => isP256Point(keys.p256dh) && isAuthKey(keys.auth);
+export const pushSubscriptionInput = z.object({
+  endpoint: z.string().trim().url().max(2048).refine(isSupportedPushEndpoint, 'Push endpoint is not a supported browser push service'),
+  expirationTime: z.number().int().nonnegative().nullable().optional(),
+  keys: z.object({
+    p256dh: base64Url.length(87).refine(isP256Point, 'p256dh must be an uncompressed, valid P-256 point'),
+    auth: base64Url.min(16).max(128).refine(isAuthKey, 'auth must decode to exactly 16 bytes'),
+  }).strict(),
+}).strict();
+export const pushSubscriptionDeleteInput = z.object({ endpoint: pushSubscriptionInput.shape.endpoint }).strict();
+export const notificationPreferencesInput = z.object({
+  money_changes: z.boolean().default(true), scheduled_events: z.boolean().default(true), detail_level: z.enum(['generic', 'detailed']).default('generic'),
+}).strict();
 export const allocationInput = z.object({ method: z.enum(['equal', 'exact', 'percentage', 'shares']), values: z.array(z.number().nonnegative()).min(1) });
 const splitDefaultPersonIds = z.array(id).min(1).max(100).refine((values) => new Set(values).size === values.length, 'Included members must be unique');
 const splitDefaultValues = z.array(z.number().finite().positive()).min(1).max(100);
@@ -69,6 +115,8 @@ export type FriendInput = z.infer<typeof friendInput>;
 export type InvitationInput = z.infer<typeof invitationInput>;
 export type ScheduledExpenseInput = z.infer<typeof scheduledExpenseInput>;
 export type CategorySuggestionInput = z.infer<typeof categorySuggestionInput>;
+export type PushSubscriptionInput = z.infer<typeof pushSubscriptionInput>;
+export type NotificationPreferencesInput = z.infer<typeof notificationPreferencesInput>;
 
 export function assertFinancialInput(input: ExpenseInput): void {
   const uniquePayers = new Set(input.payers.map((p) => p.person_id));

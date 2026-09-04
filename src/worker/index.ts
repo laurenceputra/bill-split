@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { accountDeletionInput, categorySuggestionInput, currency, date, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput } from '../shared/schemas';
+import { accountDeletionInput, categorySuggestionInput, currency, date, friendInput, groupInput, groupSplitDefaultInput, invitationInput, notificationPreferencesInput, ownershipTransferInput, personInput, pushSubscriptionDeleteInput, pushSubscriptionInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
@@ -11,6 +11,8 @@ import { assertClerkAuthenticationConfig, authenticateClerkSession, ClerkAuthent
 import { escapeCsvCell, settlementCsvRow } from './csv';
 import { CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSessionToken, serializeCookie, sessionCookieName, sha256Hex } from './application-session';
 import { registerExpenseSettlementRoutes } from './expense-settlement-routes';
+import { consumeNotificationQueue, flushNotificationOutbox, notificationConfig, type NotificationBindings } from './notifications';
+import type { MessageBatch } from '@cloudflare/workers-types';
 export { parseAuthorizedParties } from './clerk-auth';
 
 type ApplicationAuth = { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
@@ -22,9 +24,9 @@ export const cronStageOrder = (scheduledTime: number): CronStage[] => {
   const start = ((Math.floor(scheduledTime / cronSlotMs) % cronStages.length) + cronStages.length) % cronStages.length;
   return [...cronStages.slice(start), ...cronStages.slice(0, start)];
 };
-type Env = { Bindings: { DB: D1Database; ASSETS: Fetcher; RATE_LIMITER?: RateLimit; ENVIRONMENT?: string; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string; IDENTITY_TOMBSTONE_KEY?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
+type Env = { Bindings: NotificationBindings & { ASSETS: Fetcher; RATE_LIMITER?: RateLimit; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
-const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined));
+const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined), { pushSubscriptionKey: env.PUSH_SUBSCRIPTION_ENCRYPTION_KEY });
 const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string, details?: Record<string, unknown>) => c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;
@@ -117,7 +119,7 @@ const allowsMutation = (c: any) => {
   return exactOrigin || trustedFetchSite || /^Bearer\s+\S+$/i.test(authorization ?? '');
 };
 const repositoryError = (c: any, error: unknown) => {
-   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
+   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'NOTIFICATIONS_DISABLED' ? 503 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' || error.code === 'PUSH_SUBSCRIPTION_LIMIT' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' || error.code === 'INVALID_PUSH_SUBSCRIPTION' ? 400 : 500, error.code, error.message, error.details);
   throw error;
 };
 export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
@@ -179,8 +181,9 @@ const issueApplicationSession = async (c: any, auth: ApplicationAuth) => {
   return { ...auth, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt } satisfies ApplicationAuth;
 };
 const balanceError = (c: any, error: unknown) => error instanceof BalanceOverflowError ? jsonError(c, 422, error.code, error.message) : undefined;
-export type RateLimitOperation = 'group-create' | 'friend-create' | 'invitation-create' | 'invitation-target-create' | 'invitation-accept' | 'invitation-reject';
+export type RateLimitOperation = 'group-create' | 'friend-create' | 'invitation-create' | 'invitation-target-create' | 'invitation-accept' | 'invitation-reject' | 'notification-subscription-enroll';
 export const rateLimitOperationFor = (method: string, pathname: string): RateLimitOperation | undefined => {
+  if (method === 'PUT' && pathname === '/api/notifications/subscription') return 'notification-subscription-enroll';
   if (method !== 'POST') return undefined;
   if (pathname === '/api/groups') return 'group-create';
   if (pathname === '/api/friends') return 'friend-create';
@@ -211,7 +214,12 @@ api.use('/api/*', async (c, next) => {
       if (path !== '/api/session/bootstrap' && c.env.ENVIRONMENT !== 'development' && c.env.ENVIRONMENT !== 'test' && cookieValue(c.req.raw, sessionCookieName(c.env.ENVIRONMENT)) && !constantTimeEqual(csrfCookie, csrfHeader)) { earlyResponse = jsonError(c, 403, 'CSRF_FORBIDDEN', 'A matching host-only CSRF token is required'); return earlyResponse; }
       if (!(await readBoundedBody(c))) { earlyResponse = jsonError(c, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body must not exceed 64 KiB'); return earlyResponse; }
     }
-    await next();
+     await next();
+      const repository = c.get('repo') as Repository | undefined;
+      if (c.env.NOTIFICATION_QUEUE && notificationConfig(c.env) && repository) {
+        const flush = flushNotificationOutbox(repository, c.env.NOTIFICATION_QUEUE).catch((error) => console.error(JSON.stringify({ event: 'bill-split.notifications', outcome: 'outbox_flush_failed', error: error instanceof Error ? error.name : 'UNEXPECTED_ERROR', requestId: c.get('requestId') })));
+       if (typeof c.executionCtx?.waitUntil === 'function') c.executionCtx.waitUntil(flush); else await flush;
+     }
     const auth = c.get('auth');
     if (auth) {
       c.res.headers.set('X-BillSplit-User-Id', auth.id);
@@ -355,6 +363,26 @@ api.post('/api/session/bootstrap', async (c) => {
   } catch (error) { return repositoryError(c, error); }
 });
 api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
+api.get('/api/notifications/status', async (c) => {
+  const config = notificationConfig(c.env);
+  try { return c.json(await getRepo(c).notificationStatus(c.get('auth').id, Boolean(config), config?.publicKey ?? null)); } catch (error) { return repositoryError(c, error); }
+});
+api.get('/api/notifications/preferences', async (c) => {
+  const config = notificationConfig(c.env);
+  try { return c.json({ preferences: (await getRepo(c).notificationStatus(c.get('auth').id, Boolean(config), config?.publicKey ?? null)).preferences }); } catch (error) { return repositoryError(c, error); }
+});
+api.put('/api/notifications/preferences', zValidator('json', notificationPreferencesInput), async (c) => {
+  try { return c.json({ preferences: await getRepo(c).updateNotificationPreferences(c.get('auth').id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); }
+});
+const validatePushSubscription = zValidator('json', pushSubscriptionInput, (result, c) => result.success ? undefined : jsonError(c, 400, 'INVALID_PUSH_SUBSCRIPTION', 'The push subscription is invalid'));
+api.put('/api/notifications/subscription', validatePushSubscription, async (c) => {
+  if (!notificationConfig(c.env)) return jsonError(c, 503, 'NOTIFICATIONS_DISABLED', 'Push notifications are not configured');
+  try { return c.json({ subscription: await getRepo(c).upsertPushSubscription(c.get('auth').id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); }
+});
+api.delete('/api/notifications/subscription', zValidator('json', pushSubscriptionDeleteInput), async (c) => {
+  if (!c.env.PUSH_SUBSCRIPTION_ENCRYPTION_KEY && c.env.ENVIRONMENT !== 'development') return jsonError(c, 503, 'NOTIFICATIONS_DISABLED', 'Push notifications are not configured');
+  try { await getRepo(c).deletePushSubscription(c.get('auth').id, c.req.valid('json').endpoint); return c.body(null, 204); } catch (error) { return repositoryError(c, error); }
+});
 api.post('/api/session/activity', async (c) => {
   const auth = c.get('auth');
   if (!auth.applicationSessionId) return c.json({ idleExpiresAt: auth.idleExpiresAt });
@@ -471,10 +499,10 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
       // stage. Both operations share this invocation deadline.
       purge: async () => {
         sessions = await repo.purgeExpiredApplicationSessions(asOf, 100);
-        const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1, deadlineMs });
+         const result = await repo.purgeExpiredData(asOf, { maxTransactions: 4, maxGroups: 1, deadlineMs });
         return result;
       },
-      generation: () => repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2, deadlineMs }),
+       generation: async () => { const result = await repo.generateDueScheduledExpenses(asOf, { maxTemplates: 8, maxOccurrences: 8, maxOccurrencesPerTemplate: 8, maxCleanup: 2, deadlineMs }); if (env.NOTIFICATION_QUEUE && notificationConfig(env)) await flushNotificationOutbox(repo, env.NOTIFICATION_QUEUE); return result; },
       'monthly-summary': () => repo.monthlySummaryMaintenance({ maxGroups: 1, maxMonths: 2, chunkSize: 100, deadlineMs }),
       'build-gc': () => repo.ledgerPeriodBuildGarbageCollection({ maxBuilds: 1, chunkSize: 100, deadlineMs }),
     };
@@ -496,7 +524,7 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
      event: 'bill-split.cron',
      scheduledTime: controller.scheduledTime,
      outcome: failure ? 'failed' : 'completed',
-      purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, capped: purge.capped } : undefined,
+          purged: purge ? { transactions: purge.transactionsPurged, groups: purge.groupsPurged, auditEvents: purge.auditEventsPurged, notificationExpiredSubscriptionDeliveries: purge.notificationExpiredSubscriptionDeliveriesPurged, notificationSubscriptions: purge.notificationSubscriptionsPurged, notificationDeliveries: purge.notificationDeliveriesPurged, notificationEvents: purge.notificationEventsPurged, notificationCompletedEvents: purge.notificationCompletionUpdated, notificationCaps: { expiredSubscriptionDeliveries: purge.notificationExpiredSubscriptionDeliveriesCapped, subscriptions: purge.notificationSubscriptionsCapped, deliveries: purge.notificationDeliveriesCapped, events: purge.notificationEventsCapped }, capped: purge.capped } : undefined,
       sessionsPurged: sessions?.purged ?? 0,
       generated: generation?.generated ?? 0,
       blocked: generation?.blocked ?? 0,
@@ -506,4 +534,4 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
       capped,
    }));
    if (failure) throw failure;
- } };
+  }, async queue(batch: MessageBatch<string>, env: Env['Bindings']) { await consumeNotificationQueue(batch, env); } };

@@ -54,6 +54,21 @@ export interface Balance { personId: string; name: string; netMinor: number; cur
 export interface PairwiseBalance { fromPersonId: string; fromName: string; toPersonId: string; toName: string; amountMinor: number; currency: Currency }
 export interface Balances { raw: Balance[]; simplified: PairwiseBalance[] }
 
+export type NotificationDetailLevel = 'generic' | 'detailed';
+export interface NotificationPreferences {
+  moneyChanges: boolean;
+  scheduledEvents: boolean;
+  detailLevel: NotificationDetailLevel;
+}
+export interface NotificationStatus {
+  /** Whether this deployment has Queue/VAPID delivery configured. This is not
+   * a per-user or per-device enablement flag. */
+  enabled: boolean;
+  publicKey: string | null;
+  subscriptionCount: number;
+  preferences: NotificationPreferences;
+}
+
 export type ActivityType = 'expense' | 'settlement' | 'expense_revision' | 'settlement_revision' | 'expense_deleted' | 'settlement_deleted';
 export interface ActivityBase {
   id: string;

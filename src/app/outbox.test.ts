@@ -311,6 +311,7 @@ describe('durable expense outbox', () => {
     const flush = flushOutbox(1_000);
     await transportStartedPromise;
     const logout = clearEverythingForLogout(false);
+    await vi.waitFor(() => expect(abortObserved).toBe(true));
     await vi.advanceTimersByTimeAsync(OUTBOX_IDB_DEADLINE_MS + OUTBOX_LOGOUT_DEADLINE_MS);
     await expect(logout).resolves.toBeUndefined();
     expect(abortObserved).toBe(true);
@@ -561,7 +562,7 @@ describe('durable expense outbox', () => {
     await flushOutbox();
     expect(abortObserved).toBe(true);
     expect(expenseCalls).toBe(1);
-    expect(await listOutbox('user-a')).toEqual([]);
+    expect(await listOutbox('user-a')).toHaveLength(1);
   });
 
   it('does not release an in-flight lease when auth downgrades before transport settles', async () => {

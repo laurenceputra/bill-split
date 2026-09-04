@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { SignInButton, SignUpButton, useAuth, useClerk, useUser } from '@clerk/react';
-import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, GroupResponse, GroupSplitDefault, HistoricalParticipant, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Transaction, Weekday } from '../shared/types';
+import type { Activity as ActivityItem, AuditEvent, Balances, Currency, Expense, Group, GroupInvitation, GroupMember, GroupResponse, GroupSplitDefault, HistoricalParticipant, NotificationPreferences, RecurrenceFrequency, ScheduledExpense, ScheduledExpenseStatus, Settlement, SplitMethod, Transaction, Weekday } from '../shared/types';
 import { currencyOptions, groupSplitDefaultInput, scheduledExpenseInput, type ExpenseInput, type ScheduledExpenseInput } from '../shared/schemas';
 import { checkedSumMinor, formatMoney, parseMoney } from '../domain/money';
 import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteGroup, deleteGroupSplitDefault, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditPage, getAuthLifecycle, getBalances, getCategories, getCategorySuggestion, getConnectionState, getExpenseDetails, getExportPage, getGlobalTransactionPage, getGroup, getGroupCsvExportPage, getGroupExportPage, getGroupSettlementCsvExportPage, getGroups, getMe, getOwnerInvitations, getPendingAccountDeletionClerkUserId, getPendingAccountDeletionPhase, getPendingInvitations, getScheduledExpense, getScheduledExpensePage, getScheduledExpenses, getSettlementDetails, getTransactionPage, hasInvalidPendingAccountDeletion, hasPendingAccountDeletion, hasRetainedPrivateSession, hydrateActivity, hydrateBalances, hydrateCategories, hydrateExpenseDetails, hydrateGlobalTransactions, hydrateGroup, hydrateGroups, hydrateIdentity, hydrateTransactionOverview, hydrateTransactions, isPrivateCacheRouteCurrent, leaveGroup, recordSessionActivity, rejectInvitation, removeGroupMember, restoreExpense, restoreSettlement, revokeAllApplicationSessions, revokeApplicationSession, revokeForClerkSessionChange, revokeGroupInvitation, transferGroupOwnership, updateGroup, updateGroupSplitDefault, updateScheduledExpense, updateSettlement, getTrustedOfflineClerkUserId, getVerifiedClerkUserId, getVerifiedUserId, isDefinitivelySignedOut, isDevelopmentAuthBypass, isIncompleteLoadedSignedInEvidence, recoverAfterClerkSignOutFailure, resetForClerkSessionChange, shouldReverifyTrustedOffline, shouldStartAuthCheck, subscribeAuthLifecycle, clearEverythingForLogout } from './api';
@@ -22,6 +22,8 @@ import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collec
 import { hasTransactionFilters, readTransactionFilters, transactionFilterCount, transactionFilterKey, writeTransactionFilters, type TransactionFilters } from './transaction-filters';
 import { transactionCategory, transactionDate, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 import { createSessionActivityScheduler } from './session-activity';
+import { clearNotificationBadge } from './notification-badge';
+import { enableNotifications, disableNotifications, getNotificationSnapshot, initializeNotifications, reconcileNotifications, saveNotificationPreferences, subscribeNotifications } from './notifications';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -585,7 +587,7 @@ type ScheduleListProps = { groupId: string; schedules: ScheduledExpense[]; resou
 function CompactScheduleList(props: ScheduleListProps) {
   const active = props.schedules.filter((schedule) => schedule.status === 'active');
   const next = active.map((schedule) => schedule.nextOccurrenceDate).filter((date): date is string => Boolean(date)).sort()[0];
-  return <section className="scheduled-summary" aria-labelledby="scheduled-summary-heading"><div className="section-title"><h2 id="scheduled-summary-heading">Scheduled expenses</h2><span className="muted">{active.length} active{next ? ` · Next ${formatScheduleDate(next)}` : ''}</span></div><details><summary>View scheduled expenses and actions</summary><ScheduleList {...props} /></details></section>;
+  return <section className="scheduled-summary" aria-labelledby="scheduled-summary-heading"><div className="section-title"><h2 id="scheduled-summary-heading">Scheduled expenses</h2><span className="muted">{active.length} active{next ? ` · Next ${formatScheduleDate(next)}` : ''}</span></div><details><summary>View scheduled expenses and actions</summary><div className="schedule-list-content"><ScheduleList {...props} /></div></details></section>;
 }
 
 function ScheduleList({ groupId, schedules: initialSchedules, resource, online, userId }: ScheduleListProps) {
@@ -1121,6 +1123,7 @@ function HistoryChanges({ groupId }: { groupId?: string }) {
 }
 
 function History() {
+  useEffect(() => { clearNotificationBadge(); }, []);
   const [searchParams, setSearchParams] = useSearchParams();
   const groupId = searchParams.get('group') || undefined;
   const view = searchParams.get('view') === 'transactions' ? 'transactions' : 'changes';
@@ -1146,6 +1149,31 @@ function LegacyTransactionRedirect() {
   const location = useLocation();
   const search = new URLSearchParams(location.search); search.set('group', id); search.set('view', 'transactions');
   return <Navigate to={`/activity?${search}`} replace />;
+}
+
+function NotificationSettings({ userId }: { userId?: string }) {
+  const notification = useSyncExternalStore(subscribeNotifications, getNotificationSnapshot, getNotificationSnapshot);
+  const [busy, setBusy] = useState(false);
+  const [preferenceError, setPreferenceError] = useState<unknown>();
+  useEffect(() => { initializeNotifications(); if (userId) void reconcileNotifications(userId); }, [userId]);
+  const preferences = notification.status?.preferences;
+  const update = async (next: NotificationPreferences) => {
+    setBusy(true); setPreferenceError(undefined);
+    try { await saveNotificationPreferences(next); }
+    catch (cause) { setPreferenceError(cause); }
+    finally { setBusy(false); }
+  };
+  const enable = async () => { setBusy(true); setPreferenceError(undefined); try { if (!(await enableNotifications(userId))) setPreferenceError(getNotificationSnapshot().error); } finally { setBusy(false); } };
+  const disable = async () => { setBusy(true); setPreferenceError(undefined); try { if (!(await disableNotifications(userId))) setPreferenceError(getNotificationSnapshot().error); } finally { setBusy(false); } };
+  let content: ReactNode;
+  if (notification.capability === 'checking') content = <Loading />;
+  else if (notification.capability === 'unavailable') content = <p className="muted">Push notifications are unavailable for this deployment or browser.</p>;
+  else if (notification.capability === 'needs-install') content = <><p className="muted">On iPhone and iPad, notifications work only after BillSplit is added to the Home Screen and opened as an installed app.</p><InstallAction showStatus /></>;
+  else if (notification.capability === 'denied') content = <p className="muted">Notifications are blocked by this browser. Allow them in the site’s browser settings, then return here.</p>;
+  else if (notification.capability === 'default' || notification.capability === 'supported' || notification.capability === 'disabled') content = <><p className="muted">Get a notification when group money changes or a scheduled expense is generated. Permission is requested only when you press this button.</p><Button type="button" disabled={busy} onClick={() => void enable()}>{busy ? 'Enabling…' : 'Enable notifications on this device'}</Button></>;
+  else if (notification.capability === 'enabled' && preferences) content = <><p className="muted">This device is enabled. These account-wide settings choose which group activity can notify your devices. Lock-screen messages use generic details by default.</p><div className="notification-preferences"><label className="checkbox-row"><input type="checkbox" disabled={busy} checked={preferences.moneyChanges} onChange={(event) => void update({ ...preferences, moneyChanges: event.target.checked })} />Money changes</label><label className="checkbox-row"><input type="checkbox" disabled={busy} checked={preferences.scheduledEvents} onChange={(event) => void update({ ...preferences, scheduledEvents: event.target.checked })} />Scheduled events</label><label className="field"><span>Lock-screen detail for this account</span><select disabled={busy} value={preferences.detailLevel} onChange={(event) => void update({ ...preferences, detailLevel: event.target.value as NotificationPreferences['detailLevel'] })}><option value="generic">Generic (recommended)</option><option value="detailed">Detailed</option></select></label></div><Button type="button" variant="secondary" disabled={busy} onClick={() => void disable()}>{busy ? 'Disabling…' : 'Disable this device'}</Button></>;
+  else content = <><p className="muted">Notification setup could not be completed. Check your connection and try again.</p><Button type="button" variant="secondary" disabled={busy} onClick={() => { setPreferenceError(undefined); if (userId) void reconcileNotifications(userId); }}>Retry notification setup</Button></>;
+  return <section aria-labelledby="notifications-heading"><div className="section-title"><h2 id="notifications-heading">Notifications</h2><span className="muted">Device controls</span></div>{content}{preferenceError ? <ErrorBox error={preferenceError} id="notification-error" /> : null}</section>;
 }
 
 function Settings() {
@@ -1190,9 +1218,13 @@ function Settings() {
 
   const logout = async (allDevices = false) => {
     if (!online) { setLogoutError(new Error('Logout requires a connection so the server session can be revoked safely.')); return; }
-    if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. Logging out will permanently delete them from this device. Continue?`)) return;
+    if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. They will stay on this device and sync only after the same account is verified again. Continue?`)) return;
     setClearing(true); setError(undefined); setLogoutError(undefined);
     try {
+      // Revoke the push credential while the authenticated application session
+      // is still valid. Failure is best-effort; the local identity fence below
+      // still suppresses old-account notifications offline.
+      await disableNotifications().catch(() => undefined);
       if (allDevices) await revokeAllApplicationSessions(); else await revokeApplicationSession();
       await clearEverythingForLogout();
       try {
@@ -1236,7 +1268,8 @@ function Settings() {
 
   return <Layout>
     <div className="page-title"><div><p className="eyebrow">More</p><h1>Settings</h1></div></div>
-    <section><h2>Device</h2><p className="muted" role="status">{connectionStatusLabel(connection.status)} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
+     <section><h2>Device</h2><p className="muted" role="status">{connectionStatusLabel(connection.status)} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></section>
+     <NotificationSettings userId={getVerifiedUserId()} />
     <section><h2>Pending expenses</h2>{outbox.length ? <div className="list">{outbox.map((item) => <div className="row" key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><strong>{item.display.currency} {(item.display.amountMinor / 100).toFixed(2)}</strong></div>)}</div> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</section>
       <section><h2>Trusted-device offline access</h2><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores a Clerk token, and replay still requires an active application session. Only use this on a device you trust.</p></section>
      <section><h2>Local data</h2><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</section>
@@ -1270,6 +1303,11 @@ export function App() {
   const connection = useConnectionState();
   const online = connection.status === 'connected';
   const offline = connection.status === 'offline';
+  const verifiedInternalUserId = getVerifiedUserId();
+  useEffect(() => { initializeNotifications(); }, []);
+  useEffect(() => {
+    if (auth.status === 'authenticated' && verifiedInternalUserId) void reconcileNotifications(verifiedInternalUserId);
+  }, [auth.status, userId, verifiedInternalUserId]);
   useEffect(() => {
     if (auth.status !== 'authenticated') return;
     const scheduler = createSessionActivityScheduler({

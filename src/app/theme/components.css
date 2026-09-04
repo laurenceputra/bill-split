@@ -63,7 +63,7 @@
 
 .skeleton--back {
   width: 6rem;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
 }
 
 .skeleton--surface {
@@ -277,7 +277,7 @@
 
 .public-sign-in {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   border-radius: var(--radius-pill);
   background: var(--color-primary);
@@ -300,7 +300,7 @@
 }
 
 .public-sign-up {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-pill);
@@ -366,7 +366,7 @@
 }
 
 .landing-actions .install-control {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
 }
 
 .landing-actions .install-action {
@@ -543,7 +543,7 @@
 
 .desktop-nav__item {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-pill);
@@ -630,7 +630,7 @@
 
 .install-action {
   width: 4.5rem;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: var(--space-1) var(--space-2);
 }
 
@@ -696,7 +696,7 @@
   width: 10rem;
   min-height: 2rem;
   padding: var(--space-1) var(--space-2);
-  font-size: var(--text-xs);
+  font-size: 1rem;
 }
 
 .app-main {
@@ -725,22 +725,23 @@
   min-width: 0;
   flex: 1 1 12rem;
   overflow-wrap: anywhere;
+  margin: 0;
 }
 
 .section-title + .chips {
-  margin-top: var(--space-3);
+  margin-top: 0;
 }
 
 .section-title + .list {
-  margin-top: var(--space-3);
+  margin-top: 0;
 }
 
 .section-title + .member-list {
-  margin-top: var(--space-3);
+  margin-top: 0;
 }
 
 :where(.section-title) + p {
-  margin-top: var(--space-3);
+  margin-top: 0;
 }
 
 .reading-width {
@@ -833,7 +834,7 @@ main.app-main > h1 {
 }
 
 .history-tabs a {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: 0.65rem 1rem;
   color: var(--color-ink-muted);
   font-weight: 800;
@@ -875,7 +876,7 @@ main.app-main > h1 {
   display: flex;
   min-width: 0;
   max-width: 100%;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   margin-bottom: var(--space-4);
   color: var(--color-ink-muted);
@@ -894,7 +895,7 @@ main.app-main > h1 {
 .button,
 button {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
@@ -1037,11 +1038,34 @@ section,
   font-weight: 750;
 }
 
+/* The generic card span rule must not enlarge explicitly compact balance labels. */
+.card .card__balance-label {
+  font-size: var(--text-xs);
+}
+
 section,
 .surface,
 .empty {
   margin: var(--space-4) 0;
   padding: var(--surface-padding);
+}
+
+section,
+.surface {
+  display: grid;
+  gap: var(--flow-content);
+}
+
+/* Grid items stretch by default. Keep standalone actions content-sized while
+   leaving grouped actions, forms, and lists responsible for their own width. */
+section > :is(button, .button, .inline-action, input[type="button"], input[type="submit"], input[type="reset"], [role="button"]),
+.surface > :is(button, .button, .inline-action, input[type="button"], input[type="submit"], input[type="reset"], [role="button"]) {
+  justify-self: start;
+}
+
+section > :is(h1, h2, h3, h4, p, form, .actions, .error, .cache-status, .list, .empty, details, .section-title, .offline-banner, .status),
+.surface > :is(h1, h2, h3, h4, p, form, .actions, .error, .cache-status, .list, .empty, details, .section-title, .offline-banner, .status) {
+  margin-block: 0;
 }
 
 .empty {
@@ -1053,6 +1077,33 @@ form {
   display: grid;
   gap: var(--space-4);
   margin: var(--space-4) 0;
+}
+
+form .error,
+form .actions {
+  margin: 0;
+}
+
+form > :is(.cache-status, .warning) {
+  margin: 0;
+}
+
+/* Direct forms and status messages belong to the containing section's grid;
+   do not let their standalone margins add a second flow interval. */
+section > form,
+.surface > form,
+section > .cache-status,
+.surface > .cache-status,
+section > .error,
+.surface > .error,
+section > .offline-banner,
+.surface > .offline-banner {
+  margin: 0;
+}
+
+section > .actions,
+.surface > .actions {
+  margin: 0;
 }
 
 form > label,
@@ -1116,7 +1167,7 @@ form > button {
 
 .pending-row__actions .button,
 .pending-row__actions button {
-  min-height: 2.25rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
 }
@@ -1195,7 +1246,7 @@ form > button {
 
 .auth-banner button {
   flex: 0 0 auto;
-  min-height: 2.35rem;
+  min-height: var(--control-min-height);
   background: var(--color-coral-ink);
   color: var(--color-coral);
   padding: var(--space-2) var(--space-3);
@@ -1277,7 +1328,7 @@ form > button {
 
 .actions a:not(.button) {
   display: inline-flex;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   color: var(--color-primary-strong);
   font-size: var(--text-sm);
@@ -1304,7 +1355,7 @@ form > button {
 
 .schedule-row__actions .button,
 .schedule-row__actions button {
-  min-height: 2.5rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
 }
@@ -1345,12 +1396,12 @@ form > button {
 @media (max-width: 55.999rem) {
   .brand {
     display: inline-flex;
-    min-height: 2.75rem;
+    min-height: var(--control-min-height);
     align-items: center;
   }
 
   .actions > a:not(.button) {
-    min-width: 2.75rem;
+    min-width: var(--control-min-height);
     justify-content: center;
   }
 }
@@ -1396,7 +1447,9 @@ form > button {
 }
 
 .inline-action {
-  min-height: 1.8rem;
+  display: inline-flex;
+  min-height: var(--control-min-height);
+  align-items: center;
   border: 0;
   background: transparent;
   color: var(--color-primary-strong);
@@ -1410,24 +1463,18 @@ form > button {
   color: var(--color-primary);
 }
 
-.expense-filters-disclosure {
-  margin: 0;
-}
-
-.expense-filters-disclosure > details > summary {
-  min-height: 2.75rem;
-  cursor: pointer;
-  color: var(--color-primary-strong);
-  font-weight: 800;
-}
-
-.expense-filters-disclosure > details[open] > summary {
-  margin-bottom: var(--space-3);
-}
-
 /* Author styles for forms and sections override the browser's native closed-details rule. */
 details:not([open]) > :not(summary) {
   display: none;
+}
+
+details > :is(p, form, .cache-status, .error, .offline-banner, .empty, .status) {
+  margin: 0;
+}
+
+summary {
+  min-height: var(--control-min-height);
+  cursor: pointer;
 }
 
 .member-list {
@@ -1504,7 +1551,7 @@ details:not([open]) > :not(summary) {
 
 .member-email-control details > summary,
 .generic-invitation-disclosure > summary {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   cursor: pointer;
   color: var(--color-primary-strong);
   font-weight: 800;
@@ -1533,7 +1580,31 @@ details:not([open]) > :not(summary) {
 }
 
 .member-email-control__form {
-  margin-top: var(--space-2);
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.member-email-control details {
+  margin: 0;
+}
+
+.member-email-control details[open],
+.generic-invitation-disclosure[open] {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.member-email-control details[open] > form,
+.generic-invitation-disclosure > form,
+.member-email-control__form form {
+  margin: 0;
+}
+
+.generic-invitation-disclosure > p,
+.member-email-control .error,
+.generic-invitation-disclosure .error {
+  margin: 0;
 }
 
 .invitations-panel > .generic-invitation-disclosure {
@@ -1609,7 +1680,39 @@ details:not([open]) > :not(summary) {
 }
 
 .balance-breakdown {
-  margin-top: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.balance-cards > :is(.cache-status, .error, .offline-banner, .status),
+.balance-breakdown > :is(.cache-status, .error, .offline-banner, .status),
+.transaction-filters-disclosure > :is(.cache-status, .error, .offline-banner, .status),
+.scheduled-summary > details > :is(.cache-status, .error, .offline-banner, .status),
+.scheduled-summary .schedule-list-content > :is(.cache-status, .error, .offline-banner, .status) {
+  margin: 0;
+}
+
+.balance-breakdown > div {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.balance-breakdown h3 {
+  margin: 0;
+}
+
+.balance-breakdown > p {
+  margin: 0;
+}
+
+.balance-breakdown .empty {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .transaction-row strong {
@@ -1623,13 +1726,15 @@ details:not([open]) > :not(summary) {
 }
 
 .transaction-filters-disclosure {
-  margin: 0 0 var(--space-5);
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
 }
 
 .transaction-filters-disclosure > summary,
 .scheduled-summary > details > summary,
 .balance-breakdown > summary {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   cursor: pointer;
   color: var(--color-primary-strong);
   font-weight: 800;
@@ -1638,7 +1743,11 @@ details:not([open]) > :not(summary) {
 .transaction-filters {
   display: grid;
   gap: var(--space-3);
-  margin-top: var(--space-3);
+  margin: 0;
+}
+
+.transaction-filters-disclosure > .cache-status {
+  margin: 0;
 }
 
 .transaction-filters .actions {
@@ -1650,13 +1759,40 @@ details:not([open]) > :not(summary) {
 }
 
 .scheduled-summary > details {
-  margin-top: var(--space-2);
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
 }
 
-.scheduled-summary > details > section {
-  margin-top: var(--space-3);
-  border-top: 1px solid var(--color-border);
-  padding-top: var(--space-3);
+/* ScheduleList is also used inside the overview disclosure. Keep its
+   standalone semantic section, but make the nested presentation content-only. */
+.scheduled-summary .schedule-list-content {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.scheduled-summary .schedule-list-content > section {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.scheduled-summary .schedule-list-content > section > .section-title {
+  display: none;
+}
+
+.scheduled-summary .schedule-list-content > .empty,
+.scheduled-summary .schedule-list-content > section > .empty {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .people-summary-compact {
@@ -1671,12 +1807,17 @@ details:not([open]) > :not(summary) {
 }
 
 .pending-transactions {
-  margin-bottom: var(--space-3);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .pending-transactions h2,
 .pending-transactions h3 {
-  margin-bottom: var(--space-2);
+  margin: 0;
   font-size: var(--text-md);
 }
 
@@ -1764,7 +1905,8 @@ details:not([open]) > :not(summary) {
 .amount-field > select {
   grid-area: currency;
   min-width: 0;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
+  /* Deliberate extra inline space reserves the native caret affordance. */
   padding-left: 0.875rem;
   padding-right: 2.5rem;
 }
@@ -1779,7 +1921,8 @@ details:not([open]) > :not(summary) {
 }
 
 .amount-input--long {
-  font-size: 0.76rem;
+  /* Detached payer/allocation fields must also stay above iOS's zoom floor. */
+  font-size: 1rem;
   letter-spacing: 0;
 }
 
@@ -1788,7 +1931,7 @@ details:not([open]) > :not(summary) {
 }
 
 .amount-input--very-long {
-  font-size: 0.6rem;
+  font-size: 1rem;
   letter-spacing: 0;
 }
 
@@ -1802,12 +1945,13 @@ details:not([open]) > :not(summary) {
 }
 
 .field--compact input {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
 }
 
 .field--compact select {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
+  /* Deliberate extra inline space reserves the native caret affordance. */
   padding: var(--space-2) 2.5rem var(--space-2) 0.875rem;
 }
 
@@ -1825,7 +1969,7 @@ details:not([open]) > :not(summary) {
 .method-row {
   display: flex;
   width: 100%;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
@@ -1838,7 +1982,7 @@ details:not([open]) > :not(summary) {
 }
 
 .participant-row {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
 }
 
@@ -2064,14 +2208,16 @@ input[inputmode="decimal"] {
 }
 
 .split-default-choices {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-muted);
-  padding: var(--space-3) var(--space-4);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .split-default-choices p {
-  margin: 0 0 var(--space-3);
+  margin: 0;
 }
 
 .split-default-choices .actions {
@@ -2125,7 +2271,7 @@ input[inputmode="decimal"] {
 }
 
 .modal-sheet form {
-  margin-bottom: 0;
+  margin: 0;
 }
 
 .modal-sheet,
@@ -2151,13 +2297,13 @@ input[inputmode="decimal"] {
 }
 
 .modal-sheet .button--secondary {
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   padding: var(--space-2) var(--space-3);
 }
 
 .checkbox-row {
   display: flex;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-items: center;
   gap: var(--space-2);
   color: var(--color-ink);
@@ -2168,6 +2314,12 @@ input[inputmode="decimal"] {
   height: 1.15rem;
   min-height: 1.15rem;
   accent-color: var(--color-primary);
+}
+
+.notification-preferences {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .bottom-nav {
@@ -2192,6 +2344,37 @@ input[inputmode="decimal"] {
   padding-bottom: calc(var(--space-1) + var(--safe-bottom));
   padding-left: max(var(--space-1), var(--safe-left));
   backdrop-filter: blur(18px);
+}
+
+.update-control {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-primary-strong);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.update-control > span {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-action {
+  min-height: var(--control-min-height);
+  border-color: var(--color-border-strong);
+  background: var(--color-primary-soft);
+  color: var(--color-primary-strong);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.update-action:hover {
+  background: var(--color-secondary-hover);
 }
 
 .nav-item {
@@ -2222,6 +2405,8 @@ input[inputmode="decimal"] {
 }
 
 .nav-item--add {
+  position: relative;
+  isolation: isolate;
   align-self: stretch;
   align-items: stretch;
   background: transparent;
@@ -2231,7 +2416,7 @@ input[inputmode="decimal"] {
 .nav-item__capsule {
   display: grid;
   width: 100%;
-  min-height: 2.75rem;
+  min-height: var(--control-min-height);
   align-self: stretch;
   place-items: center;
   gap: var(--space-1);
@@ -2247,8 +2432,33 @@ input[inputmode="decimal"] {
   color: var(--color-ink-muted);
 }
 
-.nav-item--add:hover .nav-item__capsule,
+.nav-item--add[aria-current="page"]::before {
+  position: absolute;
+  z-index: 0;
+  top: calc(-1 * var(--space-1));
+  right: calc(-1 * var(--space-1));
+  bottom: calc(-1 * (var(--space-1) + var(--safe-bottom)));
+  left: calc(-1 * var(--space-1));
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--color-primary-strong);
+  content: '';
+}
+
+.nav-item--add .nav-item__capsule {
+  position: relative;
+  z-index: 1;
+  background: var(--color-primary);
+  box-shadow: var(--shadow-primary);
+}
+
 .nav-item--add[aria-current="page"] .nav-item__capsule {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  box-shadow: none;
+}
+
+.nav-item--add:not([aria-current="page"]):hover .nav-item__capsule {
   background: var(--color-primary-strong);
   color: var(--color-on-primary);
 }

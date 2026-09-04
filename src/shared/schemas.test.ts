@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupSplitDefaultInput, notificationPreferencesInput, pushSubscriptionInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { isSupportedPushEndpoint } from './push-endpoints';
 import { BalanceOverflowError } from './money';
 
 const base = { description: 'Lunch', amount_minor: 1000, currency: 'USD' as const, date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }] };
@@ -25,6 +26,31 @@ describe('financial input', () => {
   });
   it('keeps frontend currency options aligned with the validation source', () => {
     expect(currencyOptions.map((option) => option.value)).toEqual([...supportedCurrencies]);
+  });
+  it('keeps notification enablement out of account-wide content preferences', () => {
+    expect(notificationPreferencesInput.safeParse({ money_changes: true, scheduled_events: true, detail_level: 'generic' }).success).toBe(true);
+    expect(notificationPreferencesInput.safeParse({ enabled: false, money_changes: true, scheduled_events: true, detail_level: 'generic' }).success).toBe(false);
+  });
+  it('accepts only supported HTTPS browser push services and safe endpoint URLs', () => {
+    expect(isSupportedPushEndpoint('https://web.push.apple.com/safari-opaque-push-token')).toBe(true);
+    expect(isSupportedPushEndpoint('https://fcm.googleapis.com/wp/chrome-token')).toBe(true);
+    expect(isSupportedPushEndpoint('https://updates.push.services.mozilla.com/wpush/v2/firefox-token')).toBe(true);
+    const validP256dh = 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU';
+    const validAuth = 'BwcHBwcHBwcHBwcHBwcHBw';
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: validP256dh, auth: validAuth } }).success).toBe(true);
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: 'A'.repeat(87), auth: validAuth } }).success).toBe(false);
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: validP256dh, auth: 'A'.repeat(21) } }).success).toBe(false);
+    for (const endpoint of [
+      'http://fcm.googleapis.com/fcm/send/token',
+      'https://evil.example/fcm/send/token',
+      'https://fcm.googleapis.com:8443/fcm/send/token',
+      'https://user:secret@fcm.googleapis.com/fcm/send/token',
+      'https://fcm.googleapis.com/not-a-push-path/token',
+      'https://web.push.apple.com/3/device/apple-token',
+      'https://web.push.apple.com/',
+      'https://web.push.apple.com/safari/token',
+      'https://web.push.apple.com/safari-token?query=not-supported',
+    ]) expect(isSupportedPushEndpoint(endpoint)).toBe(false);
   });
   it('accepts a client operation ID for retry-safe friend creation', () => {
     expect(friendInput.parse({ name: 'Friend', currency: 'USD', client_operation_id: 'friend-op' }).client_operation_id).toBe('friend-op');
