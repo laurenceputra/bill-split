@@ -735,6 +735,11 @@
   margin-top: var(--space-3);
 }
 
+.section-title + .member-list,
+.section-title + p {
+  margin-top: var(--space-3);
+}
+
 .reading-width {
   width: min(100%, var(--reading-max));
 }
@@ -1478,6 +1483,15 @@ details:not([open]) > :not(summary) {
   border-top: 1px solid var(--color-border);
 }
 
+.member-email-control,
+.member-email-control form,
+.member-email-control .field,
+.member-email-control__pending,
+.member-email-control__pending-actions {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .member-email-control form {
   display: flex;
   align-items: end;
@@ -1503,10 +1517,16 @@ details:not([open]) > :not(summary) {
 
 .member-email-control__pending {
   justify-content: space-between;
+  overflow-wrap: anywhere;
 }
 
 .member-email-control__pending-actions {
   flex: 0 0 auto;
+}
+
+.member-email-control__pending > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .member-email-control__form {
@@ -2363,6 +2383,7 @@ input[inputmode="decimal"] {
   }
 
   .member-email-control {
+    flex: 0 1 auto;
     order: 2;
   }
 

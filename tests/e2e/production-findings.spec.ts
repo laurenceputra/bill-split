@@ -156,20 +156,64 @@ test('saves an email from the participant disclosure as a targeted invitation', 
   await expect(sam).toContainText('Pending invitation for sam-login@example.com');
 });
 
-test('stacks targeted email fields and actions within a member row on narrow screens', async ({ authenticatedPage }) => {
-  await authenticatedPage.setViewportSize({ width: 390, height: 844 });
-  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
-  const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
-  await sam.locator('summary').click();
-  const layout = await sam.evaluate((row) => {
-    const form = row.querySelector('form');
-    const input = row.querySelector('input[type="email"]');
-    const button = form?.querySelector('button');
-    return { formDisplay: form ? getComputedStyle(form).display : '', inputBottom: input?.getBoundingClientRect().bottom, buttonTop: button?.getBoundingClientRect().top, rowRight: row.getBoundingClientRect().right, viewport: window.innerWidth };
-  });
-  expect(layout.formDisplay).toBe('grid');
-  expect(layout.buttonTop).toBeGreaterThanOrEqual(layout.inputBottom || 0);
-  expect(layout.rowRight).toBeLessThanOrEqual(layout.viewport);
+test('contains the open targeted email form across responsive member-row widths', async ({ authenticatedPage }) => {
+  const viewports = [
+    { width: 390, height: 844 },
+    { width: 480, height: 844 },
+    { width: 481, height: 844 },
+    { width: 768, height: 1024 },
+    { width: 895, height: 900 },
+    { width: 896, height: 900 },
+    { width: 1440, height: 900 },
+  ];
+
+  for (const viewport of viewports) {
+    await authenticatedPage.setViewportSize(viewport);
+    await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+    const sam = authenticatedPage.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+    await sam.locator('summary').click();
+    await expect(sam.getByLabel('Email for Sam Rivera')).toBeVisible();
+
+    const layout = await sam.evaluate((row) => {
+      const isVisible = (element: Element) => {
+        const style = getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && box.width > 0 && box.height > 0;
+      };
+      const elements = [row, ...Array.from(row.querySelectorAll('*'))].filter(isVisible);
+      const rowBox = row.getBoundingClientRect();
+      const overflowing = elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return { element: element.tagName.toLowerCase(), left: box.left, right: box.right };
+      }).filter(({ left, right }) => left < -1 || right > window.innerWidth + 1);
+      const outsideRowBounds = elements.filter((element) => element !== row).map((element) => {
+        const box = element.getBoundingClientRect();
+        return { element: element.tagName.toLowerCase(), left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+      }).filter(({ left, right, top, bottom }) => left < rowBox.left - 1 || right > rowBox.right + 1 || top < rowBox.top - 1 || bottom > rowBox.bottom + 1);
+      const form = row.querySelector('form');
+      const field = form?.querySelector('.field');
+      const button = form?.querySelector('button');
+      return {
+        documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+        viewport: window.innerWidth,
+        rowBounds: { left: rowBox.left, right: rowBox.right, top: rowBox.top, bottom: rowBox.bottom },
+        overflowing,
+        outsideRowBounds,
+        formDisplay: form ? getComputedStyle(form).display : '',
+        fieldBottom: field?.getBoundingClientRect().bottom || 0,
+        buttonTop: button?.getBoundingClientRect().top || 0,
+      };
+    });
+
+    const geometry = JSON.stringify(layout);
+    expect(layout.documentWidth, geometry).toBeLessThanOrEqual(layout.viewport + 1);
+    expect(layout.overflowing, geometry).toEqual([]);
+    expect(layout.outsideRowBounds, geometry).toEqual([]);
+    if (viewport.width <= 480) {
+      expect(layout.formDisplay).toBe('grid');
+      expect(layout.buttonTop).toBeGreaterThanOrEqual(layout.fieldBottom - 1);
+    }
+  }
 });
 
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {

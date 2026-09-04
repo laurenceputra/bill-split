@@ -56,6 +56,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
     expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
+    expect(css).toMatch(/\.section-title \+ \.member-list,\s*\.section-title \+ p\s*\{[\s\S]*margin-top: var\(--space-3\);/);
   });
 
   it('styles the native expense filter disclosure at its actual DOM depth', () => {
@@ -193,6 +194,14 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('expensePersonLabel(payer.personId)');
     expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.member-email-control form\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
+  });
+
+  it('contains targeted email controls and wraps pending invitation text', () => {
+    const containmentRule = css.match(/\.member-email-control,\s*\.member-email-control form,\s*\.member-email-control \.field,\s*\.member-email-control__pending,\s*\.member-email-control__pending-actions\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(containmentRule).toContain('min-width: 0;');
+    expect(containmentRule).toContain('max-width: 100%;');
+    expect(css).toMatch(/\.member-email-control__pending\s*\{[\s\S]*overflow-wrap: anywhere;/);
+    expect(css).toMatch(/\.member-email-control__pending > span:first-child\s*\{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;/);
   });
 
   it('defines every spacing token referenced by the authored stylesheets', () => {
