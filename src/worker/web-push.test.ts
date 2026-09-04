@@ -20,10 +20,16 @@ const hkdfExpand = async (prk: Uint8Array, info: Uint8Array, length: number) => 
 
 describe('Worker Web Push implementation', () => {
   it('round-trips encrypted subscription material without storing an endpoint in plaintext', async () => {
-    const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/opaque-token', keys: { p256dh: b64(new Uint8Array(65).fill(4)), auth: b64(new Uint8Array(16).fill(7)) } };
+    const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/opaque-token', keys: { p256dh: 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU', auth: b64(new Uint8Array(16).fill(7)) } };
     const ciphertext = await encryptSubscription(subscription, 'test-encryption-secret');
     expect(ciphertext).not.toContain(subscription.endpoint);
     await expect(decryptSubscription(ciphertext, 'test-encryption-secret')).resolves.toEqual(subscription);
+  });
+
+  it('rejects malformed subscription key material before encryption or delivery', async () => {
+    const subscription = { endpoint: 'https://fcm.googleapis.com/fcm/send/opaque-token', keys: { p256dh: b64(new Uint8Array(65).fill(4)), auth: b64(new Uint8Array(16).fill(7)) } };
+    await expect(encryptSubscription(subscription, 'test-encryption-secret')).rejects.toThrow(/key material|P-256/i);
+    await expect(sendWebPush(subscription, '{}', { privateKey: 'unused', publicKey: 'unused', contact: 'mailto:test@example.test' })).rejects.toThrow(/key material|P-256/i);
   });
 
   it('sends standards-compatible aes128gcm payloads with a VAPID authorization header', async () => {

@@ -3,6 +3,7 @@
  * suitable for a Worker bundle. */
 
 import { normalizeSupportedPushEndpoint } from '../shared/push-endpoints';
+import { isValidPushSubscriptionKeyMaterial } from '../shared/schemas';
 
 const encoder = new TextEncoder();
 
@@ -14,7 +15,7 @@ const toBase64Url = (bytes: Uint8Array) => {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 };
 const fromBase64Url = (value: string) => {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('Invalid base64url value');
+  if (!/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) throw new Error('Invalid base64url value');
   const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
   return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
 };
@@ -49,9 +50,24 @@ async function encryptionKey(secret: string) {
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
+/** Validate both the wire contract and the platform's P-256 import rules
+ * before credentials are persisted or used for delivery. */
+export async function validatePushSubscriptionKeyMaterial(keys: { p256dh: string; auth: string }) {
+  if (!isValidPushSubscriptionKeyMaterial(keys)) throw new Error('Invalid Web Push key material');
+  const clientPublic = fromBase64Url(keys.p256dh);
+  const auth = fromBase64Url(keys.auth);
+  if (clientPublic.length !== 65 || clientPublic[0] !== 4 || auth.length !== 16) throw new Error('Invalid Web Push key material');
+  try {
+    await crypto.subtle.importKey('raw', clientPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  } catch {
+    throw new Error('Invalid Web Push P-256 public key');
+  }
+}
+
 export async function encryptSubscription(subscription: StoredPushSubscription, secret: string) {
   const endpoint = normalizeSupportedPushEndpoint(subscription.endpoint);
   if (!endpoint) throw new Error('Invalid push subscription');
+  await validatePushSubscriptionKeyMaterial(subscription.keys);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await encryptionKey(secret);
   const ciphertext = u8(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(JSON.stringify({ ...subscription, endpoint }))));
@@ -66,6 +82,7 @@ export async function decryptSubscription(ciphertext: string, secret: string): P
   const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as StoredPushSubscription;
   const endpoint = normalizeSupportedPushEndpoint(parsed.endpoint);
   if (!endpoint || typeof parsed.keys?.p256dh !== 'string' || typeof parsed.keys?.auth !== 'string') throw new Error('Invalid stored subscription');
+  await validatePushSubscriptionKeyMaterial(parsed.keys);
   return { endpoint, keys: { p256dh: parsed.keys.p256dh, auth: parsed.keys.auth } };
 }
 
@@ -82,9 +99,9 @@ const expand = async (prk: Uint8Array, infoValue: Uint8Array, length: number) =>
 const info = (label: string) => concat(encoder.encode(label), new Uint8Array([0]));
 
 async function encryptedBody(subscription: StoredPushSubscription, payload: string) {
+  await validatePushSubscriptionKeyMaterial(subscription.keys);
   const clientPublic = fromBase64Url(subscription.keys.p256dh);
   const auth = fromBase64Url(subscription.keys.auth);
-  if (clientPublic.length !== 65 || clientPublic[0] !== 4 || auth.length !== 16) throw new Error('Invalid Web Push key material');
   const clientKey = await crypto.subtle.importKey('raw', clientPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
   const server = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']) as CryptoKeyPair;
   const serverPublic = u8(await crypto.subtle.exportKey('raw', server.publicKey as CryptoKey) as unknown as ArrayBuffer);

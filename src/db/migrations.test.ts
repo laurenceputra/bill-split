@@ -38,8 +38,8 @@ const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split
 const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/0024_incremental_projection_totals.sql', moduleUrl), 'utf8');
 const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_expense_suggestion_lookup.sql', moduleUrl), 'utf8');
 const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
-const notificationsSql = readFileSync(new URL('../../migrations/0026_notifications.sql', moduleUrl), 'utf8');
-const notificationMaintenanceSql = readFileSync(new URL('../../migrations/0027_notification_maintenance_indexes.sql', moduleUrl), 'utf8');
+const notificationsSql = readFileSync(new URL('../../migrations/0027_notifications.sql', moduleUrl), 'utf8');
+const notificationMaintenanceSql = readFileSync(new URL('../../migrations/0028_notification_maintenance_indexes.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
@@ -415,10 +415,13 @@ describe('scheduled completion migration integration', () => {
         run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE projection_state SET status='ready' WHERE group_id='group-1';", '--yes']);
         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at) VALUES('group-1','USD','person-1',100,'2026-01-01');", '--yes']);
-       await cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql'));
-        await cp(join(root, 'migrations', '0025_expense_suggestion_lookup.sql'), join(migrationsDir, '0025_expense_suggestion_lookup.sql'));
-        await cp(join(root, 'migrations', '0026_notifications.sql'), join(migrationsDir, '0026_notifications.sql'));
-        await cp(join(root, 'migrations', '0027_notification_maintenance_indexes.sql'), join(migrationsDir, '0027_notification_maintenance_indexes.sql'));
+        await Promise.all([
+          cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql')),
+          cp(join(root, 'migrations', '0025_expense_suggestion_lookup.sql'), join(migrationsDir, '0025_expense_suggestion_lookup.sql')),
+          cp(join(root, 'migrations', '0026_targeted_group_invitations.sql'), join(migrationsDir, '0026_targeted_group_invitations.sql')),
+          cp(join(root, 'migrations', '0027_notifications.sql'), join(migrationsDir, '0027_notifications.sql')),
+          cp(join(root, 'migrations', '0028_notification_maintenance_indexes.sql'), join(migrationsDir, '0028_notification_maintenance_indexes.sql')),
+        ]);
        run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
       expect(query('SELECT id,status,generation_claim_id,next_occurrence_date,(SELECT COUNT(*) FROM scheduled_payers WHERE scheduled_expense_id=scheduled_expenses.id) AS payer_count,(SELECT COUNT(*) FROM scheduled_splits WHERE scheduled_expense_id=scheduled_expenses.id) AS split_count,(SELECT COUNT(*) FROM scheduled_occurrences WHERE scheduled_expense_id=scheduled_expenses.id) AS occurrence_count FROM scheduled_expenses WHERE id=\'scheduled-1\';')).toEqual([
@@ -428,8 +431,10 @@ describe('scheduled completion migration integration', () => {
       expect(query('PRAGMA foreign_key_list(scheduled_payers);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
       expect(query('PRAGMA foreign_key_list(scheduled_occurrences);')).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
       expect(query('PRAGMA table_info(scheduled_expenses);')).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'category' })]));
-      expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
-         expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
+       expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
+       expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
+       expect(query("SELECT name FROM pragma_table_info('group_invitations') WHERE name='target_person_id';")).toEqual([{ name: 'target_person_id' }]);
+       expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_group_invitations_target','idx_group_invitations_pending_target','idx_group_invitations_pending_email') ORDER BY name;")).toEqual([{ name: 'idx_group_invitations_pending_email' }, { name: 'idx_group_invitations_pending_target' }, { name: 'idx_group_invitations_target' }]);
         expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;")).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
        expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_expenses_suggestion_lookup';")).toEqual([{ name: 'idx_expenses_suggestion_lookup' }]);
        expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('push_subscriptions','notification_preferences','notification_events','notification_deliveries') ORDER BY name;")).toEqual([{ name: 'notification_deliveries' }, { name: 'notification_events' }, { name: 'notification_preferences' }, { name: 'push_subscriptions' }]);

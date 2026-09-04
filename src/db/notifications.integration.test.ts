@@ -16,6 +16,8 @@ import { Miniflare } from 'miniflare';
 
 type Row = Record<string, unknown>;
 type Execution = { rows: Row[]; changes: number };
+const validP256dh = 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU';
+const validAuth = 'BwcHBwcHBwcHBwcHBwcHBw';
 
 /** D1's prepare endpoint accepts one statement and avoids starting a new
  * Wrangler process for every migration operation. Keep trigger bodies intact
@@ -80,7 +82,7 @@ describe('notification event commits against local D1', () => {
       '0017_cleanup_indexes.sql', '0018_category_preferences.sql', '0019_group_membership_events.sql',
       '0020_account_deletion.sql', '0021_deleted_identity_tombstones.sql', '0022_application_sessions.sql',
       '0023_group_split_defaults.sql', '0024_incremental_projection_totals.sql',
-      '0025_expense_suggestion_lookup.sql', '0026_notifications.sql', '0027_notification_maintenance_indexes.sql',
+      '0025_expense_suggestion_lookup.sql', '0026_targeted_group_invitations.sql', '0027_notifications.sql', '0028_notification_maintenance_indexes.sql',
     ];
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES ('user-1','one@example.test','2026-01-01','2026-01-01'),('user-2','two@example.test','2026-01-01','2026-01-01'),('user-3','three@example.test','2026-01-01','2026-01-01');
@@ -107,6 +109,8 @@ describe('notification event commits against local D1', () => {
         const sql = await readFile(new URL(`../../migrations/${name}`, moduleUrl), 'utf8');
         for (const statement of statementsIn(sql)) await db.prepare(statement).run();
       }
+      expect((await execute("SELECT name FROM pragma_table_info('group_invitations') WHERE name='target_person_id'")).rows).toEqual([{ name: 'target_person_id' }]);
+      expect((await execute("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_group_invitations_target','idx_group_invitations_pending_target','idx_group_invitations_pending_email') ORDER BY name")).rows).toEqual([{ name: 'idx_group_invitations_pending_email' }, { name: 'idx_group_invitations_pending_target' }, { name: 'idx_group_invitations_target' }]);
       for (const statement of statementsIn(seed)) await db.prepare(statement).run();
       const repo = new Repository(new LocalD1(execute, executeBatch) as never);
       const expenseInput = { description: 'Dinner', amount_minor: 1000, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-1', amount_minor: 1000 }], splits: [{ person_id: 'person-2', amount_minor: 1000 }] };
@@ -152,8 +156,8 @@ describe('notification event commits against local D1', () => {
       // user-1, so user-3 is the eligible recipient.
       const notificationRepo = new Repository(new LocalD1(execute, executeBatch) as never, undefined, { pushSubscriptionKey: 'integration-secret' });
        const endpoint = 'https://fcm.googleapis.com/fcm/send/queued-delivery';
-       const subscription = await notificationRepo.upsertPushSubscription('user-3', { endpoint, keys: { p256dh: 'A'.repeat(65), auth: 'A'.repeat(22) } });
-       await notificationRepo.upsertPushSubscription('user-3', { endpoint, keys: { p256dh: 'B'.repeat(65), auth: 'B'.repeat(22) } });
+      const subscription = await notificationRepo.upsertPushSubscription('user-3', { endpoint, keys: { p256dh: validP256dh, auth: validAuth } });
+      await notificationRepo.upsertPushSubscription('user-3', { endpoint, keys: { p256dh: validP256dh, auth: validAuth } });
        expect((await execute("SELECT COUNT(*) AS count FROM push_subscriptions WHERE user_id='user-3' AND revoked_at IS NULL")).rows).toEqual([{ count: 1 }]);
       await notificationRepo.updateNotificationPreferences('user-3', { money_changes: true, scheduled_events: true, detail_level: 'detailed' });
       const deliveredExpense = await repo.createExpense('group-1', 'user-1', {
@@ -198,18 +202,18 @@ describe('notification event commits against local D1', () => {
       expect((await execute('SELECT COUNT(*) AS count FROM notification_deliveries WHERE event_id=?', [deliveredEventId])).rows).toEqual([{ count: 1 }]);
         const destinationEndpoints = Array.from({ length: 10 }, (_, index) => `https://fcm.googleapis.com/fcm/send/cap-${index}`);
         const reactivationEndpoint = 'https://fcm.googleapis.com/fcm/send/revoked-at-cap';
-        const reactivationSubscription = await notificationRepo.upsertPushSubscription('user-2', { endpoint: reactivationEndpoint, keys: { p256dh: 'C'.repeat(65), auth: 'C'.repeat(22) } });
+        const reactivationSubscription = await notificationRepo.upsertPushSubscription('user-2', { endpoint: reactivationEndpoint, keys: { p256dh: validP256dh, auth: validAuth } });
         await execute('UPDATE push_subscriptions SET revoked_at=? WHERE id=?', ['2026-01-03T00:00:00.000Z', reactivationSubscription.id]);
         const destinationSubscriptions = [];
-        for (const destinationEndpoint of destinationEndpoints) destinationSubscriptions.push(await notificationRepo.upsertPushSubscription('user-2', { endpoint: destinationEndpoint, keys: { p256dh: 'C'.repeat(65), auth: 'C'.repeat(22) } }));
-        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint: reactivationEndpoint, keys: { p256dh: 'D'.repeat(65), auth: 'D'.repeat(22) } })).rejects.toMatchObject({ code: 'PUSH_SUBSCRIPTION_LIMIT', details: { limit: 10 } });
-        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint: destinationEndpoints[0], keys: { p256dh: 'D'.repeat(65), auth: 'D'.repeat(22) } })).resolves.toMatchObject({ id: destinationSubscriptions[0].id });
-        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint, keys: { p256dh: 'D'.repeat(65), auth: 'D'.repeat(22) } })).rejects.toMatchObject({ code: 'PUSH_SUBSCRIPTION_LIMIT', details: { limit: 10 } });
+        for (const destinationEndpoint of destinationEndpoints) destinationSubscriptions.push(await notificationRepo.upsertPushSubscription('user-2', { endpoint: destinationEndpoint, keys: { p256dh: validP256dh, auth: validAuth } }));
+        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint: reactivationEndpoint, keys: { p256dh: validP256dh, auth: validAuth } })).rejects.toMatchObject({ code: 'PUSH_SUBSCRIPTION_LIMIT', details: { limit: 10 } });
+        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint: destinationEndpoints[0], keys: { p256dh: validP256dh, auth: validAuth } })).resolves.toMatchObject({ id: destinationSubscriptions[0].id });
+        await expect(notificationRepo.upsertPushSubscription('user-2', { endpoint, keys: { p256dh: validP256dh, auth: validAuth } })).rejects.toMatchObject({ code: 'PUSH_SUBSCRIPTION_LIMIT', details: { limit: 10 } });
        expect((await execute('SELECT user_id FROM push_subscriptions WHERE endpoint_hash=?', [await endpointHash(endpoint, 'integration-secret')])).rows).toEqual([{ user_id: 'user-3' }]);
        await execute("INSERT INTO notification_events(id,event_type,group_id,entity_type,entity_id,entity_version,actor_id,occurred_at) VALUES('transfer-event','expense_created','group-1','expense',?,1,'user-1','2026-01-04T00:00:00.000Z')", [expense.id]);
        await execute("INSERT INTO notification_deliveries(event_id,subscription_id,status,attempts,next_attempt_at,updated_at) VALUES('transfer-event',?,'pending',0,'2026-01-04T00:00:00.000Z','2026-01-04T00:00:00.000Z')", [subscription.id]);
         await notificationRepo.deletePushSubscription('user-2', destinationEndpoints[0]);
-        const transferred = await notificationRepo.upsertPushSubscription('user-2', { endpoint, keys: { p256dh: 'D'.repeat(65), auth: 'D'.repeat(22) } });
+      const transferred = await notificationRepo.upsertPushSubscription('user-2', { endpoint, keys: { p256dh: validP256dh, auth: validAuth } });
         expect(transferred.id).not.toBe(subscription.id);
         expect((await execute("SELECT user_id,revoked_at FROM push_subscriptions WHERE id=?", [subscription.id])).rows).toEqual([{ user_id: 'user-3', revoked_at: expect.any(String) }]);
         expect((await execute("SELECT user_id,revoked_at FROM push_subscriptions WHERE id=?", [transferred.id])).rows).toEqual([{ user_id: 'user-2', revoked_at: null }]);
@@ -225,12 +229,12 @@ describe('notification event commits against local D1', () => {
        for (let index = 0; index < 5; index += 1) {
          const fanoutEndpoint = `https://fcm.googleapis.com/fcm/send/fanout-${index}`;
         await execute("INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?)", [
-          `fanout-subscription-${index}`, 'user-3', await endpointHash(fanoutEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: fanoutEndpoint, keys: { p256dh: 'B'.repeat(65), auth: 'B'.repeat(22) } }, 'integration-secret'), '2026-01-04', '2026-01-04',
+           `fanout-subscription-${index}`, 'user-3', await endpointHash(fanoutEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: fanoutEndpoint, keys: { p256dh: validP256dh, auth: validAuth } }, 'integration-secret'), '2026-01-04', '2026-01-04',
          ]);
        }
        const expiredDeliveryEndpoint = 'https://fcm.googleapis.com/fcm/send/expired-delivery';
        await execute("INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,expiration_time,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", [
-         'expired-subscription-delivery', 'user-3', await endpointHash(expiredDeliveryEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: expiredDeliveryEndpoint, keys: { p256dh: 'X'.repeat(65), auth: 'X'.repeat(22) } }, 'integration-secret'), Date.parse('2025-12-01'), '2025-12-01', '2025-12-01',
+          'expired-subscription-delivery', 'user-3', await endpointHash(expiredDeliveryEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: expiredDeliveryEndpoint, keys: { p256dh: validP256dh, auth: validAuth } }, 'integration-secret'), Date.parse('2025-12-01'), '2025-12-01', '2025-12-01',
        ]);
        sendWebPush.mockClear();
        countNotificationQueries = true;
@@ -271,7 +275,7 @@ describe('notification event commits against local D1', () => {
          const expiredSubscriptionId = `expired-subscription-${index}`;
          const expiredEndpoint = `https://fcm.googleapis.com/fcm/send/expired-${index}`;
          await execute("INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,expiration_time,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", [
-           expiredSubscriptionId, 'user-3', await endpointHash(expiredEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: expiredEndpoint, keys: { p256dh: 'E'.repeat(65), auth: 'E'.repeat(22) } }, 'integration-secret'), Date.parse('2025-12-01'), '2025-12-01', '2025-12-01',
+            expiredSubscriptionId, 'user-3', await endpointHash(expiredEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: expiredEndpoint, keys: { p256dh: validP256dh, auth: validAuth } }, 'integration-secret'), Date.parse('2025-12-01'), '2025-12-01', '2025-12-01',
          ]);
          await execute("INSERT INTO notification_events(id,event_type,group_id,entity_type,entity_id,entity_version,occurred_at,completed_at) VALUES(?,?,?,?,?,1,?,?)", [`expired-event-${index}`, 'expense_created', 'group-1', 'expense', expense.id, '2025-12-01', '2025-12-01']);
          await execute("INSERT INTO notification_deliveries(event_id,subscription_id,status,attempts,next_attempt_at,updated_at) VALUES(?,?, 'sent',1,?,?)", [`expired-event-${index}`, expiredSubscriptionId, '2025-12-01', '2025-12-01']);
@@ -294,7 +298,7 @@ describe('notification event commits against local D1', () => {
         const pagedSubscriptionId = 'paged-expired-subscription';
         const pagedEndpoint = 'https://fcm.googleapis.com/fcm/send/paged-expired';
         await execute("INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,expiration_time,created_at,updated_at,revoked_at) VALUES(?,?,?,?,?,?,?,?)", [
-          pagedSubscriptionId, 'user-3', await endpointHash(pagedEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: pagedEndpoint, keys: { p256dh: 'P'.repeat(65), auth: 'P'.repeat(22) } }, 'integration-secret'), null, '2025-12-01', '2025-12-01', '2025-12-01',
+          pagedSubscriptionId, 'user-3', await endpointHash(pagedEndpoint, 'integration-secret'), await encryptSubscription({ endpoint: pagedEndpoint, keys: { p256dh: validP256dh, auth: validAuth } }, 'integration-secret'), null, '2025-12-01', '2025-12-01', '2025-12-01',
         ]);
         for (let index = 0; index < NOTIFICATION_MAINTENANCE_BATCH_SIZE + 1; index += 1) {
           const eventId = `paged-expired-event-${index}`;

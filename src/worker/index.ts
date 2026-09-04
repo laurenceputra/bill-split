@@ -374,7 +374,8 @@ api.get('/api/notifications/preferences', async (c) => {
 api.put('/api/notifications/preferences', zValidator('json', notificationPreferencesInput), async (c) => {
   try { return c.json({ preferences: await getRepo(c).updateNotificationPreferences(c.get('auth').id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); }
 });
-api.put('/api/notifications/subscription', zValidator('json', pushSubscriptionInput), async (c) => {
+const validatePushSubscription = zValidator('json', pushSubscriptionInput, (result, c) => result.success ? undefined : jsonError(c, 400, 'INVALID_PUSH_SUBSCRIPTION', 'The push subscription is invalid'));
+api.put('/api/notifications/subscription', validatePushSubscription, async (c) => {
   if (!notificationConfig(c.env)) return jsonError(c, 503, 'NOTIFICATIONS_DISABLED', 'Push notifications are not configured');
   try { return c.json({ subscription: await getRepo(c).upsertPushSubscription(c.get('auth').id, c.req.valid('json')) }); } catch (error) { return repositoryError(c, error); }
 });

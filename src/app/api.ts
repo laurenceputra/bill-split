@@ -522,7 +522,7 @@ const mutationIdentityError = () => new ApiError('The verified account is unavai
  * its own exact Clerk binding and tombstone lookup; keep this option private
  * to that route and require the still-valid local recovery marker here too.
  */
-type ApiMutationOptions = { accountDeletionRecovery?: { clerkUserId: string } };
+type ApiMutationOptions = { accountDeletionRecovery?: { clerkUserId: string }; expectedUserId?: string };
 const isBoundAccountDeletionRecovery = (path: string, init: RequestInit | undefined, options: ApiMutationOptions | undefined) => {
   if (!options?.accountDeletionRecovery || path !== '/account' || (init?.method || 'GET').toUpperCase() !== 'DELETE') return false;
   const expectedClerkUserId = new Headers(init?.headers).get(ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER);
@@ -548,7 +548,7 @@ const runAuthenticatedMutation = <T>(path: string, init: RequestInit | undefined
   } else {
     if (!isServerMutationAllowed()) return Promise.reject(mutationBlockedError());
   }
-  const expectedUserId = getVerifiedUserId();
+  const expectedUserId = options?.expectedUserId ?? getVerifiedUserId();
   if (!recovery && !expectedUserId) return Promise.reject(mutationIdentityError());
   return runMutation(() => {
     if (getSessionLogoutInProgress() || isMutationBarrierActive()) return Promise.reject(mutationBlockedError());
@@ -715,10 +715,18 @@ export const bootstrapApplicationSession = () => directSessionRequest<SessionRes
 export const recordSessionActivity = () => api<SessionResponse>('/session/activity', { method: 'POST', body: '{}' });
 export const revokeApplicationSession = () => api<void>('/session', { method: 'DELETE' });
 export const revokeAllApplicationSessions = () => api<void>('/sessions', { method: 'DELETE' });
-export const getNotificationStatus = () => api<NotificationStatus>('/notifications/status');
+export async function getNotificationStatus(expectedAuthEpoch?: number, expectedUserId?: string) {
+  const response = await apiWithMeta<NotificationStatus>('/notifications/status', undefined, expectedAuthEpoch);
+  if (expectedUserId && response.userId !== expectedUserId) throw new ApiError('The authenticated account changed before notification preferences were read.', { status: 401, code: 'IDENTITY_MISMATCH' });
+  return response.data;
+}
 export const putNotificationSubscription = (subscription: PushSubscriptionInput) => api<{ subscription: { id: string; expirationTime: number | null } }>('/notifications/subscription', { method: 'PUT', body: JSON.stringify(subscription) });
 export const removeNotificationSubscription = (endpoint: string) => api<void>('/notifications/subscription', { method: 'DELETE', body: JSON.stringify({ endpoint }) });
-export const updateNotificationPreferences = (preferences: NotificationPreferences) => api<{ preferences: NotificationPreferences }>('/notifications/preferences', { method: 'PUT', body: JSON.stringify({ money_changes: preferences.moneyChanges, scheduled_events: preferences.scheduledEvents, detail_level: preferences.detailLevel }) }).then((result) => result.preferences);
+export async function updateNotificationPreferences(preferences: NotificationPreferences, expectedAuthEpoch?: number, expectedUserId?: string) {
+  const response = await apiWithMeta<{ preferences: NotificationPreferences }>('/notifications/preferences', { method: 'PUT', body: JSON.stringify({ money_changes: preferences.moneyChanges, scheduled_events: preferences.scheduledEvents, detail_level: preferences.detailLevel }) }, expectedAuthEpoch, { expectedUserId });
+  if (expectedUserId && response.userId !== expectedUserId) throw new ApiError('The authenticated account changed before notification preferences were saved.', { status: 401, code: 'IDENTITY_MISMATCH' });
+  return response.data.preferences;
+}
 
 export function apiWithMeta<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number, options?: ApiMutationOptions): Promise<ApiResponse<T>> {
   if (path === '/me' && clerkEvidenceKnown && (!clerkEvidence.isLoaded || isIncompleteSignedInEvidence(clerkEvidence)) && !isDevelopmentAuthBypass) {

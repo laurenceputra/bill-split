@@ -10,7 +10,7 @@ import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS }
 import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
 import { normalizeExpenseSplitArrangement, sameGroupSplitArrangement } from '../shared/split-default';
-import { encryptSubscription, endpointHash } from '../worker/web-push';
+import { encryptSubscription, endpointHash, validatePushSubscriptionKeyMaterial } from '../worker/web-push';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -374,6 +374,8 @@ export class Repository {
     const key = this.pushKey(), parsed = pushSubscriptionInput.safeParse(input);
     if (!parsed.success) throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'The push subscription is invalid');
     const value = parsed.data, endpoint = new URL(value.endpoint).toString(), timestamp = now(), activeAsOf = Date.now();
+    try { await validatePushSubscriptionKeyMaterial(value.keys); }
+    catch { throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'The push subscription key material is invalid', { field: 'keys' }); }
     const hash = await endpointHash(endpoint, key);
     const ciphertext = await encryptSubscription({ endpoint, keys: value.keys }, key);
     const id = uid();

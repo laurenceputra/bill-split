@@ -75,9 +75,9 @@ describe('notification delivery', () => {
     expect(retryRepo.markNotificationDeliveryRetry).toHaveBeenCalledWith('event-1', 'subscription-1', expect.any(String), 2, '503');
   });
 
-  it('revokes invalid ciphertext credentials without deleting their delivery row', async () => {
+  it('revokes credentials with invalid stored key material without retrying', async () => {
     const repo = repository();
-    decrypt.mockRejectedValueOnce(new Error('invalid ciphertext'));
+    decrypt.mockRejectedValueOnce(new Error('Invalid Web Push key material'));
     await expect(deliverNotificationEvent(repo, 'event-1', config)).resolves.toMatchObject({ retry: false });
     expect(repo.markNotificationDeliveryFailed).toHaveBeenCalledWith('event-1', 'subscription-1', expect.any(String), 1, 'INVALID_CIPHERTEXT');
     expect(repo.revokePushSubscription).toHaveBeenCalledWith('subscription-1');

@@ -29,6 +29,14 @@ const setSnapshot = (next: NotificationSnapshot) => {
   snapshot = Object.freeze(next);
   notify();
 };
+const resetNotificationSnapshot = () => {
+  localBadgeCount = 0;
+  setSnapshot(initial);
+};
+const activateNotificationUser = (userId: string) => {
+  if (activeUserId !== userId) resetNotificationSnapshot();
+  activeUserId = userId;
+};
 const permission = (): NotificationPermission | 'unsupported' => {
   if (typeof Notification === 'undefined') return 'unsupported';
   try { return Notification.permission; } catch { return 'unsupported'; }
@@ -111,17 +119,19 @@ const queueIdentityRevocation = () => {
 // ordinary same-account Clerk startup/wake transitions; those transitions
 // fence old writes but must not revoke a still-valid push identity.
 subscribeAuthEpoch((transition: AuthEpochTransition) => {
-  if (transition.reason === 'same-account' || transition.reason === 'cache-clear') return;
+  if (transition.reason === 'same-account') return;
+  resetNotificationSnapshot();
+  if (transition.reason === 'cache-clear') return;
   activeUserId = undefined;
   identityAdmissionRequired = true;
   void queueIdentityRevocation().catch(() => undefined);
 });
 
-async function loadStatus(isCurrent: () => boolean = () => true) {
+async function loadStatus(isCurrent: () => boolean = () => true, expectedAuthEpoch?: number, expectedUserId?: string) {
   if (notificationNeedsInstall()) { setSnapshot({ capability: 'needs-install', permission: permission() }); return undefined; }
   if (!notificationSupported()) { setSnapshot({ capability: 'unavailable', permission: 'unsupported' }); return undefined; }
   try {
-    const status = await getNotificationStatus();
+    const status = await getNotificationStatus(expectedAuthEpoch, expectedUserId);
     if (!isCurrent()) return undefined;
     setSnapshot({ capability: capabilityFor(status), permission: permission(), status, deviceSubscribed: false });
     return status;
@@ -134,7 +144,7 @@ async function loadStatus(isCurrent: () => boolean = () => true) {
 /** Reconcile only an already-granted browser permission; it never prompts. */
 export function reconcileNotifications(userId: string) {
   if (identityAdmissionRequired && activeUserId !== userId) return Promise.resolve();
-  activeUserId = userId;
+  activateNotificationUser(userId);
   const requestedGeneration = captureSessionGeneration();
   const requestedAuthEpoch = getAuthEpoch();
   return enqueueNotificationOperation(userId, requestedGeneration, requestedAuthEpoch, async () => {
@@ -148,30 +158,38 @@ export function reconcileNotifications(userId: string) {
       // unnecessary notification logout. A missing or different marker is
       // fail-closed before the request, as is an authentication mismatch.
       const marker = await readNotificationIdentity().catch(() => undefined);
+      if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
       hadValidIdentity = hasValidIdentityFor(marker, userId);
-      if (!hadValidIdentity) await revokeNotificationIdentity();
+      if (!hadValidIdentity) {
+        await revokeNotificationIdentity();
+        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+      }
 
       let status: Awaited<ReturnType<typeof getNotificationStatus>>;
       try {
-        status = await getNotificationStatus();
+        status = await getNotificationStatus(requestedAuthEpoch, userId);
       } catch (error) {
         if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-        if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) await revokeNotificationIdentity().catch(() => undefined);
+        if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) {
+          await revokeNotificationIdentity().catch(() => undefined);
+          if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+        }
         setSnapshot({ capability: 'error', permission: permission(), error });
         return;
       }
-       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-      if (permission() === 'default') { await revokeNotificationIdentity().catch(() => undefined); setSnapshot({ capability: status.enabled ? 'default' : 'unavailable', permission: 'default', status }); return; }
-      if (permission() === 'denied') { await revokeNotificationIdentity().catch(() => undefined); setSnapshot({ capability: status.enabled ? 'denied' : 'unavailable', permission: 'denied', status }); return; }
+      if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+      if (permission() === 'default') { await revokeNotificationIdentity().catch(() => undefined); if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return; setSnapshot({ capability: status.enabled ? 'default' : 'unavailable', permission: 'default', status }); return; }
+      if (permission() === 'denied') { await revokeNotificationIdentity().catch(() => undefined); if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return; setSnapshot({ capability: status.enabled ? 'denied' : 'unavailable', permission: 'denied', status }); return; }
       const subscription = await (await readyRegistration()).pushManager.getSubscription();
-       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+      if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
       if (!subscription) {
         await revokeNotificationIdentity().catch(() => undefined);
+        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
       } else {
-          await setNotificationIdentity(userId, identityFence(requestedGeneration, requestedAuthEpoch));
-          if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-         try { await putNotificationSubscription(serializedSubscription(subscription)); }
-         catch (error) {
+        await setNotificationIdentity(userId, identityFence(requestedGeneration, requestedAuthEpoch));
+        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+        try { await putNotificationSubscription(serializedSubscription(subscription)); }
+        catch (error) {
            // Preserve an already valid local fence across a transient server
            // failure. The next foreground pass can repair the subscription;
            // auth failures and non-transient failures still revoke it.
@@ -181,16 +199,19 @@ export function reconcileNotifications(userId: string) {
            }
            throw error;
          }
-          if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-       }
-      const refreshed = await getNotificationStatus();
-       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-      setSnapshot({ capability: capabilityFor(refreshed, Boolean(subscription)), permission: permission(), status: refreshed, deviceSubscribed: Boolean(subscription) });
-     } catch (error) {
         if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-       if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) await revokeNotificationIdentity().catch(() => undefined);
-       setSnapshot({ capability: 'error', permission: permission(), error });
-     }
+      }
+      const refreshed = await getNotificationStatus(requestedAuthEpoch, userId);
+      if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+      setSnapshot({ capability: capabilityFor(refreshed, Boolean(subscription)), permission: permission(), status: refreshed, deviceSubscribed: Boolean(subscription) });
+      } catch (error) {
+        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+        if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) {
+          await revokeNotificationIdentity().catch(() => undefined);
+          if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+        }
+        setSnapshot({ capability: 'error', permission: permission(), error });
+      }
   });
 }
 
@@ -207,7 +228,7 @@ export async function enableNotifications(userId?: string) {
   const enrollmentUserId = userId || activeUserId;
   if (!enrollmentUserId) { setSnapshot({ capability: 'error', permission: permission(), error: new Error('An authenticated account is required to enroll notifications.') }); return false; }
   if (identityAdmissionRequired && activeUserId !== enrollmentUserId) return false;
-  activeUserId = enrollmentUserId;
+  activateNotificationUser(enrollmentUserId);
   const enrollmentGeneration = captureSessionGeneration();
   const enrollmentAuthEpoch = getAuthEpoch();
   if (permission() === 'denied') { setSnapshot({ capability: 'denied', permission: 'denied' }); return false; }
@@ -237,7 +258,7 @@ export async function enableNotifications(userId?: string) {
     let serialized: ReturnType<typeof serializedSubscription> | undefined;
     let serverSetupAttempted = false;
     try {
-       const status = await loadStatus(() => operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch));
+        const status = await loadStatus(() => operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch), enrollmentAuthEpoch, enrollmentUserId);
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) return false;
       if (!status?.publicKey) { setSnapshot({ capability: 'unavailable', permission: 'granted', status }); return false; }
       // Write the fence before opening/subscribing the browser credential. A
@@ -302,14 +323,23 @@ export async function disableNotifications(userId = activeUserId) {
 }
 
 export async function saveNotificationPreferences(preferences: NotificationPreferences) {
-  try {
-    const next = await updateNotificationPreferences(preferences);
-    setSnapshot({ ...snapshot, capability: snapshot.deviceSubscribed ? 'enabled' : 'supported', status: snapshot.status ? { ...snapshot.status, preferences: next } : undefined, error: undefined });
-    return next;
-  } catch (error) {
-    setSnapshot({ ...snapshot, capability: 'error', error });
-    throw error;
-  }
+  const expectedUserId = activeUserId;
+  if (!expectedUserId || identityAdmissionRequired) return undefined;
+  const expectedGeneration = captureSessionGeneration();
+  const expectedAuthEpoch = getAuthEpoch();
+  return enqueueNotificationOperation(expectedUserId, expectedGeneration, expectedAuthEpoch, async () => {
+    if (!operationIsCurrent(expectedUserId, expectedGeneration, expectedAuthEpoch)) return undefined;
+    try {
+      const next = await updateNotificationPreferences(preferences, expectedAuthEpoch, expectedUserId);
+      if (!operationIsCurrent(expectedUserId, expectedGeneration, expectedAuthEpoch)) return undefined;
+      setSnapshot({ ...snapshot, capability: snapshot.deviceSubscribed ? 'enabled' : 'supported', status: snapshot.status ? { ...snapshot.status, preferences: next } : undefined, error: undefined });
+      return next;
+    } catch (error) {
+      if (operationIsCurrent(expectedUserId, expectedGeneration, expectedAuthEpoch)) setSnapshot({ ...snapshot, capability: 'error', error });
+      if (!operationIsCurrent(expectedUserId, expectedGeneration, expectedAuthEpoch)) return undefined;
+      throw error;
+    }
+  });
 }
 
 /** Install once at app startup. Foreground reconciliation is authoritative;
@@ -325,12 +355,13 @@ export function initializeNotifications() {
     const detail = (event as CustomEvent<{ userId?: string; authEpoch?: number }>).detail;
     const userId = detail?.userId;
     if (userId && detail?.authEpoch !== undefined && isAuthEpochCurrent(detail.authEpoch)) {
-      activeUserId = userId;
+      activateNotificationUser(userId);
       identityAdmissionRequired = false;
       void reconcileNotifications(userId);
     }
   });
   window.addEventListener('billsplit-auth-required', () => {
+    resetNotificationSnapshot();
     activeUserId = undefined;
     identityAdmissionRequired = true;
     void queueIdentityRevocation().catch(() => undefined);

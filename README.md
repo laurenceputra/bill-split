@@ -384,7 +384,8 @@ Settings can clear cached identity, groups, snapshots, and recent preferences wi
 
 ### Push notification provisioning
 
-Apply migrations `0026_notifications.sql` and `0027_notification_maintenance_indexes.sql` before enabling delivery. Create the
+Apply migrations `0026_targeted_group_invitations.sql`, `0027_notifications.sql`, and
+`0028_notification_maintenance_indexes.sql` before enabling delivery. Create the
 notification queue and dead-letter queue named in the production config, then
 set the following values in Worker runtime configuration (never in Vite files
 or tracked config):

@@ -35,7 +35,11 @@ describe('financial input', () => {
     expect(isSupportedPushEndpoint('https://web.push.apple.com/safari-opaque-push-token')).toBe(true);
     expect(isSupportedPushEndpoint('https://fcm.googleapis.com/wp/chrome-token')).toBe(true);
     expect(isSupportedPushEndpoint('https://updates.push.services.mozilla.com/wpush/v2/firefox-token')).toBe(true);
-    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: 'A'.repeat(65), auth: 'A'.repeat(22) } }).success).toBe(true);
+    const validP256dh = 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU';
+    const validAuth = 'BwcHBwcHBwcHBwcHBwcHBw';
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: validP256dh, auth: validAuth } }).success).toBe(true);
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: 'A'.repeat(87), auth: validAuth } }).success).toBe(false);
+    expect(pushSubscriptionInput.safeParse({ endpoint: 'https://fcm.googleapis.com/fcm/send/chrome-token', keys: { p256dh: validP256dh, auth: 'A'.repeat(21) } }).success).toBe(false);
     for (const endpoint of [
       'http://fcm.googleapis.com/fcm/send/token',
       'https://evil.example/fcm/send/token',

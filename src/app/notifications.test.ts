@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import 'fake-indexeddb/auto';
-import { base64UrlToUint8Array, disableNotifications, enableNotifications, initializeNotifications, isStandalonePwa, notificationNeedsInstall, reconcileNotifications } from './notifications';
+import { base64UrlToUint8Array, disableNotifications, enableNotifications, getNotificationSnapshot, initializeNotifications, isStandalonePwa, notificationNeedsInstall, reconcileNotifications, saveNotificationPreferences } from './notifications';
 import { clearNotificationBadge, setNotificationBadge } from './notification-badge';
 import { readNotificationIdentity, revokeNotificationIdentity, setNotificationIdentity } from './notification-identity';
 import { ApiError, coordinateAuthBootstrap, getAuthEpoch, resetForClerkSessionChange } from './api';
 
-const { getStatus, putSubscription, removeSubscription } = vi.hoisted(() => ({
+const { getStatus, putSubscription, removeSubscription, updatePreferences } = vi.hoisted(() => ({
   getStatus: vi.fn(async () => ({ enabled: true, publicKey: 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU', subscriptionCount: 0, preferences: { moneyChanges: true, scheduledEvents: true, detailLevel: 'generic' as const } })),
   putSubscription: vi.fn(async () => undefined),
   removeSubscription: vi.fn(async () => undefined),
+  updatePreferences: vi.fn(async (preferences: { moneyChanges: boolean; scheduledEvents: boolean; detailLevel: 'generic' | 'detailed' }) => preferences),
 }));
-vi.mock('./api', async () => ({ ...(await vi.importActual<typeof import('./api')>('./api')), getNotificationStatus: getStatus, putNotificationSubscription: putSubscription, removeNotificationSubscription: removeSubscription, updateNotificationPreferences: vi.fn() }));
+vi.mock('./api', async () => ({ ...(await vi.importActual<typeof import('./api')>('./api')), getNotificationStatus: getStatus, putNotificationSubscription: putSubscription, removeNotificationSubscription: removeSubscription, updateNotificationPreferences: updatePreferences }));
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -104,6 +105,7 @@ describe('notification client capability and permission gates', () => {
     vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
     vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => null) } }) } });
     const stale = reconcileNotifications('old-user');
+    await vi.waitFor(() => expect(getStatus).toHaveBeenCalledOnce());
     const current = reconcileNotifications('new-user');
     firstStatus.resolve({ enabled: true, publicKey: 'valid', subscriptionCount: 0, preferences: { moneyChanges: true, scheduledEvents: true, detailLevel: 'generic' } });
     await Promise.all([stale, current]);
@@ -240,6 +242,29 @@ describe('notification client capability and permission gates', () => {
     await expect(enrollment).resolves.toBe(false);
     expect(putSubscription).not.toHaveBeenCalled();
     await vi.waitFor(async () => expect(await readNotificationIdentity()).toMatchObject({ userId: null, revoked: true }));
+  });
+
+  it('does not commit an old account preference response into the new account snapshot', async () => {
+    const preferences = { moneyChanges: true, scheduledEvents: true, detailLevel: 'generic' as const };
+    const nextPreferences = { moneyChanges: false, scheduledEvents: true, detailLevel: 'detailed' as const };
+    const response = deferred<typeof nextPreferences>();
+    updatePreferences.mockClear();
+    updatePreferences.mockImplementationOnce(() => response.promise);
+    const NotificationMock = Object.assign(function Notification() {}, { permission: 'granted' as NotificationPermission, requestPermission: vi.fn() });
+    vi.stubGlobal('Notification', NotificationMock);
+    vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => null) } }) } });
+
+    authenticatedNotificationListener?.({ detail: { userId: 'preference-old-user', authEpoch: getAuthEpoch() } } as unknown as Event);
+    await reconcileNotifications('preference-old-user');
+    const save = saveNotificationPreferences(preferences);
+    await vi.waitFor(() => expect(updatePreferences).toHaveBeenCalledOnce());
+    resetForClerkSessionChange(false, 'preference-new-clerk-user');
+    response.resolve(nextPreferences);
+
+    await expect(save).resolves.toBeUndefined();
+    expect(getNotificationSnapshot()).toMatchObject({ capability: 'checking', permission: 'unsupported' });
+    expect(getNotificationSnapshot().status).toBeUndefined();
   });
 
   it('uses App Badging only when the optional APIs exist and clears through the worker', () => {
