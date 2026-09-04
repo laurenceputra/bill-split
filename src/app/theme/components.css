@@ -735,8 +735,11 @@
   margin-top: var(--space-3);
 }
 
-.section-title + .member-list,
-.section-title + p {
+.section-title + .member-list {
+  margin-top: var(--space-3);
+}
+
+:where(.section-title) + p {
   margin-top: var(--space-3);
 }
 

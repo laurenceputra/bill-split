@@ -56,7 +56,8 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
     expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
     expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
-    expect(css).toMatch(/\.section-title \+ \.member-list,\s*\.section-title \+ p\s*\{[\s\S]*margin-top: var\(--space-3\);/);
+    expect(css).toMatch(/\.section-title \+ \.member-list\s*\{[\s\S]*margin-top: var\(--space-3\);/);
+    expect(css).toMatch(/:where\(\.section-title\) \+ p\s*\{[\s\S]*margin-top: var\(--space-3\);/);
   });
 
   it('styles the native expense filter disclosure at its actual DOM depth', () => {
