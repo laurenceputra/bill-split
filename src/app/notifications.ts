@@ -78,6 +78,37 @@ const serializedSubscription = (subscription: PushSubscription) => {
   if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) throw new Error('The browser returned an incomplete push subscription.');
   return { endpoint: json.endpoint, expirationTime: json.expirationTime ?? null, keys: { p256dh: json.keys.p256dh, auth: json.keys.auth } };
 };
+const applicationServerKeyMatches = (subscription: PushSubscription, expected: Uint8Array) => {
+  try {
+    const value = subscription.options?.applicationServerKey;
+    if (!value) return false;
+    const candidate = value as unknown;
+    const actual = candidate instanceof ArrayBuffer
+      ? new Uint8Array(candidate)
+      : ArrayBuffer.isView(candidate)
+        ? (() => {
+            const view = candidate as unknown as { buffer: ArrayBuffer; byteOffset: number; byteLength: number };
+            return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+          })()
+        : undefined;
+    return Boolean(actual && actual.length === expected.length && actual.every((byte, index) => byte === expected[index]));
+  } catch {
+    // A browser that cannot expose the key cannot prove that this credential
+    // belongs to the current VAPID generation. Treat it as stale rather than
+    // silently reusing it.
+    return false;
+  }
+};
+const subscriptionForCurrentKey = async (registration: ServiceWorkerRegistration, existing: PushSubscription | null, applicationServerKey: Uint8Array) => {
+  if (existing && applicationServerKeyMatches(existing, applicationServerKey)) return { subscription: existing, created: false };
+  if (existing) {
+    // Revoke the server credential first. If this fails, the old browser
+    // credential remains usable for a later retry and is never unsubscribed.
+    await removeNotificationSubscription(existing.endpoint);
+    if (!(await existing.unsubscribe())) throw new Error('The old browser push subscription could not be removed.');
+  }
+  return { subscription: await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey as unknown as BufferSource }), created: true };
+};
 
 /** All identity-affecting notification operations share this queue. The first
  * operation starts synchronously when the queue is idle, which preserves the
@@ -180,26 +211,47 @@ export function reconcileNotifications(userId: string) {
       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
       if (permission() === 'default') { await revokeNotificationIdentity().catch(() => undefined); if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return; setSnapshot({ capability: status.enabled ? 'default' : 'unavailable', permission: 'default', status }); return; }
       if (permission() === 'denied') { await revokeNotificationIdentity().catch(() => undefined); if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return; setSnapshot({ capability: status.enabled ? 'denied' : 'unavailable', permission: 'denied', status }); return; }
-      const subscription = await (await readyRegistration()).pushManager.getSubscription();
-      if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-      if (!subscription) {
-        await revokeNotificationIdentity().catch(() => undefined);
-        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-      } else {
-        await setNotificationIdentity(userId, identityFence(requestedGeneration, requestedAuthEpoch));
-        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
-        try { await putNotificationSubscription(serializedSubscription(subscription)); }
-        catch (error) {
-           // Preserve an already valid local fence across a transient server
-           // failure. The next foreground pass can repair the subscription;
-           // auth failures and non-transient failures still revoke it.
-           if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) {
-             await removeNotificationSubscription(subscription.endpoint).catch(() => undefined);
-             await revokeNotificationIdentity().catch(() => undefined);
-           }
-           throw error;
+       const registration = await readyRegistration();
+       const subscription = await registration.pushManager.getSubscription();
+       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+       if (!subscription) {
+         await revokeNotificationIdentity().catch(() => undefined);
+         if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+       } else {
+         if (!status.enabled || !status.publicKey) {
+           await revokeNotificationIdentity().catch(() => undefined);
+           if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+           setSnapshot({ capability: 'unavailable', permission: permission(), status, deviceSubscribed: false });
+           return;
          }
-        if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+         const applicationServerKey = base64UrlToUint8Array(status.publicKey);
+         await setNotificationIdentity(userId, identityFence(requestedGeneration, requestedAuthEpoch));
+         if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
+         let activeSubscription = subscription;
+         let createdSubscription = false;
+         try {
+           const current = await subscriptionForCurrentKey(registration, subscription, applicationServerKey);
+           activeSubscription = current.subscription;
+           createdSubscription = current.created;
+           if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) throw new Error('The authenticated account changed before notification reconciliation completed.');
+           await putNotificationSubscription(serializedSubscription(activeSubscription));
+         }
+         catch (error) {
+            // Preserve an already valid local fence across a transient server
+            // failure. The next foreground pass can repair the subscription;
+            // auth failures and non-transient failures still revoke it.
+            if (createdSubscription) {
+              await removeNotificationSubscription(activeSubscription.endpoint).catch(() => undefined);
+              await activeSubscription.unsubscribe().catch(() => false);
+            } else if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) {
+              await removeNotificationSubscription(activeSubscription.endpoint).catch(() => undefined);
+            }
+            if (!hadValidIdentity || isNotificationAuthError(error) || !isNotificationTransientError(error)) {
+              await revokeNotificationIdentity().catch(() => undefined);
+            }
+            throw error;
+          }
+         if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
       }
       const refreshed = await getNotificationStatus(requestedAuthEpoch, userId);
       if (!operationIsCurrent(userId, requestedGeneration, requestedAuthEpoch)) return;
@@ -257,28 +309,32 @@ export async function enableNotifications(userId?: string) {
     let subscription: PushSubscription | undefined;
     let serialized: ReturnType<typeof serializedSubscription> | undefined;
     let serverSetupAttempted = false;
+    let createdSubscription = false;
     try {
         const status = await loadStatus(() => operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch), enrollmentAuthEpoch, enrollmentUserId);
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) return false;
-      if (!status?.publicKey) { setSnapshot({ capability: 'unavailable', permission: 'granted', status }); return false; }
+       if (!status?.enabled || !status.publicKey) { setSnapshot({ capability: 'unavailable', permission: 'granted', status }); return false; }
+       const applicationServerKey = base64UrlToUint8Array(status.publicKey);
       // Write the fence before opening/subscribing the browser credential. A
       // missing marker is unsafe in the worker, including on first enrollment.
        await setNotificationIdentity(enrollmentUserId, identityFence(enrollmentGeneration, enrollmentAuthEpoch));
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) { await revokeNotificationIdentity(); return false; }
       const registration = await readyRegistration();
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) { await revokeNotificationIdentity(); return false; }
-      subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToUint8Array(status.publicKey) });
-      serialized = serializedSubscription(subscription);
+       const current = await subscriptionForCurrentKey(registration, await registration.pushManager.getSubscription(), applicationServerKey);
+       subscription = current.subscription;
+       createdSubscription = current.created;
+       serialized = serializedSubscription(subscription);
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) throw new Error('The authenticated account changed before notification enrollment completed.');
-      serverSetupAttempted = true;
-      await putNotificationSubscription(serialized);
+       serverSetupAttempted = true;
+       await putNotificationSubscription(serialized);
        if (!operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) throw new Error('The authenticated account changed before notification enrollment completed.');
       const next = { ...status, subscriptionCount: Math.max(1, status.subscriptionCount) };
       setSnapshot({ capability: 'enabled', permission: 'granted', status: next, deviceSubscribed: true });
       return true;
     } catch (error) {
-      if (serverSetupAttempted && serialized) await removeNotificationSubscription(serialized.endpoint).catch(() => undefined);
-      if (subscription) await subscription.unsubscribe().catch(() => false);
+       if (serverSetupAttempted && serialized) await removeNotificationSubscription(serialized.endpoint).catch(() => undefined);
+       if (subscription && createdSubscription) await subscription.unsubscribe().catch(() => false);
       await revokeNotificationIdentity().catch(() => undefined);
        if (operationIsCurrent(enrollmentUserId, enrollmentGeneration, enrollmentAuthEpoch)) setSnapshot({ capability: 'error', permission: 'granted', error });
        return false;

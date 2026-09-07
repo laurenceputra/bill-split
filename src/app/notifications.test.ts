@@ -13,6 +13,24 @@ const { getStatus, putSubscription, removeSubscription, updatePreferences } = vi
 }));
 vi.mock('./api', async () => ({ ...(await vi.importActual<typeof import('./api')>('./api')), getNotificationStatus: getStatus, putNotificationSubscription: putSubscription, removeNotificationSubscription: removeSubscription, updateNotificationPreferences: updatePreferences }));
 
+const vapidPublicKey = 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU';
+const notificationStatus = () => ({ enabled: true, publicKey: vapidPublicKey, subscriptionCount: 1, preferences: { moneyChanges: true, scheduledEvents: true, detailLevel: 'generic' as const } });
+const browserSubscription = (endpoint: string, applicationServerKey: BufferSource | null, unsubscribe = vi.fn(async () => true)) => ({ endpoint, options: { applicationServerKey }, toJSON: () => ({ endpoint, expirationTime: null, keys: { p256dh: 'client', auth: 'auth' } }), unsubscribe });
+const admitNotificationUser = (userId: string) => {
+  // The authenticated event listener also starts a reconciliation. Make that
+  // admission pass a synchronous unsupported no-op; the focused test then
+  // exercises its intended operation exactly once with real browser globals.
+  if (!authenticatedNotificationListener) {
+    vi.stubGlobal('window', { addEventListener: (type: string, listener: (event: Event) => void) => { if (type === 'billsplit-authenticated') authenticatedNotificationListener = listener; } });
+    vi.stubGlobal('document', { addEventListener: vi.fn() });
+    vi.stubGlobal('navigator', { serviceWorker: { addEventListener: vi.fn() } });
+    initializeNotifications();
+  }
+  vi.stubGlobal('window', {});
+  vi.stubGlobal('navigator', {});
+  authenticatedNotificationListener?.({ detail: { userId, authEpoch: getAuthEpoch() } } as unknown as Event);
+};
+
 afterEach(() => vi.unstubAllGlobals());
 
 const deferred = <T>() => {
@@ -265,6 +283,88 @@ describe('notification client capability and permission gates', () => {
     await expect(save).resolves.toBeUndefined();
     expect(getNotificationSnapshot()).toMatchObject({ capability: 'checking', permission: 'unsupported' });
     expect(getNotificationSnapshot().status).toBeUndefined();
+  });
+
+  it('reuses a subscription only when its application server key exactly matches', async () => {
+    const key = base64UrlToUint8Array(vapidPublicKey);
+    const existing = browserSubscription('https://push.example.test/matching', key);
+    const subscribe = vi.fn();
+    getStatus.mockReset().mockResolvedValue(notificationStatus());
+    putSubscription.mockReset().mockResolvedValue(undefined);
+    removeSubscription.mockReset().mockResolvedValue(undefined);
+    admitNotificationUser('vapid-matching-user');
+    const NotificationMock = Object.assign(function Notification() {}, { permission: 'granted' as NotificationPermission, requestPermission: vi.fn() });
+    vi.stubGlobal('Notification', NotificationMock);
+    vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => existing), subscribe } }) } });
+
+    await reconcileNotifications('vapid-matching-user');
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(existing.unsubscribe).not.toHaveBeenCalled();
+    expect(removeSubscription).not.toHaveBeenCalled();
+    expect(putSubscription).toHaveBeenCalled();
+  });
+
+  it('rotates a mismatched subscription during startup reconciliation', async () => {
+    const existing = browserSubscription('https://push.example.test/old-key', new Uint8Array([1, 2, 3]));
+    const replacement = browserSubscription('https://push.example.test/current-key', base64UrlToUint8Array(vapidPublicKey));
+    const subscribe = vi.fn(async () => replacement);
+    getStatus.mockReset().mockResolvedValue(notificationStatus());
+    putSubscription.mockReset().mockResolvedValue(undefined);
+    removeSubscription.mockReset().mockResolvedValue(undefined);
+    admitNotificationUser('vapid-reconcile-rotation-user');
+    const NotificationMock = Object.assign(function Notification() {}, { permission: 'granted' as NotificationPermission, requestPermission: vi.fn() });
+    vi.stubGlobal('Notification', NotificationMock);
+    vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => existing), subscribe } }) } });
+
+    await reconcileNotifications('vapid-reconcile-rotation-user');
+    expect(removeSubscription).toHaveBeenCalledWith(existing.endpoint);
+    expect(existing.unsubscribe).toHaveBeenCalledOnce();
+    expect(subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: expect.any(Uint8Array) });
+    expect(putSubscription).toHaveBeenCalledWith(expect.objectContaining({ endpoint: replacement.endpoint }));
+  });
+
+  it('rotates a mismatched subscription during explicit enrollment', async () => {
+    const existing = browserSubscription('https://push.example.test/button-old', new Uint8Array([9, 9, 9]));
+    const replacement = browserSubscription('https://push.example.test/button-current', base64UrlToUint8Array(vapidPublicKey));
+    const subscribe = vi.fn(async () => replacement);
+    const requestPermission = vi.fn(async () => 'granted' as NotificationPermission);
+    getStatus.mockReset().mockResolvedValue(notificationStatus());
+    putSubscription.mockReset().mockResolvedValue(undefined);
+    removeSubscription.mockReset().mockResolvedValue(undefined);
+    admitNotificationUser('vapid-button-rotation-user');
+    const NotificationMock = Object.assign(function Notification() {}, { permission: 'granted' as NotificationPermission, requestPermission });
+    vi.stubGlobal('Notification', NotificationMock);
+    vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => existing), subscribe } }) } });
+
+    await expect(enableNotifications('vapid-button-rotation-user')).resolves.toBe(true);
+    expect(requestPermission).toHaveBeenCalledOnce();
+    expect(removeSubscription).toHaveBeenCalledWith(existing.endpoint);
+    expect(existing.unsubscribe).toHaveBeenCalledOnce();
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(putSubscription).toHaveBeenCalledWith(expect.objectContaining({ endpoint: replacement.endpoint }));
+  });
+
+  it('keeps the old browser credential when server revocation fails during rotation', async () => {
+    const unsubscribe = vi.fn(async () => true);
+    const existing = browserSubscription('https://push.example.test/revocation-failure', new Uint8Array([4, 5, 6]), unsubscribe);
+    const subscribe = vi.fn();
+    const requestPermission = vi.fn(async () => 'granted' as NotificationPermission);
+    getStatus.mockReset().mockResolvedValue(notificationStatus());
+    putSubscription.mockReset().mockResolvedValue(undefined);
+    removeSubscription.mockReset().mockRejectedValue(new Error('server unavailable'));
+    admitNotificationUser('vapid-revocation-failure-user');
+    const NotificationMock = Object.assign(function Notification() {}, { permission: 'granted' as NotificationPermission, requestPermission });
+    vi.stubGlobal('Notification', NotificationMock);
+    vi.stubGlobal('window', { Notification: NotificationMock, PushManager: class {}, matchMedia: () => ({ matches: false }) });
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0', maxTouchPoints: 0, serviceWorker: { ready: Promise.resolve({ pushManager: { getSubscription: vi.fn(async () => existing), subscribe } }) } });
+
+    await expect(enableNotifications('vapid-revocation-failure-user')).resolves.toBe(false);
+    expect(unsubscribe).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(putSubscription).not.toHaveBeenCalled();
   });
 
   it('uses App Badging only when the optional APIs exist and clears through the worker', () => {

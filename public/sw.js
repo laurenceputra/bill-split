@@ -44,7 +44,7 @@ const openNotificationState = () => {
   if (typeof indexedDB === 'undefined') return Promise.resolve(undefined);
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (value) => { if (settled) return; settled = true; resolve(value); };
+    const finish = (value) => { if (settled) { try { value?.close?.(); } catch {} return; } settled = true; resolve(value); };
     const timer = setTimeout(() => finish(undefined), 500);
     try {
       const request = indexedDB.open(notificationStateDatabase, 1);
@@ -76,7 +76,7 @@ const currentNotificationIdentity = async () => {
 };
 const changeNotificationBadge = async (clear = false) => {
   const db = await openNotificationState();
-  const badgeApi = self.registration && self.registration;
+  const badgeApi = self.navigator;
   if (!db) return undefined;
   let nextCount = 0;
   await new Promise((resolve) => {

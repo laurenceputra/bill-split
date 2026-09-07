@@ -1,5 +1,5 @@
 import type { D1Database, Queue, MessageBatch } from '@cloudflare/workers-types';
-import { NOTIFICATION_DELIVERY_PAGE_SIZE, NOTIFICATION_MAX_ATTEMPTS, Repository, type NotificationDeliveryCandidate } from '../db/repository';
+import { NOTIFICATION_DELIVERY_PAGE_SIZE, NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS, NOTIFICATION_MAX_ATTEMPTS, Repository, type NotificationDeliveryCandidate } from '../db/repository';
 import { decryptSubscription, sendWebPush } from './web-push';
 
 export type NotificationBindings = {
@@ -65,14 +65,31 @@ export const notificationPayloadFor = (candidate: NotificationDeliveryCandidate)
 export async function deliverNotificationEvent(repo: Repository, eventId: string, env: NotificationBindings, attempts = 1) {
   const config = deliveryConfig(env);
   if (!config) return { retry: false, disabled: true };
-  const event = await repo.notificationEventForDelivery(eventId);
+  const asOf = new Date().toISOString();
+  const event = await repo.notificationEventForDelivery(eventId, asOf);
   if (!event) return { retry: false, missing: true };
+  const staleCutoff = Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS;
+  // A queue message can outlive the outbox and Cron. Stale events are drained
+  // only through bounded terminal updates; they never enter fan-out, claim, or
+  // provider I/O. The continuation uses the same opaque queue body until all
+  // old rows have been terminalized.
+  if (event.occurredAt && Date.parse(event.occurredAt) < staleCutoff) {
+    if (typeof repo.terminalizeStaleNotificationDeliveries === 'function') {
+      await repo.terminalizeStaleNotificationDeliveries(eventId, asOf, NOTIFICATION_DELIVERY_PAGE_SIZE);
+    }
+    const staleWork = typeof repo.notificationDeliveryWorkRemaining === 'function'
+      ? await repo.notificationDeliveryWorkRemaining(eventId, asOf)
+      : { remaining: false, due: false };
+    if (staleWork.remaining) return { retry: false, continuation: true, continuationDelaySeconds: 0, maxAttempts: NOTIFICATION_MAX_ATTEMPTS };
+    await repo.completeNotificationEvent(eventId, asOf);
+    return { retry: false, continuation: false, maxAttempts: NOTIFICATION_MAX_ATTEMPTS };
+  }
   const claimOwner = crypto.randomUUID();
-  await repo.recoverStaleNotificationDeliveryClaims(eventId, new Date().toISOString());
-  const candidates = await repo.notificationDeliveryCandidates(eventId, new Date().toISOString());
+  await repo.recoverStaleNotificationDeliveryClaims(eventId, asOf);
+  const candidates = await repo.notificationDeliveryCandidates(eventId, asOf, NOTIFICATION_DELIVERY_PAGE_SIZE, event);
   let retry = false;
   for (const candidate of candidates) {
-    const claimed = await repo.claimNotificationDelivery(eventId, candidate.subscriptionId, claimOwner, new Date().toISOString());
+    const claimed = await repo.claimNotificationDelivery(eventId, candidate.subscriptionId, claimOwner, asOf);
     // A duplicate queue consumer, or a recipient whose authorization changed,
     // simply loses the claim and must not perform external push I/O.
     if (!claimed) continue;
@@ -117,7 +134,7 @@ export async function deliverNotificationEvent(repo: Repository, eventId: string
   // subscription still exists. Only the repository's durable check can decide
   // whether completion is safe; Queue retries are not pagination.
   const work = typeof repo.notificationDeliveryWorkRemaining === 'function'
-    ? await repo.notificationDeliveryWorkRemaining(eventId, new Date().toISOString())
+    ? await repo.notificationDeliveryWorkRemaining(eventId, asOf)
     : { remaining: candidates.length >= NOTIFICATION_DELIVERY_PAGE_SIZE, due: candidates.length >= NOTIFICATION_DELIVERY_PAGE_SIZE };
   if (work.remaining) return { retry, continuation: true, continuationDelaySeconds: work.due ? 0 : 30, maxAttempts: NOTIFICATION_MAX_ATTEMPTS };
   await repo.completeNotificationEvent(eventId);

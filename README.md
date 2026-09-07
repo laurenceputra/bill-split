@@ -384,8 +384,9 @@ Settings can clear cached identity, groups, snapshots, and recent preferences wi
 
 ### Push notification provisioning
 
-Apply migrations `0026_targeted_group_invitations.sql`, `0027_notifications.sql`, and
-`0028_notification_maintenance_indexes.sql` before enabling delivery. Create the
+Apply migrations `0026_targeted_group_invitations.sql`, `0027_notifications.sql`,
+`0028_notification_maintenance_indexes.sql`, and
+`0029_notification_fanout_pagination.sql` before enabling delivery. Create the
 notification queue and dead-letter queue named in the production config, then
 set the following values in Worker runtime configuration (never in Vite files
 or tracked config):
@@ -407,10 +408,12 @@ work, never by queue delivery. Each 15-minute Cron run first removes at most
 100 delivery rows belonging to expired/revoked subscriptions, then removes at
 most 100 of those subscriptions only when no delivery rows remain. Terminal
 delivery retention and completed-event retention are each capped at 100 rows
-per run, and the maintenance uses a fixed set of five D1 statements; no parent delete
+per run, and the maintenance uses at most nine bounded D1 statements (including a
+cursor wrap probe); no parent delete
 relies on an unbounded foreign-key cascade. The notification Queue consumer uses
-`max_batch_size = 1`: one page is capped at three recipients and stays within
-the documented 18-query worst-case D1 budget.
+`max_batch_size = 1`: one page is capped at three recipients. The measured
+transient-failure path uses 17 D1 statements, and the documented budget is 18
+including one statement of margin.
 Account deletion is separate from Clerk account management: the server deletion succeeds first and writes an identity-bound, non-sensitive pending-deletion marker outside IndexedDB. The app processes that marker before private hydration; a `server-pending` marker retries the authenticated, idempotent server DELETE with the marker's exact Clerk ID in `X-BillSplit-Expected-Clerk-User-Id`, and never clears local data or calls Clerk until the server commit is confirmed. The Worker requires both the application session and a fresh matching Clerk identity, then revokes all application sessions atomically with repository deletion. It then clears all local BillSplit data and calls the installed Clerk client's typed `UserResource.delete()` API. If the session expires or the user signs out after server/local cleanup, the marker remains and the app requires sign-in to the same Clerk account before provider deletion; only a confirmed `provider-deleted` marker may be cleared while signed out. Actor-name snapshots in financial audit and membership history are intentionally retained without email/contact details. Signed Clerk deletion/disable webhooks are intentionally deferred until a verified webhook API and secret are available; no pseudo-signature validation is used.
 
 Remaining intentional MVP limitations are no offline editing/deletion/settlement/membership sync, no offline schedule management, no currency conversion, and no receipt upload UI. Scheduled templates are fetched online and are not cached for offline use. IndexedDB can be cleared by the browser or unavailable in private/restricted contexts; those conditions are surfaced rather than silently dropping queued expenses. The `attachments` table and optional `RECEIPTS` R2 binding remain an extension point; any future routes must check group membership before issuing object access. D1 migrations must be applied explicitly in each environment, and production Clerk configuration remains an operator responsibility.

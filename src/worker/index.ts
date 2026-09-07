@@ -26,7 +26,10 @@ export const cronStageOrder = (scheduledTime: number): CronStage[] => {
 };
 type Env = { Bindings: NotificationBindings & { ASSETS: Fetcher; RATE_LIMITER?: RateLimit; CLERK_PUBLISHABLE_KEY?: string; CLERK_SECRET_KEY?: string; CLERK_JWT_KEY?: string; CLERK_AUTHORIZED_PARTIES?: string }; Variables: { auth: ApplicationAuth; repo: Repository; requestId: string } };
 export const DEVELOPMENT_IDENTITY_TOMBSTONE_KEY = 'billsplit-development-identity-tombstone-key-v1';
-const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined), { pushSubscriptionKey: env.PUSH_SUBSCRIPTION_ENCRYPTION_KEY });
+const repositoryFor = (env: Env['Bindings']) => new Repository(env.DB, env.IDENTITY_TOMBSTONE_KEY || (env.ENVIRONMENT === 'development' ? DEVELOPMENT_IDENTITY_TOMBSTONE_KEY : undefined), {
+  pushSubscriptionKey: env.PUSH_SUBSCRIPTION_ENCRYPTION_KEY,
+  notificationDeliveryEnabled: Boolean(notificationConfig(env)),
+});
 const api = new Hono<Env>();
 const jsonError = (c: any, status: number, code: string, message: string, details?: Record<string, unknown>) => c.json({ error: { code, message, ...(details ? { details } : {}) } }, status);
 const getRepo = (c: any) => c.get('repo') as Repository;

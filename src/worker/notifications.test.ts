@@ -31,9 +31,13 @@ describe('notification delivery', () => {
 
   it('documents the single-message queue bound and worst-case D1 budget', () => {
     expect(NOTIFICATION_QUEUE_MAX_BATCH_SIZE).toBe(1);
-    // Event/recovery/fan-out/suppression plus work = 5, each of the three
-    // candidates can use claim/read/retry/read = 4, then work is checked once.
-    expect(NOTIFICATION_DELIVERY_D1_QUERY_BUDGET).toBe(5 + NOTIFICATION_DELIVERY_PAGE_SIZE * 4 + 1);
+    // Measured transient full-page path: event/recovery (2), fan-out
+    // select/insert/cursor/suppression/candidate page (5), three statements
+    // per candidate (claim/read/retry update), and one work probe = 17.
+    // Keep one statement of margin for harmless repository instrumentation.
+    const measuredWorstCase = 2 + 5 + NOTIFICATION_DELIVERY_PAGE_SIZE * 3 + 1;
+    expect(measuredWorstCase).toBe(17);
+    expect(NOTIFICATION_DELIVERY_D1_QUERY_BUDGET).toBe(measuredWorstCase + 1);
   });
 
   it('fans out only the current recipient candidates and completes a successful delivery', async () => {

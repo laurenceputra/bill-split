@@ -12,7 +12,7 @@
     "typecheck": "tsc -b",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "vitest run --config vitest.config.ts --exclude=**/*.integration.test.ts --exclude=**/*.performance.test.ts",
-    "test:integration": "vitest run --config vitest.integration.config.ts --exclude=src/db/group-summary.performance.test.ts && vitest run --config vitest.migration.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts --exclude=src/db/group-summary.performance.test.ts && vitest run --config vitest.migration.config.ts && vitest run --config vitest.config.ts src/db/notifications.integration.test.ts",
     "test:performance": "vitest run --config vitest.integration.config.ts src/db/group-summary.performance.test.ts",
     "test:all": "npm test && npm run test:performance",
     "test:watch": "vitest --config vitest.config.ts --exclude=**/*.integration.test.ts --exclude=**/*.performance.test.ts",

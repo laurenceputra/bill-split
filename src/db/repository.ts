@@ -23,7 +23,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 export type NotificationEventType = 'expense_created' | 'expense_updated' | 'expense_deleted' | 'expense_restored' | 'settlement_created' | 'settlement_updated' | 'settlement_deleted' | 'settlement_restored' | 'scheduled_expense_generated' | 'scheduled_expense_blocked';
 export type NotificationDeliveryCandidate = { eventId: string; eventType: NotificationEventType; subscriptionId: string; subscriptionCiphertext: string; detailLevel: 'generic' | 'detailed'; recipientUserId: string; groupId: string; entityId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; description?: string | null; amountMinor?: number | null; currency?: string | null };
-export type NotificationEventSnapshot = { id: string; eventType: NotificationEventType; groupId: string; entityId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; actorId: string | null; description: string | null; amountMinor: number | null; currency: string | null };
+export type NotificationEventSnapshot = { id: string; eventType: NotificationEventType; groupId: string; entityId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; actorId: string | null; description: string | null; amountMinor: number | null; currency: string | null; occurredAt: string; fanoutUserId?: string | null; fanoutSubscriptionId?: string | null; fanoutComplete?: boolean };
 export const NOTIFICATION_MAX_ATTEMPTS = 5;
 /** Conservative per-account device limit. Expired and revoked credentials do
  * not consume a slot, and refreshing an existing endpoint is an update. */
@@ -32,13 +32,17 @@ export const NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS = 10;
  * Workers Free D1's per-invocation query budget. */
 export const NOTIFICATION_DELIVERY_PAGE_SIZE = 3;
 /** The Queue consumer must remain single-message because one delivery page can
- * use 18 D1 queries in the transient-provider-failure worst case (17 for a
- * successful terminal page). */
+ * use at most 18 D1 queries in the transient-provider-failure worst case,
+ * including the continuation work probe. */
 export const NOTIFICATION_QUEUE_MAX_BATCH_SIZE = 1;
 export const NOTIFICATION_DELIVERY_D1_QUERY_BUDGET = 18;
 /** Maintenance selects at most this many rows in each notification category
  * per Cron invocation. Keep this independent from the ledger purge budget. */
 export const NOTIFICATION_MAINTENANCE_BATCH_SIZE = 100;
+/** Incomplete events are retained long enough to survive a transient delivery
+ * outage, but an event that never acquired a delivery row must not remain
+ * replayable forever if delivery is later enabled. */
+export const NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class RepositoryError extends Error {
   constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED' | 'NOTIFICATIONS_DISABLED' | 'INVALID_PUSH_SUBSCRIPTION' | 'PUSH_SUBSCRIPTION_LIMIT', message: string, readonly details?: Record<string, unknown>) { super(message); }
@@ -159,7 +163,7 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
 const groupDisplayNameSql = (memberAlias: string) => `CASE WHEN (SELECT COUNT(*) FROM group_members display_member WHERE display_member.group_id=g.id AND display_member.deleted_at IS NULL)=2 THEN COALESCE((SELECT display_person.name FROM people display_person JOIN group_members display_other ON display_other.person_id=display_person.id WHERE display_other.group_id=g.id AND display_other.person_id<>${memberAlias}.person_id AND display_other.deleted_at IS NULL AND display_person.deleted_at IS NULL LIMIT 1),g.name) ELSE g.name END`;
 
 export class Repository {
-  constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string, private readonly options: { pushSubscriptionKey?: string } = {}) {}
+  constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string, private readonly options: { pushSubscriptionKey?: string; notificationDeliveryEnabled?: boolean } = {}) {}
 
   private tombstoneKey() {
     const key = this.identityTombstoneKey?.trim();
@@ -470,62 +474,103 @@ export class Repository {
 
   async pendingNotificationEventIds(asOf = now(), limit = 100) {
     const stale = new Date(Date.parse(asOf) - 10 * 60 * 1000).toISOString();
+    const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
     const bounded = Math.min(Math.max(limit, 1), 100);
     const rows = (await this.db.prepare(`SELECT id FROM notification_events WHERE completed_at IS NULL
-      AND (queued_at IS NULL OR queued_at<?) ORDER BY occurred_at,id LIMIT ?`).bind(stale, bounded).all<Row>()).results;
+      AND occurred_at>=? AND (queued_at IS NULL OR queued_at<?) ORDER BY occurred_at,id LIMIT ?`).bind(cutoff, stale, bounded).all<Row>()).results;
     return rows.map((row) => text(row.id));
   }
 
   async markNotificationEventsQueued(ids: string[], queuedAt = now()) {
     if (!ids.length) return;
-    await this.db.prepare('UPDATE notification_events SET queued_at=? WHERE id IN (SELECT value FROM json_each(?)) AND completed_at IS NULL').bind(queuedAt, JSON.stringify(ids)).run();
+    const cutoff = new Date(Date.parse(queuedAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+    await this.db.prepare('UPDATE notification_events SET queued_at=? WHERE id IN (SELECT value FROM json_each(?)) AND completed_at IS NULL AND occurred_at>=?').bind(queuedAt, JSON.stringify(ids), cutoff).run();
   }
 
-  async notificationEventForDelivery(eventId: string) {
+  async notificationEventForDelivery(eventId: string, _asOf = now()) {
     const row = await this.db.prepare(`SELECT id,event_type,group_id,entity_type,entity_id,entity_version,actor_id,occurred_at,
-      description_snapshot,amount_minor_snapshot,currency_snapshot
+      description_snapshot,amount_minor_snapshot,currency_snapshot,fanout_user_id,fanout_subscription_id,fanout_complete
       FROM notification_events WHERE id=? AND completed_at IS NULL`).bind(eventId).first<Row>();
     if (!row) return null;
-    return { id: text(row.id), eventType: text(row.event_type) as NotificationEventType, groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as NotificationEventSnapshot['entityType'], actorId: row.actor_id == null ? null : text(row.actor_id), description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot) } satisfies NotificationEventSnapshot;
+    return { id: text(row.id), eventType: text(row.event_type) as NotificationEventType, groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as NotificationEventSnapshot['entityType'], actorId: row.actor_id == null ? null : text(row.actor_id), description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot), occurredAt: text(row.occurred_at), fanoutUserId: row.fanout_user_id == null ? null : text(row.fanout_user_id), fanoutSubscriptionId: row.fanout_subscription_id == null ? null : text(row.fanout_subscription_id), fanoutComplete: flag(row.fanout_complete) };
   }
 
-   async notificationDeliveryCandidates(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE) {
+   async notificationDeliveryCandidates(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE, eventState?: NotificationEventSnapshot) {
      const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
-     await this.db.prepare(`INSERT OR IGNORE INTO notification_deliveries(event_id,subscription_id,status,attempts,next_attempt_at,updated_at)
-      SELECT event.id,subscription.id,'pending',0,?,?
-      FROM notification_events event
-      JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-      JOIN group_members member ON member.group_id=event.group_id AND member.deleted_at IS NULL
-      JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
-      JOIN users active_user ON active_user.id=member.user_id AND active_user.deleted_at IS NULL
-      JOIN push_subscriptions subscription ON subscription.user_id=member.user_id AND subscription.revoked_at IS NULL
-      LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-       WHERE event.id=? AND event.completed_at IS NULL AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
-         AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-         AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-           OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-         AND NOT EXISTS (SELECT 1 FROM notification_deliveries existing_delivery
-           WHERE existing_delivery.event_id=event.id AND existing_delivery.subscription_id=subscription.id)
-       ORDER BY subscription.id LIMIT ?`).bind(asOf, asOf, eventId, Date.parse(asOf), limit).run();
-    // A preference, membership, or actor can change after fan-out but before
+     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     const event = eventState ?? await this.notificationEventForDelivery(eventId, asOf);
+     if (!event) return [];
+     if (event.occurredAt < cutoff) {
+       await this.terminalizeStaleNotificationDeliveries(eventId, asOf, limit);
+       return [];
+     }
+      if (!event.fanoutComplete) {
+        // Subscriptions are the ordered outer relation. Membership/person
+        // joins are correlated existence checks so multiple people linked to
+        // one user cannot duplicate a subscription or force a temp sort.
+        const continuation = event.fanoutUserId !== null && event.fanoutSubscriptionId !== null;
+        const cursorPredicate = continuation ? 'AND (subscription.user_id,subscription.id) > (?,?)' : '';
+        const cursorArgs = continuation ? [event.fanoutUserId, event.fanoutSubscriptionId] : [];
+        const page = (await this.db.prepare(`SELECT subscription.id,subscription.user_id
+          FROM notification_events event
+          JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
+          JOIN push_subscriptions subscription INDEXED BY idx_push_subscriptions_notification_fanout
+            ON subscription.revoked_at IS NULL AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
+          LEFT JOIN notification_preferences preference ON preference.user_id=subscription.user_id
+          WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=?
+            AND (event.actor_id IS NULL OR event.actor_id!=subscription.user_id)
+            ${cursorPredicate}
+            AND EXISTS (SELECT 1 FROM users active_user
+              WHERE active_user.id=subscription.user_id AND active_user.deleted_at IS NULL)
+            AND EXISTS (SELECT 1 FROM group_members member INDEXED BY idx_group_members_notification_user
+              JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
+              WHERE member.group_id=event.group_id AND member.user_id=subscription.user_id AND member.deleted_at IS NULL)
+            AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
+              OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
+          ORDER BY subscription.user_id,subscription.id LIMIT ?`).bind(Date.parse(asOf), eventId, cutoff, ...cursorArgs, limit).all<Row>()).results;
+        const subscriptionIds = page.map((row) => text(row.id));
+        if (subscriptionIds.length) {
+          // The delivery primary key is the idempotency boundary. The insert
+          // intentionally trusts only the bounded, already-deduped page;
+          // claimNotificationDelivery repeats authorization before I/O.
+          await this.db.prepare(`INSERT OR IGNORE INTO notification_deliveries(event_id,subscription_id,status,attempts,next_attempt_at,updated_at)
+            SELECT event.id,selected.value,'pending',0,?,?
+            FROM notification_events event
+            JOIN json_each(?) selected ON 1=1
+            WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=?`).bind(asOf, asOf, JSON.stringify(subscriptionIds), eventId, cutoff).run();
+          const last = page[page.length - 1];
+          const nextUserId = text(last.user_id), nextSubscriptionId = text(last.id);
+          await this.db.prepare(`UPDATE notification_events SET fanout_user_id=?,fanout_subscription_id=?,fanout_complete=?
+            WHERE id=? AND completed_at IS NULL AND fanout_complete=0
+              AND fanout_user_id IS ? AND fanout_subscription_id IS ?`).bind(nextUserId, nextSubscriptionId, subscriptionIds.length < limit ? 1 : 0, eventId, event.fanoutUserId, event.fanoutSubscriptionId).run();
+        } else {
+          await this.db.prepare(`UPDATE notification_events SET fanout_complete=1
+            WHERE id=? AND completed_at IS NULL AND fanout_complete=0
+              AND fanout_user_id IS ? AND fanout_subscription_id IS ?`).bind(eventId, event.fanoutUserId, event.fanoutSubscriptionId).run();
+        }
+      }
+      // A preference, membership, or actor can change after an earlier page
+      // was materialized. Recheck only the next bounded pending-delivery page;
+      // this is not an exhaustion probe and cannot walk the recipient set.
+      await this.db.prepare(`UPDATE notification_deliveries SET status='failed',last_error='NOT_ELIGIBLE',updated_at=?
+        WHERE rowid IN (SELECT delivery.rowid FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_subscription
+          WHERE delivery.event_id=? AND delivery.status='pending'
+          ORDER BY delivery.subscription_id LIMIT ?)
+        AND NOT EXISTS (SELECT 1 FROM notification_events event
+          JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
+          JOIN push_subscriptions subscription ON subscription.id=notification_deliveries.subscription_id AND subscription.revoked_at IS NULL
+            AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
+          JOIN group_members member INDEXED BY idx_group_members_notification_user ON member.group_id=event.group_id AND member.user_id=subscription.user_id AND member.deleted_at IS NULL
+          LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
+          WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL
+            AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
+            AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
+              OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1)))`).bind(asOf, eventId, limit, Date.parse(asOf)).run();
+     // A preference, membership, or actor can change after fan-out but before
     // the queue consumer claims a row. Suppressed rows are terminal for this
     // event; otherwise a permanently disabled category would keep the outbox
     // event pending forever.
-    await this.db.prepare(`UPDATE notification_deliveries SET status='failed',last_error='NOT_ELIGIBLE',updated_at=?
-      WHERE event_id=? AND status='pending' AND EXISTS (SELECT 1 FROM notification_events current_event WHERE current_event.id=notification_deliveries.event_id AND current_event.completed_at IS NULL) AND NOT EXISTS (
-         SELECT 1 FROM notification_events event
-        JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-        JOIN group_members member ON member.group_id=event.group_id AND member.deleted_at IS NULL
-        JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
-        JOIN users active_user ON active_user.id=member.user_id AND active_user.deleted_at IS NULL
-        JOIN push_subscriptions subscription ON subscription.id=notification_deliveries.subscription_id AND subscription.user_id=member.user_id AND subscription.revoked_at IS NULL
-          AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-        LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-         WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
-          AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-            OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-      )`).bind(asOf, eventId, Date.parse(asOf)).run();
-    const rows = (await this.db.prepare(`SELECT delivery.event_id,delivery.subscription_id,subscription.subscription_ciphertext, event.event_type,
+     const rows = (await this.db.prepare(`SELECT delivery.event_id,delivery.subscription_id,subscription.subscription_ciphertext, event.event_type,
       event.group_id,event.entity_id,event.entity_type,subscription.user_id AS recipient_user_id,
       COALESCE(preference.detail_level,'generic') AS detail_level,event.description_snapshot,event.amount_minor_snapshot,event.currency_snapshot
        FROM notification_deliveries delivery JOIN notification_events event ON event.id=delivery.event_id AND event.completed_at IS NULL
@@ -536,35 +581,41 @@ export class Repository {
     return rows.map((row) => ({ eventId: text(row.event_id), eventType: text(row.event_type) as NotificationEventType, subscriptionId: text(row.subscription_id), subscriptionCiphertext: text(row.subscription_ciphertext), detailLevel: text(row.detail_level) === 'detailed' ? 'detailed' as const : 'generic' as const, recipientUserId: text(row.recipient_user_id), groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as 'expense' | 'settlement' | 'scheduled_expense', description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot) }));
   }
 
-  /** Check both materialized work and eligible subscriptions which have not
-   * been materialized yet. This is deliberately an EXISTS query: completion
-   * must not mistake an unvisited page for an empty event. */
-  async notificationDeliveryWorkRemaining(eventId: string, asOf = now()) {
-    const row = await this.db.prepare(`SELECT
-      EXISTS (SELECT 1 FROM notification_deliveries delivery
-        WHERE delivery.event_id=? AND delivery.status IN ('pending','claimed')) AS pending,
-      EXISTS (SELECT 1 FROM notification_deliveries delivery
-        WHERE delivery.event_id=? AND delivery.status='pending' AND delivery.next_attempt_at<=?) AS due,
-      EXISTS (SELECT 1 FROM notification_events event
-        JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-        JOIN group_members member ON member.group_id=event.group_id AND member.deleted_at IS NULL
-        JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
-        JOIN users active_user ON active_user.id=member.user_id AND active_user.deleted_at IS NULL
-        JOIN push_subscriptions subscription ON subscription.user_id=member.user_id AND subscription.revoked_at IS NULL
-          AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-        LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-        WHERE event.id=? AND event.completed_at IS NULL AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
-          AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-            OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-          AND NOT EXISTS (SELECT 1 FROM notification_deliveries existing_delivery
-            WHERE existing_delivery.event_id=event.id AND existing_delivery.subscription_id=subscription.id)) AS unmaterialized`).bind(eventId, eventId, asOf, Date.parse(asOf), eventId).first<Row>();
-    const pending = flag(row?.pending), due = flag(row?.due), unmaterialized = flag(row?.unmaterialized);
-    return { remaining: pending || unmaterialized, due: due || unmaterialized };
-  }
+    /** Completion is driven by the durable fan-out cursor.  In particular, do
+     * not ask SQLite to prove that no eligible member/subscription remains:
+     * that negative join can walk an entire group. */
+    async notificationDeliveryWorkRemaining(eventId: string, asOf = now()) {
+      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+      const row = await this.db.prepare(`SELECT event.occurred_at,event.fanout_complete,
+        EXISTS (SELECT 1 FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_subscription
+          WHERE delivery.event_id=? AND delivery.status IN ('pending','claimed') LIMIT 1) AS pending,
+        EXISTS (SELECT 1 FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_due
+          WHERE delivery.event_id=? AND delivery.status='pending' AND delivery.next_attempt_at<=? LIMIT 1) AS due,
+        event.occurred_at>=? AND event.fanout_complete=0 AS unmaterialized
+        FROM notification_events event WHERE event.id=? AND event.completed_at IS NULL`).bind(eventId, eventId, asOf, cutoff, eventId).first<Row>();
+      const pending = flag(row?.pending), due = flag(row?.due), unmaterialized = flag(row?.unmaterialized);
+      return { remaining: pending || unmaterialized, due: due || unmaterialized };
+    }
+
+    async terminalizeStaleNotificationDeliveries(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE) {
+      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+      const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
+      const result = await this.db.prepare(`UPDATE notification_deliveries
+        SET status='failed',last_error='STALE_INCOMPLETE_EVENT',claim_owner=NULL,claim_until=NULL,updated_at=?
+        WHERE rowid IN (
+          SELECT delivery.rowid FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
+          JOIN notification_deliveries delivery ON delivery.event_id=event.id
+          WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at<?
+            AND delivery.status IN ('pending','claimed')
+          ORDER BY delivery.subscription_id LIMIT ?
+        )`).bind(asOf, eventId, cutoff, limit).run();
+      return Number(result.meta?.changes ?? 0);
+    }
 
   async recoverStaleNotificationDeliveryClaims(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE) {
     const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
-    const result = await this.db.prepare("UPDATE notification_deliveries SET status='pending',claim_owner=NULL,claim_until=NULL,updated_at=? WHERE rowid IN (SELECT delivery.rowid FROM notification_deliveries delivery WHERE delivery.event_id=? AND delivery.status='claimed' AND (delivery.claim_until IS NULL OR delivery.claim_until<=?) AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=delivery.event_id AND event.completed_at IS NULL) ORDER BY delivery.rowid LIMIT ?)").bind(asOf, eventId, asOf, limit).run();
+     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     const result = await this.db.prepare("UPDATE notification_deliveries SET status='pending',claim_owner=NULL,claim_until=NULL,updated_at=? WHERE rowid IN (SELECT delivery.rowid FROM notification_deliveries delivery WHERE delivery.event_id=? AND delivery.status='claimed' AND (delivery.claim_until IS NULL OR delivery.claim_until<=?) AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=delivery.event_id AND event.completed_at IS NULL AND event.occurred_at>=?) ORDER BY delivery.rowid LIMIT ?)").bind(asOf, eventId, asOf, cutoff, limit).run();
     return Number(result.meta?.changes ?? 0);
   }
   /** Atomically lease a delivery immediately before any external push I/O.
@@ -578,17 +629,17 @@ export class Repository {
         AND ((status='pending' AND next_attempt_at<=?) OR (status='claimed' AND (claim_until IS NULL OR claim_until<=?)))
         AND EXISTS (
            SELECT 1 FROM notification_events event
-          JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-          JOIN group_members member ON member.group_id=event.group_id AND member.deleted_at IS NULL
+       JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
+       JOIN group_members member INDEXED BY idx_group_members_notification_user ON member.group_id=event.group_id AND member.deleted_at IS NULL
           JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
           JOIN users active_user ON active_user.id=member.user_id AND active_user.deleted_at IS NULL
           JOIN push_subscriptions subscription ON subscription.id=? AND subscription.user_id=member.user_id AND subscription.revoked_at IS NULL
             AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
           LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-           WHERE event.id=? AND event.completed_at IS NULL AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
+             WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=? AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
             AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
               OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-        )`).bind(claimOwner, leaseUntil, asOf, eventId, subscriptionId, asOf, asOf, subscriptionId, Date.parse(asOf), eventId).run();
+        )`).bind(claimOwner, leaseUntil, asOf, eventId, subscriptionId, asOf, asOf, subscriptionId, Date.parse(asOf), eventId, new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString()).run();
     if (Number(claimed.meta?.changes ?? 0) !== 1) return null;
     const row = await this.db.prepare(`SELECT delivery.event_id,delivery.subscription_id,subscription.subscription_ciphertext,event.event_type,
       event.group_id,event.entity_id,event.entity_type,subscription.user_id AS recipient_user_id,
@@ -602,7 +653,8 @@ export class Repository {
   }
 
   async markNotificationDeliverySent(eventId: string, subscriptionId: string, claimOwner: string, sentAt = now()) {
-    await this.db.prepare("UPDATE notification_deliveries SET status='sent',sent_at=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL)").bind(sentAt, sentAt, eventId, subscriptionId, claimOwner).run();
+     const cutoff = new Date(Date.parse(sentAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     await this.db.prepare("UPDATE notification_deliveries SET status='sent',sent_at=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?)").bind(sentAt, sentAt, eventId, subscriptionId, claimOwner, cutoff).run();
   }
    async markNotificationDeliveryRetry(eventId: string, subscriptionId: string, claimOwner: string, _attempts: number, error: string, asOf = now()) {
     // Queue retries are configured for 30 seconds. Keep the D1 lease within
@@ -610,18 +662,20 @@ export class Repository {
     // eligible again; the queue's max_retries/dead-letter policy remains the
     // outer retry bound.
      const next = new Date(Date.parse(asOf) + Math.min(30 * 1000, 2 ** Math.min(Math.max(_attempts, 1), 10) * 1000)).toISOString();
-     await this.db.prepare(`UPDATE notification_deliveries SET status=CASE WHEN attempts+1>=${NOTIFICATION_MAX_ATTEMPTS} THEN 'failed' ELSE 'pending' END,attempts=attempts+1,next_attempt_at=?,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL)`).bind(next, error.slice(0, 80), asOf, eventId, subscriptionId, claimOwner).run();
-     const row = await this.db.prepare('SELECT status FROM notification_deliveries WHERE event_id=? AND subscription_id=?').bind(eventId, subscriptionId).first<Row>();
-     return text(row?.status) === 'pending';
+      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+       const row = await this.db.prepare(`UPDATE notification_deliveries SET status=CASE WHEN attempts+1>=${NOTIFICATION_MAX_ATTEMPTS} THEN 'failed' ELSE 'pending' END,attempts=attempts+1,next_attempt_at=?,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?) RETURNING status`).bind(next, error.slice(0, 80), asOf, eventId, subscriptionId, claimOwner, cutoff).first<Row>();
+      return text(row?.status) === 'pending';
   }
   async markNotificationDeliveryFailed(eventId: string, subscriptionId: string, claimOwner: string, _attempts: number, error: string, asOf = now()) {
-    await this.db.prepare("UPDATE notification_deliveries SET status='failed',attempts=attempts+1,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL)").bind(String(error).slice(0, 80), asOf, eventId, subscriptionId, claimOwner).run();
+     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     await this.db.prepare("UPDATE notification_deliveries SET status='failed',attempts=attempts+1,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?)").bind(String(error).slice(0, 80), asOf, eventId, subscriptionId, claimOwner, cutoff).run();
   }
   async revokePushSubscription(subscriptionId: string, revokedAt = now()) {
     await this.db.prepare('UPDATE push_subscriptions SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL').bind(revokedAt, revokedAt, subscriptionId).run();
   }
-  async completeNotificationEvent(eventId: string, completedAt = now()) {
-    await this.db.prepare("UPDATE notification_events SET completed_at=? WHERE id=? AND completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM notification_deliveries WHERE event_id=? AND status IN ('pending','claimed'))").bind(completedAt, eventId, eventId).run();
+   async completeNotificationEvent(eventId: string, completedAt = now()) {
+     const cutoff = new Date(Date.parse(completedAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     await this.db.prepare("UPDATE notification_events SET completed_at=? WHERE id=? AND completed_at IS NULL AND (fanout_complete=1 OR occurred_at<?) AND NOT EXISTS (SELECT 1 FROM notification_deliveries WHERE event_id=? AND status IN ('pending','claimed'))").bind(completedAt, eventId, cutoff, eventId).run();
   }
 
   /** Remove only old, terminal notification history. Financial and audit
@@ -630,7 +684,25 @@ export class Repository {
   async purgeNotificationData(asOf: Date | string = new Date(), limit = NOTIFICATION_MAINTENANCE_BATCH_SIZE) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf;
     const cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const bounded = Math.min(Math.max(limit, 1), NOTIFICATION_MAINTENANCE_BATCH_SIZE);
+    const incompleteCutoff = new Date(current.getTime() - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
+     const bounded = Math.min(Math.max(limit, 1), NOTIFICATION_MAINTENANCE_BATCH_SIZE);
+     // Configuration may be disabled for longer than a queue lease. Old
+     // pending and claimed rows are terminalized in a small, deterministic
+     // batch so a claimed row cannot retain a lease forever. The event-age
+     // cutoff intentionally leaves recent transient-outage rows retryable.
+      const staleDeliveryResult = await this.db.prepare(`UPDATE notification_deliveries
+       SET status='failed',last_error='STALE_INCOMPLETE_EVENT',claim_owner=NULL,claim_until=NULL,updated_at=?
+       WHERE rowid IN (
+          SELECT delivery.rowid FROM notification_deliveries delivery
+          WHERE delivery.event_id=(SELECT event.id FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
+            WHERE event.completed_at IS NULL AND event.occurred_at<?
+              AND EXISTS (SELECT 1 FROM notification_deliveries candidate
+                WHERE candidate.event_id=event.id AND candidate.status IN ('pending','claimed'))
+            ORDER BY event.occurred_at,event.id LIMIT 1)
+            AND delivery.status IN ('pending','claimed')
+          ORDER BY delivery.subscription_id LIMIT ?
+         )`).bind(current.toISOString(), incompleteCutoff, bounded).run();
+      const staleDeliveriesTerminalized = Number(staleDeliveryResult.meta?.changes ?? 0);
     // Expired/revoked credentials can have an arbitrarily large delivery
     // history. Drain children first so deleting a parent never has to scan or
     // remove an unbounded child set. The rowid/ID subqueries are the explicit,
@@ -649,14 +721,43 @@ export class Repository {
         AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.subscription_id=subscription.id)
       ORDER BY subscription.expiration_time,subscription.id LIMIT ?
     )`).bind(current.getTime(), bounded).run();
-    // A worker crash can occur after the last delivery becomes terminal but
-    // before the event completion write. Close that gap before retention so a
-    // later enrollment can never recreate an old terminal delivery.
-    const completionResult = await this.db.prepare(`UPDATE notification_events SET completed_at=COALESCE((SELECT MAX(delivery.updated_at) FROM notification_deliveries delivery WHERE delivery.event_id=notification_events.id),?)
-      WHERE rowid IN (SELECT event.rowid FROM notification_events event
-        WHERE event.completed_at IS NULL AND EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.event_id=event.id)
-          AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.event_id=event.id AND delivery.status IN ('pending','claimed'))
-        ORDER BY event.id LIMIT ?)`).bind(current.toISOString(), bounded).run();
+     // A worker crash can occur after the last delivery becomes terminal but
+     // before the event completion write. First take a bounded age/index page,
+     // then apply the correlated delivery predicates only to that page. The
+     // durable cursor rotates past blocked events, so one permanently blocked
+     // event cannot starve the rest of the stale backlog.
+      const selectCompletionPage = () => this.db.prepare(`SELECT event.id,event.occurred_at
+        FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
+        CROSS JOIN notification_completion_cursor cursor
+        WHERE cursor.id=1 AND event.completed_at IS NULL AND event.occurred_at<?
+          AND (?=1 OR cursor.occurred_at IS NULL OR event.occurred_at>cursor.occurred_at
+            OR (event.occurred_at=cursor.occurred_at AND event.id>COALESCE(cursor.event_id,'')))
+        ORDER BY event.occurred_at,event.id LIMIT ?`).bind(incompleteCutoff, staleDeliveriesTerminalized > 0 ? 1 : 0, bounded);
+      let completionPage = (await selectCompletionPage().all<Row>()).results;
+      if (!completionPage.length) {
+        // A full rotation must wrap in the same maintenance invocation. This
+        // is what lets a newly-terminalized event complete without waiting for
+        // another Cron tick, while the indexed page remains bounded.
+        await this.db.prepare('UPDATE notification_completion_cursor SET occurred_at=NULL,event_id=NULL WHERE id=1').run();
+        completionPage = (await selectCompletionPage().all<Row>()).results;
+      }
+      let completionUpdated = 0;
+      let completionCapped = completionPage.length >= bounded;
+      if (completionPage.length) {
+        const completionIds = completionPage.map((row) => text(row.id));
+        const completionResult = await this.db.prepare(`UPDATE notification_events SET completed_at=?
+          WHERE id IN (SELECT value FROM json_each(?)) AND completed_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery
+              WHERE delivery.event_id=notification_events.id AND delivery.status IN ('pending','claimed'))`).bind(current.toISOString(), JSON.stringify(completionIds)).run();
+        completionUpdated = Number(completionResult.meta?.changes ?? 0);
+        const last = completionPage[completionPage.length - 1];
+        await this.db.prepare('UPDATE notification_completion_cursor SET occurred_at=?,event_id=? WHERE id=1').bind(text(last.occurred_at), text(last.id)).run();
+      } else {
+        // The cursor is already reset after an empty rotation. New old events,
+        // and events blocked on an earlier pass, are picked up on the next
+        // bounded pass.
+        completionCapped = false;
+      }
      const deliveries = await this.db.prepare(`DELETE FROM notification_deliveries WHERE rowid IN (
        SELECT delivery.rowid FROM notification_deliveries delivery
        LEFT JOIN notification_events event ON event.id=delivery.event_id
@@ -674,17 +775,20 @@ export class Repository {
          AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.event_id=event.id)
        ORDER BY event.completed_at,event.id LIMIT ?
      )`).bind(cutoff, cutoff, bounded).run();
-    const expiredSubscriptionDeliveriesPurged = Number(expiredDeliveryResult.meta?.changes ?? 0);
+     const expiredSubscriptionDeliveriesPurged = Number(expiredDeliveryResult.meta?.changes ?? 0);
     const subscriptionsPurged = Number(subscriptionResult.meta?.changes ?? 0);
     const deliveriesPurged = Number(deliveries.meta?.changes ?? 0);
     const eventsPurged = Number(events.meta?.changes ?? 0);
     const expiredSubscriptionDeliveriesCapped = expiredSubscriptionDeliveriesPurged >= bounded;
     const subscriptionsCapped = subscriptionsPurged >= bounded;
     const deliveriesCapped = deliveriesPurged >= bounded;
-    const eventsCapped = eventsPurged >= bounded;
-    return {
-      cutoff,
-      expiredSubscriptionDeliveriesPurged,
+     const eventsCapped = eventsPurged >= bounded;
+     const staleDeliveriesCapped = staleDeliveriesTerminalized >= bounded;
+      return {
+       cutoff,
+       staleDeliveriesTerminalized,
+       staleDeliveriesCapped,
+       expiredSubscriptionDeliveriesPurged,
       subscriptionsPurged,
       deliveriesPurged,
       eventsPurged,
@@ -692,8 +796,10 @@ export class Repository {
       subscriptionsCapped,
       deliveriesCapped,
       eventsCapped,
-      completionUpdated: Number(completionResult.meta?.changes ?? 0),
-      capped: expiredSubscriptionDeliveriesCapped || subscriptionsCapped || deliveriesCapped || eventsCapped,
+       completionUpdated,
+       completionCapped,
+       completionContinuation: completionCapped,
+        capped: staleDeliveriesCapped || expiredSubscriptionDeliveriesCapped || subscriptionsCapped || deliveriesCapped || eventsCapped || completionCapped,
     };
   }
 
@@ -1821,8 +1927,8 @@ export class Repository {
   private notificationEventInsert(event: { eventType: NotificationEventType; groupId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; entityId: string; version: number; actorId?: string | null; occurredAt: string; description?: string | null; amountMinor?: number | null; currency?: string | null; where: string; whereArgs: unknown[] }) {
     const actor = event.actorId === undefined ? null : event.actorId;
     return this.db.prepare(`INSERT INTO notification_events(id,event_type,group_id,entity_type,entity_id,entity_version,actor_id,occurred_at,description_snapshot,amount_minor_snapshot,currency_snapshot)
-      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ${event.where}`)
-      .bind(uid(), event.eventType, event.groupId, event.entityType, event.entityId, event.version, actor, event.occurredAt, event.description ?? null, event.amountMinor ?? null, event.currency ?? null, ...event.whereArgs);
+      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ? AND ${event.where}`)
+      .bind(uid(), event.eventType, event.groupId, event.entityType, event.entityId, event.version, actor, event.occurredAt, event.description ?? null, event.amountMinor ?? null, event.currency ?? null, this.options.notificationDeliveryEnabled !== false ? 1 : 0, ...event.whereArgs);
   }
   private expenseAfter(old: Expense | null, id: string, groupId: string, userId: string, input: ExpenseInput, t: string, version: number): Expense {
     return { id, groupId, description: input.description, amountMinor: input.amount_minor, currency: input.currency, date: input.date, category: input.category ?? null, notes: input.notes ?? null, createdBy: old?.createdBy ?? userId, createdAt: old?.createdAt ?? t, updatedAt: t, deletedAt: null, version, clientOperationId: old?.clientOperationId ?? input.client_operation_id ?? null, payers: input.payers.map((p) => ({ personId: p.person_id, amountMinor: p.amount_minor })), splits: input.splits.map((s) => ({ personId: s.person_id, amountMinor: s.amount_minor, metadata: s.metadata })) };
@@ -2027,14 +2133,18 @@ export class Repository {
   }
   async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number; deadlineMs?: number } = {}) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf, cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-     let notificationSubscriptionsPurged = 0, notificationExpiredSubscriptionDeliveriesPurged = 0, notificationDeliveriesPurged = 0, notificationEventsPurged = 0, notificationCompletionUpdated = 0, notificationExpiredSubscriptionDeliveriesCapped = false, notificationSubscriptionsCapped = false, notificationDeliveriesCapped = false, notificationEventsCapped = false, notificationCapped = false;
+      let notificationStaleDeliveriesTerminalized = 0, notificationStaleDeliveriesCapped = false, notificationSubscriptionsPurged = 0, notificationExpiredSubscriptionDeliveriesPurged = 0, notificationDeliveriesPurged = 0, notificationEventsPurged = 0, notificationCompletionUpdated = 0, notificationCompletionCapped = false, notificationCompletionContinuation = false, notificationExpiredSubscriptionDeliveriesCapped = false, notificationSubscriptionsCapped = false, notificationDeliveriesCapped = false, notificationEventsCapped = false, notificationCapped = false;
     if (withinDeadline(options.deadlineMs)) {
        const notificationPurge = await this.purgeNotificationData(current);
-       notificationSubscriptionsPurged = notificationPurge.subscriptionsPurged;
+        notificationStaleDeliveriesTerminalized = notificationPurge.staleDeliveriesTerminalized;
+        notificationStaleDeliveriesCapped = notificationPurge.staleDeliveriesCapped;
+        notificationSubscriptionsPurged = notificationPurge.subscriptionsPurged;
        notificationExpiredSubscriptionDeliveriesPurged = notificationPurge.expiredSubscriptionDeliveriesPurged;
       notificationDeliveriesPurged = notificationPurge.deliveriesPurged;
       notificationEventsPurged = notificationPurge.eventsPurged;
-       notificationCompletionUpdated = notificationPurge.completionUpdated;
+        notificationCompletionUpdated = notificationPurge.completionUpdated;
+        notificationCompletionCapped = notificationPurge.completionCapped;
+        notificationCompletionContinuation = notificationPurge.completionContinuation;
        notificationExpiredSubscriptionDeliveriesCapped = notificationPurge.expiredSubscriptionDeliveriesCapped;
        notificationSubscriptionsCapped = notificationPurge.subscriptionsCapped;
        notificationDeliveriesCapped = notificationPurge.deliveriesCapped;
@@ -2181,7 +2291,7 @@ export class Repository {
         await this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff).run();
       }
     }
-      return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, notificationSubscriptionsPurged, notificationExpiredSubscriptionDeliveriesPurged, notificationDeliveriesPurged, notificationEventsPurged, notificationCompletionUpdated, notificationExpiredSubscriptionDeliveriesCapped, notificationSubscriptionsCapped, notificationDeliveriesCapped, notificationEventsCapped, capped: incomplete || notificationCapped || groups.length >= maxGroups || !withinDeadline(options.deadlineMs) };
+        return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, notificationStaleDeliveriesTerminalized, notificationStaleDeliveriesCapped, notificationSubscriptionsPurged, notificationExpiredSubscriptionDeliveriesPurged, notificationDeliveriesPurged, notificationEventsPurged, notificationCompletionUpdated, notificationCompletionCapped, notificationCompletionContinuation, notificationExpiredSubscriptionDeliveriesCapped, notificationSubscriptionsCapped, notificationDeliveriesCapped, notificationEventsCapped, capped: incomplete || notificationCapped || notificationCompletionCapped || notificationCompletionContinuation || groups.length >= maxGroups || !withinDeadline(options.deadlineMs) };
   }
   async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }) {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options.cursor);
