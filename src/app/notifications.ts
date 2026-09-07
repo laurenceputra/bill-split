@@ -5,7 +5,7 @@ import { setNotificationBadge } from './notification-badge';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 import { flushOutbox } from './outbox';
 
-export type NotificationCapability = 'checking' | 'supported' | 'unavailable' | 'needs-install' | 'default' | 'denied' | 'disabled' | 'enabled' | 'error';
+export type NotificationCapability = 'checking' | 'supported' | 'unavailable' | 'needs-install' | 'default' | 'denied' | 'enabled' | 'error';
 export type NotificationSnapshot = Readonly<{
   capability: NotificationCapability;
   permission: NotificationPermission | 'unsupported';
