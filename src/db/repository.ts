@@ -1671,9 +1671,10 @@ export class Repository {
     const value = (camel: string, snake: string) => row[camel] ?? row[snake];
     const amount = value('amountMinor', 'amount_minor');
     const currencyValue = value('currency', 'currency');
+    const parsedAmount = typeof amount === 'number' || (typeof amount === 'string' && amount.trim() !== '') ? Number(amount) : NaN;
     const parts = [
       entityType === 'expense' && typeof value('description', 'description') === 'string' && value('description', 'description') ? `Description “${value('description', 'description')}”` : '',
-      typeof amount === 'number' || typeof amount === 'string' ? `Amount ${Number(amount) / 100} ${text(currencyValue)}` : '',
+      Number.isSafeInteger(parsedAmount) ? `Amount ${text(currencyValue)} ${(parsedAmount / 100).toFixed(2)}` : '',
       typeof value('date', 'expense_date') === 'string' || typeof value('settlementDate', 'settlement_date') === 'string' ? `Date ${text(value('date', 'expense_date') ?? value('settlementDate', 'settlement_date'))}` : '',
       entityType === 'expense' && typeof value('notes', 'notes') === 'string' && value('notes', 'notes') ? `Notes “${value('notes', 'notes')}”` : '',
       entityType === 'settlement' && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',

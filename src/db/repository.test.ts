@@ -267,14 +267,15 @@ class AuditPageStatement {
   }
 }
 class AuditDisclosureDb {
-  prepare(sql: string) { return new AuditDisclosureStatement(sql); }
+  constructor(readonly beforeAmount: unknown = 100, readonly afterAmount: unknown = 200) {}
+  prepare(sql: string) { return new AuditDisclosureStatement(sql, this); }
 }
 class AuditDisclosureStatement {
-  constructor(private readonly sql: string) {}
+  constructor(private readonly sql: string, private readonly db?: AuditDisclosureDb) {}
   bind(..._args: unknown[]) { return this; }
   async all<T>() {
     if (!this.sql.includes('FROM audit_events')) return { results: [] as T[] };
-    return { results: [{ id: 'private-audit-id', entity_type: 'expense', entity_id: 'private-expense-id', version: 2, action: 'update', actor_name: 'Alex', occurred_at: '2026-01-02T00:00:00.000Z', before_json: JSON.stringify({ description: 'Old', amountMinor: 100, currency: 'USD', notes: 'old note', payers: [{ personId: 'private-person-id' }] }), after_json: JSON.stringify({ description: 'New', amountMinor: 200, currency: 'USD', notes: 'new note', payers: [{ personId: 'private-person-id' }] }) }] as T[] };
+    return { results: [{ id: 'private-audit-id', entity_type: 'expense', entity_id: 'private-expense-id', version: 2, action: 'update', actor_name: 'Alex', occurred_at: '2026-01-02T00:00:00.000Z', before_json: JSON.stringify({ description: 'Old', amountMinor: this.db?.beforeAmount ?? 100, currency: 'USD', notes: 'old note', payers: [{ personId: 'private-person-id' }] }), after_json: JSON.stringify({ description: 'New', amountMinor: this.db?.afterAmount ?? 200, currency: 'USD', notes: 'new note', payers: [{ personId: 'private-person-id' }] }) }] as T[] };
   }
 }
 
@@ -1158,6 +1159,14 @@ describe('repository pagination guards', () => {
     expect(page.items[0]).not.toHaveProperty('entityId');
     expect(JSON.stringify(page)).not.toContain('private-person-id');
     expect(JSON.stringify(page)).not.toContain('private-operation-id');
+  });
+  it('formats safe minor-unit amounts with two fractional digits and omits malformed amounts', async () => {
+    const formatted = await new Repository(new AuditDisclosureDb(8450, 8400) as never).auditEntityPage('group-1', 'expense', 'expense-1', { limit: 10 });
+    expect(formatted.items[0]).toMatchObject({ beforeSummary: expect.stringContaining('Amount USD 84.50'), afterSummary: expect.stringContaining('Amount USD 84.00') });
+
+    const malformed = await new Repository(new AuditDisclosureDb('not-an-amount') as never).auditEntityPage('group-1', 'expense', 'expense-1', { limit: 10 });
+    expect(malformed.items[0].beforeSummary).not.toContain('Amount');
+    expect(malformed.items[0].beforeSummary).not.toContain('NaN');
   });
 });
 
