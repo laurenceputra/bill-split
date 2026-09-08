@@ -43,7 +43,7 @@ describe('scheduled completion migration integration', () => {
     ];
     const currentNames = [
       '0024_incremental_projection_totals.sql', '0025_expense_suggestion_lookup.sql',
-      '0026_targeted_group_invitations.sql', '0027_notifications.sql', '0028_notification_maintenance_indexes.sql', '0029_notification_fanout_pagination.sql',
+      '0026_targeted_group_invitations.sql',
     ];
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES('user-1','migration@example.com','2026-01-01','2026-01-01');

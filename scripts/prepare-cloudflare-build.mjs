@@ -24,6 +24,45 @@ function sectionContents(source, sectionName) {
   return rest.split(/^\s*\[\[?.*\]\]?\s*$/m, 1)[0];
 }
 
+function stripTomlComments(source) {
+  let result = '';
+  let quote;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      result += character;
+      if (quote.length === 3) {
+        if (source.startsWith(quote, index)) {
+          result += source.slice(index + 1, index + quote.length);
+          index += quote.length - 1;
+          quote = undefined;
+        }
+      } else if (quote === '"' && character === '\\' && index + 1 < source.length) {
+        result += source[++index];
+      } else if (character === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (character === '#') {
+      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1;
+      if (index < source.length) result += source[index];
+      continue;
+    }
+    if (source.startsWith('"""', index) || source.startsWith("'''", index)) {
+      quote = source.slice(index, index + 3);
+      result += quote;
+      index += 2;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      result += character;
+    } else {
+      result += character;
+    }
+  }
+  return result;
+}
+
 function assignment(source, key, { allowQuotedKey = false } = {}) {
   const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const keyPattern = allowQuotedKey ? `(?:${escapedKey}|"${escapedKey}"|'${escapedKey}')` : escapedKey;
@@ -100,7 +139,7 @@ function quotedArrayValues(value) {
 }
 
 function hasPlaintextSecretAssignment(source) {
-  const secret = `(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY|VAPID_PRIVATE_KEY|PUSH_SUBSCRIPTION_ENCRYPTION_KEY)`;
+  const secret = `(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)`;
   const key = `(?:(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')\.)*(?:${secret}|"${secret}"|'${secret}')`;
   const keySegment = `(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')`;
   const secretSegment = `(?:${secret}|"${secret}"|'${secret}')`;
@@ -110,9 +149,26 @@ function hasPlaintextSecretAssignment(source) {
   const tablePattern = new RegExp(`^\\s*\\[\\[?\\s*(?:${keySegment}\\s*\\.\\s*)*${secretSegment}(?:\\s*\\.\\s*${keySegment})*\\s*\\]\\]?\\s*(?:#.*)?$`, 'i');
   return source.split(/\r?\n/).some((line) => {
     const uncommented = line.replace(/(^|\s)#.*$/, '$1');
-    if (!/(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY|VAPID_PRIVATE_KEY|PUSH_SUBSCRIPTION_ENCRYPTION_KEY)/i.test(uncommented)) return false;
+    if (!/(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)/i.test(uncommented)) return false;
     return assignmentPattern.test(uncommented) || inlineAssignmentPattern.test(uncommented) || dottedAssignmentPattern.test(uncommented) || tablePattern.test(line);
   });
+}
+
+function rejectObsoleteNotificationConfig(source) {
+  const withoutComments = stripTomlComments(source);
+  const keySegment = `(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')`;
+  const obsoleteNames = 'NOTIFICATION_QUEUE|VAPID_PUBLIC_KEY|VAPID_CONTACT|VAPID_PRIVATE_KEY|PUSH_SUBSCRIPTION_ENCRYPTION_KEY';
+  const obsoleteKey = `(?:${obsoleteNames}|"(?:${obsoleteNames})"|'(?:${obsoleteNames})')`;
+  const obsoleteKeyAssignment = new RegExp(`^\\s*(?:${keySegment}\\s*\\.\\s*)*${obsoleteKey}\\s*=`, 'im');
+  const obsoleteTable = new RegExp(`^\\s*\\[\\[?\\s*(?:${keySegment}\\s*\\.\\s*)*${obsoleteKey}\\s*(?:\\.|\\]\\]?)`, 'im');
+  const requiredNotificationSecret = new RegExp(`(?:^|[,\\[])\\s*(?:"(?:${obsoleteNames})"|'(?:${obsoleteNames})'|(?:${obsoleteNames}))\\s*(?=[,\\]])`, 'i');
+  const queueTable = /^\s*\[\[?\s*(?:["']?queues["']?)(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+'))*\s*\]\]?\s*$/im;
+  const queueAssignment = /^\s*(?:["']?queues["']?)(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+'))*\s*=/im;
+  const notificationBinding = /\bbinding\s*=\s*["']NOTIFICATION_QUEUE["']/i;
+  const secrets = sectionContents(withoutComments, 'secrets');
+  if (queueTable.test(withoutComments) || queueAssignment.test(withoutComments) || notificationBinding.test(withoutComments) || obsoleteKeyAssignment.test(withoutComments) || obsoleteTable.test(withoutComments) || requiredNotificationSecret.test(secrets)) {
+    throw new Error('Production config must not contain obsolete notification Queue or VAPID configuration.');
+  }
 }
 
 function rejectVarsTableBinding(source, key) {
@@ -166,7 +222,7 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   // Ignore comments while checking for development/example values. This keeps
   // useful comments from making a real config fail while still rejecting the
   // values shipped in wrangler.deploy.toml.example.
-  const withoutComments = source.replace(/^\s*#.*$/gm, '');
+  const withoutComments = stripTomlComments(source);
   if (/replace[-_]with|your[-_]bill[-_]split|placeholder|localhost|127\.0\.0\.1|bill-split-(?:local|dev|test|development|staging|preview)|pk_test|sk_test/i.test(withoutComments)) {
     throw new Error('The production Wrangler config contains a development or placeholder value.');
   }
@@ -178,6 +234,7 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   if (hasPlaintextSecretAssignment(source)) {
     throw new Error('Production config must not embed runtime secret values; declare them only in [secrets].required.');
   }
+  rejectObsoleteNotificationConfig(source);
 
   const workerName = safeWorkerName(quotedValue(source, 'name'), 'Production config name');
   requireNonPlaceholderValue(source, 'account_id', 'account_id');
@@ -208,28 +265,6 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   const vars = sectionContents(source, 'vars');
   const authorizedParties = requireNonPlaceholderValue(vars, 'CLERK_AUTHORIZED_PARTIES', 'CLERK_AUTHORIZED_PARTIES');
   const authorizedUrl = httpsOrigin(authorizedParties, 'CLERK_AUTHORIZED_PARTIES');
-  const vapidPublicKey = requireNonPlaceholderValue(vars, 'VAPID_PUBLIC_KEY', 'VAPID_PUBLIC_KEY');
-  let vapidBytes;
-  try { vapidBytes = Buffer.from(vapidPublicKey.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - vapidPublicKey.length % 4) % 4), 'base64'); } catch { vapidBytes = undefined; }
-  if (!/^[A-Za-z0-9_-]+$/.test(vapidPublicKey) || vapidBytes?.length !== 65 || vapidBytes[0] !== 4) throw new Error('Production config must contain a valid VAPID_PUBLIC_KEY.');
-  try {
-    createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: vapidBytes.subarray(1, 33).toString('base64url'), y: vapidBytes.subarray(33, 65).toString('base64url') }, format: 'jwk' });
-  } catch {
-    throw new Error('Production config must contain a VAPID_PUBLIC_KEY on the P-256 curve.');
-  }
-  const vapidContact = requireNonPlaceholderValue(vars, 'VAPID_CONTACT', 'VAPID_CONTACT');
-  if (!/^(?:mailto:[^\s@]+@[^\s@]+|https:\/\/[^\s]+)$/i.test(vapidContact)) throw new Error('Production config must contain a valid VAPID_CONTACT.');
-
-  const queueProducer = sectionContents(source, 'queues.producers');
-  const queueConsumer = sectionContents(source, 'queues.consumers');
-  const producerBinding = quotedValue(queueProducer, 'binding');
-  const producerQueue = requireNonPlaceholderValue(queueProducer, 'queue', 'notification Queue producer');
-  const consumerQueue = requireNonPlaceholderValue(queueConsumer, 'queue', 'notification Queue consumer');
-  if (producerBinding !== 'NOTIFICATION_QUEUE' || producerQueue !== consumerQueue) throw new Error('Production config must define matching notification Queue producer and consumer bindings.');
-  const deadLetterQueue = requireNonPlaceholderValue(queueConsumer, 'dead_letter_queue', 'notification Queue dead-letter queue');
-  if (deadLetterQueue === consumerQueue) throw new Error('Production config must use a distinct notification Queue dead-letter queue.');
-  if (assignment(queueConsumer, 'max_batch_size') !== '1') throw new Error('Production notification Queue consumer must use max_batch_size = 1 for the bounded D1 query budget.');
-  if (assignment(queueConsumer, 'max_retries') !== '4' || assignment(queueConsumer, 'retry_delay') !== '30') throw new Error('Production config must use 4 Queue retries with a 30-second retry delay.');
 
   // These runtime variables may be managed in the Worker dashboard. When they
   // are present in TOML, keep validating them rather than allowing the file to
@@ -252,7 +287,7 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
 
   const secrets = sectionContents(source, 'secrets');
   const requiredSecrets = quotedArrayValues(assignment(secrets, 'required'));
-  if (!requiredSecrets.includes('CLERK_SECRET_KEY') || !requiredSecrets.includes('IDENTITY_TOMBSTONE_KEY') || !requiredSecrets.includes('VAPID_PRIVATE_KEY') || !requiredSecrets.includes('PUSH_SUBSCRIPTION_ENCRYPTION_KEY')) {
+  if (!requiredSecrets.includes('CLERK_SECRET_KEY') || !requiredSecrets.includes('IDENTITY_TOMBSTONE_KEY')) {
     throw new Error('Production config [secrets].required must declare the required runtime secrets.');
   }
 

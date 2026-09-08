@@ -3,7 +3,6 @@ import { ClerkProvider } from '@clerk/react';
 import { AppErrorBoundary } from './ErrorBoundary';
 import { initializeInstallUX } from './install';
 import { observeServiceWorkerRegistration } from './service-worker';
-import { initializeNotifications } from './notifications';
 
 export function registerServiceWorker() {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
@@ -19,7 +18,6 @@ export function registerServiceWorker() {
 
 registerServiceWorker();
 initializeInstallUX();
-initializeNotifications();
 // Clerk reads VITE_CLERK_PUBLISHABLE_KEY from the Vite environment. Keeping
 // the key implicit here follows the current ClerkProvider setup and avoids a
 // second client-side configuration source.

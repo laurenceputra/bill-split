@@ -1,4 +1,4 @@
-import { groupSplitDefaultInput, pushSubscriptionInput, notificationPreferencesInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput, type PushSubscriptionInput, type NotificationPreferencesInput } from '../shared/schemas';
+import { groupSplitDefaultInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
 import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, Transaction } from '../shared/types';
 import { checkedMinor } from '../shared/money';
@@ -10,7 +10,6 @@ import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS }
 import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
 import { normalizeExpenseSplitArrangement, sameGroupSplitArrangement } from '../shared/split-default';
-import { encryptSubscription, endpointHash, validatePushSubscriptionKeyMaterial } from '../worker/web-push';
 
 const now = () => new Date().toISOString();
 const uid = () => crypto.randomUUID();
@@ -21,31 +20,9 @@ const identityHash = async (value: string, key: string) => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 };
 type Row = Record<string, unknown>;
-export type NotificationEventType = 'expense_created' | 'expense_updated' | 'expense_deleted' | 'expense_restored' | 'settlement_created' | 'settlement_updated' | 'settlement_deleted' | 'settlement_restored' | 'scheduled_expense_generated' | 'scheduled_expense_blocked';
-export type NotificationDeliveryCandidate = { eventId: string; eventType: NotificationEventType; subscriptionId: string; subscriptionCiphertext: string; detailLevel: 'generic' | 'detailed'; recipientUserId: string; groupId: string; entityId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; description?: string | null; amountMinor?: number | null; currency?: string | null };
-export type NotificationEventSnapshot = { id: string; eventType: NotificationEventType; groupId: string; entityId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; actorId: string | null; description: string | null; amountMinor: number | null; currency: string | null; occurredAt: string; fanoutUserId?: string | null; fanoutSubscriptionId?: string | null; fanoutComplete?: boolean };
-export const NOTIFICATION_MAX_ATTEMPTS = 5;
-/** Conservative per-account device limit. Expired and revoked credentials do
- * not consume a slot, and refreshing an existing endpoint is an update. */
-export const NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS = 10;
-/** A delivery page is deliberately small so one Queue message stays within
- * Workers Free D1's per-invocation query budget. */
-export const NOTIFICATION_DELIVERY_PAGE_SIZE = 3;
-/** The Queue consumer must remain single-message because one delivery page can
- * use at most 18 D1 queries in the transient-provider-failure worst case,
- * including the continuation work probe. */
-export const NOTIFICATION_QUEUE_MAX_BATCH_SIZE = 1;
-export const NOTIFICATION_DELIVERY_D1_QUERY_BUDGET = 18;
-/** Maintenance selects at most this many rows in each notification category
- * per Cron invocation. Keep this independent from the ledger purge budget. */
-export const NOTIFICATION_MAINTENANCE_BATCH_SIZE = 100;
-/** Incomplete events are retained long enough to survive a transient delivery
- * outage, but an event that never acquired a delivery row must not remain
- * replayable forever if delivery is later enabled. */
-export const NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED' | 'NOTIFICATIONS_DISABLED' | 'INVALID_PUSH_SUBSCRIPTION' | 'PUSH_SUBSCRIPTION_LIMIT', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -163,7 +140,7 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
 const groupDisplayNameSql = (memberAlias: string) => `CASE WHEN (SELECT COUNT(*) FROM group_members display_member WHERE display_member.group_id=g.id AND display_member.deleted_at IS NULL)=2 THEN COALESCE((SELECT display_person.name FROM people display_person JOIN group_members display_other ON display_other.person_id=display_person.id WHERE display_other.group_id=g.id AND display_other.person_id<>${memberAlias}.person_id AND display_other.deleted_at IS NULL AND display_person.deleted_at IS NULL LIMIT 1),g.name) ELSE g.name END`;
 
 export class Repository {
-  constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string, private readonly options: { pushSubscriptionKey?: string; notificationDeliveryEnabled?: boolean } = {}) {}
+  constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string) {}
 
   private tombstoneKey() {
     const key = this.identityTombstoneKey?.trim();
@@ -333,474 +310,6 @@ export class Repository {
       SELECT id FROM application_sessions WHERE idle_expires_at<=? OR revoked_at IS NOT NULL ORDER BY id LIMIT ?
     )`).bind(timestamp, bounded).run();
     return { purged: Number(result.meta?.changes ?? 0), capped: Number(result.meta?.changes ?? 0) >= bounded };
-  }
-
-  private pushKey() {
-    const key = this.options.pushSubscriptionKey?.trim();
-    if (!key) throw new RepositoryError('NOTIFICATIONS_DISABLED', 'Push notifications are not configured');
-    return key;
-  }
-
-  async notificationStatus(userId: string, enabled: boolean, publicKey: string | null) {
-    const [preference, count] = await Promise.all([
-      this.db.prepare('SELECT money_changes,scheduled_events,detail_level FROM notification_preferences WHERE user_id=?').bind(userId).first<Row>(),
-      this.db.prepare('SELECT COUNT(*) AS count FROM push_subscriptions WHERE user_id=? AND revoked_at IS NULL AND (expiration_time IS NULL OR expiration_time>?)').bind(userId, Date.now()).first<Row>(),
-    ]);
-    return {
-      enabled,
-      publicKey: enabled ? publicKey : null,
-      subscriptionCount: number(count?.count),
-      preferences: {
-        moneyChanges: preference == null ? true : flag(preference.money_changes),
-        scheduledEvents: preference == null ? true : flag(preference.scheduled_events),
-        detailLevel: text(preference?.detail_level) === 'detailed' ? 'detailed' as const : 'generic' as const,
-      },
-    };
-  }
-
-  async updateNotificationPreferences(userId: string, input: NotificationPreferencesInput) {
-    const parsed = notificationPreferencesInput.safeParse(input);
-    if (!parsed.success) throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'Notification preferences are invalid');
-    const value = parsed.data, timestamp = now();
-    const result = await this.db.prepare(`INSERT INTO notification_preferences(user_id,money_changes,scheduled_events,detail_level,updated_at)
-      SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)
-      ON CONFLICT(user_id) DO UPDATE SET money_changes=excluded.money_changes,scheduled_events=excluded.scheduled_events,detail_level=excluded.detail_level,updated_at=excluded.updated_at`)
-      .bind(userId, value.money_changes ? 1 : 0, value.scheduled_events ? 1 : 0, value.detail_level, timestamp, userId).run();
-    if (Number(result.meta?.changes ?? 0) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The authenticated account is not available'); }
-    return (await this.notificationStatus(userId, true, null)).preferences;
-  }
-
-  async upsertPushSubscription(userId: string, input: PushSubscriptionInput) {
-    return this.upsertPushSubscriptionInternal(userId, input, false);
-  }
-
-  private async upsertPushSubscriptionInternal(userId: string, input: PushSubscriptionInput, retried: boolean): Promise<{ id: string; expirationTime: number | null }> {
-    const key = this.pushKey(), parsed = pushSubscriptionInput.safeParse(input);
-    if (!parsed.success) throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'The push subscription is invalid');
-    const value = parsed.data, endpoint = new URL(value.endpoint).toString(), timestamp = now(), activeAsOf = Date.now();
-    try { await validatePushSubscriptionKeyMaterial(value.keys); }
-    catch { throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'The push subscription key material is invalid', { field: 'keys' }); }
-    const hash = await endpointHash(endpoint, key);
-    const ciphertext = await encryptSubscription({ endpoint, keys: value.keys }, key);
-    const id = uid();
-    const existing = await this.db.prepare('SELECT id,user_id FROM push_subscriptions WHERE endpoint_hash=? AND revoked_at IS NULL ORDER BY id LIMIT 1').bind(hash).first<Row>();
-    let result;
-    if (existing && text(existing.user_id) !== userId) {
-      // A transfer is a new credential lifetime. Revoke the old parent and
-      // insert a new ID, preserving the old delivery rows under their original
-      // account instead of moving or deleting them.
-      const transfer = await this.db.batch([
-        this.db.prepare(`UPDATE push_subscriptions SET revoked_at=?,updated_at=?
-          WHERE id=? AND endpoint_hash=? AND revoked_at IS NULL
-            AND (SELECT COUNT(*) FROM push_subscriptions destination
-              WHERE destination.user_id=? AND destination.revoked_at IS NULL
-                AND (destination.expiration_time IS NULL OR destination.expiration_time>?) ) < ?
-            AND EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)`)
-          .bind(timestamp, timestamp, existing.id, hash, userId, activeAsOf, NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS, userId),
-        this.db.prepare(`INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,expiration_time,created_at,updated_at,revoked_at)
-          SELECT ?,?,?,?,?,?,?,NULL
-          WHERE EXISTS (SELECT 1 FROM push_subscriptions transferred
-            WHERE transferred.id=? AND transferred.endpoint_hash=? AND transferred.revoked_at=?)
-            AND EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)
-            AND (SELECT COUNT(*) FROM push_subscriptions destination
-              WHERE destination.user_id=? AND destination.revoked_at IS NULL
-                AND (destination.expiration_time IS NULL OR destination.expiration_time>?) ) < ?`)
-          .bind(id, userId, hash, ciphertext, value.expirationTime ?? null, timestamp, timestamp, existing.id, hash, timestamp, userId, userId, activeAsOf, NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS),
-      ]);
-      result = transfer[0];
-      if (Number(result?.meta?.changes ?? 0) === 0) {
-        await this.throwIfDeleted(userId);
-        const destinationCount = await this.activePushSubscriptionCount(userId);
-        if (destinationCount >= NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS) throw this.pushSubscriptionLimit();
-        if (!retried) return this.upsertPushSubscriptionInternal(userId, input, true);
-        throw new RepositoryError('DATABASE_ERROR', 'The push subscription could not be saved');
-      }
-    } else if (existing) {
-      result = await this.db.prepare(`UPDATE push_subscriptions SET subscription_ciphertext=?,expiration_time=?,updated_at=?,revoked_at=NULL
-        WHERE id=? AND user_id=? AND endpoint_hash=? AND EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)
-          AND ((revoked_at IS NULL AND (expiration_time IS NULL OR expiration_time>?))
-            OR (SELECT COUNT(*) FROM push_subscriptions other_active
-              WHERE other_active.user_id=? AND other_active.revoked_at IS NULL
-                AND (other_active.expiration_time IS NULL OR other_active.expiration_time>?)
-                AND other_active.id<>?) < ?)`)
-        .bind(ciphertext, value.expirationTime ?? null, timestamp, existing.id, userId, hash, userId, activeAsOf, userId, activeAsOf, existing.id, NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS).run();
-    } else {
-      try {
-        result = await this.db.prepare(`INSERT INTO push_subscriptions(id,user_id,endpoint_hash,subscription_ciphertext,expiration_time,created_at,updated_at,revoked_at)
-          SELECT ?,?,?,?,?,?,?,NULL
-          WHERE EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)
-            AND (SELECT COUNT(*) FROM push_subscriptions active_subscription
-              WHERE active_subscription.user_id=? AND active_subscription.revoked_at IS NULL
-                AND (active_subscription.expiration_time IS NULL OR active_subscription.expiration_time>?)) < ?`)
-          .bind(id, userId, hash, ciphertext, value.expirationTime ?? null, timestamp, timestamp, userId, userId, activeAsOf, NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS).run();
-      } catch (error) {
-        // Two first-time enrollments for the same endpoint can both observe no
-        // row before D1 serializes their writes. Re-read once so the loser
-        // follows the normal idempotent update/transfer path.
-        if (!retried && error instanceof Error && /unique|constraint/i.test(error.message)) return this.upsertPushSubscriptionInternal(userId, input, true);
-        throw error;
-      }
-    }
-    if (Number(result?.meta?.changes ?? 0) === 0) {
-      await this.throwIfDeleted(userId);
-      if (await this.activePushSubscriptionCount(userId) >= NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS) throw this.pushSubscriptionLimit();
-      throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The authenticated account is not available');
-    }
-    const row = await this.db.prepare('SELECT id,expiration_time FROM push_subscriptions WHERE endpoint_hash=? AND user_id=? AND revoked_at IS NULL').bind(hash, userId).first<Row>();
-    if (!row) throw new RepositoryError('DATABASE_ERROR', 'The push subscription could not be saved');
-    return { id: text(row.id), expirationTime: row.expiration_time == null ? null : number(row.expiration_time) };
-  }
-
-  private async activePushSubscriptionCount(userId: string) {
-    const row = await this.db.prepare(`SELECT COUNT(*) AS count FROM push_subscriptions
-      WHERE user_id=? AND revoked_at IS NULL AND (expiration_time IS NULL OR expiration_time>?)`).bind(userId, Date.now()).first<Row>();
-    return number(row?.count);
-  }
-
-  private pushSubscriptionLimit() {
-    return new RepositoryError('PUSH_SUBSCRIPTION_LIMIT', 'This account has reached its active push subscription limit', { limit: NOTIFICATION_MAX_ACTIVE_SUBSCRIPTIONS });
-  }
-
-  async deletePushSubscription(userId: string, endpoint: string) {
-    const parsed = pushSubscriptionInput.shape.endpoint.safeParse(endpoint);
-    if (!parsed.success) throw new RepositoryError('INVALID_PUSH_SUBSCRIPTION', 'The push subscription is invalid');
-    const hash = await endpointHash(new URL(parsed.data).toString(), this.pushKey());
-    const timestamp = now();
-    const result = await this.db.prepare(`UPDATE push_subscriptions SET revoked_at=?,updated_at=? WHERE rowid IN (
-      SELECT rowid FROM push_subscriptions WHERE endpoint_hash=? AND user_id=? AND revoked_at IS NULL LIMIT 1
-    )`).bind(timestamp, timestamp, hash, userId).run();
-    return Number(result.meta?.changes ?? 0) > 0;
-  }
-
-  async pendingNotificationEventIds(asOf = now(), limit = 100) {
-    const stale = new Date(Date.parse(asOf) - 10 * 60 * 1000).toISOString();
-    const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-    const bounded = Math.min(Math.max(limit, 1), 100);
-    const rows = (await this.db.prepare(`SELECT id FROM notification_events WHERE completed_at IS NULL
-      AND occurred_at>=? AND (queued_at IS NULL OR queued_at<?) ORDER BY occurred_at,id LIMIT ?`).bind(cutoff, stale, bounded).all<Row>()).results;
-    return rows.map((row) => text(row.id));
-  }
-
-  async markNotificationEventsQueued(ids: string[], queuedAt = now()) {
-    if (!ids.length) return;
-    const cutoff = new Date(Date.parse(queuedAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-    await this.db.prepare('UPDATE notification_events SET queued_at=? WHERE id IN (SELECT value FROM json_each(?)) AND completed_at IS NULL AND occurred_at>=?').bind(queuedAt, JSON.stringify(ids), cutoff).run();
-  }
-
-  async notificationEventForDelivery(eventId: string, _asOf = now()) {
-    const row = await this.db.prepare(`SELECT id,event_type,group_id,entity_type,entity_id,entity_version,actor_id,occurred_at,
-      description_snapshot,amount_minor_snapshot,currency_snapshot,fanout_user_id,fanout_subscription_id,fanout_complete
-      FROM notification_events WHERE id=? AND completed_at IS NULL`).bind(eventId).first<Row>();
-    if (!row) return null;
-    return { id: text(row.id), eventType: text(row.event_type) as NotificationEventType, groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as NotificationEventSnapshot['entityType'], actorId: row.actor_id == null ? null : text(row.actor_id), description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot), occurredAt: text(row.occurred_at), fanoutUserId: row.fanout_user_id == null ? null : text(row.fanout_user_id), fanoutSubscriptionId: row.fanout_subscription_id == null ? null : text(row.fanout_subscription_id), fanoutComplete: flag(row.fanout_complete) };
-  }
-
-   async notificationDeliveryCandidates(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE, eventState?: NotificationEventSnapshot) {
-     const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
-     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     const event = eventState ?? await this.notificationEventForDelivery(eventId, asOf);
-     if (!event) return [];
-     if (event.occurredAt < cutoff) {
-       await this.terminalizeStaleNotificationDeliveries(eventId, asOf, limit);
-       return [];
-     }
-      if (!event.fanoutComplete) {
-        // Subscriptions are the ordered outer relation. Membership/person
-        // joins are correlated existence checks so multiple people linked to
-        // one user cannot duplicate a subscription or force a temp sort.
-        const continuation = event.fanoutUserId !== null && event.fanoutSubscriptionId !== null;
-        const cursorPredicate = continuation ? 'AND (subscription.user_id,subscription.id) > (?,?)' : '';
-        const cursorArgs = continuation ? [event.fanoutUserId, event.fanoutSubscriptionId] : [];
-        const page = (await this.db.prepare(`SELECT subscription.id,subscription.user_id
-          FROM notification_events event
-          JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-          JOIN push_subscriptions subscription INDEXED BY idx_push_subscriptions_notification_fanout
-            ON subscription.revoked_at IS NULL AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-          LEFT JOIN notification_preferences preference ON preference.user_id=subscription.user_id
-          WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=?
-            AND (event.actor_id IS NULL OR event.actor_id!=subscription.user_id)
-            ${cursorPredicate}
-            AND EXISTS (SELECT 1 FROM users active_user
-              WHERE active_user.id=subscription.user_id AND active_user.deleted_at IS NULL)
-            AND EXISTS (SELECT 1 FROM group_members member INDEXED BY idx_group_members_notification_user
-              JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
-              WHERE member.group_id=event.group_id AND member.user_id=subscription.user_id AND member.deleted_at IS NULL)
-            AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-              OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-          ORDER BY subscription.user_id,subscription.id LIMIT ?`).bind(Date.parse(asOf), eventId, cutoff, ...cursorArgs, limit).all<Row>()).results;
-        const subscriptionIds = page.map((row) => text(row.id));
-        if (subscriptionIds.length) {
-          // The delivery primary key is the idempotency boundary. The insert
-          // intentionally trusts only the bounded, already-deduped page;
-          // claimNotificationDelivery repeats authorization before I/O.
-          await this.db.prepare(`INSERT OR IGNORE INTO notification_deliveries(event_id,subscription_id,status,attempts,next_attempt_at,updated_at)
-            SELECT event.id,selected.value,'pending',0,?,?
-            FROM notification_events event
-            JOIN json_each(?) selected ON 1=1
-            WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=?`).bind(asOf, asOf, JSON.stringify(subscriptionIds), eventId, cutoff).run();
-          const last = page[page.length - 1];
-          const nextUserId = text(last.user_id), nextSubscriptionId = text(last.id);
-          await this.db.prepare(`UPDATE notification_events SET fanout_user_id=?,fanout_subscription_id=?,fanout_complete=?
-            WHERE id=? AND completed_at IS NULL AND fanout_complete=0
-              AND fanout_user_id IS ? AND fanout_subscription_id IS ?`).bind(nextUserId, nextSubscriptionId, subscriptionIds.length < limit ? 1 : 0, eventId, event.fanoutUserId, event.fanoutSubscriptionId).run();
-        } else {
-          await this.db.prepare(`UPDATE notification_events SET fanout_complete=1
-            WHERE id=? AND completed_at IS NULL AND fanout_complete=0
-              AND fanout_user_id IS ? AND fanout_subscription_id IS ?`).bind(eventId, event.fanoutUserId, event.fanoutSubscriptionId).run();
-        }
-      }
-      // A preference, membership, or actor can change after an earlier page
-      // was materialized. Recheck only the next bounded pending-delivery page;
-      // this is not an exhaustion probe and cannot walk the recipient set.
-      await this.db.prepare(`UPDATE notification_deliveries SET status='failed',last_error='NOT_ELIGIBLE',updated_at=?
-        WHERE rowid IN (SELECT delivery.rowid FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_subscription
-          WHERE delivery.event_id=? AND delivery.status='pending'
-          ORDER BY delivery.subscription_id LIMIT ?)
-        AND NOT EXISTS (SELECT 1 FROM notification_events event
-          JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-          JOIN push_subscriptions subscription ON subscription.id=notification_deliveries.subscription_id AND subscription.revoked_at IS NULL
-            AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-          JOIN group_members member INDEXED BY idx_group_members_notification_user ON member.group_id=event.group_id AND member.user_id=subscription.user_id AND member.deleted_at IS NULL
-          LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-          WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL
-            AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
-            AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-              OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1)))`).bind(asOf, eventId, limit, Date.parse(asOf)).run();
-     // A preference, membership, or actor can change after fan-out but before
-    // the queue consumer claims a row. Suppressed rows are terminal for this
-    // event; otherwise a permanently disabled category would keep the outbox
-    // event pending forever.
-     const rows = (await this.db.prepare(`SELECT delivery.event_id,delivery.subscription_id,subscription.subscription_ciphertext, event.event_type,
-      event.group_id,event.entity_id,event.entity_type,subscription.user_id AS recipient_user_id,
-      COALESCE(preference.detail_level,'generic') AS detail_level,event.description_snapshot,event.amount_minor_snapshot,event.currency_snapshot
-       FROM notification_deliveries delivery JOIN notification_events event ON event.id=delivery.event_id AND event.completed_at IS NULL
-       JOIN push_subscriptions subscription ON subscription.id=delivery.subscription_id AND subscription.revoked_at IS NULL AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-       LEFT JOIN notification_preferences preference ON preference.user_id=subscription.user_id
-       WHERE delivery.event_id=? AND delivery.status='pending' AND delivery.next_attempt_at<=?
-       ORDER BY delivery.subscription_id LIMIT ?`).bind(Date.parse(asOf), eventId, asOf, limit).all<Row>()).results;
-    return rows.map((row) => ({ eventId: text(row.event_id), eventType: text(row.event_type) as NotificationEventType, subscriptionId: text(row.subscription_id), subscriptionCiphertext: text(row.subscription_ciphertext), detailLevel: text(row.detail_level) === 'detailed' ? 'detailed' as const : 'generic' as const, recipientUserId: text(row.recipient_user_id), groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as 'expense' | 'settlement' | 'scheduled_expense', description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot) }));
-  }
-
-    /** Completion is driven by the durable fan-out cursor.  In particular, do
-     * not ask SQLite to prove that no eligible member/subscription remains:
-     * that negative join can walk an entire group. */
-    async notificationDeliveryWorkRemaining(eventId: string, asOf = now()) {
-      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-      const row = await this.db.prepare(`SELECT event.occurred_at,event.fanout_complete,
-        EXISTS (SELECT 1 FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_subscription
-          WHERE delivery.event_id=? AND delivery.status IN ('pending','claimed') LIMIT 1) AS pending,
-        EXISTS (SELECT 1 FROM notification_deliveries delivery INDEXED BY idx_notification_deliveries_event_status_due
-          WHERE delivery.event_id=? AND delivery.status='pending' AND delivery.next_attempt_at<=? LIMIT 1) AS due,
-        event.occurred_at>=? AND event.fanout_complete=0 AS unmaterialized
-        FROM notification_events event WHERE event.id=? AND event.completed_at IS NULL`).bind(eventId, eventId, asOf, cutoff, eventId).first<Row>();
-      const pending = flag(row?.pending), due = flag(row?.due), unmaterialized = flag(row?.unmaterialized);
-      return { remaining: pending || unmaterialized, due: due || unmaterialized };
-    }
-
-    async terminalizeStaleNotificationDeliveries(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE) {
-      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-      const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
-      const result = await this.db.prepare(`UPDATE notification_deliveries
-        SET status='failed',last_error='STALE_INCOMPLETE_EVENT',claim_owner=NULL,claim_until=NULL,updated_at=?
-        WHERE rowid IN (
-          SELECT delivery.rowid FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
-          JOIN notification_deliveries delivery ON delivery.event_id=event.id
-          WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at<?
-            AND delivery.status IN ('pending','claimed')
-          ORDER BY delivery.subscription_id LIMIT ?
-        )`).bind(asOf, eventId, cutoff, limit).run();
-      return Number(result.meta?.changes ?? 0);
-    }
-
-  async recoverStaleNotificationDeliveryClaims(eventId: string, asOf = now(), requestedLimit = NOTIFICATION_DELIVERY_PAGE_SIZE) {
-    const limit = Number.isSafeInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), NOTIFICATION_DELIVERY_PAGE_SIZE) : NOTIFICATION_DELIVERY_PAGE_SIZE;
-     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     const result = await this.db.prepare("UPDATE notification_deliveries SET status='pending',claim_owner=NULL,claim_until=NULL,updated_at=? WHERE rowid IN (SELECT delivery.rowid FROM notification_deliveries delivery WHERE delivery.event_id=? AND delivery.status='claimed' AND (delivery.claim_until IS NULL OR delivery.claim_until<=?) AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=delivery.event_id AND event.completed_at IS NULL AND event.occurred_at>=?) ORDER BY delivery.rowid LIMIT ?)").bind(asOf, eventId, asOf, cutoff, limit).run();
-    return Number(result.meta?.changes ?? 0);
-  }
-  /** Atomically lease a delivery immediately before any external push I/O.
-   * Every authorization predicate is repeated here, rather than trusting the
-   * earlier fan-out query, because membership, account, preferences, and the
-   * actor can all change while a queue message is waiting. */
-  async claimNotificationDelivery(eventId: string, subscriptionId: string, claimOwner: string, asOf = now()) {
-    const leaseUntil = new Date(Date.parse(asOf) + 2 * 60 * 1000).toISOString();
-    const claimed = await this.db.prepare(`UPDATE notification_deliveries SET status='claimed',claim_owner=?,claim_until=?,updated_at=?
-      WHERE event_id=? AND subscription_id=?
-        AND ((status='pending' AND next_attempt_at<=?) OR (status='claimed' AND (claim_until IS NULL OR claim_until<=?)))
-        AND EXISTS (
-           SELECT 1 FROM notification_events event
-       JOIN groups active_group ON active_group.id=event.group_id AND active_group.deleted_at IS NULL
-       JOIN group_members member INDEXED BY idx_group_members_notification_user ON member.group_id=event.group_id AND member.deleted_at IS NULL
-          JOIN people member_person ON member_person.id=member.person_id AND member_person.deleted_at IS NULL
-          JOIN users active_user ON active_user.id=member.user_id AND active_user.deleted_at IS NULL
-          JOIN push_subscriptions subscription ON subscription.id=? AND subscription.user_id=member.user_id AND subscription.revoked_at IS NULL
-            AND (subscription.expiration_time IS NULL OR subscription.expiration_time>?)
-          LEFT JOIN notification_preferences preference ON preference.user_id=member.user_id
-             WHERE event.id=? AND event.completed_at IS NULL AND event.occurred_at>=? AND (event.actor_id IS NULL OR event.actor_id!=member.user_id)
-            AND ((event.event_type LIKE 'scheduled_%' AND COALESCE(preference.scheduled_events,1)=1)
-              OR (event.event_type NOT LIKE 'scheduled_%' AND COALESCE(preference.money_changes,1)=1))
-        )`).bind(claimOwner, leaseUntil, asOf, eventId, subscriptionId, asOf, asOf, subscriptionId, Date.parse(asOf), eventId, new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString()).run();
-    if (Number(claimed.meta?.changes ?? 0) !== 1) return null;
-    const row = await this.db.prepare(`SELECT delivery.event_id,delivery.subscription_id,subscription.subscription_ciphertext,event.event_type,
-      event.group_id,event.entity_id,event.entity_type,subscription.user_id AS recipient_user_id,
-      COALESCE(preference.detail_level,'generic') AS detail_level,event.description_snapshot,event.amount_minor_snapshot,event.currency_snapshot
-       FROM notification_deliveries delivery JOIN notification_events event ON event.id=delivery.event_id AND event.completed_at IS NULL
-      JOIN push_subscriptions subscription ON subscription.id=delivery.subscription_id AND subscription.revoked_at IS NULL
-      LEFT JOIN notification_preferences preference ON preference.user_id=subscription.user_id
-      WHERE delivery.event_id=? AND delivery.subscription_id=? AND delivery.status='claimed' AND delivery.claim_owner=?`).bind(eventId, subscriptionId, claimOwner).first<Row>();
-    if (!row) return null;
-    return { eventId: text(row.event_id), eventType: text(row.event_type) as NotificationEventType, subscriptionId: text(row.subscription_id), subscriptionCiphertext: text(row.subscription_ciphertext), detailLevel: text(row.detail_level) === 'detailed' ? 'detailed' as const : 'generic' as const, recipientUserId: text(row.recipient_user_id), groupId: text(row.group_id), entityId: text(row.entity_id), entityType: text(row.entity_type) as 'expense' | 'settlement' | 'scheduled_expense', description: row.description_snapshot == null ? null : text(row.description_snapshot), amountMinor: row.amount_minor_snapshot == null ? null : number(row.amount_minor_snapshot), currency: row.currency_snapshot == null ? null : text(row.currency_snapshot) } satisfies NotificationDeliveryCandidate;
-  }
-
-  async markNotificationDeliverySent(eventId: string, subscriptionId: string, claimOwner: string, sentAt = now()) {
-     const cutoff = new Date(Date.parse(sentAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     await this.db.prepare("UPDATE notification_deliveries SET status='sent',sent_at=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?)").bind(sentAt, sentAt, eventId, subscriptionId, claimOwner, cutoff).run();
-  }
-   async markNotificationDeliveryRetry(eventId: string, subscriptionId: string, claimOwner: string, _attempts: number, error: string, asOf = now()) {
-    // Queue retries are configured for 30 seconds. Keep the D1 lease within
-    // that window so a retry is not acknowledged before its delivery row is
-    // eligible again; the queue's max_retries/dead-letter policy remains the
-    // outer retry bound.
-     const next = new Date(Date.parse(asOf) + Math.min(30 * 1000, 2 ** Math.min(Math.max(_attempts, 1), 10) * 1000)).toISOString();
-      const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-       const row = await this.db.prepare(`UPDATE notification_deliveries SET status=CASE WHEN attempts+1>=${NOTIFICATION_MAX_ATTEMPTS} THEN 'failed' ELSE 'pending' END,attempts=attempts+1,next_attempt_at=?,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?) RETURNING status`).bind(next, error.slice(0, 80), asOf, eventId, subscriptionId, claimOwner, cutoff).first<Row>();
-      return text(row?.status) === 'pending';
-  }
-  async markNotificationDeliveryFailed(eventId: string, subscriptionId: string, claimOwner: string, _attempts: number, error: string, asOf = now()) {
-     const cutoff = new Date(Date.parse(asOf) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     await this.db.prepare("UPDATE notification_deliveries SET status='failed',attempts=attempts+1,last_error=?,claim_owner=NULL,claim_until=NULL,updated_at=? WHERE event_id=? AND subscription_id=? AND status='claimed' AND claim_owner=? AND EXISTS (SELECT 1 FROM notification_events event WHERE event.id=notification_deliveries.event_id AND event.completed_at IS NULL AND event.occurred_at>=?)").bind(String(error).slice(0, 80), asOf, eventId, subscriptionId, claimOwner, cutoff).run();
-  }
-  async revokePushSubscription(subscriptionId: string, revokedAt = now()) {
-    await this.db.prepare('UPDATE push_subscriptions SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL').bind(revokedAt, revokedAt, subscriptionId).run();
-  }
-   async completeNotificationEvent(eventId: string, completedAt = now()) {
-     const cutoff = new Date(Date.parse(completedAt) - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     await this.db.prepare("UPDATE notification_events SET completed_at=? WHERE id=? AND completed_at IS NULL AND (fanout_complete=1 OR occurred_at<?) AND NOT EXISTS (SELECT 1 FROM notification_deliveries WHERE event_id=? AND status IN ('pending','claimed'))").bind(completedAt, eventId, cutoff, eventId).run();
-  }
-
-  /** Remove only old, terminal notification history. Financial and audit
-   * history is unaffected; completed notification events are retained for a
-   * bounded 30-day troubleshooting window. */
-  async purgeNotificationData(asOf: Date | string = new Date(), limit = NOTIFICATION_MAINTENANCE_BATCH_SIZE) {
-    const current = typeof asOf === 'string' ? new Date(asOf) : asOf;
-    const cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const incompleteCutoff = new Date(current.getTime() - NOTIFICATION_INCOMPLETE_EVENT_MAX_AGE_MS).toISOString();
-     const bounded = Math.min(Math.max(limit, 1), NOTIFICATION_MAINTENANCE_BATCH_SIZE);
-     // Configuration may be disabled for longer than a queue lease. Old
-     // pending and claimed rows are terminalized in a small, deterministic
-     // batch so a claimed row cannot retain a lease forever. The event-age
-     // cutoff intentionally leaves recent transient-outage rows retryable.
-      const staleDeliveryResult = await this.db.prepare(`UPDATE notification_deliveries
-       SET status='failed',last_error='STALE_INCOMPLETE_EVENT',claim_owner=NULL,claim_until=NULL,updated_at=?
-       WHERE rowid IN (
-          SELECT delivery.rowid FROM notification_deliveries delivery
-          WHERE delivery.event_id=(SELECT event.id FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
-            WHERE event.completed_at IS NULL AND event.occurred_at<?
-              AND EXISTS (SELECT 1 FROM notification_deliveries candidate
-                WHERE candidate.event_id=event.id AND candidate.status IN ('pending','claimed'))
-            ORDER BY event.occurred_at,event.id LIMIT 1)
-            AND delivery.status IN ('pending','claimed')
-          ORDER BY delivery.subscription_id LIMIT ?
-         )`).bind(current.toISOString(), incompleteCutoff, bounded).run();
-      const staleDeliveriesTerminalized = Number(staleDeliveryResult.meta?.changes ?? 0);
-    // Expired/revoked credentials can have an arbitrarily large delivery
-    // history. Drain children first so deleting a parent never has to scan or
-    // remove an unbounded child set. The rowid/ID subqueries are the explicit,
-    // bounded delete sets for each statement.
-    const expiredDeliveryResult = await this.db.prepare(`DELETE FROM notification_deliveries WHERE rowid IN (
-      SELECT delivery.rowid FROM notification_deliveries delivery
-      JOIN push_subscriptions subscription ON subscription.id=delivery.subscription_id
-      WHERE (subscription.expiration_time IS NOT NULL AND subscription.expiration_time<=?)
-        OR subscription.revoked_at IS NOT NULL
-      ORDER BY subscription.expiration_time,subscription.id,delivery.event_id LIMIT ?
-    )`).bind(current.getTime(), bounded).run();
-    const subscriptionResult = await this.db.prepare(`DELETE FROM push_subscriptions WHERE id IN (
-      SELECT subscription.id FROM push_subscriptions subscription
-      WHERE ((subscription.expiration_time IS NOT NULL AND subscription.expiration_time<=?)
-        OR subscription.revoked_at IS NOT NULL)
-        AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.subscription_id=subscription.id)
-      ORDER BY subscription.expiration_time,subscription.id LIMIT ?
-    )`).bind(current.getTime(), bounded).run();
-     // A worker crash can occur after the last delivery becomes terminal but
-     // before the event completion write. First take a bounded age/index page,
-     // then apply the correlated delivery predicates only to that page. The
-     // durable cursor rotates past blocked events, so one permanently blocked
-     // event cannot starve the rest of the stale backlog.
-      const selectCompletionPage = () => this.db.prepare(`SELECT event.id,event.occurred_at
-        FROM notification_events event INDEXED BY idx_notification_events_incomplete_age
-        CROSS JOIN notification_completion_cursor cursor
-        WHERE cursor.id=1 AND event.completed_at IS NULL AND event.occurred_at<?
-          AND (?=1 OR cursor.occurred_at IS NULL OR event.occurred_at>cursor.occurred_at
-            OR (event.occurred_at=cursor.occurred_at AND event.id>COALESCE(cursor.event_id,'')))
-        ORDER BY event.occurred_at,event.id LIMIT ?`).bind(incompleteCutoff, staleDeliveriesTerminalized > 0 ? 1 : 0, bounded);
-      let completionPage = (await selectCompletionPage().all<Row>()).results;
-      if (!completionPage.length) {
-        // A full rotation must wrap in the same maintenance invocation. This
-        // is what lets a newly-terminalized event complete without waiting for
-        // another Cron tick, while the indexed page remains bounded.
-        await this.db.prepare('UPDATE notification_completion_cursor SET occurred_at=NULL,event_id=NULL WHERE id=1').run();
-        completionPage = (await selectCompletionPage().all<Row>()).results;
-      }
-      let completionUpdated = 0;
-      let completionCapped = completionPage.length >= bounded;
-      if (completionPage.length) {
-        const completionIds = completionPage.map((row) => text(row.id));
-        const completionResult = await this.db.prepare(`UPDATE notification_events SET completed_at=?
-          WHERE id IN (SELECT value FROM json_each(?)) AND completed_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery
-              WHERE delivery.event_id=notification_events.id AND delivery.status IN ('pending','claimed'))`).bind(current.toISOString(), JSON.stringify(completionIds)).run();
-        completionUpdated = Number(completionResult.meta?.changes ?? 0);
-        const last = completionPage[completionPage.length - 1];
-        await this.db.prepare('UPDATE notification_completion_cursor SET occurred_at=?,event_id=? WHERE id=1').bind(text(last.occurred_at), text(last.id)).run();
-      } else {
-        // The cursor is already reset after an empty rotation. New old events,
-        // and events blocked on an earlier pass, are picked up on the next
-        // bounded pass.
-        completionCapped = false;
-      }
-     const deliveries = await this.db.prepare(`DELETE FROM notification_deliveries WHERE rowid IN (
-       SELECT delivery.rowid FROM notification_deliveries delivery
-       LEFT JOIN notification_events event ON event.id=delivery.event_id
-       LEFT JOIN groups deleted_group ON deleted_group.id=event.group_id
-       WHERE (event.completed_at IS NOT NULL AND event.completed_at<?)
-         OR (delivery.status='failed' AND delivery.updated_at<?)
-         OR (deleted_group.deleted_at IS NOT NULL AND deleted_group.deleted_at<?)
-       ORDER BY delivery.updated_at,delivery.event_id,delivery.subscription_id LIMIT ?
-     )`).bind(cutoff, cutoff, cutoff, bounded).run();
-     const events = await this.db.prepare(`DELETE FROM notification_events WHERE rowid IN (
-       SELECT event.rowid FROM notification_events event
-       LEFT JOIN groups deleted_group ON deleted_group.id=event.group_id
-       WHERE ((event.completed_at IS NOT NULL AND event.completed_at<?)
-         OR (deleted_group.deleted_at IS NOT NULL AND deleted_group.deleted_at<?))
-         AND NOT EXISTS (SELECT 1 FROM notification_deliveries delivery WHERE delivery.event_id=event.id)
-       ORDER BY event.completed_at,event.id LIMIT ?
-     )`).bind(cutoff, cutoff, bounded).run();
-     const expiredSubscriptionDeliveriesPurged = Number(expiredDeliveryResult.meta?.changes ?? 0);
-    const subscriptionsPurged = Number(subscriptionResult.meta?.changes ?? 0);
-    const deliveriesPurged = Number(deliveries.meta?.changes ?? 0);
-    const eventsPurged = Number(events.meta?.changes ?? 0);
-    const expiredSubscriptionDeliveriesCapped = expiredSubscriptionDeliveriesPurged >= bounded;
-    const subscriptionsCapped = subscriptionsPurged >= bounded;
-    const deliveriesCapped = deliveriesPurged >= bounded;
-     const eventsCapped = eventsPurged >= bounded;
-     const staleDeliveriesCapped = staleDeliveriesTerminalized >= bounded;
-      return {
-       cutoff,
-       staleDeliveriesTerminalized,
-       staleDeliveriesCapped,
-       expiredSubscriptionDeliveriesPurged,
-      subscriptionsPurged,
-      deliveriesPurged,
-      eventsPurged,
-      expiredSubscriptionDeliveriesCapped,
-      subscriptionsCapped,
-      deliveriesCapped,
-      eventsCapped,
-       completionUpdated,
-       completionCapped,
-       completionContinuation: completionCapped,
-        capped: staleDeliveriesCapped || expiredSubscriptionDeliveriesCapped || subscriptionsCapped || deliveriesCapped || eventsCapped || completionCapped,
-    };
   }
 
   /**
@@ -1596,8 +1105,7 @@ export class Repository {
        guarded('INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,?', [id, template.groupId, expense.description, expense.amount_minor, expense.currency, expense.date, expense.category ?? null, null, template.createdBy, timestamp, timestamp, null, id]),
       guarded('INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\') FROM json_each(?)', [id, JSON.stringify(expense.payers)]),
        guarded('INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value, \'$.person_id\'),json_extract(value, \'$.amount_minor\'),json_extract(value, \'$.metadata\') FROM json_each(?)', [id, JSON.stringify(expense.splits)]),
-          this.auditInsert({ groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: template.createdBy, occurredAt: timestamp, after: this.expenseAfter(null, id, template.groupId, template.createdBy, expense, timestamp, 1), mutationMarker: id }),
-          this.notificationEventInsert({ eventType: 'scheduled_expense_generated', groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, actorId: null, occurredAt: timestamp, description: expense.description, amountMinor: expense.amount_minor, currency: expense.currency, where: guard.sql, whereArgs: guard.args }),
+         this.auditInsert({ groupId: template.groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: template.createdBy, occurredAt: timestamp, after: this.expenseAfter(null, id, template.groupId, template.createdBy, expense, timestamp, 1), mutationMarker: id }),
          ...this.boundExpenseProjectionDelta(id, template.groupId, expense.currency, expense.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), expense.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, timestamp, undefined, expense.date),
         this.projectionMutation(template.groupId, timestamp, 'expenses', id),
        guarded('INSERT INTO scheduled_occurrences(scheduled_expense_id,occurrence_date,expense_id,created_at) SELECT ?,?,?,?', [template.id, occurrenceDate, id, timestamp]),
@@ -1733,16 +1241,7 @@ export class Repository {
       }
       if (!madeProgress) break;
     }
-     if (blockedTemplates.length && withinDeadline(options.deadlineMs)) {
-       const blockedStatements = blockedTemplates.flatMap(({ template, reason }) => {
-         const timestamp = now();
-         return [
-           this.db.prepare("UPDATE scheduled_expenses SET status='blocked',blocked_reason=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status='active' AND version=?").bind(reason, timestamp, template.id, template.version),
-            this.notificationEventInsert({ eventType: 'scheduled_expense_blocked', groupId: template.groupId, entityType: 'scheduled_expense', entityId: template.id, version: template.version + 1, actorId: null, occurredAt: timestamp, description: template.description, amountMinor: template.amountMinor, currency: template.currency, where: "EXISTS (SELECT 1 FROM scheduled_expenses WHERE id=? AND status='blocked' AND version=? AND updated_at=? AND blocked_reason IS NOT NULL)", whereArgs: [template.id, template.version + 1, timestamp] }),
-         ];
-       });
-       await this.db.batch(blockedStatements);
-     }
+     if (blockedTemplates.length && withinDeadline(options.deadlineMs)) await this.db.batch(blockedTemplates.map(({ template, reason }) => this.db.prepare("UPDATE scheduled_expenses SET status='blocked',blocked_reason=?,generation_claim_id=NULL,updated_at=?,version=version+1 WHERE id=? AND status='active' AND version=?").bind(reason, now(), template.id, template.version)));
     return { templatesScanned: rows.length, generated, blocked, processed, capped: processed >= maxOccurrences || states.some((state) => !state.stopped && state.processed >= maxOccurrencesPerTemplate) || !withinDeadline(options.deadlineMs) };
   }
   async expensePage(groupId: string, opts: { q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit: number; cursor?: string; offset?: number }) {
@@ -1922,13 +1421,7 @@ export class Repository {
       SELECT ?,?,?,?,?,?,?,actor_person.id,COALESCE(actor_person.name,'Unknown user'),?,?,?
       FROM users actor_user LEFT JOIN people actor_person ON actor_person.user_id=actor_user.id AND actor_person.deleted_at IS NULL
        WHERE actor_user.id=? AND EXISTS (SELECT 1 FROM ${table} audited_entity WHERE audited_entity.id=? AND audited_entity.version=?${event.mutationMarker === undefined ? '' : ' AND audited_entity.projection_mutation_id=?'})${event.revisionId === undefined ? '' : " AND EXISTS (SELECT 1 FROM revisions audit_revision WHERE audit_revision.id=? AND audit_revision.entity_type=? AND audit_revision.entity_id=?)"}`)
-        .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version, ...(event.mutationMarker === undefined ? [] : [event.mutationMarker]), ...(event.revisionId === undefined ? [] : [event.revisionId, event.entityType, event.entityId]));
-  }
-  private notificationEventInsert(event: { eventType: NotificationEventType; groupId: string; entityType: 'expense' | 'settlement' | 'scheduled_expense'; entityId: string; version: number; actorId?: string | null; occurredAt: string; description?: string | null; amountMinor?: number | null; currency?: string | null; where: string; whereArgs: unknown[] }) {
-    const actor = event.actorId === undefined ? null : event.actorId;
-    return this.db.prepare(`INSERT INTO notification_events(id,event_type,group_id,entity_type,entity_id,entity_version,actor_id,occurred_at,description_snapshot,amount_minor_snapshot,currency_snapshot)
-      SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE ? AND ${event.where}`)
-      .bind(uid(), event.eventType, event.groupId, event.entityType, event.entityId, event.version, actor, event.occurredAt, event.description ?? null, event.amountMinor ?? null, event.currency ?? null, this.options.notificationDeliveryEnabled !== false ? 1 : 0, ...event.whereArgs);
+       .bind(uid(), event.groupId, event.entityType, event.entityId, event.version, event.action, event.actorId, event.occurredAt, event.before == null ? null : JSON.stringify(event.before), event.after == null ? null : JSON.stringify(event.after), event.actorId, event.entityId, event.version, ...(event.mutationMarker === undefined ? [] : [event.mutationMarker]), ...(event.revisionId === undefined ? [] : [event.revisionId, event.entityType, event.entityId]));
   }
   private expenseAfter(old: Expense | null, id: string, groupId: string, userId: string, input: ExpenseInput, t: string, version: number): Expense {
     return { id, groupId, description: input.description, amountMinor: input.amount_minor, currency: input.currency, date: input.date, category: input.category ?? null, notes: input.notes ?? null, createdBy: old?.createdBy ?? userId, createdAt: old?.createdAt ?? t, updatedAt: t, deletedAt: null, version, clientOperationId: old?.clientOperationId ?? input.client_operation_id ?? null, payers: input.payers.map((p) => ({ personId: p.person_id, amountMinor: p.amount_minor })), splits: input.splits.map((s) => ({ personId: s.person_id, amountMinor: s.amount_minor, metadata: s.metadata })) };
@@ -1944,9 +1437,8 @@ export class Repository {
        this.db.prepare(`INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,notes,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.description, input.amount_minor, input.currency, input.date, input.category ?? null, input.notes ?? null, userId, t, t, scopedOperation ?? null, id, ...actor.args, ...participants.args),
        this.db.prepare("INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.payers), id),
         this.db.prepare("INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1)").bind(id, JSON.stringify(input.splits), id),
-       ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id }),
-       this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
-        this.notificationEventInsert({ eventType: 'expense_created', groupId, entityType: 'expense', entityId: id, version: 1, actorId: userId, occurredAt: t, description: input.description, amountMinor: input.amount_minor, currency: input.currency, where: 'EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=1 AND projection_mutation_id=?)', whereArgs: [id, id] }),
+        ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id }),
+        this.auditInsert({ groupId, entityType: 'expense', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
         ...this.boundExpenseProjectionDelta(id, groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, undefined, input.date),
        this.projectionMutation(groupId, t, 'expenses', id),
     ];
@@ -1974,9 +1466,8 @@ export class Repository {
       this.db.prepare(`DELETE FROM splits WHERE expense_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
       this.db.prepare(`INSERT INTO payers(expense_id,person_id,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.payers), ...revisionGuard.args),
       this.db.prepare(`INSERT INTO splits(expense_id,person_id,amount_minor,metadata_json) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.amount_minor'),json_extract(value,'$.metadata') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.splits), ...revisionGuard.args),
-       ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next, revisionId }),
-       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
-        this.notificationEventInsert({ eventType: 'expense_updated', groupId: old.groupId, entityType: 'expense', entityId: id, version: next, actorId: userId, occurredAt: t, description: input.description, amountMinor: input.amount_minor, currency: input.currency, where: 'EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)', whereArgs: [id, next, revisionId] }),
+      ...this.categoryPreferenceStatements(userId, input.description, input.category, t, { table: 'expenses', id, version: next, revisionId }),
+      this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
        ...this.boundExpenseProjectionDelta(id, old.groupId, input.currency, input.payers.map((payer) => ({ personId: payer.person_id, amountMinor: payer.amount_minor })), input.splits.map((split) => ({ personId: split.person_id, amountMinor: split.amount_minor })), 1, t, revisionId, input.date),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ];
@@ -1992,8 +1483,7 @@ export class Repository {
       this.db.prepare(`UPDATE expenses SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'expense', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
        ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, -1, t, revisionId, old.date),
-        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
-        this.notificationEventInsert({ eventType: 'expense_deleted', groupId: old.groupId, entityType: 'expense', entityId: id, version: next, actorId: userId, occurredAt: t, description: old.description, amountMinor: old.amountMinor, currency: old.currency, where: 'EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)', whereArgs: [id, next, revisionId] }),
+       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -2009,8 +1499,7 @@ export class Repository {
       this.db.prepare(`UPDATE expenses SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
       this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'expense', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
        ...this.boundExpenseProjectionDelta(id, old.groupId, old.currency, old.payers, old.splits, 1, t, revisionId, old.date),
-        this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
-        this.notificationEventInsert({ eventType: 'expense_restored', groupId: old.groupId, entityType: 'expense', entityId: id, version: next, actorId: userId, occurredAt: t, description: old.description, amountMinor: old.amountMinor, currency: old.currency, where: 'EXISTS (SELECT 1 FROM expenses WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)', whereArgs: [id, next, revisionId] }),
+       this.auditInsert({ groupId: old.groupId, entityType: 'expense', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
       this.projectionMutation(old.groupId, t, 'expenses', id, revisionId),
     ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The expense changed before it could be restored'); }
@@ -2053,8 +1542,7 @@ export class Repository {
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('settlement.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
        this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, id, ...actor.args, ...participants.args),
-         this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
-          this.notificationEventInsert({ eventType: 'settlement_created', groupId, entityType: 'settlement', entityId: id, version: 1, actorId: userId, occurredAt: t, description: input.note, amountMinor: input.amount_minor, currency: input.currency, where: 'EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=1 AND projection_mutation_id=?)', whereArgs: [id, id] }),
+        this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
          ...this.boundSettlementProjectionDelta(id, groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, undefined, input.date),
         this.projectionMutation(groupId, t, 'settlements', id),
     ];
@@ -2074,8 +1562,7 @@ export class Repository {
        this.db.prepare(`UPDATE settlements SET from_person_id=?,to_person_id=?,amount_minor=?,currency=?,settlement_date=?,note=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}`).bind(input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, input.version, JSON.stringify(old), userId, t, id, next, revisionId),
         ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId, old.date),
-         this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
-          this.notificationEventInsert({ eventType: 'settlement_updated', groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, actorId: userId, occurredAt: t, description: input.note, amountMinor: input.amount_minor, currency: input.currency, where: 'EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)', whereArgs: [id, next, revisionId] }),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
         ...this.boundSettlementProjectionDelta(id, old.groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, revisionId, input.date),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
@@ -2089,8 +1576,7 @@ export class Repository {
         this.db.prepare(`UPDATE settlements SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args),
         this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'settlement', id, version, JSON.stringify(old), userId, t, id, next, revisionId),
        ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, -1, t, revisionId, old.date),
-         this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
-         this.notificationEventInsert({ eventType: 'settlement_deleted', groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, actorId: userId, occurredAt: t, description: old.note, amountMinor: old.amountMinor, currency: old.currency, where: 'EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)', whereArgs: [id, next, revisionId] }),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The record was changed by another request'); }
@@ -2105,8 +1591,7 @@ export class Repository {
        this.db.prepare(`UPDATE settlements SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args),
        this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'settlement', id, next, JSON.stringify(old), userId, t, id, next, revisionId),
        ...this.boundSettlementProjectionDelta(id, old.groupId, old.currency, old.fromPersonId, old.toPersonId, old.amountMinor, 1, t, revisionId, old.date),
-         this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
-         this.notificationEventInsert({ eventType: 'settlement_restored', groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, actorId: userId, occurredAt: t, description: old.note, amountMinor: old.amountMinor, currency: old.currency, where: 'EXISTS (SELECT 1 FROM settlements WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)', whereArgs: [id, next, revisionId] }),
+        this.auditInsert({ groupId: old.groupId, entityType: 'settlement', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }),
        this.projectionMutation(old.groupId, t, 'settlements', id, revisionId),
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored'); }
@@ -2133,24 +1618,6 @@ export class Repository {
   }
   async purgeExpiredData(asOf: Date | string = new Date(), options: { maxTransactions?: number; maxGroups?: number; deadlineMs?: number } = {}) {
     const current = typeof asOf === 'string' ? new Date(asOf) : asOf, cutoff = new Date(current.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      let notificationStaleDeliveriesTerminalized = 0, notificationStaleDeliveriesCapped = false, notificationSubscriptionsPurged = 0, notificationExpiredSubscriptionDeliveriesPurged = 0, notificationDeliveriesPurged = 0, notificationEventsPurged = 0, notificationCompletionUpdated = 0, notificationCompletionCapped = false, notificationCompletionContinuation = false, notificationExpiredSubscriptionDeliveriesCapped = false, notificationSubscriptionsCapped = false, notificationDeliveriesCapped = false, notificationEventsCapped = false, notificationCapped = false;
-    if (withinDeadline(options.deadlineMs)) {
-       const notificationPurge = await this.purgeNotificationData(current);
-        notificationStaleDeliveriesTerminalized = notificationPurge.staleDeliveriesTerminalized;
-        notificationStaleDeliveriesCapped = notificationPurge.staleDeliveriesCapped;
-        notificationSubscriptionsPurged = notificationPurge.subscriptionsPurged;
-       notificationExpiredSubscriptionDeliveriesPurged = notificationPurge.expiredSubscriptionDeliveriesPurged;
-      notificationDeliveriesPurged = notificationPurge.deliveriesPurged;
-      notificationEventsPurged = notificationPurge.eventsPurged;
-        notificationCompletionUpdated = notificationPurge.completionUpdated;
-        notificationCompletionCapped = notificationPurge.completionCapped;
-        notificationCompletionContinuation = notificationPurge.completionContinuation;
-       notificationExpiredSubscriptionDeliveriesCapped = notificationPurge.expiredSubscriptionDeliveriesCapped;
-       notificationSubscriptionsCapped = notificationPurge.subscriptionsCapped;
-       notificationDeliveriesCapped = notificationPurge.deliveriesCapped;
-       notificationEventsCapped = notificationPurge.eventsCapped;
-       notificationCapped = notificationPurge.capped;
-    }
     // Financial detail is permanent for active groups. Deleted groups are the
     // exception, and are drained in bounded, FK-safe chunks before the group
      // tombstone itself is removed. A durable (deleted_at,id) cursor provides
@@ -2253,10 +1720,9 @@ export class Repository {
            AND NOT EXISTS (SELECT 1 FROM ledger_summary_state child WHERE child.group_id=groups.id)
            AND NOT EXISTS (SELECT 1 FROM group_balance_projection child WHERE child.group_id=groups.id)
            AND NOT EXISTS (SELECT 1 FROM ledger_totals child WHERE child.group_id=groups.id)
-             AND NOT EXISTS (SELECT 1 FROM projection_state child WHERE child.group_id=groups.id)
-             AND NOT EXISTS (SELECT 1 FROM group_split_defaults child WHERE child.group_id=groups.id)
-             AND NOT EXISTS (SELECT 1 FROM idempotency_keys child WHERE child.group_id=groups.id)
-             AND NOT EXISTS (SELECT 1 FROM notification_events child WHERE child.group_id=groups.id)`).bind(groupId, cutoff);
+            AND NOT EXISTS (SELECT 1 FROM projection_state child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM group_split_defaults child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM idempotency_keys child WHERE child.group_id=groups.id)`).bind(groupId, cutoff);
         const metadataStatements = [
          auditEventsDelete,
         this.db.prepare('DELETE FROM group_membership_events WHERE rowid IN (SELECT rowid FROM group_membership_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
@@ -2291,7 +1757,7 @@ export class Repository {
         await this.db.prepare('UPDATE groups SET updated_at=? WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?').bind(now(), groupId, cutoff).run();
       }
     }
-        return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, notificationStaleDeliveriesTerminalized, notificationStaleDeliveriesCapped, notificationSubscriptionsPurged, notificationExpiredSubscriptionDeliveriesPurged, notificationDeliveriesPurged, notificationEventsPurged, notificationCompletionUpdated, notificationCompletionCapped, notificationCompletionContinuation, notificationExpiredSubscriptionDeliveriesCapped, notificationSubscriptionsCapped, notificationDeliveriesCapped, notificationEventsCapped, capped: incomplete || notificationCapped || notificationCompletionCapped || notificationCompletionContinuation || groups.length >= maxGroups || !withinDeadline(options.deadlineMs) };
+    return { cutoff, transactionsScanned, transactionsPurged, groupsScanned: groups.length, groupsPurged, auditEventsPurged, capped: incomplete || groups.length >= maxGroups || !withinDeadline(options.deadlineMs) };
   }
   async globalActivity(userId: string, groupId: string | undefined, options: { limit?: number; cursor?: string }) {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 100), cursor = decodeLedgerCursor(options.cursor);

@@ -334,13 +334,6 @@ test('standalone section actions stay content-sized across responsive boundaries
     expect(clearGeometry.justifySelf).toBe('start');
     expect(clearGeometry.width).toBeLessThan(clearGeometry.parentContentWidth);
 
-    const notificationAction = page.locator('section[aria-labelledby="notifications-heading"] > button').first();
-    if (await notificationAction.count() && await notificationAction.isVisible()) {
-      const notificationGeometry = await actionGeometry(notificationAction);
-      expect(notificationGeometry.justifySelf).toBe('start');
-      expect(notificationGeometry.width).toBeLessThan(notificationGeometry.parentContentWidth);
-    }
-
     const accountForm = page.locator('section[aria-labelledby="delete-account-heading"] > form');
     await expect(accountForm).toBeVisible();
     const formGeometry = await accountForm.evaluate((element) => {

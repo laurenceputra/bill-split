@@ -2316,12 +2316,6 @@ input[inputmode="decimal"] {
   accent-color: var(--color-primary);
 }
 
-.notification-preferences {
-  display: grid;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-
 .bottom-nav {
   position: fixed;
   z-index: 10;

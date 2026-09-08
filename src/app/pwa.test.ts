@@ -49,12 +49,8 @@ describe('standalone PWA contract', () => {
     expect(outbox).toContain('handleAuthenticatedUser(userId)');
   });
 
-  it('keeps push delivery and Background Sync feature-detected', () => {
-    expect(serviceWorker).toContain("self.addEventListener('push'");
-    expect(serviceWorker).toContain("self.addEventListener('notificationclick'");
-    expect(serviceWorker).toContain("self.addEventListener('pushsubscriptionchange'");
+  it('keeps Background Sync feature-detected', () => {
     expect(serviceWorker).toContain("self.addEventListener('sync'");
-    expect(serviceWorker).toContain('CLEAR_NOTIFICATION_BADGE');
     expect(outbox).toContain("billsplit-expense-outbox");
   });
 });
