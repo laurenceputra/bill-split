@@ -38,33 +38,9 @@ const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split
 const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/0024_incremental_projection_totals.sql', moduleUrl), 'utf8');
 const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_expense_suggestion_lookup.sql', moduleUrl), 'utf8');
 const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
-const notificationsSql = readFileSync(new URL('../../migrations/0027_notifications.sql', moduleUrl), 'utf8');
-const notificationMaintenanceSql = readFileSync(new URL('../../migrations/0028_notification_maintenance_indexes.sql', moduleUrl), 'utf8');
-const notificationFanoutSql = readFileSync(new URL('../../migrations/0029_notification_fanout_pagination.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
-
-describe('notification maintenance migration', () => {
-  it('indexes deterministic expired-subscription maintenance', () => {
-    expect(notificationMaintenanceSql).toMatch(/idx_push_subscriptions_expiration/);
-    expect(notificationMaintenanceSql).toMatch(/expiration_time,id/);
-    expect(notificationMaintenanceSql).toMatch(/idx_push_subscriptions_revoked/);
-    expect(notificationMaintenanceSql).toMatch(/CREATE UNIQUE INDEX idx_push_subscriptions_active_endpoint ON push_subscriptions\(endpoint_hash\) WHERE revoked_at IS NULL/i);
-    expect(notificationMaintenanceSql).toMatch(/idx_notification_deliveries_subscription/);
-    expect(notificationMaintenanceSql).toMatch(/idx_notification_deliveries_event_claim/);
-    expect(notificationMaintenanceSql).toMatch(/idx_notification_events_group_purge/);
-  });
-  it('adds durable fan-out and completion cursors', () => {
-    expect(notificationFanoutSql).toMatch(/fanout_user_id TEXT/);
-    expect(notificationFanoutSql).toMatch(/fanout_subscription_id TEXT/);
-    expect(notificationFanoutSql).toMatch(/fanout_complete INTEGER NOT NULL DEFAULT 0/);
-    expect(notificationFanoutSql).toMatch(/CREATE TABLE notification_completion_cursor/);
-    expect(notificationFanoutSql).toMatch(/CHECK\(id = 1\)/);
-    expect(notificationFanoutSql).toMatch(/idx_group_members_notification_user/);
-    expect(notificationFanoutSql).toMatch(/idx_push_subscriptions_notification_fanout/);
-  });
-});
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {
@@ -324,48 +300,6 @@ describe('targeted invitation migration', () => {
   });
 });
 
-describe('notification migration', () => {
-  it('encrypts subscription material at rest, binds it to accounts, and keeps the outbox durable', () => {
-    expect(notificationsSql).toMatch(/CREATE TABLE push_subscriptions/);
-     expect(notificationsSql).toMatch(/endpoint_hash TEXT NOT NULL CHECK/);
-    expect(notificationsSql).toMatch(/subscription_ciphertext TEXT NOT NULL/);
-     expect(notificationsSql).toMatch(/user_id TEXT NOT NULL REFERENCES users\(id\) ON DELETE RESTRICT/);
-    expect(notificationsSql).toMatch(/CREATE TABLE notification_preferences/);
-     expect(notificationsSql).not.toMatch(/notification_preferences[\s\S]*enabled INTEGER/);
-     expect(notificationsSql).toMatch(/money_changes INTEGER NOT NULL DEFAULT 1/);
-     expect(notificationsSql).toMatch(/CREATE TABLE notification_events/);
-     expect(notificationsSql).toMatch(/group_id TEXT NOT NULL REFERENCES groups\(id\) ON DELETE RESTRICT/);
-     expect(notificationsSql).toMatch(/CREATE TABLE notification_deliveries/);
-     expect(notificationsSql).toMatch(/event_id TEXT NOT NULL REFERENCES notification_events\(id\) ON DELETE RESTRICT/);
-     expect(notificationsSql).toMatch(/subscription_id TEXT NOT NULL REFERENCES push_subscriptions\(id\) ON DELETE RESTRICT/);
-     expect(notificationsSql).toMatch(/PRIMARY KEY\(event_id, subscription_id\)/);
-     expect(notificationsSql).toMatch(/description_snapshot TEXT/);
-     expect(notificationsSql).toMatch(/status IN \('pending','claimed','sent','failed'\)/);
-      expect(notificationsSql).toMatch(/claim_until TEXT/);
-      expect(notificationsSql).toMatch(/idx_notification_events_retention/);
-      expect(notificationsSql).toMatch(/idx_notification_deliveries_retention/);
-    expect(notificationsSql).toMatch(/notification_revoke_on_user_deletion/);
-     expect(notificationsSql).toMatch(/UPDATE push_subscriptions[\s\S]*WHERE user_id=NEW.id AND revoked_at IS NULL/);
-     expect(notificationsSql).not.toMatch(/DELETE FROM push_subscriptions/);
-    expect(repositorySql).toMatch(/expense_created/);
-    expect(repositorySql).toMatch(/expense_restored/);
-    expect(repositorySql).toMatch(/settlement_deleted/);
-    expect(repositorySql).toMatch(/scheduled_expense_generated/);
-     expect(repositorySql).toMatch(/scheduled_expense_blocked/);
-       expect(repositorySql).toMatch(/DELETE FROM notification_deliveries WHERE rowid IN/);
-       expect(repositorySql.match(/DELETE FROM push_subscriptions/g)?.length).toBe(1);
-       expect(repositorySql).not.toMatch(/removePushSubscription|DELETE FROM push_subscriptions WHERE endpoint_hash/);
-       expect(repositorySql).toMatch(/NOT EXISTS \(SELECT 1 FROM notification_events child WHERE child\.group_id=groups\.id\)/);
-     expect(repositorySql).toMatch(/description_snapshot/);
-      expect(repositorySql).toMatch(/claimNotificationDelivery/);
-      expect(repositorySql).toMatch(/recoverStaleNotificationDeliveryClaims\(eventId: string/);
-      expect(repositorySql).toMatch(/delivery\.event_id=\?[^\n]*ORDER BY delivery\.rowid LIMIT \?/);
-       expect(repositorySql).toMatch(/status='failed',last_error='STALE_INCOMPLETE_EVENT'[\s\S]*idx_notification_events_incomplete_age[\s\S]*ORDER BY delivery\.subscription_id LIMIT \?/);
-      expect(repositorySql).not.toMatch(/MAX\(delivery\.updated_at\)/);
-      expect(repositorySql).not.toMatch(/notificationDeliveryCandidates[\s\S]{0,300}DELETE FROM push_subscriptions/);
-    });
-});
-
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -431,9 +365,6 @@ describe('scheduled completion migration integration', () => {
           cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql')),
           cp(join(root, 'migrations', '0025_expense_suggestion_lookup.sql'), join(migrationsDir, '0025_expense_suggestion_lookup.sql')),
           cp(join(root, 'migrations', '0026_targeted_group_invitations.sql'), join(migrationsDir, '0026_targeted_group_invitations.sql')),
-          cp(join(root, 'migrations', '0027_notifications.sql'), join(migrationsDir, '0027_notifications.sql')),
-          cp(join(root, 'migrations', '0028_notification_maintenance_indexes.sql'), join(migrationsDir, '0028_notification_maintenance_indexes.sql')),
-          cp(join(root, 'migrations', '0029_notification_fanout_pagination.sql'), join(migrationsDir, '0029_notification_fanout_pagination.sql')),
         ]);
        run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
@@ -450,7 +381,6 @@ describe('scheduled completion migration integration', () => {
        expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_group_invitations_target','idx_group_invitations_pending_target','idx_group_invitations_pending_email') ORDER BY name;")).toEqual([{ name: 'idx_group_invitations_pending_email' }, { name: 'idx_group_invitations_pending_target' }, { name: 'idx_group_invitations_target' }]);
         expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;")).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
        expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_expenses_suggestion_lookup';")).toEqual([{ name: 'idx_expenses_suggestion_lookup' }]);
-       expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('push_subscriptions','notification_preferences','notification_events','notification_deliveries') ORDER BY name;")).toEqual([{ name: 'notification_deliveries' }, { name: 'notification_events' }, { name: 'notification_preferences' }, { name: 'push_subscriptions' }]);
         const suggestionPlan = JSON.stringify(query("EXPLAIN QUERY PLAN SELECT e.id FROM expenses e WHERE e.group_id='group-1' AND e.created_by='user-1' AND e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM scheduled_occurrences occurrence WHERE occurrence.expense_id=e.id) ORDER BY e.created_at DESC,e.id DESC LIMIT 3;")).toLowerCase();
         expect(suggestionPlan).toContain('idx_expenses_suggestion_lookup');
         expect(suggestionPlan).toMatch(/expense_id=\?/);

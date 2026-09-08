@@ -85,7 +85,6 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/form\s*\{[\s\S]*display:\s*grid;/);
     expect(css).toMatch(/\.list\s*\{[\s\S]*display:\s*grid;/);
     expect(appSource).toContain('Load more audit events');
-    expect(appSource).toContain('Enable notifications on this device');
     expect(appSource).toContain('Clear cached data');
     expect(appSource).toContain('>Manage people</Link>');
   });
@@ -171,7 +170,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);
   });
 
-  it('uses a data-free private-shaped auth loading shell and stable notification geometry', () => {
+  it('uses a data-free private-shaped auth loading shell', () => {
     expect(uiSource).toContain('export function AuthLoadingShell()');
     expect(uiSource).toContain('aria-live="polite">Loading…</p>');
     expect(appSource).toContain('return <AuthLoadingShell />;');
