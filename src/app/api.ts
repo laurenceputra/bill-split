@@ -1798,7 +1798,12 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         assertAuthCommitAllowed(sessionGeneration);
         if (!(await trustRevisionIsCurrent(trust))) return authLifecycle;
         if (!offlineActivationMemoryIsCurrent(trust, evidenceEpoch, sessionGeneration, authEpoch) || !(await trustRevisionIsCurrent(trust)) || !offlineActivationMemoryIsCurrent(trust, evidenceEpoch, sessionGeneration, authEpoch)) return authLifecycle;
-        const user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0] };
+        let user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
+        if (typeof user.profileRevision === 'number' && !rememberLocalProfileRevision(user, sessionGeneration)) {
+          const current = verifiedIdentity;
+          if (current?.id === user.id && current.personId === user.personId && typeof current.profileRevision === 'number' && current.profileRevision > user.profileRevision) user = current;
+          else return authLifecycle;
+        }
         if (!offlineActivationMemoryIsCurrent(trust, evidenceEpoch, sessionGeneration, authEpoch)) return authLifecycle;
         verifiedIdentity = user;
         verifiedClerkUserId = trust.clerkUserId;
