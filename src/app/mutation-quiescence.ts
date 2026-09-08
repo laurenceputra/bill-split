@@ -43,6 +43,9 @@ export const beginMutationBarrier = (generation: number) => {
 
 export const isMutationBarrierActive = () => logoutBarrierGeneration !== undefined;
 
+/** Used by coordinated lifecycle changes that must not interrupt a write. */
+export const hasActiveMutations = () => activeMutations.size > 0;
+
 /** Release only after a newly verified session, or when destructive logout failed. */
 export const releaseMutationBarrier = (generation?: number) => {
   if (generation === undefined || logoutBarrierGeneration === generation) logoutBarrierGeneration = undefined;

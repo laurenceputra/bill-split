@@ -29,12 +29,26 @@ database_name = "bill-split"
 database_id = "01234567-89ab-4cde-8123-456789abcdef"
 migrations_dir = "migrations"
 
+[[queues.producers]]
+binding = "NOTIFICATION_QUEUE"
+queue = "bill-split-notifications"
+
+[[queues.consumers]]
+queue = "bill-split-notifications"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 4
+retry_delay = 30
+dead_letter_queue = "bill-split-notifications-dead-letter"
+
 [vars]
 ENVIRONMENT = "production"
 CLERK_AUTHORIZED_PARTIES = "https://split.test"
+VAPID_PUBLIC_KEY = "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+VAPID_CONTACT = "mailto:admin@split.test"
 
 [secrets]
-required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY"]
+required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY", "VAPID_PRIVATE_KEY", "PUSH_SUBSCRIPTION_ENCRYPTION_KEY"]
 
 [[ratelimits]]
 name = "RATE_LIMITER"
@@ -201,10 +215,34 @@ describe('Cloudflare Workers Builds preparation', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+    });
   });
-});
 
-describe('Cloudflare Workers Builds deployment guards and ordering', () => {
+  it('requires the notification Queue wiring and push secret declarations', () => {
+    expect(validateProductionConfig(productionConfig)).toBe(true);
+    for (const key of ['VAPID_PRIVATE_KEY', 'PUSH_SUBSCRIPTION_ENCRYPTION_KEY']) {
+      expect(() => validateProductionConfig(`${productionConfig}\n${key} = "runtime-secret"`)).toThrow(/must not embed/i);
+      expect(() => validateProductionConfig(`${productionConfig}\n"${key}" = "runtime-secret"`)).toThrow(/must not embed/i);
+      expect(() => validateProductionConfig(productionConfig.replace(`, "${key}"`, ''))).toThrow(/required/);
+    }
+    expect(() => validateProductionConfig(productionConfig.replace('queue = "bill-split-notifications"', 'queue = "other-notifications"'))).toThrow(/Queue/);
+    expect(() => validateProductionConfig(productionConfig.replace('VAPID_CONTACT = "mailto:admin@split.test"', 'VAPID_CONTACT = "not-a-contact"'))).toThrow(/VAPID_CONTACT/);
+    expect(() => validateProductionConfig(productionConfig.replace(/VAPID_PUBLIC_KEY = "[^"]+"/, 'VAPID_PUBLIC_KEY = "bad"'))).toThrow(/VAPID_PUBLIC_KEY/);
+    expect(() => validateProductionConfig(productionConfig.replace(/VAPID_PUBLIC_KEY = "[^"]+"/, 'VAPID_PUBLIC_KEY = "' + 'B' + 'A'.repeat(86) + '"'))).toThrow(/P-256/);
+     expect(() => validateProductionConfig(productionConfig.replace('dead_letter_queue = "bill-split-notifications-dead-letter"', 'dead_letter_queue = "bill-split-notifications"'))).toThrow(/distinct/);
+     expect(() => validateProductionConfig(productionConfig.replace('max_batch_size = 1', 'max_batch_size = 2'))).toThrow(/max_batch_size = 1/);
+     expect(() => validateProductionConfig(productionConfig.replace('max_retries = 4', 'max_retries = 5'))).toThrow(/4 Queue retries/);
+   });
+
+  it('keeps checked-in local and example Queue consumers at the safe batch bound', async () => {
+    for (const [path, count] of [['../wrangler.toml', 2], ['../wrangler.deploy.toml.example', 1]] as const) {
+      const config = await readFile(new URL(path, import.meta.url), 'utf8');
+      expect(config.match(/max_batch_size\s*=\s*1/g)?.length).toBe(count);
+      expect(config).not.toMatch(/max_batch_size\s*=\s*(?:[2-9]|\d{2,})/);
+    }
+  });
+
+ describe('Cloudflare Workers Builds deployment guards and ordering', () => {
   const buildEnv = {
     WORKERS_CI: '1',
     WORKERS_CI_BRANCH: 'main',

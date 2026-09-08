@@ -100,7 +100,7 @@ function quotedArrayValues(value) {
 }
 
 function hasPlaintextSecretAssignment(source) {
-  const secret = `(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)`;
+  const secret = `(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY|VAPID_PRIVATE_KEY|PUSH_SUBSCRIPTION_ENCRYPTION_KEY)`;
   const key = `(?:(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')\.)*(?:${secret}|"${secret}"|'${secret}')`;
   const keySegment = `(?:[A-Za-z0-9_-]+|"[^"]+"|'[^']+')`;
   const secretSegment = `(?:${secret}|"${secret}"|'${secret}')`;
@@ -110,7 +110,7 @@ function hasPlaintextSecretAssignment(source) {
   const tablePattern = new RegExp(`^\\s*\\[\\[?\\s*(?:${keySegment}\\s*\\.\\s*)*${secretSegment}(?:\\s*\\.\\s*${keySegment})*\\s*\\]\\]?\\s*(?:#.*)?$`, 'i');
   return source.split(/\r?\n/).some((line) => {
     const uncommented = line.replace(/(^|\s)#.*$/, '$1');
-    if (!/(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY)/i.test(uncommented)) return false;
+    if (!/(?:CLERK_SECRET_KEY|IDENTITY_TOMBSTONE_KEY|VAPID_PRIVATE_KEY|PUSH_SUBSCRIPTION_ENCRYPTION_KEY)/i.test(uncommented)) return false;
     return assignmentPattern.test(uncommented) || inlineAssignmentPattern.test(uncommented) || dottedAssignmentPattern.test(uncommented) || tablePattern.test(line);
   });
 }
@@ -208,6 +208,28 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
   const vars = sectionContents(source, 'vars');
   const authorizedParties = requireNonPlaceholderValue(vars, 'CLERK_AUTHORIZED_PARTIES', 'CLERK_AUTHORIZED_PARTIES');
   const authorizedUrl = httpsOrigin(authorizedParties, 'CLERK_AUTHORIZED_PARTIES');
+  const vapidPublicKey = requireNonPlaceholderValue(vars, 'VAPID_PUBLIC_KEY', 'VAPID_PUBLIC_KEY');
+  let vapidBytes;
+  try { vapidBytes = Buffer.from(vapidPublicKey.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - vapidPublicKey.length % 4) % 4), 'base64'); } catch { vapidBytes = undefined; }
+  if (!/^[A-Za-z0-9_-]+$/.test(vapidPublicKey) || vapidBytes?.length !== 65 || vapidBytes[0] !== 4) throw new Error('Production config must contain a valid VAPID_PUBLIC_KEY.');
+  try {
+    createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: vapidBytes.subarray(1, 33).toString('base64url'), y: vapidBytes.subarray(33, 65).toString('base64url') }, format: 'jwk' });
+  } catch {
+    throw new Error('Production config must contain a VAPID_PUBLIC_KEY on the P-256 curve.');
+  }
+  const vapidContact = requireNonPlaceholderValue(vars, 'VAPID_CONTACT', 'VAPID_CONTACT');
+  if (!/^(?:mailto:[^\s@]+@[^\s@]+|https:\/\/[^\s]+)$/i.test(vapidContact)) throw new Error('Production config must contain a valid VAPID_CONTACT.');
+
+  const queueProducer = sectionContents(source, 'queues.producers');
+  const queueConsumer = sectionContents(source, 'queues.consumers');
+  const producerBinding = quotedValue(queueProducer, 'binding');
+  const producerQueue = requireNonPlaceholderValue(queueProducer, 'queue', 'notification Queue producer');
+  const consumerQueue = requireNonPlaceholderValue(queueConsumer, 'queue', 'notification Queue consumer');
+  if (producerBinding !== 'NOTIFICATION_QUEUE' || producerQueue !== consumerQueue) throw new Error('Production config must define matching notification Queue producer and consumer bindings.');
+  const deadLetterQueue = requireNonPlaceholderValue(queueConsumer, 'dead_letter_queue', 'notification Queue dead-letter queue');
+  if (deadLetterQueue === consumerQueue) throw new Error('Production config must use a distinct notification Queue dead-letter queue.');
+  if (assignment(queueConsumer, 'max_batch_size') !== '1') throw new Error('Production notification Queue consumer must use max_batch_size = 1 for the bounded D1 query budget.');
+  if (assignment(queueConsumer, 'max_retries') !== '4' || assignment(queueConsumer, 'retry_delay') !== '30') throw new Error('Production config must use 4 Queue retries with a 30-second retry delay.');
 
   // These runtime variables may be managed in the Worker dashboard. When they
   // are present in TOML, keep validating them rather than allowing the file to
@@ -230,7 +252,7 @@ export function validateProductionConfig(source, { expectedClerkPublishableKey }
 
   const secrets = sectionContents(source, 'secrets');
   const requiredSecrets = quotedArrayValues(assignment(secrets, 'required'));
-  if (!requiredSecrets.includes('CLERK_SECRET_KEY') || !requiredSecrets.includes('IDENTITY_TOMBSTONE_KEY')) {
+  if (!requiredSecrets.includes('CLERK_SECRET_KEY') || !requiredSecrets.includes('IDENTITY_TOMBSTONE_KEY') || !requiredSecrets.includes('VAPID_PRIVATE_KEY') || !requiredSecrets.includes('PUSH_SUBSCRIPTION_ENCRYPTION_KEY')) {
     throw new Error('Production config [secrets].required must declare the required runtime secrets.');
   }
 

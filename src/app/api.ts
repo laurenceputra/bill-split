@@ -1,6 +1,6 @@
-import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
-import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
-import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
+import type { Activity, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction, NotificationPreferences, NotificationStatus } from '../shared/types';
+import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput, PushSubscriptionInput } from '../shared/schemas';
+import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { beginLocalLogoutCleanup, broadcastSessionCoordination, cancelLocalLogoutCleanup, captureAuthInvalidationNonce, captureSessionGeneration, clearSessionLogout, completeLocalLogoutCleanup, consumeAuthInvalidationNonce, getLocallyOwnedLogoutGeneration, getSessionGeneration, getSessionLogoutInProgress, hydrateSessionCoordination, isSessionGenerationCurrent, isSessionLogoutAdopted, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionCoordination, subscribeSessionLogout } from './session';
@@ -10,6 +10,7 @@ import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
 import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
 import { CSRF_COOKIE, CSRF_HEADER } from '../worker/application-session';
 import { persistActivityResponse, persistBalanceResponse, persistCategoriesResponse, persistExpenseDetailsResponse, persistExpenseResponse, persistGroupResponse, persistGroupsResponse, persistSettlementResponse, persistTransactionResponse } from './persisted-resources';
+import { revokeNotificationIdentity } from './notification-identity';
 
 export type CurrentUser = { id: string; email: string; personId: string; idleExpiresAt?: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -312,6 +313,13 @@ const claimAuthVerificationIntent = () => {
 };
 const authListeners = new Set<() => void>();
 const connectionListeners = new Set<() => void>();
+export type AuthEpochTransition = {
+  epoch: number;
+  reason: 'same-account' | 'account-switch' | 'auth-required' | 'identity-mismatch' | 'logout' | 'account-deletion' | 'cache-clear';
+  previousClerkUserId?: string;
+  clerkUserId?: string;
+};
+const authEpochListeners = new Set<(transition: AuthEpochTransition) => void>();
 /** Explicit build-time flag used by the local E2E harness; the Worker still gates it on ENVIRONMENT=development. */
 export const isDevelopmentAuthBypass = import.meta.env.VITE_DEV_AUTH_BYPASS === 'true';
 export const isMeaningfulClerkSessionTransition = (previousSessionKey: string | undefined, currentSessionKey: string | undefined) => Boolean(previousSessionKey && currentSessionKey && previousSessionKey !== currentSessionKey);
@@ -338,15 +346,29 @@ const setAuthLifecycle = (next: AuthLifecycle) => {
 };
 export const getAuthEpoch = () => authInvalidationGeneration;
 export const isAuthEpochCurrent = (epoch: number) => epoch === authInvalidationGeneration;
+/** Synchronous notification for identity-bound clients. Listeners must only
+ * invalidate local state or enqueue cleanup; the auth transition itself does
+ * not wait on IndexedDB or network work. */
+export const subscribeAuthEpoch = (listener: (transition: AuthEpochTransition) => void) => { authEpochListeners.add(listener); return () => authEpochListeners.delete(listener); };
 export const getClerkEvidenceEpoch = () => clerkEvidenceEpoch;
 export const isClerkEvidenceEpochCurrent = (epoch: number) => epoch === clerkEvidenceEpoch;
-const advanceAuthEpoch = () => { authInvalidationGeneration += 1; startupCacheToken += 1; provisionalRouteGeneration += 1; provisionalRestoreRequest = undefined; identityRequest = undefined; authLifecycleRequest = undefined; return authInvalidationGeneration; };
+const advanceAuthEpoch = (transition: Omit<AuthEpochTransition, 'epoch'> = { reason: 'auth-required' }) => {
+  authInvalidationGeneration += 1;
+  startupCacheToken += 1;
+  provisionalRouteGeneration += 1;
+  provisionalRestoreRequest = undefined;
+  identityRequest = undefined;
+  authLifecycleRequest = undefined;
+  const event = { ...transition, epoch: authInvalidationGeneration } satisfies AuthEpochTransition;
+  authEpochListeners.forEach((listener) => { try { listener(event); } catch { /* A cleanup listener cannot block auth invalidation. */ } });
+  return authInvalidationGeneration;
+};
 const cancelClerkProbes = () => { for (const controller of clerkProbeControllers) controller.abort(); clerkProbeControllers.clear(); };
 export const clearAuthRequired = () => { authBlocked = false; allowIdentityVerification(); if (!authState.required) return; authState = { required: false }; authListeners.forEach((listener) => listener()); };
 const signalAuthRequired = (code: AuthRequiredCode) => {
   cancelForegroundRetry();
   verifiedIdentity = undefined;
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: code === 'IDENTITY_MISMATCH' ? 'identity-mismatch' : 'auth-required' });
   authBlocked = true;
   blockResourceIdentity(new ApiError('Authentication is required before private data can be refreshed.', { code }));
   if (code === 'IDENTITY_MISMATCH') {
@@ -362,6 +384,7 @@ const signalAuthRequired = (code: AuthRequiredCode) => {
 };
 /** Clerk is authoritative for the signed-out state; avoid racing /api/me during provider startup. */
 export const markSignedOut = () => {
+  void revokeNotificationIdentity().catch(() => undefined);
   requestTrustRevocation();
   if (authLifecycle.status === 'unauthenticated' && authState.required) return;
   signalAuthRequired('AUTH_REQUIRED');
@@ -369,6 +392,7 @@ export const markSignedOut = () => {
 /** Invalidate all prior private memory before rechecking a changed Clerk session. */
 export const resetForClerkSessionChange = (broadcast = true, targetClerkUserId?: string) => {
   const previousClerkUserId = verifiedClerkUserId || clerkEvidence.userId;
+  void revokeNotificationIdentity().catch(() => undefined);
   requestTrustRevocation();
   cancelClerkProbes();
   cancelAuthVerificationIntent();
@@ -377,7 +401,7 @@ export const resetForClerkSessionChange = (broadcast = true, targetClerkUserId?:
   verifiedIdentity = undefined;
   verifiedClerkUserId = undefined;
   clerkUserIdHydrated = false;
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'account-switch', previousClerkUserId, ...(targetClerkUserId ? { clerkUserId: targetClerkUserId } : {}) });
   authBlocked = true;
   blockResourceIdentity(new ApiError('The account changed. Verify the current account before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }));
   setAuthLifecycle({ status: 'checking' });
@@ -389,13 +413,14 @@ export const resetForClerkSessionChange = (broadcast = true, targetClerkUserId?:
 /** Revoke private UI immediately for an offline account change; reverification waits for connectivity. */
 export const revokeForClerkSessionChange = (broadcast = true) => {
   const previousClerkUserId = verifiedClerkUserId || clerkEvidence.userId;
+  void revokeNotificationIdentity().catch(() => undefined);
   requestTrustRevocation();
   cancelClerkProbes();
   cancelAuthVerificationIntent();
   cancelClerkRestorationDeadline();
   clerkEvidenceEpoch += 1;
   verifiedIdentity = undefined;
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'account-switch', previousClerkUserId });
   authBlocked = true;
   blockResourceIdentity(new ApiError('Offline access is unavailable for the current account. Verify the account when connected.', { status: 401, code: 'IDENTITY_MISMATCH' }));
   authState = { required: false };
@@ -497,7 +522,7 @@ const mutationIdentityError = () => new ApiError('The verified account is unavai
  * its own exact Clerk binding and tombstone lookup; keep this option private
  * to that route and require the still-valid local recovery marker here too.
  */
-type ApiMutationOptions = { accountDeletionRecovery?: { clerkUserId: string } };
+type ApiMutationOptions = { accountDeletionRecovery?: { clerkUserId: string }; expectedUserId?: string };
 const isBoundAccountDeletionRecovery = (path: string, init: RequestInit | undefined, options: ApiMutationOptions | undefined) => {
   if (!options?.accountDeletionRecovery || path !== '/account' || (init?.method || 'GET').toUpperCase() !== 'DELETE') return false;
   const expectedClerkUserId = new Headers(init?.headers).get(ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER);
@@ -523,7 +548,7 @@ const runAuthenticatedMutation = <T>(path: string, init: RequestInit | undefined
   } else {
     if (!isServerMutationAllowed()) return Promise.reject(mutationBlockedError());
   }
-  const expectedUserId = getVerifiedUserId();
+  const expectedUserId = options?.expectedUserId ?? getVerifiedUserId();
   if (!recovery && !expectedUserId) return Promise.reject(mutationIdentityError());
   return runMutation(() => {
     if (getSessionLogoutInProgress() || isMutationBarrierActive()) return Promise.reject(mutationBlockedError());
@@ -690,6 +715,18 @@ export const bootstrapApplicationSession = () => directSessionRequest<SessionRes
 export const recordSessionActivity = () => api<SessionResponse>('/session/activity', { method: 'POST', body: '{}' });
 export const revokeApplicationSession = () => api<void>('/session', { method: 'DELETE' });
 export const revokeAllApplicationSessions = () => api<void>('/sessions', { method: 'DELETE' });
+export async function getNotificationStatus(expectedAuthEpoch?: number, expectedUserId?: string) {
+  const response = await apiWithMeta<NotificationStatus>('/notifications/status', undefined, expectedAuthEpoch);
+  if (expectedUserId && response.userId !== expectedUserId) throw new ApiError('The authenticated account changed before notification preferences were read.', { status: 401, code: 'IDENTITY_MISMATCH' });
+  return response.data;
+}
+export const putNotificationSubscription = (subscription: PushSubscriptionInput) => api<{ subscription: { id: string; expirationTime: number | null } }>('/notifications/subscription', { method: 'PUT', body: JSON.stringify(subscription) });
+export const removeNotificationSubscription = (endpoint: string) => api<void>('/notifications/subscription', { method: 'DELETE', body: JSON.stringify({ endpoint }) });
+export async function updateNotificationPreferences(preferences: NotificationPreferences, expectedAuthEpoch?: number, expectedUserId?: string) {
+  const response = await apiWithMeta<{ preferences: NotificationPreferences }>('/notifications/preferences', { method: 'PUT', body: JSON.stringify({ money_changes: preferences.moneyChanges, scheduled_events: preferences.scheduledEvents, detail_level: preferences.detailLevel }) }, expectedAuthEpoch, { expectedUserId });
+  if (expectedUserId && response.userId !== expectedUserId) throw new ApiError('The authenticated account changed before notification preferences were saved.', { status: 401, code: 'IDENTITY_MISMATCH' });
+  return response.data.preferences;
+}
 
 export function apiWithMeta<T>(path: string, init?: RequestInit, expectedAuthEpoch?: number, options?: ApiMutationOptions): Promise<ApiResponse<T>> {
   if (path === '/me' && clerkEvidenceKnown && (!clerkEvidence.isLoaded || isIncompleteSignedInEvidence(clerkEvidence)) && !isDevelopmentAuthBypass) {
@@ -843,7 +880,7 @@ const holdSharedAuthInvalidation = (message: { nonce?: string; previousClerkUser
   clerkUserIdHydrated = false;
   authBlocked = true;
   authState = { required: false };
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'account-switch', previousClerkUserId: message.previousClerkUserId, clerkUserId: message.clerkUserId });
   resetResourceIdentity();
   blockResourceIdentity(new ApiError('The previous Clerk account was invalidated. Verify the current account before viewing private data.', { status: 401, code: 'IDENTITY_MISMATCH' }));
   if (terminal) setVerificationUnavailable(new ApiError('The current Clerk account does not match the shared account-switch target.', { status: 401, code: 'IDENTITY_MISMATCH' }));
@@ -1228,8 +1265,6 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
     cancelAuthVerificationIntent();
     clerkEvidenceEpoch += 1;
     cancelClerkProbes();
-    advanceAuthEpoch();
-    cancelClerkRestorationDeadline();
     const nextIsCompleteSignedIn = nextEvidence.isLoaded && nextEvidence.isSignedIn === true && Boolean(nextEvidence.userId && nextEvidence.sessionId);
     const knownPreviousClerkUserId = verifiedClerkUserId || previousEvidence.userId;
     // userId is meaningful even when sessionId is still being restored.  A
@@ -1237,6 +1272,20 @@ function coordinateAuthBootstrapImpl(evidence: ClerkAuthEvidence, options: { net
     // treated as a same-session restoration window.
     const knownPositiveMismatch = Boolean(nextEvidence.isLoaded && nextEvidence.isSignedIn === true && nextEvidence.userId && knownPreviousClerkUserId && nextEvidence.userId !== knownPreviousClerkUserId);
     const authoritativeSignedOut = nextEvidence.isLoaded && nextEvidence.isSignedIn === false && !nextEvidence.userId;
+    // A provider wake, session renewal, or temporary unload for the same
+    // account still advances the API epoch to fence in-flight requests. It is
+    // not an identity loss, though, so identity-bound notification state must
+    // remain usable across that ordinary transition.
+    const sameAccountTransition = !knownPositiveMismatch && !authoritativeSignedOut && (
+      Boolean(knownPreviousClerkUserId && nextEvidence.userId && knownPreviousClerkUserId === nextEvidence.userId)
+      || Boolean(verifiedIdentity && verifiedClerkUserId)
+    );
+    advanceAuthEpoch({
+      reason: knownPositiveMismatch ? 'account-switch' : sameAccountTransition ? 'same-account' : 'auth-required',
+      ...(knownPreviousClerkUserId ? { previousClerkUserId: knownPreviousClerkUserId } : {}),
+      ...(nextEvidence.userId ? { clerkUserId: nextEvidence.userId } : {}),
+    });
+    cancelClerkRestorationDeadline();
     clerkRestorationRetryAttempts = 0;
     if (knownPositiveMismatch) {
       broadcastSessionCoordination({ type: 'auth-invalidation', reason: 'account-switch', previousClerkUserId: knownPreviousClerkUserId, clerkUserId: nextEvidence.userId });
@@ -1662,7 +1711,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         // record can therefore never be used if that request is unavailable.
         verifiedIdentity = undefined;
         requestTrustRevocation();
-        authEpoch = advanceAuthEpoch();
+        authEpoch = advanceAuthEpoch({ reason: 'identity-mismatch', previousClerkUserId: trust.clerkUserId, clerkUserId: options.clerkUserId });
         if (!await ensureTrustRevoked()) {
           assertAuthEvidence(authEpoch, evidenceEpoch);
           setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('The previous account is still being cleared. Retry verification.', { code: 'IDENTITY_MISMATCH' }) });
@@ -1852,10 +1901,14 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
   else if (receivedGeneration === undefined && !logoutRecoveryContext.adoptedSessionId) logoutRecoveryContext.adoptedSessionId = clerkEvidence.sessionId;
   if (receivedGeneration !== undefined && !isSessionGenerationCurrent(receivedGeneration)) return;
   beginLocalLogoutCleanup(generation);
+  // This marker is intentionally independent of the private cache. Start it
+  // before quiescing, but await it before clearing cached state. That keeps
+  // the bounded outbox shutdown from being delayed by IndexedDB scheduling.
+  const notificationRevocation = revokeNotificationIdentity().catch(() => undefined);
   // Invalidate in-flight authentication immediately, before waiting for the
   // outbox or IndexedDB cleanup. The final advance below also invalidates any
   // work that somehow started during the destructive boundary.
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'logout' });
   cancelAuthVerificationIntent();
   beginMutationBarrier(generation);
   try {
@@ -1867,7 +1920,11 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
     // deliberately performed after the bounded wait as well, so a transport
     // which ignores abort cannot strand local private rows.
     await withExclusiveMutationLock(async () => { await outboxQuiescence; });
-    await clearAllPrivateData();
+    await notificationRevocation;
+    // Logout revokes private trust and cache but deliberately preserves the
+    // durable new-expense outbox. It is user-scoped and cannot replay until
+    // the same internal account is authoritatively verified again.
+    await clearCachedData();
   } catch (error) {
     // Keep the current authenticated UI visible when storage is unavailable.
     // Release the lock barrier so retry is possible; the session generation
@@ -1882,7 +1939,7 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
   verifiedClerkUserId = undefined;
   clerkUserIdHydrated = true;
   authBlocked = true;
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'logout' });
   resetResourceIdentity();
   authState = { required: true, code: 'AUTH_REQUIRED' };
   if (logoutRecoveryContext?.generation === generation) logoutRecoveryContext.cleanupCompleted = true;
@@ -2463,7 +2520,7 @@ if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-clea
   // event (which has no detail) needs the local auth invalidation here.
   if ((event as CustomEvent<{ generation?: number; type?: string }>).detail?.generation !== undefined || (event as CustomEvent<{ type?: string }>).detail?.type === 'cache-clear') return;
   startupCacheToken += 1;
-  advanceAuthEpoch();
+  advanceAuthEpoch({ reason: 'cache-clear' });
   cancelAuthVerificationIntent();
   cancelClerkProbes();
   verifiedIdentity = undefined;
@@ -2518,7 +2575,7 @@ subscribeSessionCoordination((message) => {
     requestTrustRevocation();
     cancelAuthVerificationIntent();
     cancelClerkRestorationDeadline();
-    advanceAuthEpoch();
+    advanceAuthEpoch({ reason: 'account-deletion', clerkUserId: message.clerkUserId });
     authBlocked = true;
     blockResourceIdentity(new ApiError('Account deletion is in progress.', { status: 401, code: 'AUTH_REQUIRED' }));
     setAuthLifecycle({ status: 'verification-unavailable', error: new ApiError('Account deletion is in progress.', { code: 'AUTH_REQUIRED' }) });
@@ -2527,7 +2584,7 @@ subscribeSessionCoordination((message) => {
   }
   if (message.type === 'cache-clear') {
     startupCacheToken += 1;
-    advanceAuthEpoch();
+    advanceAuthEpoch({ reason: 'cache-clear' });
     cancelAuthVerificationIntent();
     cancelClerkProbes();
     verifiedIdentity = undefined;

@@ -35,10 +35,24 @@ migrations_dir = "migrations"
 # credentials are random opaque tokens; only their SHA-256 hashes are stored,
 # so no additional session secret or binding is required.
 
+[[queues.producers]]
+binding = "NOTIFICATION_QUEUE"
+queue = "replace-with-notification-queue-name"
+
+[[queues.consumers]]
+queue = "replace-with-notification-queue-name"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 4
+retry_delay = 30
+dead_letter_queue = "replace-with-notification-dead-letter-queue-name"
+
 [vars]
 ENVIRONMENT = "production"
 # Set this to the exact HTTPS origin configured in Clerk.
 CLERK_AUTHORIZED_PARTIES = "https://your-bill-split.example"
+VAPID_PUBLIC_KEY = "REPLACE_WITH_VAPID_PUBLIC_KEY"
+VAPID_CONTACT = "mailto:admin@your-bill-split.example"
 # CLERK_PUBLISHABLE_KEY and CLERK_JWT_KEY are required Worker runtime variables;
 # set them under Worker Settings → Variables & Secrets. The deploy wrapper's
 # --keep-vars preserves these dashboard-managed values when they are omitted
@@ -47,7 +61,8 @@ CLERK_AUTHORIZED_PARTIES = "https://your-bill-split.example"
 
 # Declarations only; values must be uploaded with `wrangler secret put`.
 [secrets]
-required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY"]
+required = ["CLERK_SECRET_KEY", "IDENTITY_TOMBSTONE_KEY", "VAPID_PRIVATE_KEY", "PUSH_SUBSCRIPTION_ENCRYPTION_KEY"]
+
 
 [[ratelimits]]
 name = "RATE_LIMITER"

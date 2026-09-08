@@ -5,6 +5,7 @@ import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
+import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 
 type IconName = 'groups' | 'activity' | 'add' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -95,6 +96,17 @@ function useOutbox() {
   return useSyncExternalStore(subscribeOutbox, getOutboxSnapshot, () => []);
 }
 
+function useServiceWorkerUpdate() {
+  return useSyncExternalStore(subscribeServiceWorkerUpdate, getServiceWorkerUpdateState, () => ({ updateReady: false, applying: false, blocked: false }));
+}
+
+export function ServiceWorkerUpdate() {
+  const update = useServiceWorkerUpdate();
+  if (!update.updateReady && !update.applying && !update.blocked) return null;
+  const message = update.applying ? 'Applying update…' : update.blocked ? 'Finish your current entry before updating.' : 'A new BillSplit version is ready.';
+  return <div className="update-control" role="status" aria-live="polite"><span>{message}</span>{!update.applying ? <button className="update-action" type="button" onClick={() => { applyServiceWorkerUpdate(); }}>{update.blocked ? 'Apply when ready' : 'Update'}</button> : null}</div>;
+}
+
 export function InstallAction({ showStatus = false, label = 'Install' }: { showStatus?: boolean; label?: string } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
@@ -147,7 +159,7 @@ export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();
   const unsynced = outbox.length;
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {

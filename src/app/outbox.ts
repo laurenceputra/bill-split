@@ -179,6 +179,21 @@ export const subscribeOutbox = (listener: OutboxListener) => { listeners.add(lis
 export const getOutboxSnapshot = () => snapshot;
 export const pendingCount = () => snapshot.length;
 
+/**
+ * Background Sync is only a wake-up hint. Replaying from a worker would need
+ * to duplicate the foreground's session-cookie, identity, lease, and logout
+ * protocol, so the service worker never sends the expense itself.
+ */
+export async function requestBackgroundOutboxSync() {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return false;
+  try {
+    const registration = await navigator.serviceWorker.ready as ServiceWorkerRegistration & { sync?: { register: (tag: string) => Promise<void> } };
+    if (!registration.sync || typeof registration.sync.register !== 'function') return false;
+    await registration.sync.register('billsplit-expense-outbox');
+    return true;
+  } catch { return false; }
+}
+
 export async function initializeOutbox() {
   if (logoutQuiescing || getSessionLogoutInProgress()) return;
   if (!initialized) {
@@ -202,8 +217,9 @@ export async function enqueueExpense(input: { userId: string; groupId: string; p
    const saved = await saveOutboxItem(item, generation, authEpoch, () => isAuthEpochCurrent(authEpoch) && getAuthLifecycle().status === lifecycle && allowedUserId === input.userId && (lifecycle !== 'authenticated' || currentOutboxUserId() === input.userId));
    if (!saved) throw new ApiError('The verified account changed before this expense was queued.', { code: 'IDENTITY_MISMATCH', status: 401 });
    snapshot = [...snapshot.filter((existing) => !(existing.userId === item.userId && existing.clientOperationId === item.clientOperationId)), item].sort((a, b) => a.createdAt.localeCompare(b.createdAt)); notify();
-  await invalidateForMutation.expenseChanged(item.groupId, undefined, item.userId, generation);
-  return item;
+   await invalidateForMutation.expenseChanged(item.groupId, undefined, item.userId, generation);
+   void requestBackgroundOutboxSync();
+   return item;
 }
 
 const errorDetails = (error: ApiError) => ({ code: error.code, message: error.message, status: error.status });

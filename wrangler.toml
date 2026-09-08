@@ -34,6 +34,18 @@ database_name = "bill-split"
 database_id = "00000000-0000-4000-8000-000000000000"
 migrations_dir = "migrations"
 
+[[queues.producers]]
+binding = "NOTIFICATION_QUEUE"
+queue = "bill-split-notifications"
+
+[[queues.consumers]]
+queue = "bill-split-notifications"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 4
+retry_delay = 30
+dead_letter_queue = "bill-split-notifications-dead-letter"
+
 [vars]
 ENVIRONMENT = "development"
 # No production Clerk values or resources belong in this config.
@@ -55,3 +67,15 @@ ENVIRONMENT = "development"
 # Local development only. Do not use this environment for a public hostname.
 # Development intentionally has no rate-limit resource; a missing limiter is
 # permitted only when ENVIRONMENT is exactly development or test.
+
+[[env.dev.queues.producers]]
+binding = "NOTIFICATION_QUEUE"
+queue = "bill-split-notifications-dev"
+
+[[env.dev.queues.consumers]]
+queue = "bill-split-notifications-dev"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 4
+retry_delay = 30
+dead_letter_queue = "bill-split-notifications-dev-dead-letter"

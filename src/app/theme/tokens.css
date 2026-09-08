@@ -44,6 +44,7 @@
   --flow-section: var(--space-5);
   --surface-padding: var(--space-4);
   --surface-padding-wide: var(--space-5);
+  --control-min-height: 2.75rem;
   --content-max: 74rem;
   --reading-max: 42rem;
   --nav-height: 4.5rem;

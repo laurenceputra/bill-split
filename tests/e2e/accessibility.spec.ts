@@ -1,5 +1,6 @@
 import { test, expect, newAuthenticatedContext, DEV_EMAIL, REGISTERED_EMAIL, BASE_URL, seedOfflineTrust } from './fixtures';
 import { DB_NAME, DB_VERSION } from '../../src/app/idb';
+import type { Locator, Page } from '@playwright/test';
 
 const richGroupId = '00000000-0000-4000-8000-000000003002';
 
@@ -120,7 +121,7 @@ test('active auth banner stays clear of tablet navigation controls', async ({ br
     });
     expect(geometry.bannerBottom).toBeLessThanOrEqual(geometry.navTop - 4);
     expect(geometry.controls).toHaveLength(4);
-    expect(geometry.controls.every((control) => control.visible && control.accessible && control.bottom <= 1024)).toBe(true);
+    expect(geometry.controls.filter((control) => control.visible && control.accessible && control.bottom <= 1024)).toHaveLength(4);
   } finally {
     await context.close();
   }
@@ -185,6 +186,248 @@ test('transaction filter disclosure remains native and opens for URL filters', a
   await expect(page.getByText('1 active filter')).toBeVisible();
   await disclosure.locator('summary').click();
   await expect(disclosure).toHaveJSProperty('open', false);
+});
+
+test('normalizes disclosure spacing and nested surfaces across responsive boundaries', async ({ authenticatedPage: page }) => {
+  for (const viewport of [390, 768, 895, 896, 1440]) {
+    await page.setViewportSize({ width: viewport, height: viewport < 896 ? 844 : 900 });
+    await page.goto(`/groups/${richGroupId}`);
+    const balance = page.locator('.balance-breakdown');
+    await expect(balance).toBeVisible();
+    await balance.locator('summary').click();
+    await expect(balance).toHaveJSProperty('open', true);
+    await expect(balance.locator('.list, .empty, .cache-status').first()).toBeVisible();
+    const balanceGeometry = await balance.evaluate((element) => {
+      const summary = element.querySelector(':scope > summary')?.getBoundingClientRect();
+      const firstContent = Array.from(element.children).find((child) => child.tagName !== 'SUMMARY')?.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { gap: parseFloat(style.rowGap), transition: (firstContent?.top || 0) - (summary?.bottom || 0) };
+    });
+    expect(balanceGeometry.gap).toBe(12);
+    expect(balanceGeometry.transition).toBeGreaterThanOrEqual(11);
+
+    const scheduled = page.locator('.scheduled-summary > details');
+    await scheduled.locator('summary').click();
+    await expect(scheduled).toHaveJSProperty('open', true);
+    await expect(scheduled.locator('.schedule-list-content')).toBeVisible();
+    await expect(scheduled.locator('.schedule-list-content > section')).toHaveCount(1);
+    await expect(scheduled.locator('.schedule-row')).toHaveCount(1);
+    const scheduleChrome = await page.locator('.scheduled-summary .schedule-list-content > section').evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { margin: style.margin, borderWidths: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth], shadow: style.boxShadow };
+    });
+    expect(scheduleChrome.margin).toBe('0px');
+    expect(scheduleChrome.borderWidths).toEqual(['0px', '0px', '0px', '0px']);
+    expect(scheduleChrome.shadow).toBe('none');
+
+    if (viewport < 896) {
+      const scheduleTargets = page.locator('.schedule-row a.button, .schedule-row button');
+      await expect(scheduleTargets).toHaveCount(3);
+      const targetHeights = await scheduleTargets.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
+      for (const height of targetHeights) expect(height).toBeGreaterThanOrEqual(44);
+    }
+
+    await page.goto(`/groups/${richGroupId}/manage`);
+    const generic = page.locator('details.generic-invitation-disclosure');
+    await expect(generic).toHaveJSProperty('open', false);
+    await generic.locator('summary').click();
+    await expect(generic).toHaveJSProperty('open', true);
+    await expect(generic.locator('form')).toBeVisible();
+    const genericFormMargin = await generic.locator('form').evaluate((element) => getComputedStyle(element).margin);
+    expect(genericFormMargin).toBe('0px');
+
+    const sam = page.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Sam Rivera' });
+    const targeted = sam.locator('details');
+    await expect(targeted).toHaveJSProperty('open', false);
+    await targeted.locator('summary').click();
+    await expect(targeted).toHaveJSProperty('open', true);
+    await expect(targeted.locator('form')).toBeVisible();
+    const targetedFormMargin = await targeted.locator('form').evaluate((element) => getComputedStyle(element).margin);
+    expect(targetedFormMargin).toBe('0px');
+
+    await page.goto(`/activity?group=${richGroupId}&view=transactions`);
+    const filters = page.locator('details.transaction-filters-disclosure');
+    await expect(filters).toHaveJSProperty('open', false);
+    await filters.locator('summary').click();
+    await expect(filters).toHaveJSProperty('open', true);
+    await expect(filters.locator('form')).toBeVisible();
+    const filterGeometry = await filters.evaluate((element) => {
+      const form = element.querySelector('form');
+      const style = form ? getComputedStyle(form) : undefined;
+      const disclosureStyle = getComputedStyle(element);
+      return { formMargin: style?.margin || '', gap: parseFloat(disclosureStyle.rowGap) };
+    });
+    expect(filterGeometry.formMargin).toBe('0px');
+    expect(filterGeometry.gap).toBe(12);
+  }
+});
+
+test('direct section and surface forms own their flow spacing', async ({ authenticatedPage: page }) => {
+  const marginOf = async (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).margin);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: '+ Add friend' }).click();
+  await expect(page.locator('.surface form')).toBeVisible();
+  expect(await marginOf(page.locator('.surface form'))).toBe('0px');
+
+  await page.goto(`/groups/${richGroupId}/manage`);
+  const groupSettingsForm = page.locator('#settings section.group-settings > form');
+  await expect(groupSettingsForm).toBeVisible();
+  expect(await marginOf(groupSettingsForm)).toBe('0px');
+
+  const addFriend = page.locator('section[aria-labelledby="add-friend-heading"]');
+  await addFriend.getByRole('button', { name: 'Add friend' }).click();
+  const addFriendForm = addFriend.locator(':scope > form');
+  await expect(addFriendForm).toBeVisible();
+  expect(await marginOf(addFriendForm)).toBe('0px');
+
+  const splitDefault = page.locator('section.split-default-settings');
+  await splitDefault.getByRole('button', { name: /^(Customize|Edit)$/ }).click();
+  const splitDefaultForm = splitDefault.locator(':scope > form');
+  await expect(splitDefaultForm).toBeVisible();
+  expect(await marginOf(splitDefaultForm)).toBe('0px');
+
+  await page.goto('/settings');
+  const deletion = page.locator('section[aria-labelledby="delete-account-heading"]');
+  const deletionForm = deletion.locator(':scope > form');
+  await expect(deletionForm).toBeVisible();
+  expect(await marginOf(deletionForm)).toBe('0px');
+});
+
+test('standalone section actions stay content-sized across responsive boundaries', async ({ authenticatedPage: page }) => {
+  const viewports = [390, 895, 896, 1440];
+  const actionGeometry = async (locator: Locator) => locator.evaluate((element) => {
+    const parent = element.parentElement;
+    const style = getComputedStyle(element);
+    const parentStyle = parent ? getComputedStyle(parent) : undefined;
+    const parentInset = parentStyle ? parseFloat(parentStyle.paddingLeft) + parseFloat(parentStyle.paddingRight) + parseFloat(parentStyle.borderLeftWidth) + parseFloat(parentStyle.borderRightWidth) : 0;
+    return {
+      width: element.getBoundingClientRect().width,
+      parentContentWidth: parent ? parent.getBoundingClientRect().width - parentInset : 0,
+      justifySelf: style.justifySelf,
+    };
+  });
+
+  for (const width of viewports) {
+    await page.setViewportSize({ width, height: width < 896 ? 844 : 900 });
+    await page.goto(`/groups/${richGroupId}`);
+    const managePeople = page.locator('section[aria-labelledby="people-summary-heading"] > .inline-action');
+    await expect(managePeople).toBeVisible();
+    const manageGeometry = await actionGeometry(managePeople);
+    expect(manageGeometry.justifySelf).toBe('start');
+    expect(manageGeometry.width).toBeLessThan(manageGeometry.parentContentWidth);
+    const recentList = page.locator('section[aria-labelledby="recent-transactions-heading"] > .list');
+    await expect(recentList).toBeVisible();
+    const listGeometry = await actionGeometry(recentList);
+    expect(Math.abs(listGeometry.width - listGeometry.parentContentWidth)).toBeLessThanOrEqual(1);
+
+    await page.goto(`/groups/${richGroupId}/manage`);
+    const actionGroup = page.locator('#settings section.group-settings > .actions');
+    await expect(actionGroup).toBeVisible();
+    const actionGroupGeometry = await actionGeometry(actionGroup);
+    expect(Math.abs(actionGroupGeometry.width - actionGroupGeometry.parentContentWidth)).toBeLessThanOrEqual(1);
+
+    await page.goto('/settings');
+    const clearCachedData = page.getByRole('button', { name: 'Clear cached data' });
+    await expect(clearCachedData).toBeVisible();
+    const clearGeometry = await actionGeometry(clearCachedData);
+    expect(clearGeometry.justifySelf).toBe('start');
+    expect(clearGeometry.width).toBeLessThan(clearGeometry.parentContentWidth);
+
+    const notificationAction = page.locator('section[aria-labelledby="notifications-heading"] > button').first();
+    if (await notificationAction.count() && await notificationAction.isVisible()) {
+      const notificationGeometry = await actionGeometry(notificationAction);
+      expect(notificationGeometry.justifySelf).toBe('start');
+      expect(notificationGeometry.width).toBeLessThan(notificationGeometry.parentContentWidth);
+    }
+
+    const accountForm = page.locator('section[aria-labelledby="delete-account-heading"] > form');
+    await expect(accountForm).toBeVisible();
+    const formGeometry = await accountForm.evaluate((element) => {
+      const parent = element.parentElement;
+      const parentStyle = parent ? getComputedStyle(parent) : undefined;
+      const parentInset = parentStyle ? parseFloat(parentStyle.paddingLeft) + parseFloat(parentStyle.paddingRight) + parseFloat(parentStyle.borderLeftWidth) + parseFloat(parentStyle.borderRightWidth) : 0;
+      return { width: element.getBoundingClientRect().width, parentContentWidth: parent ? parent.getBoundingClientRect().width - parentInset : 0 };
+    });
+    expect(Math.abs(formGeometry.width - formGeometry.parentContentWidth)).toBeLessThanOrEqual(1);
+  }
+});
+
+test('expense form status messages own spacing through the form grid', async ({ authenticatedPage: page }) => {
+  await page.route(`${BASE_URL}/api/groups/${richGroupId}`, async (route) => {
+    const response = await route.fetch();
+    const group = await response.json();
+    await route.fulfill({ response, json: { ...group, splitDefault: { method: 'equal', personIds: ['00000000-0000-4000-8000-000000002001', '00000000-0000-4000-8000-000000002003', '00000000-0000-4000-8000-000000002004'] } } });
+  });
+  await page.goto(`/groups/${richGroupId}/expense/new`);
+  const status = page.locator('.expense-form > .cache-status').filter({ hasText: 'Party default applied.' });
+  await expect(status).toBeVisible();
+  await expect(status).toHaveCSS('margin', '0px');
+});
+
+test('scheduled disclosure keeps loading, offline, empty, and error states inside its flow', async ({ browser }) => {
+  const schedulePath = `${BASE_URL}/api/groups/${richGroupId}/scheduled-expenses**`;
+  const openSchedule = async (page: Page) => {
+    const disclosure = page.locator('.scheduled-summary > details');
+    await expect(disclosure).toHaveJSProperty('open', false);
+    await expect(disclosure.locator('.schedule-list-content')).toBeHidden();
+    await disclosure.locator('summary').click();
+    await expect(disclosure).toHaveJSProperty('open', true);
+    await expect(disclosure.locator('.schedule-list-content')).toBeVisible();
+    const nonZeroFlowMargins = await disclosure.locator('.schedule-list-content > section').evaluate((section) => Array.from(section.children).map((child) => getComputedStyle(child).margin).filter((margin) => margin !== '0px'));
+    expect(nonZeroFlowMargins).toEqual([]);
+    return disclosure;
+  };
+
+  const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const loadingPage = await loadingContext.newPage();
+  let releaseLoading!: () => void;
+  const loadingGate = new Promise<void>((resolve) => { releaseLoading = resolve; });
+  await loadingPage.route(schedulePath, async (route) => { await loadingGate; await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ scheduledExpenses: [] }) }); });
+  try {
+    await loadingPage.goto(`/groups/${richGroupId}`);
+    await expect(loadingPage.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
+    const disclosure = await openSchedule(loadingPage);
+    await expect(disclosure.getByRole('status').filter({ hasText: 'Loading…' })).toBeVisible();
+  } finally {
+    releaseLoading();
+    await loadingContext.close();
+  }
+
+  const errorContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const errorPage = await errorContext.newPage();
+  await errorPage.route(schedulePath, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SCHEDULE_UNAVAILABLE', message: 'Schedule fixture outage' } }) }));
+  try {
+    await errorPage.goto(`/groups/${richGroupId}`);
+    const disclosure = await openSchedule(errorPage);
+    await expect(disclosure.locator('.error')).toContainText('Schedule fixture outage');
+  } finally {
+    await errorContext.close();
+  }
+
+  const emptyContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const emptyPage = await emptyContext.newPage();
+  await emptyPage.route(schedulePath, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ scheduledExpenses: [] }) }));
+  try {
+    await emptyPage.goto(`/groups/${richGroupId}`);
+    const disclosure = await openSchedule(emptyPage);
+    await expect(disclosure).toContainText('No recurring expenses yet.');
+  } finally {
+    await emptyContext.close();
+  }
+
+  const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const offlinePage = await offlineContext.newPage();
+  try {
+    await offlinePage.goto(`/groups/${richGroupId}`);
+    await expect(offlinePage.locator('.schedule-row')).toHaveCount(1);
+    await offlineContext.setOffline(true);
+    await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
+    const disclosure = await openSchedule(offlinePage);
+    await expect(disclosure).toContainText('Schedule management requires a connection.');
+  } finally {
+    await offlineContext.close();
+  }
 });
 
 test('group overview exposes history and manage anchors', async ({ authenticatedPage: page }) => {

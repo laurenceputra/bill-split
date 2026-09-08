@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import worker, { cronStageOrder } from './index';
-import { Repository } from '../db/repository';
+import { Repository, RepositoryError } from '../db/repository';
 
 class Statement {
   constructor(protected readonly sql: string) {}
@@ -253,6 +253,26 @@ describe('worker boundary', () => {
     expect(friend.status).not.toBe(429);
     expect(limiter.keys).toEqual(['user-1:group-create', 'user-2:friend-create']);
   });
+  it('rate-limits authenticated notification enrollment in its own bucket and returns cap conflicts structurally', async () => {
+    const limiter = testRateLimiter();
+    const upsert = vi.spyOn(Repository.prototype, 'upsertPushSubscription').mockResolvedValue({ id: 'subscription-1', expirationTime: null });
+    const notificationEnv = { RATE_LIMITER: limiter, NOTIFICATION_QUEUE: {}, PUSH_SUBSCRIPTION_ENCRYPTION_KEY: 'encryption', VAPID_PRIVATE_KEY: 'private', VAPID_PUBLIC_KEY: 'public', VAPID_CONTACT: 'mailto:test@example.test' };
+    const body = { endpoint: 'https://fcm.googleapis.com/fcm/send/test-token', keys: { p256dh: 'BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU', auth: 'BwcHBwcHBwcHBwcHBwcHBw' } };
+    const response = await worker.fetch(new Request('https://split.example/api/notifications/subscription', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), env(notificationEnv), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(limiter.keys).toEqual(['user-1:notification-subscription-enroll']);
+    expect(upsert).toHaveBeenCalled();
+
+    upsert.mockRejectedValueOnce(new RepositoryError('PUSH_SUBSCRIPTION_LIMIT', 'This account has reached its active push subscription limit', { limit: 10 }));
+    const limited = await worker.fetch(new Request('https://split.example/api/notifications/subscription', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), env(notificationEnv), {} as ExecutionContext);
+    expect(limited.status).toBe(409);
+    await expect(limited.json()).resolves.toEqual({ error: { code: 'PUSH_SUBSCRIPTION_LIMIT', message: 'This account has reached its active push subscription limit', details: { limit: 10 } } });
+  });
+  it('rejects malformed notification key material with a structured API error', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/notifications/subscription', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/fcm/send/test-token', keys: { p256dh: 'A'.repeat(87), auth: 'BwcHBwcHBwcHBwcHBwcHBw' } }) }), env({ NOTIFICATION_QUEUE: {}, PUSH_SUBSCRIPTION_ENCRYPTION_KEY: 'encryption', VAPID_PRIVATE_KEY: 'private', VAPID_PUBLIC_KEY: 'public', VAPID_CONTACT: 'mailto:test@example.test' }), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'INVALID_PUSH_SUBSCRIPTION' } });
+  });
   it('denies a protected invitation operation with structured JSON and Retry-After', async () => {
     const limiter = testRateLimiter(false);
     const response = await worker.fetch(new Request('https://split.example/api/invitations/invitation-1/accept', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com' } }), env({ RATE_LIMITER: limiter }), {} as ExecutionContext);
@@ -272,6 +292,10 @@ describe('worker boundary', () => {
     expect(rateLimitOperationFor('POST', '/api/groups/group-1/expenses')).toBeUndefined();
     expect(rateLimitOperationFor('POST', '/api/groups/group-1/scheduled-expenses')).toBeUndefined();
     expect(rateLimitOperationFor('POST', '/api/groups/group-1/settlements')).toBeUndefined();
+    expect(rateLimitOperationFor('PUT', '/api/notifications/subscription')).toBe('notification-subscription-enroll');
+    expect(rateLimitOperationFor('DELETE', '/api/notifications/subscription')).toBeUndefined();
+    expect(rateLimitOperationFor('GET', '/api/notifications/status')).toBeUndefined();
+    expect(rateLimitOperationFor('PUT', '/api/notifications/preferences')).toBeUndefined();
   });
   it('does not rate-limit expense creation, including when the limiter would deny it', async () => {
     const limiter = testRateLimiter(false);
