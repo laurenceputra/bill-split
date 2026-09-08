@@ -256,6 +256,29 @@ export class Repository {
   }
   async me(email: string) { return this.user(email); }
 
+  async updateDisplayName(userId: string, name: string) {
+    const value = name.trim();
+    const timestamp = now();
+    // Keep the person write and the user timestamp in one guarded D1 batch.
+    // The second guard depends on the first statement's result inside the same
+    // transaction, so a deleted-user race cannot leave a half-updated profile.
+    const result = await this.db.batch([
+      this.db.prepare(`UPDATE people SET name=? WHERE user_id=? AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)`).bind(value, userId, userId),
+      this.db.prepare(`UPDATE users SET updated_at=?,profile_revision=profile_revision+1 WHERE id=? AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM people WHERE user_id=? AND deleted_at IS NULL)`).bind(timestamp, userId, userId),
+    ]);
+    const personChanges = Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+    const userChanges = Number((result[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+    if (personChanges === 0 || userChanges === 0) {
+      await this.throwIfDeleted(userId);
+      throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The active profile could not be updated');
+    }
+    const person = await this.db.prepare('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision FROM people p JOIN users u ON u.id=p.user_id WHERE p.user_id=? AND p.deleted_at IS NULL AND u.deleted_at IS NULL').bind(userId).first<Row>();
+    if (!person) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The active profile could not be loaded');
+    return { id: text(person.id), name: text(person.name), email: person.email == null ? null : text(person.email), createdAt: text(person.created_at), updatedAt: text(person.updated_at), profileRevision: number(person.profile_revision) };
+  }
+
   async createApplicationSession(userId: string, tokenHash: string, createdAt = now(), idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString()) {
     if (!/^[a-f0-9]{64}$/i.test(tokenHash)) throw new RepositoryError('DATABASE_ERROR', 'Application session credentials must be SHA-256 digests');
     const id = uid();
@@ -266,11 +289,11 @@ export class Repository {
   }
 
   async applicationSession(tokenHash: string, asOf = now()) {
-    const row = await this.db.prepare(`SELECT s.id,s.user_id,s.created_at,s.last_activity_at,s.idle_expires_at,u.email,u.clerk_user_id,u.deleted_at,p.id AS person_id
+    const row = await this.db.prepare(`SELECT s.id,s.user_id,s.created_at,s.last_activity_at,s.idle_expires_at,u.email,u.clerk_user_id,u.updated_at,u.profile_revision,u.deleted_at,p.id AS person_id,p.name AS person_name
       FROM application_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN people p ON p.user_id=u.id AND p.deleted_at IS NULL
       WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.idle_expires_at>? AND u.deleted_at IS NULL`).bind(tokenHash, asOf).first<Row>();
     if (!row) return null;
-    return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at) };
+    return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), name: text(row.person_name), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at), updatedAt: text(row.updated_at), profileRevision: number(row.profile_revision) };
   }
 
   async renewApplicationSession(sessionId: string, asOf = now(), throttleMs = APPLICATION_SESSION_ACTIVITY_THROTTLE_MS) {
@@ -1318,6 +1341,32 @@ export class Repository {
     sql += ' ORDER BY tr.transaction_date DESC,tr.created_at DESC,tr.kind ASC,tr.id DESC LIMIT ?'; args.push(limit + 1);
     const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
     const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const expenseIds = pageRows.filter((row) => text(row.kind) === 'expense').map((row) => text(row.id));
+     const contextByExpense = new Map<string, { payerPersonIds: string[]; payerNames: string[]; splitPersonIds: string[]; splitNames: string[] }>();
+     if (expenseIds.length) {
+       // Each child query has one bound ID per expense. Keeping them as two
+       // queries (rather than a UNION with the IDs repeated) leaves a 100-item
+       // page safely below D1's parameter limit while remaining bulk hydration.
+       for (let start = 0; start < expenseIds.length; start += 90) {
+         const chunk = expenseIds.slice(start, start + 90), placeholders = chunk.map(() => '?').join(',');
+         const [payers, splits] = await Promise.all([
+           this.db.prepare(`SELECT payer.expense_id,payer.person_id,COALESCE(person.name,'Removed participant') AS person_name
+             FROM payers payer LEFT JOIN people person ON person.id=payer.person_id WHERE payer.expense_id IN (${placeholders}) ORDER BY payer.expense_id,payer.person_id`).bind(...chunk).all<Row>(),
+           this.db.prepare(`SELECT split.expense_id,split.person_id,COALESCE(person.name,'Removed participant') AS person_name
+             FROM splits split LEFT JOIN people person ON person.id=split.person_id WHERE split.expense_id IN (${placeholders}) ORDER BY split.expense_id,split.person_id`).bind(...chunk).all<Row>(),
+         ]);
+         for (const row of payers.results) {
+           const expenseId = text(row.expense_id), context = contextByExpense.get(expenseId) || { payerPersonIds: [], payerNames: [], splitPersonIds: [], splitNames: [] };
+           if (row.person_id) { context.payerPersonIds.push(text(row.person_id)); context.payerNames.push(text(row.person_name)); }
+           contextByExpense.set(expenseId, context);
+         }
+         for (const row of splits.results) {
+           const expenseId = text(row.expense_id), context = contextByExpense.get(expenseId) || { payerPersonIds: [], payerNames: [], splitPersonIds: [], splitNames: [] };
+           if (row.person_id) { context.splitPersonIds.push(text(row.person_id)); context.splitNames.push(text(row.person_name)); }
+           contextByExpense.set(expenseId, context);
+         }
+       }
+     }
     const items: Transaction[] = pageRows.map((row) => {
       if (text(row.kind) === 'settlement') return {
          kind: 'settlement', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
@@ -1328,7 +1377,7 @@ export class Repository {
       return {
         kind: 'expense', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
-        createdBy: text(row.created_by), createdAt: text(row.created_at), clientOperationId: operation,
+        createdBy: text(row.created_by), createdAt: text(row.created_at), clientOperationId: operation, ...(contextByExpense.get(text(row.id)) || {}),
       };
     });
     const last = pageRows[pageRows.length - 1];
@@ -1613,6 +1662,42 @@ export class Repository {
     const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
     const parse = (value: unknown) => { if (value == null) return undefined; try { return JSON.parse(text(value)); } catch { return undefined; } };
     const items = pageRows.map((row) => ({ id: text(row.id), groupId: text(row.group_id), entityType: text(row.entity_type) as AuditEvent['entityType'], entityId: text(row.entity_id), version: number(row.version), action: text(row.action) as AuditEvent['action'], actorId: text(row.actor_id), ...(row.actor_person_id == null ? {} : { actorPersonId: text(row.actor_person_id) }), actorName: text(row.actor_name) || 'Unknown user', occurredAt: text(row.occurred_at), ...(row.before_json == null ? {} : { before: parse(row.before_json) }), ...(row.after_json == null ? {} : { after: parse(row.after_json) }) }));
+    const last = pageRows[pageRows.length - 1];
+     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.occurred_at), createdAt: text(last.occurred_at), id: text(last.id) }) : undefined };
+  }
+  private auditSummary(snapshot: unknown, entityType: AuditEvent['entityType']) {
+    if (!snapshot || typeof snapshot !== 'object') return undefined;
+    const row = snapshot as Record<string, unknown>;
+    const value = (camel: string, snake: string) => row[camel] ?? row[snake];
+    const amount = value('amountMinor', 'amount_minor');
+    const currencyValue = value('currency', 'currency');
+    const parts = [
+      entityType === 'expense' && typeof value('description', 'description') === 'string' && value('description', 'description') ? `Description “${value('description', 'description')}”` : '',
+      typeof amount === 'number' || typeof amount === 'string' ? `Amount ${Number(amount) / 100} ${text(currencyValue)}` : '',
+      typeof value('date', 'expense_date') === 'string' || typeof value('settlementDate', 'settlement_date') === 'string' ? `Date ${text(value('date', 'expense_date') ?? value('settlementDate', 'settlement_date'))}` : '',
+      entityType === 'expense' && typeof value('notes', 'notes') === 'string' && value('notes', 'notes') ? `Notes “${value('notes', 'notes')}”` : '',
+      entityType === 'settlement' && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',
+      value('fromPersonId', 'from_person_id') !== undefined || value('toPersonId', 'to_person_id') !== undefined ? 'Participants updated' : '',
+      value('deletedAt', 'deleted_at') != null ? 'Marked deleted' : '',
+    ].filter(Boolean);
+    return parts.length ? parts.join(' · ') : 'No meaningful field details';
+  }
+  async auditEntityPage(groupId: string, entityType: AuditEvent['entityType'], entityId: string, options: { limit?: number; cursor?: string; offset?: number } = {}) {
+    if (options.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 100), cursor = decodeLedgerCursor(options.cursor);
+    let sql = 'SELECT entity_type,version,action,actor_name,occurred_at,before_json,after_json,id FROM audit_events WHERE group_id=? AND entity_type=? AND entity_id=?';
+    const args: unknown[] = [groupId, entityType, entityId];
+    if (cursor) { sql += ' AND (occurred_at<? OR (occurred_at=? AND id<?))'; args.push(cursor.createdAt, cursor.createdAt, cursor.id); }
+    sql += ' ORDER BY occurred_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
+    const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results;
+    const hasMore = rows.length > limit, pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const parse = (value: unknown) => { if (value == null) return undefined; try { return JSON.parse(text(value)); } catch { return undefined; } };
+    const items = pageRows.map((row) => ({
+      entityType: text(row.entity_type) as AuditEvent['entityType'], version: number(row.version), action: text(row.action) as AuditEvent['action'],
+      actorName: text(row.actor_name) || 'Unknown user', occurredAt: text(row.occurred_at),
+      ...(row.before_json == null ? {} : { beforeSummary: this.auditSummary(parse(row.before_json), entityType) }),
+      ...(row.after_json == null ? {} : { afterSummary: this.auditSummary(parse(row.after_json), entityType) }),
+    }));
     const last = pageRows[pageRows.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: text(last.occurred_at), createdAt: text(last.occurred_at), id: text(last.id) }) : undefined };
   }

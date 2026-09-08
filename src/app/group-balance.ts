@@ -18,8 +18,12 @@ export function personalBalanceDisplay(balance: Balance | undefined, currency: s
 }
 
 export function personalBalances(balances: Record<string, { raw: Balance[] }>, personId: string, defaultCurrency: string): GroupBalanceDisplay[] {
-  const displays = Object.entries(balances).map(([currency, value]) => personalBalanceDisplay(value.raw.find((balance) => balance.personId === personId), currency));
+  const displays = Object.entries(balances).map(([currency, value]) => personalBalanceDisplay(value.raw.find((balance) => balance.personId === personId) || { personId, name: 'You', netMinor: 0, currency: currency as Balance['currency'] }, currency));
   return displays.length ? displays : [personalBalanceDisplay(undefined, defaultCurrency)];
+}
+
+export function balanceStatus(netMinor: number): 'owed' | 'owes' | 'settled' {
+  return netMinor > 0 ? 'owed' : netMinor < 0 ? 'owes' : 'settled';
 }
 
 export function groupBalanceDisplay(summary: GroupBalanceSummary | undefined, defaultCurrency: string): GroupBalanceDisplay {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Transaction } from '../shared/types';
-import { transactionCategory, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
+import { transactionCategory, transactionContext, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 
 const expense: Transaction = { kind: 'expense', id: 'e-1', groupId: 'g-1', description: 'Dinner', amountMinor: 1200, currency: 'USD', date: '2026-01-01', category: ' Dining ', notes: '  Team meal  ', createdBy: 'u-1', createdAt: '2026-01-01T00:00:00Z', clientOperationId: null };
 const settlement: Transaction = { kind: 'settlement', id: 's-1', groupId: 'g-1', amountMinor: 500, currency: 'USD', date: '2026-01-02', note: '  Paid back  ', fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'Former A', toName: 'Former B', createdAt: '2026-01-02T00:00:00Z' };
@@ -20,5 +20,27 @@ describe('transaction row helpers', () => {
     expect(transactionCategory(settlement)).toBeUndefined();
     expect(transactionNote(expense)).toBe('Team meal');
     expect(transactionNote(settlement)).toBe('Paid back');
+  });
+
+  it('uses Split with only when the viewer is included', () => {
+    const included: Transaction = { ...expense, payerPersonIds: ['me'], payerNames: ['Alex'], splitPersonIds: ['me', 'friend'], splitNames: ['Alex', 'Aron'] };
+    expect(transactionContext(included, 'me')).toEqual(['Paid by You', 'Split with Aron']);
+  });
+
+  it('uses neutral copy when the viewer is excluded', () => {
+    const excluded: Transaction = { ...expense, payerPersonIds: ['me'], payerNames: ['Alex'], splitPersonIds: ['friend', 'other'], splitNames: ['Aron', 'Bea'] };
+    expect(transactionContext(excluded, 'me')).toEqual(['Paid by You', 'Split between Aron, Bea']);
+  });
+
+  it('uses neutral copy when the viewer identity is unknown', () => {
+    const unknownViewer: Transaction = { ...expense, payerPersonIds: ['me'], payerNames: ['Alex'], splitPersonIds: ['me', 'friend'], splitNames: ['Alex', 'Aron'] };
+    expect(transactionContext(unknownViewer)).toEqual(['Paid by Alex', 'Split between Alex, Aron']);
+  });
+
+  it('does not repeat the current user in split context', () => {
+    const payerAndSplit: Transaction = { ...expense, payerPersonIds: ['me'], payerNames: ['Alex'], splitPersonIds: ['me', 'friend'], splitNames: ['Alex', 'Aron'] };
+    const onlyCurrentUser: Transaction = { ...expense, payerPersonIds: ['me'], payerNames: ['Alex'], splitPersonIds: ['me'], splitNames: ['Alex'] };
+    expect(transactionContext(payerAndSplit, 'me')).toEqual(['Paid by You', 'Split with Aron']);
+    expect(transactionContext(onlyCurrentUser, 'me')).toEqual(['Paid by You']);
   });
 });

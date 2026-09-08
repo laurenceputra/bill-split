@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches } from './idb';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, updateOfflineTrustName } from './idb';
 import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -62,6 +62,19 @@ describe('user-scoped IndexedDB', () => {
     ]);
     expect([first, second].filter(Boolean)).toHaveLength(1);
     expect((await readOfflineTrust())?.revision).toBe(expectedRevision + 1);
+  });
+
+  it('orders offline profile patches by the numeric revision, not timestamp order', async () => {
+    await saveOfflineTrust({ ...user('user-a'), clerkUserId: 'clerk-a', profileRevision: 1 });
+    await updateOfflineTrustName('user-a', 'New name', undefined, 3, '2026-01-01T00:00:00.000Z');
+    await updateOfflineTrustName('user-a', 'Old name', undefined, 2, '2026-01-02T00:00:00.000Z');
+    expect(await readOfflineTrust()).toMatchObject({ name: 'New name', profileRevision: 3 });
+  });
+
+  it('does not let a late identity write regress a newer profile revision', async () => {
+    await saveVerifiedIdentity({ ...user('user-a'), name: 'New name', profileRevision: 3 });
+    await saveVerifiedIdentity({ ...user('user-a'), name: 'Old name', profileRevision: 2 });
+    expect(await readLastVerifiedIdentity()).toMatchObject({ name: 'New name', profileRevision: 3 });
   });
 
   it('upgrades without losing the legacy recent store', async () => {
@@ -229,6 +242,37 @@ describe('user-scoped IndexedDB', () => {
   it('persists home balance summaries without requiring an IndexedDB migration', async () => {
     await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', createdAt: '', updatedAt: '', balanceSummaries: [{ currency: 'EUR', netMinor: -250 }] }], cachedAt: 'summary-time' });
     expect((await readGroups('user-a'))?.groups[0].balanceSummaries).toEqual([{ currency: 'EUR', netMinor: -250 }]);
+  });
+
+  it('updates a renamed counterpart in the persisted home group label only when the snapshot identifies that counterpart', async () => {
+    await saveGroups({ userId: 'user-a', groups: [
+      { id: 'friend-group', name: 'Friend group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 2, counterpartName: 'Old name' },
+      { id: 'larger-group', name: 'Larger group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 3, counterpartName: 'Should stay' },
+    ], cachedAt: 'groups-time' });
+    await updateGroupSnapshot('user-a', 'friend-group', {
+      currentPersonId: 'person-me',
+      members: [
+        { personId: 'person-me', name: 'Me', joinedAt: '', role: 'member' },
+        { personId: 'person-friend', name: 'Old name', joinedAt: '', role: 'member' },
+      ],
+    });
+    await updateGroupSnapshot('user-a', 'larger-group', {
+      currentPersonId: 'person-me',
+      members: [
+        { personId: 'person-me', name: 'Me', joinedAt: '', role: 'member' },
+        { personId: 'person-friend', name: 'Old name', joinedAt: '', role: 'member' },
+        { personId: 'person-other', name: 'Other', joinedAt: '', role: 'member' },
+      ],
+    });
+
+    await patchCachedMemberName('user-a', 'person-friend', 'New name', undefined, 2, '2026-01-02T00:00:00.000Z');
+    await patchCachedMemberName('user-a', 'person-friend', 'Delayed old name', undefined, 1, '2026-01-01T00:00:00.000Z');
+
+    expect((await readGroups('user-a'))?.groups).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'friend-group', counterpartName: 'New name' }),
+      expect.objectContaining({ id: 'larger-group', counterpartName: 'Should stay' }),
+    ]));
+    expect((await readGroupSnapshot('user-a', 'friend-group'))?.members?.find((member) => member.personId === 'person-friend')?.name).toBe('New name');
   });
 
   it('expires persisted home groups without discarding offline summaries', async () => {

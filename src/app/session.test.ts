@@ -63,6 +63,80 @@ describe('persisted logout coordination', () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects profile changes from another session and older revisions', async () => {
+    const values = new Map<string, string>();
+    class FakeChannel {
+      static instances: FakeChannel[] = [];
+      listener?: (event: MessageEvent) => void;
+      constructor() { FakeChannel.instances.push(this); }
+      addEventListener(_type: string, listener: (event: MessageEvent) => void) { this.listener = listener; }
+      postMessage() { /* Sender delivery is excluded by owner. */ }
+      emit(data: unknown) { this.listener?.({ data } as MessageEvent); }
+    }
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
+    vi.stubGlobal('window', { addEventListener: vi.fn() });
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    vi.resetModules();
+    const session = await import('./session');
+    const listener = vi.fn();
+    session.subscribeSessionCoordination(listener);
+    const currentGeneration = session.captureSessionGeneration();
+    const current = { type: 'profile-changed' as const, userId: 'user-a', personId: 'person-a', name: 'New', generation: currentGeneration, revision: 2, nonce: 'profile-new', owner: 'other-tab' };
+    FakeChannel.instances[0].emit(current);
+    FakeChannel.instances[0].emit({ ...current, name: 'Old', revision: 1, nonce: 'profile-old' });
+    FakeChannel.instances[0].emit({ ...current, name: 'Wrong session', generation: currentGeneration + 1, nonce: 'profile-wrong-session' });
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ name: 'New', revision: 2 }));
+  });
+
+  it('records the sender revision before a delayed inbound profile message arrives', async () => {
+    const values = new Map<string, string>();
+    class FakeChannel {
+      static instances: FakeChannel[] = [];
+      listener?: (event: MessageEvent) => void;
+      constructor() { FakeChannel.instances.push(this); }
+      addEventListener(_type: string, listener: (event: MessageEvent) => void) { this.listener = listener; }
+      postMessage() { /* Sender delivery is excluded by owner. */ }
+      emit(data: unknown) { this.listener?.({ data } as MessageEvent); }
+    }
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
+    vi.stubGlobal('window', { addEventListener: vi.fn() });
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    vi.resetModules();
+    const session = await import('./session');
+    const listener = vi.fn();
+    session.subscribeSessionCoordination(listener);
+    const generation = session.captureSessionGeneration();
+    expect(session.recordProfileRevision('user-a', generation, 2)).toBe(true);
+    FakeChannel.instances[0].emit({ type: 'profile-changed', userId: 'user-a', personId: 'person-a', name: 'Old', generation, profileRevision: 1, updatedAt: '2026-01-01T00:00:00.000Z', nonce: 'delayed-old', owner: 'other-tab' });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('applies inbound profile changes in server revision order', async () => {
+    const values = new Map<string, string>();
+    class FakeChannel {
+      static instances: FakeChannel[] = [];
+      listener?: (event: MessageEvent) => void;
+      constructor() { FakeChannel.instances.push(this); }
+      addEventListener(_type: string, listener: (event: MessageEvent) => void) { this.listener = listener; }
+      postMessage() { /* Sender delivery is excluded by owner. */ }
+      emit(data: unknown) { this.listener?.({ data } as MessageEvent); }
+    }
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
+    vi.stubGlobal('window', { addEventListener: vi.fn() });
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    vi.resetModules();
+    const session = await import('./session');
+    const listener = vi.fn();
+    session.subscribeSessionCoordination(listener);
+    const generation = session.captureSessionGeneration();
+    const base = { type: 'profile-changed' as const, userId: 'user-a', personId: 'person-a', generation, owner: 'other-tab' };
+    FakeChannel.instances[0].emit({ ...base, name: 'First', profileRevision: 7, updatedAt: '2026-01-02T00:00:00.000Z', nonce: 'profile-first' });
+    FakeChannel.instances[0].emit({ ...base, name: 'Second', profileRevision: 8, updatedAt: '2026-01-01T00:00:00.000Z', nonce: 'profile-second' });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener.mock.calls.map(([message]) => message.name)).toEqual(['First', 'Second']);
+  });
+
   it('keeps a local cleanup mask until the receiver finishes after logout-clear', async () => {
     const storageListeners: Array<(event: StorageEvent) => void> = [];
     vi.stubGlobal('localStorage', storage());

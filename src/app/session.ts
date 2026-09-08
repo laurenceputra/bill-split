@@ -10,7 +10,7 @@ const SESSION_COORDINATION_KEY = 'billsplit-auth-coordination';
 const SESSION_AUTH_INVALIDATION_KEY = 'billsplit-auth-invalidation';
 
 export type SessionCoordinationMessage = {
-  type: 'logout-start' | 'logout-clear' | 'logout-rollback' | 'auth-invalidation' | 'account-deletion' | 'cache-clear';
+  type: 'logout-start' | 'logout-clear' | 'logout-rollback' | 'auth-invalidation' | 'account-deletion' | 'cache-clear' | 'profile-changed';
   generation: number;
   reason?: 'account-switch' | 'account-deletion' | 'cache-clear';
   userId?: string;
@@ -18,6 +18,15 @@ export type SessionCoordinationMessage = {
   previousClerkUserId?: string;
   clearOutbox?: boolean;
   phase?: string;
+  name?: string;
+  personId?: string;
+  /** Legacy coordination revision for cached messages from older clients. */
+  revision?: number;
+  /** Server-authoritative database profile revision. */
+  profileRevision?: number;
+  /** Legacy wall-clock value retained only for DTO compatibility. */
+  updatedAt?: string;
+  timestamp?: number;
   nonce?: string;
 };
 type SessionMessage = SessionCoordinationMessage & { owner?: string };
@@ -38,6 +47,31 @@ const owner = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.random
 const processedCoordinationNonces = new Set<string>();
 let latestAuthInvalidation: SessionMessage | undefined;
 const pendingCoordinationMessages = new Map<string, SessionCoordinationMessage>();
+type ProfileRevision = { kind: 'server'; value: number } | { kind: 'legacy'; value: number };
+const latestProfileRevisions = new Map<string, ProfileRevision>();
+
+const profileRevisionFromMessage = (message: SessionMessage): ProfileRevision | undefined => {
+  const profileRevision = message.profileRevision;
+  if (typeof profileRevision === 'number' && Number.isSafeInteger(profileRevision) && profileRevision >= 0) return { kind: 'server', value: profileRevision };
+  const legacy = message.revision ?? message.timestamp;
+  return Number.isSafeInteger(legacy) ? { kind: 'legacy', value: legacy as number } : undefined;
+};
+const isNewerProfileRevision = (next: ProfileRevision, current: ProfileRevision | undefined) => {
+  if (!current) return true;
+  if (next.kind !== current.kind) return next.kind === 'server';
+  if (next.kind === 'server' && current.kind === 'server') return next.value > current.value;
+  if (next.kind === 'legacy' && current.kind === 'legacy') return next.value > current.value;
+  return false;
+};
+/** Record an accepted server revision before publishing the local rename. */
+export const recordProfileRevision = (userId: string, profileGeneration: number, profileRevision: number, legacy = false) => {
+  if (!userId || !Number.isSafeInteger(profileGeneration) || !Number.isSafeInteger(profileRevision) || profileRevision < 0) return false;
+  const next = { kind: legacy ? 'legacy' as const : 'server' as const, value: profileRevision };
+  const key = `${userId}:${profileGeneration}`;
+  const current = latestProfileRevisions.get(key);
+  if (!current || isNewerProfileRevision(next, current)) latestProfileRevisions.set(key, next);
+  return !current || current.kind === next.kind && current.value === profileRevision || isNewerProfileRevision(next, current);
+};
 
 const rememberAuthInvalidation = (message: SessionMessage) => {
   if (message.type === 'auth-invalidation' && message.reason === 'account-switch') latestAuthInvalidation = message;
@@ -52,6 +86,13 @@ const markCoordinationNonceProcessed = (nonce: string) => {
 
 const acceptCoordinationMessage = (message: SessionMessage) => {
   if (!message.nonce || message.owner === owner || processedCoordinationNonces.has(message.nonce)) return false;
+  if (message.type === 'profile-changed') {
+    const revision = profileRevisionFromMessage(message);
+    if (!message.userId || !Number.isSafeInteger(message.generation) || message.generation !== generation || !revision) return false;
+    const key = `${message.userId}:${message.generation}`;
+    if (!isNewerProfileRevision(revision, latestProfileRevisions.get(key))) return false;
+    latestProfileRevisions.set(key, revision);
+  }
   markCoordinationNonceProcessed(message.nonce);
   rememberAuthInvalidation(message);
   return true;

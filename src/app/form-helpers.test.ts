@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, effectiveGroupSplitDefault, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, isSplitDefaultSaveLockedForScope, neutralAllocationPreview, normalizeExpenseSplitArrangement, normalizeSinglePayer, previewAllocation, releaseSplitDefaultSaveLock, resolveGroupSplitDefault, sameGroupSplitArrangement, settlementSuggestion, settlementSuggestionFingerprint, splitDefaultChoiceState, splitDefaultSaveOutcome, type FormSaveFence } from './form-helpers';
+import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, effectiveGroupSplitDefault, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, isSplitDefaultSaveLockedForScope, manuallySetSettlementEditAmount, neutralAllocationPreview, normalizeExpenseSplitArrangement, normalizeSinglePayer, previewAllocation, releaseSplitDefaultSaveLock, resolveGroupSplitDefault, sameGroupSplitArrangement, settlementAmountForPair, settlementEditAmountState, settlementSuggestion, settlementSuggestionFingerprint, settlementSuggestionForPair, splitDefaultChoiceState, splitDefaultSaveOutcome, transitionSettlementEditAmount, type FormSaveFence } from './form-helpers';
 import type { Balances, GroupMember } from '../shared/types';
 
 const member = (personId: string, name = personId): GroupMember => ({ personId, name, joinedAt: '', role: 'member' });
@@ -10,6 +10,13 @@ describe('expense form helpers', () => {
     expect(currentPayerSelection('two', members)).toBe('two');
     expect(currentPayerSelection('missing', members)).toBe('one');
     expect(normalizeSinglePayer([{ personId: 'two', amount: '12.00' }, { personId: 'one', amount: '8.00' }].slice(0, 1), '20.00')).toEqual([{ personId: 'two', amount: '20.00' }]);
+  });
+
+  it('only suggests an exact selected settlement pair in its currency', () => {
+    const balances = { USD: { raw: [], simplified: [{ fromPersonId: 'one', fromName: 'One', toPersonId: 'two', toName: 'Two', amountMinor: 1440, currency: 'USD' as const }] } };
+    expect(settlementSuggestionForPair(balances, 'one', 'two', 'USD')?.amountMinor).toBe(1440);
+    expect(settlementSuggestionForPair(balances, 'two', 'one', 'USD')).toBeUndefined();
+    expect(settlementSuggestionForPair(balances, 'one', 'two', 'EUR')).toBeUndefined();
   });
 
   it('maps keyed allocation state and preserves method metadata', () => {
@@ -119,6 +126,35 @@ describe('settlement suggestion', () => {
   it('prefers a debt involving the current person and keeps debtor direction', () => {
     expect(settlementSuggestion(balances, 'two', 'USD')).toMatchObject({ fromPersonId: 'one', toPersonId: 'two', amountMinor: 900 });
     expect(settlementSuggestion(balances, 'missing', 'USD')).toMatchObject({ fromPersonId: 'one', toPersonId: 'two' });
+  });
+
+  it('restores exact pair suggestions but never overwrites a manually edited amount', () => {
+    const alternate = balances.USD.simplified[1];
+    const original = balances.USD.simplified[0];
+    let state = settlementAmountForPair('9.00', '9.00', alternate);
+    expect(state).toEqual({ amount: '1.00', autoAmount: '1.00' });
+    state = settlementAmountForPair(state.amount, state.autoAmount, original);
+    expect(state).toEqual({ amount: '9.00', autoAmount: '9.00' });
+    state = settlementAmountForPair('7.25', state.autoAmount, alternate);
+    expect(state).toEqual({ amount: '7.25', autoAmount: '9.00' });
+    expect(settlementAmountForPair(state.amount, state.autoAmount, original)).toEqual(state);
+    expect(settlementAmountForPair('9.00', '9.00', original, false)).toEqual({ amount: '9.00', autoAmount: '9.00' });
+  });
+
+  it('round trips an edited settlement through a suggested pair and back to the original amount', () => {
+    const original = balances.USD.simplified[0];
+    const alternate = balances.USD.simplified[1];
+    let state = settlementEditAmountState('one:two', '10.00');
+    state = transitionSettlementEditAmount(state, 'three:four', alternate);
+    expect(state.amount).toBe('1.00');
+    state = transitionSettlementEditAmount(state, 'one:two', original);
+    expect(state.amount).toBe('10.00');
+    state = manuallySetSettlementEditAmount(state, '7.25');
+    expect(transitionSettlementEditAmount(state, 'three:four', alternate).amount).toBe('7.25');
+  });
+
+  it('initializes an empty amount from the selected pair suggestion', () => {
+    expect(settlementAmountForPair('', undefined, balances.USD.simplified[0])).toEqual({ amount: '9.00', autoAmount: '9.00' });
   });
 });
 

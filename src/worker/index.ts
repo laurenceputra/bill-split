@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
-import { accountDeletionInput, categorySuggestionInput, currency, date, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput } from '../shared/schemas';
+import { accountDeletionInput, categorySuggestionInput, currency, date, friendInput, groupInput, groupSplitDefaultInput, invitationInput, ownershipTransferInput, personInput, profileNameInput } from '../shared/schemas';
 import { simplifyDebts } from '../domain/balances';
 import { Repository, RepositoryError, assertLikeSearch } from '../db/repository';
 import { BalanceOverflowError } from '../shared/money';
@@ -13,7 +13,7 @@ import { CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSession
 import { registerExpenseSettlementRoutes } from './expense-settlement-routes';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type ApplicationAuth = { id: string; email: string; personId: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
+type ApplicationAuth = { id: string; email: string; personId: string; name: string; profileRevision?: number; updatedAt?: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
 export type CronStage = 'purge' | 'generation' | 'monthly-summary' | 'build-gc';
 const cronStages: CronStage[] = ['purge', 'generation', 'monthly-summary', 'build-gc'];
 const cronSlotMs = 15 * 60 * 1000;
@@ -155,7 +155,7 @@ const recoverDeletedAccountIdentity = async (c: any, repo: Repository) => {
   if (!binding.ok) return jsonError(c, binding.status, binding.code, binding.message);
   const deleted = await repo.deletedAccountForIdentity(fresh.clerkUserId, fresh.primaryEmail);
   if (!deleted) return undefined;
-  return { id: String(deleted.id), email: fresh.primaryEmail, personId: '', clerkUserId: fresh.clerkUserId };
+  return { id: String(deleted.id), email: fresh.primaryEmail, personId: '', name: 'Deleted account', clerkUserId: fresh.clerkUserId };
 };
 const authenticateClerkIdentity = async (c: any) => {
   const env = c.env;
@@ -167,7 +167,7 @@ const authenticateClerkIdentity = async (c: any) => {
 const authForClerkClaims = async (repo: Repository, identityClaims: Awaited<ReturnType<typeof authenticateClerkIdentity>>) => {
   const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
   return {
-    id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), clerkUserId: identityClaims.clerkUserId,
+    id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}), clerkUserId: identityClaims.clerkUserId,
   } satisfies ApplicationAuth;
 };
 const issueApplicationSession = async (c: any, auth: ApplicationAuth) => {
@@ -235,7 +235,7 @@ api.use('/api/*', async (c, next) => {
   if (env.ENVIRONMENT === 'development' && !hasApplicationCookie && devEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(devEmail)) {
     try {
       const repo = repositoryFor(env); const identity = await repo.user(devEmail.trim().toLowerCase());
-      const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id) };
+      const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}) };
       const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
@@ -273,7 +273,7 @@ api.use('/api/*', async (c, next) => {
     const repo = repositoryFor(env);
     const session = rawToken ? await repo.applicationSession(await sha256Hex(rawToken)) : null;
     if (session) {
-      const auth = { id: session.userId, email: session.email, personId: session.personId, clerkUserId: session.clerkUserId, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt };
+      const auth = { id: session.userId, email: session.email, personId: session.personId, name: session.name, profileRevision: session.profileRevision, updatedAt: session.updatedAt, clerkUserId: session.clerkUserId, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt };
       const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
@@ -351,10 +351,18 @@ api.post('/api/session/bootstrap', async (c) => {
     c.set('auth', sessionAuth);
     c.header('X-BillSplit-User-Id', sessionAuth.id);
     c.header('X-BillSplit-Clerk-User-Id', sessionAuth.clerkUserId!);
-    return c.json({ user: { id: sessionAuth.id, email: sessionAuth.email, personId: sessionAuth.personId }, idleExpiresAt: sessionAuth.idleExpiresAt });
+    return c.json({ user: { id: sessionAuth.id, email: sessionAuth.email, personId: sessionAuth.personId, name: sessionAuth.name, profileRevision: sessionAuth.profileRevision, updatedAt: sessionAuth.updatedAt }, idleExpiresAt: sessionAuth.idleExpiresAt });
   } catch (error) { return repositoryError(c, error); }
 });
-api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
+api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, name: a.name, profileRevision: a.profileRevision, ...(a.updatedAt ? { updatedAt: a.updatedAt } : {}), ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
+api.put('/api/me', zValidator('json', profileNameInput), async (c) => {
+  try {
+    const person = await getRepo(c).updateDisplayName(c.get('auth').id, c.req.valid('json').name);
+    const auth = c.get('auth');
+    c.set('auth', { ...auth, name: person.name, profileRevision: person.profileRevision, updatedAt: person.updatedAt });
+    return c.json({ user: { id: auth.id, email: auth.email, personId: auth.personId, name: person.name, profileRevision: person.profileRevision, updatedAt: person.updatedAt, ...(auth.idleExpiresAt ? { idleExpiresAt: auth.idleExpiresAt } : {}) } });
+  } catch (error) { return repositoryError(c, error); }
+});
 api.post('/api/session/activity', async (c) => {
   const auth = c.get('auth');
   if (!auth.applicationSessionId) return c.json({ idleExpiresAt: auth.idleExpiresAt });
@@ -422,13 +430,24 @@ api.get('/api/groups/:groupId/balances', async (c) => {
   const balances: Record<string, { raw: Array<{ personId: string; name: string; netMinor: number; currency: typeof x.group.currency }>; simplified: ReturnType<typeof simplifyDebts> }> = {};
   for (const current of currencies) {
     const net: Record<string, number> = Object.fromEntries(projection.rows.filter((row) => row.currency === current).map((row) => [row.personId, row.netMinor]));
-    const raw = Object.entries(net).map(([personId, netMinor]) => ({ personId, name: names[personId] ?? personId, netMinor, currency: current }));
+    const raw = members.map((member) => ({ personId: member.personId, name: names[member.personId] ?? 'Removed participant', netMinor: net[member.personId] ?? 0, currency: current }));
     balances[current] = { raw, simplified: simplifyDebts(net, current, names) };
   }
   return c.json({ currencies, balances });
 });
 api.get('/api/activity', async (c) => { const q = c.req.query(), groupId = q.group; if (groupId && (await authorizedGroup(c, groupId)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found'); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await getRepo(c).globalActivity(c.get('auth').id, groupId || undefined, { limit, cursor: q.cursor }); return c.json({ activity: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId/audit', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.auditPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ audit: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/groups/:groupId/audit/:entityType/:entityId', async (c) => {
+  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
+  const entityType = c.req.param('entityType');
+  if (entityType !== 'expense' && entityType !== 'settlement') return jsonError(c, 400, 'INVALID_AUDIT_ENTITY', 'Audit entity type must be expense or settlement');
+  const offsetError = rejectOffset(c); if (offsetError) return offsetError;
+  const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
+  try {
+    const result = await x.repo.auditEntityPage(c.req.param('groupId'), entityType, c.req.param('entityId'), { limit, cursor: q.cursor });
+    return c.json({ audit: result.items, nextCursor: result.nextCursor });
+  } catch (error) { return repositoryError(c, error); }
+});
 api.get('/api/categories', async (c) => c.json({ categories: await getRepo(c).categories(c.get('auth').id) }));
  api.get('/api/groups/:groupId/export.json', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { return c.json(await x.repo.groupExportPage(c.req.param('groupId'), { limit, expenseCursor: q.expenseDone === '1' ? null : q.expenseCursor, settlementCursor: q.settlementDone === '1' ? null : q.settlementCursor })); } catch (error) { return repositoryError(c, error); } });
    api.get('/api/groups/:groupId/export.csv', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 100, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.expensePage(c.req.param('groupId'), { limit, cursor: q.cursor }); const csv = ['date,description,amount_minor,currency,payers,splits', ...result.items.map((expense) => [expense.date, expense.description, expense.amountMinor, expense.currency, expense.payers.map((p) => `${p.personId}:${p.amountMinor}`).join(';'), expense.splits.map((s) => `${s.personId}:${s.amountMinor}`).join(';')].map(escapeCsvCell).join(','))].join('\n'); const headers: Record<string, string> = { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="group-expenses.csv"' }; if (result.nextCursor) headers['X-Next-Cursor'] = result.nextCursor; return new Response(csv, { headers }); } catch (error) { return repositoryError(c, error); } });
