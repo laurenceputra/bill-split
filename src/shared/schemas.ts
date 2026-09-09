@@ -14,6 +14,7 @@ export const date = z.string().refine((value) => {
 }, 'Date must be a real calendar date in YYYY-MM-DD format');
 const safeMinor = z.number().int().nonnegative().refine(Number.isSafeInteger, 'Amount must be a safe integer');
 export const personInput = z.object({ name: z.string().trim().min(1).max(120), email: z.string().trim().email().max(320).optional().nullable() });
+export const profileNameInput = z.object({ name: z.string().trim().min(1).max(120) });
 export const invitationInput = z.object({ email: z.string().trim().email().max(320) });
 export const ownershipTransferInput = z.object({ person_id: id });
 export const transactionVersionInput = z.object({ version: z.number().int().positive() });

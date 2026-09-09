@@ -41,6 +41,8 @@ export interface ExpenseTransaction {
     kind: 'expense'; id: string; groupId: string; groupName?: string; description: string; amountMinor: number; currency: Currency;
     date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
     clientOperationId?: string | null;
+    /** Deliberately small context for history rows; details remain on the detail route. */
+    payerPersonIds?: string[]; payerNames?: string[]; splitPersonIds?: string[]; splitNames?: string[];
 }
 export interface SettlementTransaction {
     kind: 'settlement'; id: string; groupId: string; groupName?: string; amountMinor: number; currency: Currency; date: string;
@@ -49,6 +51,8 @@ export interface SettlementTransaction {
 export type Transaction = ExpenseTransaction | SettlementTransaction;
 export type AuditAction = 'create' | 'update' | 'delete' | 'restore';
 export interface AuditEvent { id: string; groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: AuditAction; actorId: string; actorPersonId?: string; actorName: string; occurredAt: string; before?: unknown; after?: unknown }
+/** Redacted, entity-scoped audit data intended for transaction detail views. */
+export interface AuditDisclosureEvent { entityType: 'expense' | 'settlement'; version: number; action: AuditAction; actorName: string; occurredAt: string; beforeSummary?: string; afterSummary?: string }
 export interface CursorPage<T> { items: T[]; nextCursor?: string }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }
 export interface PairwiseBalance { fromPersonId: string; fromName: string; toPersonId: string; toName: string; amountMinor: number; currency: Currency }

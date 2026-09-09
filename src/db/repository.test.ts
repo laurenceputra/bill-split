@@ -40,6 +40,30 @@ class FakeStatement {
     if (this.sql.includes('INSERT INTO splits(')) this.db.splits.push({ person_id: this.args[1], amount_minor: this.args[2], metadata_json: this.args[3] });
   }
 }
+class ProfileDb {
+  name = 'Old name';
+  updatedAt = '2026-01-02T00:00:00.000Z';
+  profileRevision = 0;
+  deleted = false;
+  prepare(sql: string) { return new ProfileStatement(this, sql); }
+  async batch(statements: ProfileStatement[]) {
+    if (this.deleted) return statements.map(() => ({ meta: { changes: 0 } }));
+    this.name = String(statements[0].args[0]);
+    this.profileRevision += 1;
+    return statements.map(() => ({ meta: { changes: 1 } }));
+  }
+}
+class ProfileStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: ProfileDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async run() { if (this.sql.includes('UPDATE people')) this.db.name = String(this.args[0]); return { meta: { changes: 1 } }; }
+  async first<T>() {
+    if (this.sql.includes('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision FROM people')) return this.db.deleted ? null : { id: 'person-1', name: this.db.name, email: 'person@example.com', created_at: '2026-01-01', updated_at: this.db.updatedAt, profile_revision: this.db.profileRevision } as T;
+    if (this.sql.includes('SELECT deleted_at FROM users')) return this.db.deleted ? { deleted_at: '2026-01-01' } as T : null;
+    return null;
+  }
+}
 class BackfillLimitDb {
   limit: unknown;
   batches = 0;
@@ -133,6 +157,17 @@ class PurgeAccountingStatement {
   async first<T>() { return null as T | null; }
   async run() { return { meta: { changes: 1 } }; }
 }
+
+describe('repository profile updates', () => {
+  it('updates only the currently linked active person and returns the display name', async () => {
+    const db = new ProfileDb();
+    await expect(new Repository(db as never).updateDisplayName('user-1', '  New name  ')).resolves.toEqual({ id: 'person-1', name: 'New name', email: 'person@example.com', createdAt: '2026-01-01', updatedAt: '2026-01-02T00:00:00.000Z', profileRevision: 1 });
+  });
+  it('verifies both guarded batch writes when the user is deleted before the profile update', async () => {
+    const db = new ProfileDb(); db.deleted = true;
+    await expect(new Repository(db as never).updateDisplayName('user-1', 'New name')).rejects.toMatchObject({ code: 'AUTH_IDENTITY_CONFLICT' });
+  });
+});
 
 describe('repository application sessions', () => {
   it('creates sessions with the shared idle expiration policy', async () => {
@@ -231,6 +266,18 @@ class AuditPageStatement {
     return { results: [] as T[] };
   }
 }
+class AuditDisclosureDb {
+  constructor(readonly beforeAmount: unknown = 100, readonly afterAmount: unknown = 200) {}
+  prepare(sql: string) { return new AuditDisclosureStatement(sql, this); }
+}
+class AuditDisclosureStatement {
+  constructor(private readonly sql: string, private readonly db?: AuditDisclosureDb) {}
+  bind(..._args: unknown[]) { return this; }
+  async all<T>() {
+    if (!this.sql.includes('FROM audit_events')) return { results: [] as T[] };
+    return { results: [{ id: 'private-audit-id', entity_type: 'expense', entity_id: 'private-expense-id', version: 2, action: 'update', actor_name: 'Alex', occurred_at: '2026-01-02T00:00:00.000Z', before_json: JSON.stringify({ description: 'Old', amountMinor: this.db?.beforeAmount ?? 100, currency: 'USD', notes: 'old note', payers: [{ personId: 'private-person-id' }] }), after_json: JSON.stringify({ description: 'New', amountMinor: this.db?.afterAmount ?? 200, currency: 'USD', notes: 'new note', payers: [{ personId: 'private-person-id' }] }) }] as T[] };
+  }
+}
 
 const input = (description: string): ExpenseInput => ({ description, amount_minor: 100, currency: 'USD', date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 100 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 100 }], client_operation_id: 'retry-1' });
 
@@ -277,6 +324,24 @@ class BulkHydrationStatement {
     const ids = new Set(this.args.map(String));
     return { results: source.filter((row) => ids.has(String(row.expense_id))) as T[] };
   }
+}
+class BulkTransactionHydrationDb {
+  readonly rows: Array<Record<string, unknown>>;
+  readonly payers: Array<Record<string, unknown>>;
+  readonly splits: Array<Record<string, unknown>>;
+  queryArgs: number[] = [];
+  constructor(count: number) {
+    this.rows = Array.from({ length: count }, (_, index) => ({ id: `expense-${index}`, group_id: 'group-1', description: `Expense ${index}`, amount_minor: 100, currency: 'USD', transaction_date: '2025-01-01', created_by: 'user-1', created_at: '', kind: 'expense' }));
+    this.payers = this.rows.map((row) => ({ expense_id: row.id, person_id: 'person-1', person_name: 'Person 1' }));
+    this.splits = this.rows.map((row) => ({ expense_id: row.id, person_id: 'person-2', person_name: 'Person 2' }));
+  }
+  prepare(sql: string) { const db = this; let args: unknown[] = []; return { bind(...next: unknown[]) { args = next; db.queryArgs.push(args.length); return this; }, async all<T>() {
+    if (sql.includes('WITH transaction_rows')) return { results: db.rows as T[] };
+    const source = sql.includes('FROM payers') ? db.payers : db.splits;
+    const ids = new Set(args.map(String));
+    return { results: source.filter((row) => ids.has(String(row.expense_id))) as T[] };
+  } }; }
+  async batch(_statements: unknown[]) { return []; }
 }
 
 class FriendDb {
@@ -644,7 +709,7 @@ type TransactionTestRow = Record<string, unknown> & { personIds: string[]; delet
 class TransactionPageDb {
   lastSql = '';
   constructor(readonly rows: TransactionTestRow[]) {}
-  prepare(sql: string) { this.lastSql = sql; return new TransactionPageStatement(this.rows, sql); }
+  prepare(sql: string) { if (sql.includes('WITH transaction_rows')) this.lastSql = sql; return new TransactionPageStatement(this.rows, sql); }
 }
 class TransactionPageStatement {
   private args: unknown[] = [];
@@ -1087,9 +1152,34 @@ describe('repository pagination guards', () => {
     expect(page.items[0]).toMatchObject({ actorId: 'user-1', actorPersonId: 'person-1', actorName: 'Alex' });
     expect(page.items[0]).not.toHaveProperty('email');
   });
+  it('returns only redacted, entity-scoped audit summaries for transaction details', async () => {
+    const page = await new Repository(new AuditDisclosureDb() as never).auditEntityPage('group-1', 'expense', 'expense-1', { limit: 10 });
+    expect(page.items[0]).toMatchObject({ entityType: 'expense', version: 2, beforeSummary: expect.stringContaining('Notes “old note”'), afterSummary: expect.stringContaining('Notes “new note”') });
+    expect(page.items[0]).not.toHaveProperty('id');
+    expect(page.items[0]).not.toHaveProperty('entityId');
+    expect(JSON.stringify(page)).not.toContain('private-person-id');
+    expect(JSON.stringify(page)).not.toContain('private-operation-id');
+  });
+  it('formats safe minor-unit amounts with two fractional digits and omits malformed amounts', async () => {
+    const formatted = await new Repository(new AuditDisclosureDb(8450, 8400) as never).auditEntityPage('group-1', 'expense', 'expense-1', { limit: 10 });
+    expect(formatted.items[0]).toMatchObject({ beforeSummary: expect.stringContaining('Amount USD 84.50'), afterSummary: expect.stringContaining('Amount USD 84.00') });
+
+    const malformed = await new Repository(new AuditDisclosureDb('not-an-amount') as never).auditEntityPage('group-1', 'expense', 'expense-1', { limit: 10 });
+    expect(malformed.items[0].beforeSummary).not.toContain('Amount');
+    expect(malformed.items[0].beforeSummary).not.toContain('NaN');
+  });
 });
 
 describe('repository transaction pagination', () => {
+  it('hydrates a full 100-expense page in bind-limited bulk chunks', async () => {
+    const db = new BulkTransactionHydrationDb(100);
+    const page = await new Repository(db as never).transactionPage('group-1', { limit: 100 });
+    expect(page.items).toHaveLength(100);
+    expect(page.items.every((item) => item.kind === 'expense' && item.payerNames?.length === 1 && item.splitNames?.length === 1)).toBe(true);
+    expect(db.queryArgs.slice(1)).toEqual([90, 90, 10, 10]);
+    expect(Math.max(...db.queryArgs.slice(1))).toBeLessThanOrEqual(90);
+  });
+
   it('walks a mixed ledger without duplicates or omissions across date, created-at, kind, and ID ties', async () => {
     const repository = new Repository(new TransactionPageDb(transactionRows) as never);
     const ids: string[] = [];

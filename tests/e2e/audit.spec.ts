@@ -57,6 +57,7 @@ type Scenario = {
   auth: string | undefined;
   context: string;
   expected: ExpectedScenario;
+  expandedAudit?: { entityType: 'expense' | 'settlement'; entityId: string; content: string };
 };
 
 const viewports: Viewport[] = [
@@ -86,6 +87,8 @@ const apiPaths = {
   categories: '/api/categories',
   invitations: (id: string) => `/api/groups/${id}/invitations`,
   expense: (id: string) => `/api/expenses/${id}`,
+  settlement: (id: string) => `/api/settlements/${id}`,
+  auditEntity: (groupId: string, entityType: 'expense' | 'settlement', entityId: string) => `/api/groups/${groupId}/audit/${entityType}/${entityId}`,
   activity: (_id: string) => '/api/activity',
 };
 
@@ -102,11 +105,12 @@ const scenarios: Scenario[] = [
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
-  { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with history fixture', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] } },
+  { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] }, expandedAudit: { entityType: 'expense', entityId: ids.dinner, content: 'Updated expense' } },
+  { name: 'settlement-detail-history', path: `/groups/${ids.rich}/settlements/00000000-0000-4000-8000-000000005001`, auth: DEV_EMAIL, context: 'SettlementDetail / edited payment with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'paid', content: 'View audit history', apiPaths: [apiPaths.me, apiPaths.settlement('00000000-0000-4000-8000-000000005001'), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] }, expandedAudit: { entityType: 'settlement', entityId: '00000000-0000-4000-8000-000000005001', content: 'Updated settlement' } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'History changes / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'History', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.activity(ids.rich)] } },
   { name: 'all-groups-transactions', path: '/activity?view=transactions', auth: DEV_EMAIL, context: 'History transactions / all authorized groups fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.globalTransactions, apiPaths.categories] } },
-  { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Trusted-device offline access', apiPaths: [apiPaths.me] } },
+  { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / Profile rename and trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Renaming is available while online.', apiPaths: [apiPaths.me] } },
 ];
 
 const authState = (auth: string | undefined): AuthState => auth ? `authenticated:${auth}` : 'public';
@@ -469,6 +473,23 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
         await assertRendered(page, scenario, observations);
         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
         await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+        if (scenario.expandedAudit) {
+          try {
+            const auditSummary = page.getByText('View audit history', { exact: true });
+            await expect(auditSummary).toBeVisible();
+            await auditSummary.click();
+            await expect(page.locator('details.audit-disclosure')).toHaveAttribute('open', '');
+            await expect(page.getByRole('heading', { name: 'Audit history' })).toBeVisible();
+            await expect(page.getByText(scenario.expandedAudit.content, { exact: true })).toBeVisible();
+            expect(observations.some((observation) => observation.path === apiPaths.auditEntity(ids.rich, scenario.expandedAudit.entityType, scenario.expandedAudit.entityId) && observation.status >= 200 && observation.status < 300)).toBe(true);
+            const expandedScenario: Scenario = { ...scenario, name: `${scenario.name}-audit-open`, context: `${scenario.context} / audit disclosure open`, expected: { ...scenario.expected, content: scenario.expandedAudit.content } };
+            await assertRendered(page, expandedScenario, observations);
+            coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [audit open]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+            await reportForPage(page, expandedScenario, `${scenario.path} [audit open]`, viewport, artifactDirectory, findings, failures);
+          } catch (error) {
+            failures.push({ scenarioName: `${scenario.name}-audit-open`, authState: authState(scenario.auth), route: `${scenario.path} [audit open]`, viewport, detail: `Audit disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+          }
+        }
         if (scenario.name === 'group-management') {
           try {
             const mateo = page.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Mateo Silva' });

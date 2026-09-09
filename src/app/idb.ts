@@ -13,6 +13,10 @@ export interface VerifiedIdentity {
   userId: string;
   email: string;
   personId: string;
+  name?: string;
+  /** Server-authoritative profile revision; absent on older offline records. */
+  profileRevision?: number;
+  updatedAt?: string;
   verifiedAt: string;
 }
 
@@ -36,6 +40,11 @@ export interface OfflineTrustRecord {
   userId: string;
   email: string;
   personId: string;
+  name?: string;
+  /** Server-authoritative profile revision; absent on older offline records. */
+  profileRevision?: number;
+  /** Legacy server timestamp; never used for ordering. */
+  updatedAt?: string;
   clerkUserId: string;
   verifiedAt: string;
   /** Server-side application-session idle boundary used for offline trust. */
@@ -48,8 +57,11 @@ export const OFFLINE_TRUST_MAX_AGE_MS = APPLICATION_SESSION_IDLE_MS;
 const normalizeOfflineTrust = (value: OfflineTrustRecord | undefined): OfflineTrustRecord | undefined => {
   if (!value) return undefined;
   const revision = Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : 0;
-  return { ...value, revision };
+  const storedProfileRevision = value.profileRevision;
+  const profileRevision = typeof storedProfileRevision === 'number' && Number.isSafeInteger(storedProfileRevision) && storedProfileRevision >= 0 ? storedProfileRevision : undefined;
+  return { ...value, revision, ...(profileRevision === undefined ? {} : { profileRevision }) };
 };
+const isProfileRevisionNewer = (next?: number, current?: number) => next === undefined ? current === undefined : current === undefined || next > current;
 
 export function isOfflineTrustUsable(record: OfflineTrustRecord | undefined, now = Date.now()) {
   if (!record || record.state !== 'active') return false;
@@ -63,6 +75,8 @@ export interface CachedGroups {
   userId: string;
   groups: Group[];
   cachedAt: string;
+  profileRevision?: number;
+  profileUpdatedAt?: string;
 }
 
 export interface GroupSnapshot {
@@ -80,6 +94,8 @@ export interface GroupSnapshot {
   transactionsNextCursor?: string;
   transactionsLimit?: number;
   cachedAt: string;
+  profileRevision?: number;
+  profileUpdatedAt?: string;
   cachedAtByResource?: Partial<Record<'group' | 'splitDefault' | 'members' | 'expenses' | 'balances' | 'settlements' | 'transactions', string>>;
 }
 
@@ -108,6 +124,8 @@ export interface CachedGlobalTransactions {
   nextCursor?: string;
   limit: number;
   fetchedAt: string;
+  profileRevision?: number;
+  profileUpdatedAt?: string;
 }
 
 export interface CachedExpenseDetails {
@@ -291,7 +309,21 @@ export async function readRecent<T>(): Promise<T | undefined> {
 
 export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>, generation = captureSessionGeneration()) => {
   assertSessionGeneration(generation);
-  return transaction('identities', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('identities').put({ ...value, key: 'last' }); });
+  return transaction('identities', 'readwrite', (tx) => {
+    const store = tx.objectStore('identities');
+    const current = store.get('last');
+    current.onsuccess = () => {
+      const existing = current.result as VerifiedIdentity | undefined;
+      const existingRevision = existing?.profileRevision;
+      const incomingRevision = value.profileRevision;
+      // Identity writes can overlap a cross-tab profile update. Never let a
+      // response with an older (or absent) server revision regress the local
+      // authoritative identity.
+      if (!isSessionGenerationCurrent(generation)
+        || existingRevision !== undefined && (incomingRevision === undefined || incomingRevision < existingRevision)) return;
+      store.put({ ...value, key: 'last' });
+    };
+  });
 };
 export const readLastVerifiedIdentity = () => transaction<VerifiedIdentity>('identities', 'readonly', (tx) => tx.objectStore('identities').get('last'));
 export const saveLastVerifiedClerkUserId = (clerkUserId: string, generation = captureSessionGeneration()) => {
@@ -327,6 +359,29 @@ export function saveOfflineTrust(value: Omit<OfflineTrustRecord, 'key' | 'state'
 }
 
 export const readOfflineTrust = () => transaction<OfflineTrustRecord>('offlineTrust', 'readonly', (tx) => tx.objectStore('offlineTrust').get(OFFLINE_TRUST_KEY)).then(normalizeOfflineTrust);
+
+/** Update only the display name of an active trust record with an atomic CAS. */
+export function updateOfflineTrustName(userId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string) {
+  assertSessionGeneration(generation);
+  return new Promise<boolean>((resolve, reject) => {
+    void open().then((db) => {
+      const tx = db.transaction('offlineTrust', 'readwrite');
+      const store = tx.objectStore('offlineTrust');
+      const current = store.get(OFFLINE_TRUST_KEY);
+      let updated = false;
+      current.onsuccess = () => {
+        const record = normalizeOfflineTrust(current.result as OfflineTrustRecord | undefined);
+        if (!record || record.state !== 'active' || record.userId !== userId || !isSessionGenerationCurrent(generation)) return;
+        if (!isProfileRevisionNewer(profileRevision, record.profileRevision)) return;
+        store.put({ ...record, name, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { updatedAt } : {}), revision: record.revision + 1 });
+        updated = true;
+      };
+      tx.oncomplete = () => { db.close(); resolve(updated && isSessionGenerationCurrent(generation)); };
+      tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+      tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    }).catch(reject);
+  });
+}
 
 /** Revocation intentionally does not use the session-generation guard. */
 export function revokeOfflineTrust() {
@@ -513,6 +568,78 @@ export async function updateGroupSnapshotIfGenerationMatches(userId: string, gro
 }
 
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
+
+/** Patch cached member labels after a confirmed profile rename. */
+export async function patchCachedMemberName(userId: string, personId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string) {
+  assertSessionGeneration(generation);
+  const db = await open();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(['groups', 'groupSnapshots', 'globalTransactions', 'resourceFreshness'], 'readwrite');
+    const snapshots = tx.objectStore('groupSnapshots').getAll();
+    const global = tx.objectStore('globalTransactions').get(userId);
+    const groups = tx.objectStore('groups').get(userId);
+    const replace = (id: unknown, value: unknown) => String(id) === personId ? name : value;
+    let snapshotRows: GroupSnapshot[] | undefined;
+    let groupsRow: CachedGroups | undefined;
+    let groupsPatched = false;
+    const patchGroups = () => {
+      if (!snapshotRows || !groupsRow || !isSessionGenerationCurrent(generation)) return;
+       if (!isProfileRevisionNewer(profileRevision, groupsRow.profileRevision)) return;
+       const nextGroups = groupsRow.groups.map((group) => {
+        if (group.memberCount !== 2) return group;
+        const snapshot = snapshotRows!.find((candidate) => candidate.userId === userId && candidate.groupId === group.id);
+        const counterpart = snapshot?.currentPersonId && snapshot.members?.length === 2
+          ? snapshot.members.find((member) => member.personId !== snapshot.currentPersonId)
+          : undefined;
+        return counterpart?.personId === personId ? { ...group, counterpartName: name } : group;
+      });
+      groupsPatched = nextGroups.some((group, index) => group !== groupsRow!.groups[index]);
+      if (!groupsPatched) return;
+      const cachedAt = new Date().toISOString();
+       tx.objectStore('groups').put({ ...groupsRow, groups: nextGroups, cachedAt, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
+      tx.objectStore('resourceFreshness').put({ userId, resource: 'groups', resourceKey: 'groups', fetchedAt: cachedAt });
+    };
+    snapshots.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      snapshotRows = snapshots.result as GroupSnapshot[];
+       for (const row of snapshotRows) {
+         if (row.userId !== userId) continue;
+          if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) continue;
+        const members = row.members?.map((member) => member.personId === personId ? { ...member, name } : member);
+        const historicalParticipants = row.historicalParticipants?.map((member) => member.personId === personId ? { ...member, name } : member);
+        const counterpart = row.currentPersonId && row.members?.length === 2 ? row.members.find((member) => member.personId !== row.currentPersonId) : undefined;
+        const group = row.group && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
+        const balances = row.balances && Object.fromEntries(Object.entries(row.balances).map(([currency, balance]) => [currency, {
+          ...balance,
+          raw: balance.raw.map((item) => ({ ...item, name: replace(item.personId, item.name) })),
+          simplified: balance.simplified.map((item) => ({ ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) })),
+        }]));
+        const transactions = row.transactions?.map((item) => item.kind === 'settlement'
+          ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+          : { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) });
+          tx.objectStore('groupSnapshots').put({ ...row, ...(group ? { group } : {}), ...(members ? { members } : {}), ...(historicalParticipants ? { historicalParticipants } : {}), ...(balances ? { balances } : {}), ...(transactions ? { transactions } : {}), ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
+      }
+      patchGroups();
+    };
+    global.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation) || !global.result) return;
+      const row = global.result as CachedGlobalTransactions;
+        if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) return;
+       const transactions = row.transactions.map((item) => item.kind === 'settlement'
+        ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+        : { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) });
+        tx.objectStore('globalTransactions').put({ ...row, transactions, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
+    };
+    groups.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      groupsRow = groups.result as CachedGroups | undefined;
+      patchGroups();
+    };
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
 
 export const saveResourceFreshness = (value: ResourceFreshness, generation = captureSessionGeneration()) => {
   assertSessionGeneration(generation);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupBalanceDisplays, personalBalanceDisplay, personalBalances } from './group-balance';
+import { balanceStatus, groupBalanceDisplays, personalBalanceDisplay, personalBalances } from './group-balance';
 
 describe('home group balance formatting', () => {
   it('distinguishes unavailable legacy data, settled groups, and signed balances', () => {
@@ -41,5 +41,13 @@ describe('personal balance labels', () => {
       { kind: 'balance', label: 'You are owed', amountMinor: 100, currency: 'USD' },
       { kind: 'balance', label: 'You owe', amountMinor: 50, currency: 'EUR' },
     ]);
+  });
+
+  it('describes raw positions without treating zero as unavailable', () => {
+    expect(balanceStatus(120)).toBe('owed');
+    expect(balanceStatus(-120)).toBe('owes');
+    expect(balanceStatus(0)).toBe('settled');
+    expect(personalBalances({ USD: { raw: [{ personId: 'me', name: 'Me', netMinor: 0, currency: 'USD' }] } }, 'me', 'USD')).toEqual([{ kind: 'settled', label: 'Settled up', currency: 'USD' }]);
+    expect(personalBalances({ USD: { raw: [] } }, 'me', 'USD')).toEqual([{ kind: 'settled', label: 'Settled up', currency: 'USD' }]);
   });
 });

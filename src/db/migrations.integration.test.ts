@@ -43,7 +43,7 @@ describe('scheduled completion migration integration', () => {
     ];
     const currentNames = [
       '0024_incremental_projection_totals.sql', '0025_expense_suggestion_lookup.sql',
-      '0026_targeted_group_invitations.sql',
+      '0026_targeted_group_invitations.sql', '0027_profile_revision.sql',
     ];
     const seed = `
       INSERT INTO users(id,email,created_at,updated_at) VALUES('user-1','migration@example.com','2026-01-01','2026-01-01');
@@ -110,7 +110,7 @@ describe('scheduled completion migration integration', () => {
         SELECT group_id,maintenance_due FROM ledger_summary_state ORDER BY group_id;
         SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;
         SELECT name FROM pragma_table_info('audit_events') WHERE name IN ('actor_person_id','actor_name') ORDER BY name;
-        SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;
+         SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash','profile_revision') ORDER BY name;
         SELECT name FROM pragma_table_info('group_invitations') WHERE name='target_person_id';
         SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_group_invitations_target','idx_group_invitations_pending_target','idx_group_invitations_pending_email') ORDER BY name;
         PRAGMA foreign_key_list(scheduled_occurrences);
@@ -141,7 +141,7 @@ describe('scheduled completion migration integration', () => {
       ]);
       expect(legacy).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
       expect(auditColumns).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
-      expect(userColumns).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
+       expect(userColumns).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }, { name: 'profile_revision' }]);
       expect(targetColumns).toEqual([{ name: 'target_person_id' }]);
       expect(targetIndexes).toEqual([{ name: 'idx_group_invitations_pending_email' }, { name: 'idx_group_invitations_pending_target' }, { name: 'idx_group_invitations_target' }]);
       expect(occurrenceForeignKeys).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));

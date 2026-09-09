@@ -38,6 +38,7 @@ const splitDefaultsSql = readFileSync(new URL('../../migrations/0023_group_split
 const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/0024_incremental_projection_totals.sql', moduleUrl), 'utf8');
 const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_expense_suggestion_lookup.sql', moduleUrl), 'utf8');
 const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
+const profileRevisionSql = readFileSync(new URL('../../migrations/0027_profile_revision.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
@@ -300,6 +301,12 @@ describe('targeted invitation migration', () => {
   });
 });
 
+describe('profile revision migration', () => {
+  it('adds a nonnegative database-allocated profile revision', () => {
+    expect(profileRevisionSql).toMatch(/ALTER TABLE users ADD COLUMN profile_revision INTEGER NOT NULL DEFAULT 0 CHECK\(profile_revision >= 0\)/i);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -364,7 +371,8 @@ describe('scheduled completion migration integration', () => {
         await Promise.all([
           cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql')),
           cp(join(root, 'migrations', '0025_expense_suggestion_lookup.sql'), join(migrationsDir, '0025_expense_suggestion_lookup.sql')),
-          cp(join(root, 'migrations', '0026_targeted_group_invitations.sql'), join(migrationsDir, '0026_targeted_group_invitations.sql')),
+           cp(join(root, 'migrations', '0026_targeted_group_invitations.sql'), join(migrationsDir, '0026_targeted_group_invitations.sql')),
+           cp(join(root, 'migrations', '0027_profile_revision.sql'), join(migrationsDir, '0027_profile_revision.sql')),
         ]);
        run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
@@ -399,7 +407,7 @@ describe('scheduled completion migration integration', () => {
          expect(query('SELECT name FROM pragma_table_info(\'audit_events\') WHERE name IN (\'actor_person_id\',\'actor_name\') ORDER BY name;')).toEqual([{ name: 'actor_name' }, { name: 'actor_person_id' }]);
          expect(query("SELECT name FROM sqlite_master WHERE type='table' AND name='group_membership_events';")).toEqual([{ name: 'group_membership_events' }]);
          expect(query("SELECT group_id,person_id,role FROM group_members WHERE group_id IN ('group-multiple','group-ownerless') AND role='owner' ORDER BY group_id,person_id;")).toEqual([{ group_id: 'group-multiple', person_id: 'person-2', role: 'owner' }, { group_id: 'group-ownerless', person_id: 'person-3', role: 'owner' }]);
-       expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }]);
+        expect(query("SELECT name FROM pragma_table_info('users') WHERE name IN ('deleted_at','deleted_email_hash','deleted_clerk_hash','profile_revision') ORDER BY name;")).toEqual([{ name: 'deleted_at' }, { name: 'deleted_clerk_hash' }, { name: 'deleted_email_hash' }, { name: 'profile_revision' }]);
        expect(query('SELECT group_id,currency,gross_minor FROM ledger_totals;')).toEqual([]);
        expect(query('SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;')).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
        run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET currency='EUR' WHERE id='expense-2'; UPDATE expenses SET deleted_at='2026-01-03' WHERE id='expense-1'; UPDATE expenses SET deleted_at=NULL WHERE id='expense-1'; DELETE FROM expenses WHERE id='expense-2';", '--yes']);

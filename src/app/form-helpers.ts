@@ -231,6 +231,44 @@ export function settlementSuggestion(balances: Record<string, Balances>, current
   return debts.find((debt) => debt.fromPersonId === currentPersonId || debt.toPersonId === currentPersonId) || debts[0];
 }
 
+/** Return a suggestion only when the selected direction has an exact debt. */
+export function settlementSuggestionForPair(balances: Record<string, Balances>, fromPersonId: string, toPersonId: string, currency: Currency): PairwiseBalance | undefined {
+  if (!fromPersonId || !toPersonId || fromPersonId === toPersonId) return undefined;
+  return balances[currency]?.simplified.find((debt) => debt.fromPersonId === fromPersonId && debt.toPersonId === toPersonId && debt.amountMinor > 0);
+}
+
 export function settlementSuggestionFingerprint(suggestion: PairwiseBalance | undefined, groupCurrency: Currency, fallbackFrom = '', fallbackTo = ''): string {
   return [suggestion?.currency || groupCurrency, suggestion?.fromPersonId || fallbackFrom, suggestion?.toPersonId || fallbackTo, suggestion?.amountMinor ?? ''].join(':');
+}
+
+/**
+ * Keep an amount suggestion tied to the selected pair until the user edits it.
+ * Returning the previous state for a dirty amount is what makes
+ * original-pair -> alternate-pair -> original-pair preserve a manual value.
+ */
+export function settlementAmountForPair(amount: string, autoAmount: string | undefined, suggestion: PairwiseBalance | undefined, pairChanged = true): { amount: string; autoAmount: string | undefined } {
+  if (!pairChanged || (autoAmount !== undefined && amount !== autoAmount) || (autoAmount === undefined && amount.trim())) return { amount, autoAmount };
+  const nextAmount = suggestion ? (suggestion.amountMinor / 100).toFixed(2) : '';
+  return { amount: nextAmount, autoAmount: nextAmount };
+}
+
+export type SettlementEditAmountState = {
+  amount: string;
+  autoAmount: string | undefined;
+  pairAmounts: Record<string, string>;
+};
+
+export function settlementEditAmountState(pair: string, amount: string): SettlementEditAmountState {
+  return { amount, autoAmount: amount, pairAmounts: { [pair]: amount } };
+}
+
+export function manuallySetSettlementEditAmount(state: SettlementEditAmountState, amount: string): SettlementEditAmountState {
+  return { ...state, amount };
+}
+
+/** Move an edit draft to a pair without replacing an amount the user typed. */
+export function transitionSettlementEditAmount(state: SettlementEditAmountState, pair: string, suggestion: PairwiseBalance | undefined): SettlementEditAmountState {
+  if ((state.autoAmount !== undefined && state.amount !== state.autoAmount) || (state.autoAmount === undefined && state.amount.trim())) return state;
+  const nextAmount = state.pairAmounts[pair] ?? (suggestion ? (suggestion.amountMinor / 100).toFixed(2) : '');
+  return { amount: nextAmount, autoAmount: nextAmount, pairAmounts: { ...state.pairAmounts, [pair]: nextAmount } };
 }
