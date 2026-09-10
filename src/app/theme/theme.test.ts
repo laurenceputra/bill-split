@@ -104,8 +104,9 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
   });
 
-  it('keeps every mobile editable control at the iOS zoom floor without shrinking the main amount', () => {
-    expect(baseCss).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*input,[\s\S]*select,[\s\S]*textarea\s*\{[\s\S]*font-size: 1rem;/);
+  it('keeps every editable control at the 16px floor without shrinking the main amount', () => {
+    const sharedControlRule = baseCss.match(/input,\nselect,\ntextarea\s*\{\n  width: 100%;([\s\S]*?)\n\}/)?.[1] ?? '';
+    expect(sharedControlRule).toContain('font-size: max(16px, 1rem);');
     expect(css).toMatch(/\.dev-identity input\s*\{[\s\S]*font-size: 1rem;/);
     expect(css).toMatch(/\.amount-input--long\s*\{[\s\S]*font-size: 1rem;/);
     expect(css).toMatch(/\.amount-input--very-long\s*\{[\s\S]*font-size: 1rem;/);
