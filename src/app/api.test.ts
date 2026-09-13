@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getSpendingInsightSummary, getSpendingInsightTrends, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -33,6 +33,20 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('passes an explicit bounded category trend range to the insights API', async () => {
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => json({ scope: 'global', trendFrom: '2025-08-01', trendTo: '2026-01-31', categoryTrends: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    await getSpendingInsightTrends(undefined, { trendFrom: '2025-08-01', trendTo: '2026-01-31' });
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/api/spending-insights?view=trends&trendFrom=2025-08-01&trendTo=2026-01-31');
+  });
+
+  it('does not opt summary-only insight requests into category trends', async () => {
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL) => json({ scope: 'group', summaries: [] }));
+    vi.stubGlobal('fetch', fetchSpy);
+    await getSpendingInsightSummary('group-a');
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe('/api/spending-insights?group=group-a&view=summary');
+  });
+
   it('fences an in-flight group GET when a split default mutation patches memory and IDB', async () => {
     const userId = 'split-default-race-user';
     const groupId = 'split-default-race-group';

@@ -117,7 +117,7 @@ const allowsMutation = (c: any) => {
   return exactOrigin || trustedFetchSite || /^Bearer\s+\S+$/i.test(authorization ?? '');
 };
 const repositoryError = (c: any, error: unknown) => {
-   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
+   if (error instanceof RepositoryError) return jsonError(c, error.code === 'BALANCE_OVERFLOW' ? 422 : error.code === 'OWNER_REQUIRED' ? 403 : error.code === 'CONFLICT' || error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'AUTH_IDENTITY_CONFLICT' || error.code === 'FINAL_OWNER' || error.code === 'INVITATION_EXPIRED' || error.code === 'INVITATION_REVOKED' || error.code === 'ACCOUNT_DELETION_BLOCKED' ? 409 : error.code === 'SELF_FRIEND' || error.code === 'INVITATION_INVALID' || error.code === 'MEMBER_REQUIRED' || error.code === 'INVALID_SEARCH' || error.code === 'INVALID_CURSOR' || error.code === 'INVALID_PAGINATION' || error.code === 'INVALID_DATE' || error.code === 'INVALID_FILTER' || error.code === 'INVALID_SPLIT_DEFAULT' ? 400 : 500, error.code, error.message, error.details);
   throw error;
 };
 export const ACCOUNT_DELETION_EXPECTED_CLERK_USER_ID_HEADER = 'X-BillSplit-Expected-Clerk-User-Id';
@@ -436,6 +436,26 @@ api.get('/api/groups/:groupId/balances', async (c) => {
   return c.json({ currencies, balances });
 });
 api.get('/api/activity', async (c) => { const q = c.req.query(), groupId = q.group; if (groupId && (await authorizedGroup(c, groupId)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found'); const limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await getRepo(c).globalActivity(c.get('auth').id, groupId || undefined, { limit, cursor: q.cursor }); return c.json({ activity: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+api.get('/api/spending-insights', async (c) => {
+  const q = c.req.query();
+  const groupId = q.group;
+  if (groupId && (await authorizedGroup(c, groupId)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
+  if (q.view !== undefined && q.view !== 'summary' && q.view !== 'trends') return jsonError(c, 400, 'INVALID_FILTER', 'Insight view is invalid');
+  if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Insight currency is invalid');
+  for (const value of [q.from, q.to, q.comparisonFrom, q.comparisonTo, q.trendFrom, q.trendTo]) if (value !== undefined && !date.safeParse(value).success) return jsonError(c, 400, 'INVALID_DATE', 'Insight dates must be real YYYY-MM-DD dates');
+  if ((q.from === undefined) !== (q.to === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight summary dates must be supplied together');
+  if ((q.comparisonFrom === undefined) !== (q.comparisonTo === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight comparison dates must be supplied together');
+  if ((q.trendFrom === undefined) !== (q.trendTo === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight trend dates must be supplied together');
+  if (q.from && q.to && q.from > q.to) return jsonError(c, 400, 'INVALID_DATE', 'Insight start date must not be after its end date');
+  if (q.comparisonFrom && q.comparisonTo && q.comparisonFrom > q.comparisonTo) return jsonError(c, 400, 'INVALID_DATE', 'Insight comparison start date must not be after its end date');
+  if (q.trendFrom && q.trendTo && q.trendFrom > q.trendTo) return jsonError(c, 400, 'INVALID_DATE', 'Insight trend start date must not be after its end date');
+  try {
+    const result = q.view === 'trends'
+      ? await getRepo(c).spendingInsights(c.get('auth').id, groupId || undefined, { view: 'trends', currency: q.currency, trendFrom: q.trendFrom, trendTo: q.trendTo })
+      : await getRepo(c).spendingInsights(c.get('auth').id, groupId || undefined, { view: 'summary', from: q.from, to: q.to, currency: q.currency, comparisonFrom: q.comparisonFrom, comparisonTo: q.comparisonTo });
+    return c.json(result);
+  } catch (error) { return repositoryError(c, error); }
+});
 api.get('/api/groups/:groupId/audit', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.auditPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ audit: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
 api.get('/api/groups/:groupId/audit/:entityType/:entityId', async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;

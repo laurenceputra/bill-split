@@ -36,6 +36,41 @@ export interface ScheduledExpense {
   clientOperationId?: string | null; payers: Payer[]; splits: Split[];
 }
 export interface Settlement { id: string; groupId: string; fromPersonId: string; toPersonId: string; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number }
+export interface SpendingInsightSummary {
+  currency: Currency;
+  /** Total expense amount. Meaningful for group scope; global scope uses allocatedSpendMinor as primary. */
+  groupSpendMinor: number;
+  /** Sum of this user's non-zero split allocations. This is the global primary metric. */
+  allocatedSpendMinor: number;
+  yourShareMinor: number;
+  youPaidMinor: number;
+  expenseCount: number;
+}
+export interface SpendingInsightCategoryTrend {
+  currency: Currency;
+  bucket: string;
+  category: string;
+  groupSpendMinor: number;
+  allocatedSpendMinor: number;
+  expenseCount: number;
+}
+export interface SpendingInsightSummaryResponse {
+  scope: 'global' | 'group';
+  from?: string;
+  to?: string;
+  summaries: SpendingInsightSummary[];
+  previous?: {
+    from: string;
+    to: string;
+    summaries: Array<Pick<SpendingInsightSummary, 'currency' | 'groupSpendMinor' | 'allocatedSpendMinor' | 'yourShareMinor' | 'youPaidMinor' | 'expenseCount'>>;
+  };
+}
+export interface SpendingInsightTrends {
+  scope: 'global' | 'group';
+  trendFrom: string;
+  trendTo: string;
+  categoryTrends: SpendingInsightCategoryTrend[];
+}
 /** The deliberately small row returned by the unified transaction list. */
 export interface ExpenseTransaction {
     kind: 'expense'; id: string; groupId: string; groupName?: string; description: string; amountMinor: number; currency: Currency;

@@ -780,6 +780,26 @@ class PreferenceDb {
   }
 }
 
+class InsightsDb {
+  sql: string[] = [];
+  args: unknown[][] = [];
+  overflowGroups = false;
+  trendRows: unknown[] = [{ group_id: 'group-1', currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }];
+  prepare(sql: string) {
+    this.sql.push(sql);
+    const statement = {
+      bind: (...args: unknown[]) => { this.args.push(args); return statement; },
+      all: async <T>() => {
+        if (sql.includes('SELECT group_id,MAX(group_name)')) return { results: (this.overflowGroups ? [{ group_id: 'group-1', group_name: 'One', currency: 'USD', group_spend_minor: Number.MAX_SAFE_INTEGER, allocated_spend_minor: Number.MAX_SAFE_INTEGER, your_share_minor: Number.MAX_SAFE_INTEGER, you_paid_minor: 0, expense_count: 1 }, { group_id: 'group-2', group_name: 'Two', currency: 'USD', group_spend_minor: 1, allocated_spend_minor: 1, your_share_minor: 1, you_paid_minor: 0, expense_count: 1 }] : [{ group_id: 'group-1', group_name: 'Group', currency: 'USD', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, you_paid_minor: 600, expense_count: 2 }]) as T[] };
+         if (sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: this.trendRows as T[] };
+         if (sql.includes('category_rows') || sql.includes('substr(expense_date')) return { results: [{ currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
+        return { results: [{ currency: 'USD', person_id: 'person-1', person_name: 'Former member', share_minor: 400 }] as T[] };
+      },
+    };
+    return statement;
+  }
+}
+
 describe('repository idempotency', () => {
   it('returns the original entity for a same-payload retry and rejects a mismatch', async () => {
     const repo = new Repository(new FakeDb() as never);
@@ -797,6 +817,54 @@ describe('repository idempotency', () => {
     const retry = await repo.createSettlement('00000000-0000-4000-8000-000000000010', 'user-1', settlement);
     expect(retry?.id).toBe(first?.id);
     await expect(repo.createSettlement('00000000-0000-4000-8000-000000000010', 'user-1', { ...settlement, amount_minor: 200 })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+});
+
+describe('repository spending insights', () => {
+  it('aggregates only selected-period group summary fields in SQL', async () => {
+    const db = new InsightsDb();
+    const result = await new Repository(db as never).spendingInsights('user-1', 'group-1', { from: '2026-01-01', to: '2026-01-31', currency: 'USD', comparisonFrom: '2025-12-01', comparisonTo: '2025-12-31' });
+    expect(result).toMatchObject({ scope: 'group', summaries: [{ groupSpendMinor: 1000, allocatedSpendMinor: 400, yourShareMinor: 400, youPaidMinor: 600, expenseCount: 2 }], previous: { from: '2025-12-01', to: '2025-12-31', summaries: [{ allocatedSpendMinor: 400 }] } });
+    expect(db.sql.filter((sql) => sql.includes('GROUP BY')).length).toBe(2);
+    expect(db.sql.every((sql) => sql.includes('gm.user_id=?') && sql.includes('gm.deleted_at IS NULL') && sql.includes('e.deleted_at IS NULL'))).toBe(true);
+    expect(db.sql.some((sql) => sql.includes('FROM settlements'))).toBe(false);
+    expect(db.sql.some((sql) => sql.includes('scheduled'))).toBe(false);
+  });
+
+  it('aggregates trend rows by group before checked cross-group combination', async () => {
+    const db = new InsightsDb();
+    const result = await new Repository(db as never).spendingInsights('user-1', 'group-1', { view: 'trends', trendFrom: '2025-08-01', trendTo: '2026-01-31' });
+    expect(result).toMatchObject({ scope: 'group', trendFrom: '2025-08-01', trendTo: '2026-01-31', categoryTrends: [{ bucket: '2026-01', category: 'Food', groupSpendMinor: 1000 }] });
+    expect(db.sql.some((sql) => sql.includes('GROUP BY group_id,currency,bucket,category'))).toBe(true);
+  });
+
+  it('rejects a category whose six individually safe monthly totals exceed the safe range', async () => {
+    const db = new InsightsDb();
+    db.trendRows = ['2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2026-01'].map((bucket) => ({ group_id: 'group-1', currency: 'USD', bucket, category: 'Food', group_spend_minor: 1_600_000_000_000_000, allocated_spend_minor: 1_600_000_000_000_000, expense_count: 1 }));
+    await expect(new Repository(db as never).spendingInsights('user-1', 'group-1', { view: 'trends', trendFrom: '2025-08-01', trendTo: '2026-01-31' })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+  });
+
+  it('uses positive current-user allocations as every global primary measure', async () => {
+    const db = new InsightsDb();
+    const result = await new Repository(db as never).spendingInsights('user-1', undefined, { from: '2026-01-01', to: '2026-01-31' });
+    expect(result.summaries[0]).toMatchObject({ groupSpendMinor: 400, allocatedSpendMinor: 400, yourShareMinor: 400, expenseCount: 2 });
+    expect(db.sql.some((sql) => sql.includes('your_share_minor>0'))).toBe(true);
+  });
+
+  it('maps checked cross-group aggregate overflow to BALANCE_OVERFLOW', async () => {
+    const db = new InsightsDb(); db.overflowGroups = true;
+    await expect(new Repository(db as never).spendingInsights('user-1')).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+  });
+
+  it('rejects invalid ranges, dates, and currencies before querying D1', async () => {
+    const db = new InsightsDb();
+    const repository = new Repository(db as never);
+    await expect(repository.spendingInsights('user-1', undefined, { from: '2026-02-01', to: '2026-01-01' })).rejects.toMatchObject({ code: 'INVALID_DATE' });
+    await expect(repository.spendingInsights('user-1', undefined, { from: '2026-02-30' })).rejects.toMatchObject({ code: 'INVALID_DATE' });
+    await expect(repository.spendingInsights('user-1', undefined, { view: 'trends', trendFrom: '2026-01-01' })).rejects.toMatchObject({ code: 'INVALID_DATE' });
+    await expect(repository.spendingInsights('user-1', undefined, { view: 'trends', trendFrom: '2025-01-01', trendTo: '2026-01-01' })).rejects.toMatchObject({ code: 'INVALID_DATE' });
+    await expect(repository.spendingInsights('user-1', undefined, { currency: 'ZZZ' })).rejects.toMatchObject({ code: 'INVALID_FILTER' });
+    expect(db.sql).toHaveLength(0);
   });
 });
 

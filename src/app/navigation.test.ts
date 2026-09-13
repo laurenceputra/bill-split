@@ -76,6 +76,16 @@ describe('getNavigationContext', () => {
     });
   });
 
+  it('classifies insights as contextual activity and preserves shareable filters', () => {
+    expect(getNavigationContext('/activity', '?group=group-123&view=insights&period=all&currency=EUR')).toMatchObject({
+      route: 'activity',
+      groupId: 'group-123',
+      activeSection: 'activity',
+      historyPath: '/activity?group=group-123&view=insights&period=all&currency=EUR',
+      contextualPath: '/groups/group-123/activity',
+    });
+  });
+
   it.each([
     ['/groups/group-123', 'group-overview', 'groups'],
     ['/groups/group-123/manage', 'group-manage', 'groups'],
