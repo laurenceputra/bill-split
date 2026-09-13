@@ -440,9 +440,19 @@ api.get('/api/spending-insights', async (c) => {
   const q = c.req.query();
   const groupId = q.group;
   if (groupId && (await authorizedGroup(c, groupId)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
+  if (q.view !== undefined && q.view !== 'summary' && q.view !== 'trends') return jsonError(c, 400, 'INVALID_FILTER', 'Insight view is invalid');
   if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Insight currency is invalid');
+  for (const value of [q.from, q.to, q.comparisonFrom, q.comparisonTo, q.trendFrom, q.trendTo]) if (value !== undefined && !date.safeParse(value).success) return jsonError(c, 400, 'INVALID_DATE', 'Insight dates must be real YYYY-MM-DD dates');
+  if ((q.from === undefined) !== (q.to === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight summary dates must be supplied together');
+  if ((q.comparisonFrom === undefined) !== (q.comparisonTo === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight comparison dates must be supplied together');
+  if ((q.trendFrom === undefined) !== (q.trendTo === undefined)) return jsonError(c, 400, 'INVALID_DATE', 'Insight trend dates must be supplied together');
+  if (q.from && q.to && q.from > q.to) return jsonError(c, 400, 'INVALID_DATE', 'Insight start date must not be after its end date');
+  if (q.comparisonFrom && q.comparisonTo && q.comparisonFrom > q.comparisonTo) return jsonError(c, 400, 'INVALID_DATE', 'Insight comparison start date must not be after its end date');
+  if (q.trendFrom && q.trendTo && q.trendFrom > q.trendTo) return jsonError(c, 400, 'INVALID_DATE', 'Insight trend start date must not be after its end date');
   try {
-    const result = await getRepo(c).spendingInsights(c.get('auth').id, groupId || undefined, { from: q.from, to: q.to, currency: q.currency });
+    const result = q.view === 'trends'
+      ? await getRepo(c).spendingInsights(c.get('auth').id, groupId || undefined, { view: 'trends', currency: q.currency, trendFrom: q.trendFrom, trendTo: q.trendTo })
+      : await getRepo(c).spendingInsights(c.get('auth').id, groupId || undefined, { view: 'summary', from: q.from, to: q.to, currency: q.currency, comparisonFrom: q.comparisonFrom, comparisonTo: q.comparisonTo });
     return c.json(result);
   } catch (error) { return repositoryError(c, error); }
 });

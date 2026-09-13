@@ -46,49 +46,30 @@ export interface SpendingInsightSummary {
   youPaidMinor: number;
   expenseCount: number;
 }
-export interface SpendingInsightBucket {
+export interface SpendingInsightCategoryTrend {
   currency: Currency;
   bucket: string;
-  groupSpendMinor: number;
-  allocatedSpendMinor: number;
-  yourShareMinor: number;
-  expenseCount: number;
-}
-export interface SpendingInsightCategory {
-  currency: Currency;
   category: string;
   groupSpendMinor: number;
   allocatedSpendMinor: number;
   expenseCount: number;
 }
-export interface SpendingInsightGroup {
-  groupId: string;
-  groupName: string;
-  currency: Currency;
-  allocatedSpendMinor: number;
-  yourShareMinor: number;
-  expenseCount: number;
-}
-export interface SpendingInsightParticipant {
-  personId: string;
-  name: string;
-  currency: Currency;
-  shareMinor: number;
-}
-export interface SpendingInsights {
+export interface SpendingInsightSummaryResponse {
   scope: 'global' | 'group';
   from?: string;
   to?: string;
   summaries: SpendingInsightSummary[];
-  buckets: SpendingInsightBucket[];
-  categories: SpendingInsightCategory[];
-  groups?: SpendingInsightGroup[];
-  participants?: SpendingInsightParticipant[];
   previous?: {
     from: string;
     to: string;
     summaries: Array<Pick<SpendingInsightSummary, 'currency' | 'groupSpendMinor' | 'allocatedSpendMinor' | 'yourShareMinor' | 'youPaidMinor' | 'expenseCount'>>;
   };
+}
+export interface SpendingInsightTrends {
+  scope: 'global' | 'group';
+  trendFrom: string;
+  trendTo: string;
+  categoryTrends: SpendingInsightCategoryTrend[];
 }
 /** The deliberately small row returned by the unified transaction list. */
 export interface ExpenseTransaction {

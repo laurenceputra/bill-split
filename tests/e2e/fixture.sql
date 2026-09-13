@@ -93,3 +93,9 @@ INSERT INTO revisions (id, entity_type, entity_id, revision, snapshot_json, crea
 INSERT INTO audit_events (id, group_id, entity_type, entity_id, version, action, actor_id, actor_person_id, actor_name, occurred_at, before_json, after_json) VALUES
   ('00000000-0000-4000-8000-000000006101', '00000000-0000-4000-8000-000000003002', 'expense', '00000000-0000-4000-8000-000000004001', 2, 'update', '00000000-0000-4000-8000-000000001001', '00000000-0000-4000-8000-000000002001', 'Dev User', '2025-08-10T19:30:00.000Z', '{"description":"Dinner by the canal","amountMinor":8400,"currency":"USD","date":"2025-08-10","notes":"Original note"}', '{"description":"Dinner by the canal (edited)","amountMinor":8400,"currency":"USD","date":"2025-08-10","notes":"The original dinner description was edited to exercise the history view."}'),
   ('00000000-0000-4000-8000-000000006102', '00000000-0000-4000-8000-000000003002', 'settlement', '00000000-0000-4000-8000-000000005001', 2, 'update', '00000000-0000-4000-8000-000000001001', '00000000-0000-4000-8000-000000002001', 'Dev User', '2025-08-13T20:30:00.000Z', '{"amountMinor":500,"currency":"USD","date":"2025-08-13","note":"Initial partial repayment"}', '{"amountMinor":1000,"currency":"USD","date":"2025-08-13","note":"Partial repayment"}');
+
+-- Keep the populated insight fixture inside the rolling six-month window used by the UI.
+UPDATE expenses SET expense_date = date('now', '-1 month') WHERE id = '00000000-0000-4000-8000-000000004001';
+UPDATE expenses SET expense_date = date('now', '-2 months') WHERE id = '00000000-0000-4000-8000-000000004002';
+UPDATE expenses SET expense_date = date('now', '-3 months') WHERE id = '00000000-0000-4000-8000-000000004003';
+UPDATE settlements SET settlement_date = date('now', '-1 month') WHERE id = '00000000-0000-4000-8000-000000005001';

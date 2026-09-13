@@ -42,13 +42,14 @@ type FindingGroup = {
   affected: Array<{ scenarioName: string; authState: AuthState; route: string; viewport: Viewport }>;
 };
 type ApiObservation = { path: string; status: number };
-type ApiRequestObservation = { path: string; headers: Record<string, string> };
+type ApiRequestObservation = { path: string; search: string; headers: Record<string, string> };
 type ExpectedScenario = {
-  mode: 'normal' | 'loading' | 'api-error' | 'offline' | 'modal' | 'insights-loading' | 'insights-cached' | 'insights-error';
+  mode: 'normal' | 'loading' | 'api-error' | 'offline' | 'modal' | 'insights-loading' | 'insights-error';
   heading: string;
   content?: string;
   apiPaths?: string[];
   apiFailures?: Array<{ path: string; status: number }>;
+  insightErrors?: Array<{ id: string; message: string }>;
 };
 type Scenario = {
   name: string;
@@ -93,6 +94,34 @@ const apiPaths = {
   spendingInsights: '/api/spending-insights',
 };
 
+function localInsightRange() {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const date = (value: Date) => `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  return { trendFrom: date(new Date(now.getFullYear(), now.getMonth() - 5, 1)), trendTo: date(now) };
+}
+
+function localComparisonRange() {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const date = (value: Date) => `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  const month = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const end = new Date(now.getFullYear(), now.getMonth() - 1, Math.min(now.getDate(), new Date(now.getFullYear(), now.getMonth(), 0).getDate()));
+  return { from: date(month), to: date(end) };
+}
+
+function populatedInsightFixture(scope: 'global' | 'group', emptySummary = false) {
+  const { trendFrom, trendTo } = localInsightRange();
+  const comparison = localComparisonRange();
+  const fromMonth = new Date(`${trendFrom.slice(0, 7)}-01T00:00:00Z`);
+  const months = Array.from({ length: 6 }, (_, index) => { const value = new Date(fromMonth); value.setUTCMonth(value.getUTCMonth() + index); return value.toISOString().slice(0, 7); });
+  const values = [[0, 0, 400000, 0, 900000, 123456789], [0, 125000, 0, 500000, 0, 34567890], [50000, 0, 0, 0, 100000, 2345678], [0, 0, 25000, 0, 0, 987654]];
+  const categoryTrends = emptySummary ? [] : values.flatMap((amounts, categoryIndex) => amounts.flatMap((amount, monthIndex) => amount ? [{ currency: 'USD', bucket: months[monthIndex], category: `Category ${String.fromCharCode(65 + categoryIndex)}`, groupSpendMinor: amount, allocatedSpendMinor: Math.round(amount / 2), expenseCount: 1 }] : []));
+  const summary = { scope, summaries: emptySummary ? [] : [{ currency: 'USD', groupSpendMinor: 987654321, allocatedSpendMinor: 456789012, yourShareMinor: 456789012, youPaidMinor: 123456789, expenseCount: 12 }], ...(emptySummary ? {} : { previous: { from: comparison.from, to: comparison.to, summaries: [{ currency: 'EUR', groupSpendMinor: 700000000, allocatedSpendMinor: 350000000, yourShareMinor: 350000000, youPaidMinor: 100000000, expenseCount: 8 }] } }) };
+  const trends = { scope, trendFrom, trendTo, categoryTrends };
+  return { summary, trends };
+}
+
 const privateHomeApis = [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights];
 const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id), apiPaths.spendingInsights];
 const groupManagementApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.invitations(id)];
@@ -111,11 +140,11 @@ const scenarios: Scenario[] = [
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'History changes / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'History', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.activity(ids.rich)] } },
   { name: 'all-groups-transactions', path: '/activity?view=transactions', auth: DEV_EMAIL, context: 'History transactions / all authorized groups fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.globalTransactions, apiPaths.categories] } },
-  { name: 'group-insights', path: `/activity?group=${ids.rich}&view=insights&period=all`, auth: DEV_EMAIL, context: 'History insights / group all-time aggregate fixture', expected: { mode: 'normal', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
-  { name: 'global-insights', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / all authorized groups all-time aggregate fixture', expected: { mode: 'normal', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
+  { name: 'group-insights', path: `/activity?group=${ids.rich}&view=insights&period=month`, auth: DEV_EMAIL, context: 'History insights / group selected-period summary and comparison fixture', expected: { mode: 'normal', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
+  { name: 'global-insights', path: '/activity?view=insights&period=month', auth: DEV_EMAIL, context: 'History insights / global selected-period summary and comparison fixture', expected: { mode: 'normal', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
   { name: 'empty-global-insights', path: '/activity?view=insights&period=all', auth: EMPTY_EMAIL, context: 'History insights / empty aggregate state', expected: { mode: 'normal', heading: 'History', content: 'No counted expenses in this period', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
-  { name: 'custom-insights', path: '/activity?view=insights&period=custom', auth: DEV_EMAIL, context: 'History insights / custom range disclosure before two dates are supplied', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups] } },
-  { name: 'invalid-custom-insights', path: '/activity?view=insights&period=custom&from=2026-02-30&to=2026-01-01', auth: DEV_EMAIL, context: 'History insights / invalid custom date validation and field error relationships', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups] } },
+  { name: 'custom-insights', path: '/activity?view=insights&period=custom', auth: DEV_EMAIL, context: 'History insights / custom range disclosure before two dates are supplied', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
+  { name: 'invalid-custom-insights', path: '/activity?view=insights&period=custom&from=2026-02-30&to=2026-01-01', auth: DEV_EMAIL, context: 'History insights / invalid custom date validation and field error relationships', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
   { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / Profile rename and trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Renaming is available while online.', apiPaths: [apiPaths.me] } },
 ];
 
@@ -138,6 +167,18 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       findings.push({ kind, severity, scenarioName, authState, route, viewport, context, selector, detail, actual });
     };
     const visible = (element: Element) => {
+      // A closed <details> keeps its summary interactive while its other
+      // descendants can retain layout-like bounds in Chromium. Treat only the
+      // direct summary subtree as visible; this prevents hidden schedule
+      // actions from being compared with the next visible group section.
+      for (let current: Element | null = element; current; current = current.parentElement) {
+        const ancestorStyle = getComputedStyle(current);
+        if (ancestorStyle.display === 'none' || ancestorStyle.visibility === 'hidden' || Number(ancestorStyle.opacity) === 0) return false;
+        if (current instanceof HTMLDetailsElement && !current.open) {
+          const summary = Array.from(current.children).find((child) => child.tagName.toLowerCase() === 'summary');
+          if (!summary || !summary.contains(element)) return false;
+        }
+      }
       const style = getComputedStyle(element);
       const box = element.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && box.width > 0 && box.height > 0;
@@ -342,12 +383,35 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
     return;
   }
 
-  if (expected.mode === 'normal' || expected.mode === 'api-error' || expected.mode === 'offline' || expected.mode === 'modal' || expected.mode === 'insights-loading' || expected.mode === 'insights-cached' || expected.mode === 'insights-error') {
+  if (expected.mode === 'normal' || expected.mode === 'api-error' || expected.mode === 'offline' || expected.mode === 'modal' || expected.mode === 'insights-loading' || expected.mode === 'insights-error') {
     if (await visibleCount(page, '.app-shell') !== 1 || await visibleCount(page, '.public-shell') !== 0) throw new Error('Scenario did not render the authenticated private shell');
     if (await page.getByRole('heading', { level: 1, name: expected.heading, exact: false }).count() === 0) throw new Error(`Expected heading was not rendered: ${expected.heading}`);
     if (expected.content && !(await page.locator('body').innerText()).includes(expected.content)) throw new Error(`Expected fixture content was not rendered: ${expected.content}`);
     if (await visibleCount(page, '.app-error-boundary') !== 0) throw new Error('Scenario rendered the application error fallback');
-  }
+    if (expected.content === 'Spending insights' && expected.mode === 'normal') {
+      const body = await page.locator('body').innerText();
+      if (body.includes('What stands out')) throw new Error('Detailed insights still render generated prose');
+     if (scenario.name === 'global-insights' && !body.includes('your allocated share')) throw new Error('Global insight scope wording is missing');
+     if (scenario.name === 'group-insights' && !body.includes('total group spending')) throw new Error('Group insight scope wording is missing');
+        const comparison = localComparisonRange();
+       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && !body.includes(`Compared with ${comparison.from} to ${comparison.to}`)) throw new Error('Selected-period summary did not show exact comparison dates');
+       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && (!body.includes('USD') || !body.includes('EUR') || !body.includes('(new)'))) throw new Error('Summary did not render zero-filled currencies and new-spend comparison');
+      const overflowingTrendRows = await page.locator('.category-trend-bars').evaluateAll((elements) => elements.filter((element) => element.scrollWidth > element.clientWidth + 1).length);
+      if (overflowingTrendRows) throw new Error('Category trend mini charts overflow their containers');
+      if (await page.locator('.category-trend-list a').count()) throw new Error('Category trend cards unexpectedly link to transaction history');
+      for (const row of await page.locator('.category-trend-list > li').all()) {
+        if (await row.locator('.category-trend-month').count() !== 6) throw new Error('Category trend did not render six calendar months');
+        if (!(await row.innerText()).includes('MTD')) throw new Error('Category trend did not identify the current month-to-date amount');
+      }
+      const zeroBars = await page.locator('.category-trend-bar').evaluateAll((elements) => elements.filter((element) => Number.parseFloat(getComputedStyle(element).height) === 0).length);
+       if (!zeroBars) throw new Error('Sparse category fixture did not render zero-height bars');
+     }
+     if (scenario.name === 'populated-home') {
+       const globalCompact = page.locator('.insights-compact').filter({ hasText: 'Spending snapshot' });
+       if (await globalCompact.count() !== 1) throw new Error('Populated home did not render the global compact insights card');
+       if ((await globalCompact.innerText()).includes('You paid')) throw new Error('Global compact insights exposed a paid-but-zero-allocation value');
+     }
+   }
   if (expected.mode === 'normal' || expected.mode === 'offline' || expected.mode === 'modal') {
     if (await visibleCount(page, '.error') !== 0 || await visibleCount(page, '.auth-banner') !== 0) throw new Error('Scenario rendered an unexpected auth/error fallback');
   }
@@ -355,10 +419,11 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
     if (await visibleCount(page, '#groups-error') !== 1 || !(await page.locator('body').innerText()).includes('Fixture outage')) throw new Error('API-error fixture did not render the intended groups error UI');
   }
   if (expected.mode === 'insights-error') {
-    if (await visibleCount(page, '#insights-error') !== 1 || !(await page.locator('#insights-error').innerText()).includes('Insights fixture outage')) throw new Error('Insights error fixture did not render the intended aggregate error UI and message');
+    for (const insightError of expected.insightErrors || []) {
+      if (await visibleCount(page, `#${insightError.id}`) !== 1 || !(await page.locator(`#${insightError.id}`).innerText()).includes(insightError.message)) throw new Error(`Insights error fixture did not render ${insightError.id} with ${insightError.message}`);
+    }
   }
   if (expected.mode === 'insights-loading' && !(await page.getByRole('status').allTextContents()).some((text) => text.includes('Loading'))) throw new Error('Insights loading fixture did not render Loading status');
-  if (expected.mode === 'insights-cached' && !(await page.locator('.cache-status').allTextContents()).some((text) => text.includes('cached insights'))) throw new Error('Insights cached fixture did not render the cached aggregate notice');
   if (expected.mode === 'offline' && await visibleCount(page, '.offline-banner') === 0) throw new Error('Offline fixture did not render the intended offline banner');
   for (const apiPath of expected.apiPaths || []) {
     if (!observations.some((observation) => observation.path === apiPath && observation.status >= 200 && observation.status < 300)) throw new Error(`Authenticated API did not succeed: ${apiPath}`);
@@ -369,22 +434,34 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
 }
 
 async function assertCustomInsightAccessibility(page: Page, invalidFromUrl: boolean) {
+  const customControls = page.locator('.insight-controls');
+  const dateInputs = customControls.locator('input[type="date"]');
+  const fromInput = dateInputs.nth(0);
+  const toInput = dateInputs.nth(1);
+  const applyButton = customControls.getByRole('button', { name: 'Apply range', exact: true });
   const initialIds = await page.locator('[id^="insights-custom-"]').evaluateAll((elements) => elements.map((element) => element.id));
   expect(new Set(initialIds).size).toBe(initialIds.length);
   if (invalidFromUrl) {
-    expect(initialIds).toEqual(expect.arrayContaining(['insights-custom-from-error', 'insights-custom-to-error']));
-    for (const fieldId of ['insights-custom-from-error', 'insights-custom-to-error']) {
-      const input = page.locator(`input[aria-describedby~="${fieldId}"]`);
-      await expect(input).toHaveAttribute('aria-invalid', 'true');
-      await expect(page.locator(`#${fieldId}`)).toHaveCount(1);
-    }
+    expect(initialIds).toContain('insights-custom-from-error');
+    expect(initialIds).not.toContain('insights-custom-to-error');
+    await expect(fromInput).toHaveAttribute('aria-invalid', 'true');
+    await expect(fromInput).toHaveAttribute('aria-describedby', 'insights-custom-from-error');
+    await expect(toInput).toHaveAttribute('aria-invalid', 'false');
+    await expect(toInput).not.toHaveAttribute('aria-describedby', 'insights-custom-to-error');
+    await expect(page.locator('#insights-custom-from-error')).toHaveCount(1);
+    await expect(applyButton).toBeVisible();
+    await fromInput.fill('2026-02-01');
+    await toInput.fill('2026-01-01');
+    await applyButton.click();
+    await expect(page.locator('#insights-custom-range-error')).toHaveCount(1);
+    await expect(applyButton).toHaveAttribute('aria-describedby', 'insights-custom-range-error');
     return;
   }
-  await page.getByLabel('From').fill('2026-02-01');
-  await page.getByLabel('To').fill('2026-01-01');
-  await page.getByRole('button', { name: 'Apply range' }).click();
+  await fromInput.fill('2026-02-01');
+  await toInput.fill('2026-01-01');
+  await applyButton.click();
   await expect(page.locator('#insights-custom-range-error')).toHaveCount(1);
-  await expect(page.getByRole('button', { name: 'Apply range' })).toHaveAttribute('aria-describedby', 'insights-custom-range-error');
+  await expect(applyButton).toHaveAttribute('aria-describedby', 'insights-custom-range-error');
   const finalIds = await page.locator('[id^="insights-custom-"]').evaluateAll((elements) => elements.map((element) => element.id));
   expect(new Set(finalIds).size).toBe(finalIds.length);
 }
@@ -467,7 +544,7 @@ function observeRequests(page: Page, requests: ApiRequestObservation[]) {
   page.on('request', (request) => {
     try {
       const url = new URL(request.url());
-      if (url.pathname.startsWith('/api/')) requests.push({ path: url.pathname, headers: request.headers() });
+      if (url.pathname.startsWith('/api/')) requests.push({ path: url.pathname, search: url.search, headers: request.headers() });
     } catch { /* Ignore non-HTTP request URLs. */ }
   });
 }
@@ -488,15 +565,19 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
       const context = await openContext(browser, scenario.auth, viewport);
       const page = await context.newPage();
       const observations: ApiObservation[] = [];
-      const apiHeaders: Array<{ path: string; headers: Record<string, string> }> = [];
+       const apiHeaders: Array<{ path: string; search: string; headers: Record<string, string> }> = [];
       await observeResponses(page, observations);
       page.on('request', (request) => {
         try {
           const url = new URL(request.url());
-          if (url.pathname.startsWith('/api/')) apiHeaders.push({ path: url.pathname, headers: request.headers() });
+           if (url.pathname.startsWith('/api/')) apiHeaders.push({ path: url.pathname, search: url.search, headers: request.headers() });
         } catch { /* Ignore non-HTTP request URLs. */ }
       });
       try {
+        if (scenario.name === 'group-insights' || scenario.name === 'global-insights' || scenario.name === 'empty-global-insights') {
+          const scope = scenario.name === 'group-insights' ? 'group' : 'global';
+           await page.route('**/api/spending-insights*', (route) => { const fixture = populatedInsightFixture(scope, scenario.name === 'empty-global-insights'); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }); });
+        }
         await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
         await page.waitForTimeout(scenario.auth ? 900 : 250);
         await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => undefined);
@@ -504,7 +585,8 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
         if (!scenario.auth && apiHeaders.some((request) => request.headers['x-dev-email'])) throw new Error('Public landing context sent X-Dev-Email');
         await assertRendered(page, scenario, observations);
         if (scenario.name === 'custom-insights' || scenario.name === 'invalid-custom-insights') {
-          if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights)) throw new Error('Invalid or incomplete custom insight range made a spending-insights request');
+           if (!apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=trends'))) throw new Error('Invalid or incomplete custom insight range did not request independent trends');
+           if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=summary'))) throw new Error('Invalid or incomplete custom insight range made a selected-period summary request');
           await assertCustomInsightAccessibility(page, scenario.name === 'invalid-custom-insights');
         }
         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -598,14 +680,14 @@ test('intercepted loading, API error, offline, and modal states render their int
       await errorContext.close();
     }
 
-    const insightsErrorScenario: Scenario = { name: 'state-insights-error', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / intercepted aggregate API error', expected: { mode: 'insights-error', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups], apiFailures: [{ path: apiPaths.spendingInsights, status: 503 }] } };
+     const insightsErrorScenario: Scenario = { name: 'state-insights-error', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / independent summary and trend API errors', expected: { mode: 'insights-error', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups], apiFailures: [{ path: apiPaths.spendingInsights, status: 400 }], insightErrors: [{ id: 'insights-summary-error', message: 'Insights fixture rejected' }, { id: 'insights-trends-error', message: 'Insights fixture rejected' }] } };
     const insightsErrorContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
     const insightsErrorPage = await insightsErrorContext.newPage();
     const insightsErrorObservations: ApiObservation[] = [];
     await observeResponses(insightsErrorPage, insightsErrorObservations);
     const insightsErrorRequests: ApiRequestObservation[] = [];
     observeRequests(insightsErrorPage, insightsErrorRequests);
-    await insightsErrorPage.route('**/api/spending-insights*', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Insights fixture outage' } }) }));
+     await insightsErrorPage.route('**/api/spending-insights*', (route) => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INVALID_FILTER', message: 'Insights fixture rejected' } }) }));
     try {
       await insightsErrorPage.goto(`${BASE_URL}${insightsErrorScenario.path}`, { waitUntil: 'domcontentloaded' });
       await insightsErrorPage.waitForTimeout(900);
@@ -615,34 +697,45 @@ test('intercepted loading, API error, offline, and modal states render their int
       await reportForPage(insightsErrorPage, insightsErrorScenario, insightsErrorScenario.path, viewport, artifactDirectory, findings, failures);
     } catch (error) {
       failures.push({ scenarioName: insightsErrorScenario.name, authState: authState(insightsErrorScenario.auth), route: insightsErrorScenario.path, viewport, detail: `Intercepted insights-error validation failed: ${error instanceof Error ? error.message : String(error)}` });
-    } finally {
-      await insightsErrorContext.close();
-    }
+     } finally {
+       await insightsErrorContext.close();
+     }
 
-    const cachedScenario: Scenario = { name: 'state-insights-cached', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / cached aggregate notice', expected: { mode: 'insights-cached', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } };
-    const cachedContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
-    const cachedPage = await cachedContext.newPage();
-    const cachedObservations: ApiObservation[] = [];
-    await observeResponses(cachedPage, cachedObservations);
-    const cachedRequests: ApiRequestObservation[] = [];
-    observeRequests(cachedPage, cachedRequests);
-    await cachedPage.route('**/api/spending-insights*', async (route) => {
-      const response = await route.fetch();
-      const body = await response.json() as Record<string, unknown>;
-      await route.fulfill({ response, json: { ...body, offline: true } });
-    });
-    try {
-      await cachedPage.goto(`${BASE_URL}${cachedScenario.path}`, { waitUntil: 'domcontentloaded' });
-      await cachedPage.waitForTimeout(900);
-      assertAuthenticatedRequest(cachedRequests, DEV_EMAIL);
-      await assertRendered(cachedPage, cachedScenario, cachedObservations);
-      coverage.push({ scenarioName: cachedScenario.name, authState: authState(cachedScenario.auth), route: cachedScenario.path, viewport, context: cachedScenario.context, rendered: true, apiSuccesses: cachedObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
-      await reportForPage(cachedPage, cachedScenario, cachedScenario.path, viewport, artifactDirectory, findings, failures);
-    } catch (error) {
-      failures.push({ scenarioName: cachedScenario.name, authState: authState(cachedScenario.auth), route: cachedScenario.path, viewport, detail: `Cached insights validation failed: ${error instanceof Error ? error.message : String(error)}` });
-    } finally {
-      await cachedContext.close();
-    }
+     for (const independent of [
+       { name: 'state-insights-summary-success-trends-error', failedView: 'trends', errorId: 'insights-trends-error', message: 'Trend fixture rejected' },
+       { name: 'state-insights-summary-error-trends-success', failedView: 'summary', errorId: 'insights-summary-error', message: 'Summary fixture rejected' },
+     ]) {
+       const scenario: Scenario = { name: independent.name, path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: `History insights / ${independent.failedView} resource failure with independent sibling success`, expected: { mode: 'insights-error', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights], apiFailures: [{ path: apiPaths.spendingInsights, status: 400 }], insightErrors: [{ id: independent.errorId, message: independent.message }] } };
+       const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+       const page = await context.newPage();
+       const observations: ApiObservation[] = [];
+       await observeResponses(page, observations);
+       const requests: ApiRequestObservation[] = [];
+       observeRequests(page, requests);
+       await page.route('**/api/spending-insights*', (route) => {
+         const isFailedView = new URL(route.request().url()).searchParams.get('view') === independent.failedView;
+         if (isFailedView) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INVALID_FILTER', message: independent.message } }) });
+         const fixture = populatedInsightFixture('global');
+         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) });
+       });
+       try {
+         await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded' });
+         await page.waitForTimeout(900);
+         assertAuthenticatedRequest(requests, DEV_EMAIL);
+         await assertRendered(page, scenario, observations);
+         if (independent.failedView === 'trends') {
+           if (await page.locator('.insight-summary-grid').count() !== 1) throw new Error('Summary-success sibling did not render its summary grid');
+         } else if (await page.locator('.category-trend-list').count() === 0) {
+           throw new Error('Trend-success sibling did not render a populated category trend list');
+         }
+         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+         await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+       } catch (error) {
+         failures.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, detail: `Independent insights resource validation failed: ${error instanceof Error ? error.message : String(error)}` });
+       } finally {
+         await context.close();
+       }
+     }
 
     const loadingScenario: Scenario = { name: 'state-insights-loading', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / intercepted spending-insights loading state', expected: { mode: 'insights-loading', heading: 'History', content: 'Spending insights', apiPaths: [apiPaths.me, apiPaths.groups] } };
     const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
@@ -665,32 +758,60 @@ test('intercepted loading, API error, offline, and modal states render their int
       await loadingContext.close();
     }
 
-    const offlineScenario: Scenario = { name: 'state-insights-offline', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'History', content: 'Detailed insights are unavailable offline', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } };
+    const offlineScenario: Scenario = { name: 'state-insights-offline', path: '/activity?view=insights&period=all', auth: DEV_EMAIL, context: 'History insights / verified fixture followed by offline transition', expected: { mode: 'offline', heading: 'History', content: 'Refresh is unavailable offline', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } };
     const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
     const offlinePage = await offlineContext.newPage();
-    const offlineObservations: ApiObservation[] = [];
-    await observeResponses(offlinePage, offlineObservations);
-    const offlineRequests: ApiRequestObservation[] = [];
-    observeRequests(offlinePage, offlineRequests);
+     const offlineObservations: ApiObservation[] = [];
+     await observeResponses(offlinePage, offlineObservations);
+     const offlineRequests: ApiRequestObservation[] = [];
+     observeRequests(offlinePage, offlineRequests);
+     await offlinePage.route('**/api/spending-insights*', (route) => { const fixture = populatedInsightFixture('global'); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }); });
     try {
       await offlinePage.goto(`${BASE_URL}${offlineScenario.path}`, { waitUntil: 'domcontentloaded' });
       await offlinePage.waitForTimeout(900);
       assertAuthenticatedRequest(offlineRequests, DEV_EMAIL);
       await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Spending insights' } }, offlineObservations);
       await offlineContext.setOffline(true);
-      await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
-      await offlinePage.waitForTimeout(150);
-      await assertRendered(offlinePage, offlineScenario, offlineObservations);
+       await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
+       await offlinePage.waitForTimeout(150);
+       await assertRendered(offlinePage, offlineScenario, offlineObservations);
+       expect(await offlinePage.locator('.category-trend-list').count()).toBeGreaterThan(0);
       coverage.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: offlineScenario.path, viewport, context: offlineScenario.context, rendered: true, apiSuccesses: offlineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(offlinePage, offlineScenario, `${offlineScenario.path} [offline]`, viewport, artifactDirectory, findings, failures);
     } catch (error) {
       failures.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: `${offlineScenario.path} [offline]`, viewport, detail: `Intercepted offline validation failed: ${error instanceof Error ? error.message : String(error)}` });
-    } finally {
-      await offlineContext.close();
-    }
-  }
+     } finally {
+       await offlineContext.close();
+     }
+
+     const coldOfflineScenario: Scenario = { name: 'state-insights-cold-offline', path: '/activity?view=insights', auth: DEV_EMAIL, context: 'History insights / uncached summary and trends while the surrounding history shell is retained', expected: { mode: 'offline', heading: 'History', content: 'Selected-period summary is unavailable offline', apiPaths: [apiPaths.me, apiPaths.groups] } };
+     const coldOfflineContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+     const coldOfflinePage = await coldOfflineContext.newPage();
+     const coldOfflineObservations: ApiObservation[] = [];
+     await observeResponses(coldOfflinePage, coldOfflineObservations);
+     const coldOfflineRequests: ApiRequestObservation[] = [];
+     observeRequests(coldOfflinePage, coldOfflineRequests);
+     try {
+       await coldOfflinePage.goto(`${BASE_URL}/activity?view=changes`, { waitUntil: 'domcontentloaded' });
+       await coldOfflinePage.waitForTimeout(900);
+       await coldOfflineContext.setOffline(true);
+       await coldOfflinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
+       await coldOfflinePage.getByRole('link', { name: 'Insights', exact: true }).click();
+       await coldOfflinePage.waitForTimeout(250);
+       assertAuthenticatedRequest(coldOfflineRequests, DEV_EMAIL);
+       await assertRendered(coldOfflinePage, coldOfflineScenario, coldOfflineObservations);
+       expect(await coldOfflinePage.getByText('Six-month trends are unavailable offline; no cached data is available.', { exact: true }).count()).toBe(1);
+       expect(await coldOfflinePage.getByText('Loading…', { exact: true }).count()).toBe(0);
+       coverage.push({ scenarioName: coldOfflineScenario.name, authState: authState(coldOfflineScenario.auth), route: coldOfflineScenario.path, viewport, context: coldOfflineScenario.context, rendered: true, apiSuccesses: coldOfflineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+       await reportForPage(coldOfflinePage, coldOfflineScenario, coldOfflineScenario.path, viewport, artifactDirectory, findings, failures);
+     } catch (error) {
+       failures.push({ scenarioName: coldOfflineScenario.name, authState: authState(coldOfflineScenario.auth), route: coldOfflineScenario.path, viewport, detail: `Cold offline insights validation failed: ${error instanceof Error ? error.message : String(error)}` });
+     } finally {
+       await coldOfflineContext.close();
+     }
+   }
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
-    'Intercepted detailed insight loading, cached, API-error, and offline states are covered across every configured viewport, including 895px, 896px, and 1440px.',
+     'Intercepted detailed insight loading, independent API-error, retained-cache offline, and cold-offline states are covered across every configured viewport, including 895px, 896px, and 1440px.',
     'The schedule disclosure state matrix uses bounded fixture/interception coverage at 390px; populated disclosure geometry is exercised across the full responsive matrix.',
     'Payer modal coverage is touch/mobile-tablet only (390px and 768px) because the matrix does not open it at wider viewports.',
   ]);

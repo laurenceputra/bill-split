@@ -34,15 +34,17 @@ class TransactionRouteDb {
   prepare(sql: string) { return new TransactionRouteStatement(sql); }
 }
 class InsightsRouteStatement extends MemberStatement {
+  constructor(sql: string, private readonly trendRows: unknown[] = []) { super(sql); }
   async all<T>() {
     if (this.sql.includes('SELECT group_id,MAX(group_name)')) return { results: [{ group_id: 'group-1', group_name: 'Group', currency: 'USD', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, you_paid_minor: 600, expense_count: 2 }] as T[] };
-    if (this.sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: [{ group_id: 'group-1', currency: 'USD', bucket: '2026-01', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, expense_count: 2 }] as T[] };
-    if (this.sql.includes('SELECT group_id,currency,COALESCE(NULLIF(TRIM(category)')) return { results: [{ group_id: 'group-1', currency: 'USD', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
+    if (this.sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: this.trendRows as T[] };
+    if (this.sql.includes('category_rows') || this.sql.includes('substr(expense_date')) return { results: [{ currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
     return { results: [{ currency: 'USD', person_id: 'person-1', person_name: 'Dev', share_minor: 400 }] as T[] };
   }
 }
 class InsightsRouteDb {
-  prepare(sql: string) { return new InsightsRouteStatement(sql); }
+  trendRows: unknown[] = [{ group_id: 'group-1', currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }];
+  prepare(sql: string) { return new InsightsRouteStatement(sql, this.trendRows); }
 }
 class TriggerOverflowStatement extends MemberStatement {
   async all<T>() {
@@ -423,12 +425,26 @@ describe('worker boundary', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND' } });
   });
   it('returns grouped spending insight aggregates for an authorized group', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-0000-0000-000000000009&from=2026-01-01&to=2026-01-31', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new InsightsRouteDb() }), {} as ExecutionContext);
+    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-0000-0000-000000000009&view=summary&from=2026-01-01&to=2026-01-31&comparisonFrom=2025-12-01&comparisonTo=2025-12-31', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new InsightsRouteDb() }), {} as ExecutionContext);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ scope: 'group', summaries: [{ groupSpendMinor: 1000, allocatedSpendMinor: 400, yourShareMinor: 400, youPaidMinor: 600 }], participants: [{ shareMinor: 400 }] });
+    expect(await response.json()).toMatchObject({ scope: 'group', summaries: [{ groupSpendMinor: 1000, allocatedSpendMinor: 400, yourShareMinor: 400, youPaidMinor: 600 }], previous: { from: '2025-12-01', to: '2025-12-31' } });
+  });
+  it('returns bounded category trends through the trends view', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-0000-0000-000000000009&view=trends&trendFrom=2025-08-01&trendTo=2026-01-31', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new InsightsRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ scope: 'group', trendFrom: '2025-08-01', trendTo: '2026-01-31', categoryTrends: [{ category: 'Food', bucket: '2026-01' }] });
+  });
+  it('maps a six-month category total overflow to the route BALANCE_OVERFLOW response', async () => {
+    const db = new InsightsRouteDb();
+    db.trendRows = ['2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2026-01'].map((bucket) => ({ group_id: 'group-1', currency: 'USD', bucket, category: 'Food', group_spend_minor: 1_600_000_000_000_000, allocated_spend_minor: 1_600_000_000_000_000, expense_count: 1 }));
+    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-0000-0000-000000000009&view=trends&trendFrom=2025-08-01&trendTo=2026-01-31', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: db }), {} as ExecutionContext);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
   });
   it.each([
     ['from=2026-02-30', 'INVALID_DATE'],
+    ['trendFrom=2026-01-01', 'INVALID_DATE'],
+    ['trendFrom=2026-02-01&trendTo=2026-01-01', 'INVALID_DATE'],
     ['currency=invalid', 'INVALID_FILTER'],
   ])('rejects invalid spending insight query %s', async (query, code) => {
     const response = await worker.fetch(new Request(`https://split.example/api/spending-insights?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);

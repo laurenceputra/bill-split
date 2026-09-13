@@ -1,7 +1,7 @@
 import { groupSplitDefaultInput, supportedCurrencies, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsights, Transaction } from '../shared/types';
-import { checkedAddMinor, checkedMinor } from '../shared/money';
+import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
+import { BalanceOverflowError, checkedAddMinor, checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
@@ -1395,11 +1395,24 @@ export class Repository {
    * user's active membership has a positive split allocation. Aggregation is
    * first grouped by group so combining groups uses checked arithmetic rather
    * than allowing a cross-group SQLite SUM to overflow. */
-  async spendingInsights(userId: string, groupId?: string, opts: { from?: string; to?: string; currency?: string } = {}): Promise<SpendingInsights> {
+   async spendingInsights(userId: string, groupId: string | undefined, opts: { view: 'trends'; trendFrom?: string; trendTo?: string; currency?: string }): Promise<SpendingInsightTrends>;
+   async spendingInsights(userId: string, groupId?: string, opts?: { view?: 'summary'; from?: string; to?: string; currency?: string; comparisonFrom?: string; comparisonTo?: string }): Promise<SpendingInsightSummaryResponse>;
+   async spendingInsights(userId: string, groupId?: string, opts: { view?: 'summary' | 'trends'; from?: string; to?: string; currency?: string; comparisonFrom?: string; comparisonTo?: string; trendFrom?: string; trendTo?: string } = {}): Promise<SpendingInsightSummaryResponse | SpendingInsightTrends> {
     for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Insight dates must be real YYYY-MM-DD dates');
+    if ((opts.from === undefined) !== (opts.to === undefined)) throw new RepositoryError('INVALID_DATE', 'Insight summary dates must be supplied together');
     if (opts.from && opts.to && opts.from > opts.to) throw new RepositoryError('INVALID_DATE', 'Insight start date must not be after its end date');
+    if ((opts.comparisonFrom === undefined) !== (opts.comparisonTo === undefined)) throw new RepositoryError('INVALID_DATE', 'Insight comparison dates must be supplied together');
+    for (const value of [opts.comparisonFrom, opts.comparisonTo]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Insight comparison dates must be real YYYY-MM-DD dates');
+    if (opts.comparisonFrom && opts.comparisonTo && opts.comparisonFrom > opts.comparisonTo) throw new RepositoryError('INVALID_DATE', 'Insight comparison start date must not be after its end date');
+    if ((opts.trendFrom === undefined) !== (opts.trendTo === undefined)) throw new RepositoryError('INVALID_DATE', 'Insight trend dates must be supplied together');
+    for (const value of [opts.trendFrom, opts.trendTo]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Insight trend dates must be real YYYY-MM-DD dates');
+    if (opts.trendFrom && opts.trendTo && opts.trendFrom > opts.trendTo) throw new RepositoryError('INVALID_DATE', 'Insight trend start date must not be after its end date');
+    if (opts.trendFrom && opts.trendTo) {
+      const months = (Number(opts.trendTo.slice(0, 4)) - Number(opts.trendFrom.slice(0, 4))) * 12 + Number(opts.trendTo.slice(5, 7)) - Number(opts.trendFrom.slice(5, 7));
+      if (months > 5) throw new RepositoryError('INVALID_DATE', 'Insight category trends may cover at most six calendar months');
+    }
     if (opts.currency && !supportedCurrencies.includes(opts.currency as typeof supportedCurrencies[number])) throw new RepositoryError('INVALID_FILTER', 'Insight currency is not supported');
-    const aggregate = async (from?: string, to?: string) => {
+    const aggregate = async (from?: string, to?: string, trendOnly = false) => {
       const scope = groupId ? 'gm.group_id=?' : '1=1';
       const scopeArgs = groupId ? [userId, groupId] : [userId];
       const dateFilter = `${from ? ' AND e.expense_date>=?' : ''}${to ? ' AND e.expense_date<=?' : ''}${opts.currency ? ' AND e.currency=?' : ''}`;
@@ -1419,48 +1432,40 @@ export class Repository {
       const args = [...scopeArgs, ...dateArgs];
       const source = groupId ? 'enriched_expenses' : 'enriched_expenses WHERE your_share_minor>0';
       const rows = async (sql: string) => (await this.db.prepare(`${cte} ${sql}`).bind(...args).all<Row>()).results;
+      if (trendOnly) {
+        return { summaries: [], trendRows: await rows(`SELECT group_id,currency,substr(expense_date,1,7) AS bucket,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') AS category,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,bucket,category ORDER BY currency,bucket,category,group_id`) };
+      }
       const summaryRows = await rows(`SELECT group_id,MAX(group_name) AS group_name,currency,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,SUM(you_paid_minor) AS you_paid_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency ORDER BY group_id,currency`);
-      const bucketRows = await rows(`SELECT group_id,currency,substr(expense_date,1,7) AS bucket,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,bucket ORDER BY bucket,currency,group_id`);
-      const categoryRows = await rows(`SELECT group_id,currency,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') AS category,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') ORDER BY currency,allocated_spend_minor DESC,category,group_id`);
-      const groupRows = groupId ? [] : summaryRows;
       const add = (left: number, right: unknown) => checkedAddMinor(left, minor(right));
-      const summaries = new Map<string, { currency: SpendingInsights['summaries'][number]['currency']; groupSpendMinor: number; allocatedSpendMinor: number; yourShareMinor: number; youPaidMinor: number; expenseCount: number }>();
+      const summaries = new Map<string, SpendingInsightSummaryResponse['summaries'][number]>();
       for (const row of summaryRows) {
         const key = text(row.currency), current = summaries.get(key) || { currency: currency(row.currency), groupSpendMinor: 0, allocatedSpendMinor: 0, yourShareMinor: 0, youPaidMinor: 0, expenseCount: 0 };
-        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.youPaidMinor = add(current.youPaidMinor, row.you_paid_minor); current.expenseCount += number(row.expense_count); summaries.set(key, current);
+        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.youPaidMinor = add(current.youPaidMinor, row.you_paid_minor); current.expenseCount = checkedAddMinor(current.expenseCount, minor(row.expense_count)); summaries.set(key, current);
       }
-      const buckets = new Map<string, SpendingInsights['buckets'][number]>();
-      for (const row of bucketRows) {
-        const key = `${text(row.currency)}:${text(row.bucket)}`, current = buckets.get(key) || { currency: currency(row.currency), bucket: text(row.bucket), groupSpendMinor: 0, allocatedSpendMinor: 0, yourShareMinor: 0, expenseCount: 0 };
-        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.expenseCount += number(row.expense_count); buckets.set(key, current);
-      }
-      const categories = new Map<string, SpendingInsights['categories'][number]>();
-      for (const row of categoryRows) {
-        const key = `${text(row.currency)}:${text(row.category)}`, current = categories.get(key) || { currency: currency(row.currency), category: text(row.category), groupSpendMinor: 0, allocatedSpendMinor: 0, expenseCount: 0 };
-        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.expenseCount += number(row.expense_count); categories.set(key, current);
-      }
-      const participantRows = groupId ? (await this.db.prepare(`SELECT e.currency,s.person_id,COALESCE(p.name,'Deleted account') AS person_name,SUM(s.amount_minor) AS share_minor
-        FROM expenses e JOIN groups g ON g.id=e.group_id AND g.deleted_at IS NULL
-        JOIN group_members gm ON gm.group_id=e.group_id AND gm.user_id=? AND gm.deleted_at IS NULL
-        JOIN users insight_user ON insight_user.id=gm.user_id AND insight_user.deleted_at IS NULL
-        JOIN splits s ON s.expense_id=e.id LEFT JOIN people p ON p.id=s.person_id
-        WHERE gm.group_id=? AND e.deleted_at IS NULL${dateFilter}
-        GROUP BY e.currency,s.person_id,COALESCE(p.name,'Deleted account') ORDER BY e.currency,share_minor DESC,person_name`).bind(userId, groupId, ...dateArgs).all<Row>()).results : [];
-      return { summaries: [...summaries.values()], buckets: [...buckets.values()], categories: [...categories.values()], groupRows, participantRows };
+      return { summaries: [...summaries.values()].map((summary) => groupId ? summary : { ...summary, groupSpendMinor: summary.allocatedSpendMinor }), trendRows: [] as Row[] };
     };
     try {
+      if (opts.view === 'trends') {
+        if (!opts.trendFrom || !opts.trendTo) throw new RepositoryError('INVALID_DATE', 'Insight trend dates are required');
+        const trend = await aggregate(opts.trendFrom, opts.trendTo, true);
+        const categoryTrends = new Map<string, SpendingInsightTrends['categoryTrends'][number]>();
+        const categoryPrimaryTotals = new Map<string, number>();
+        const add = (left: number, right: unknown) => checkedAddMinor(left, minor(right));
+        for (const row of trend.trendRows) {
+          const key = `${text(row.currency)}:${text(row.bucket)}:${text(row.category)}`;
+          const primaryKey = `${text(row.currency)}:${text(row.category)}`;
+          const primaryValue = groupId ? row.group_spend_minor : row.allocated_spend_minor;
+          categoryPrimaryTotals.set(primaryKey, add(categoryPrimaryTotals.get(primaryKey) || 0, primaryValue));
+          const current = categoryTrends.get(key) || { currency: currency(row.currency), bucket: text(row.bucket), category: text(row.category), groupSpendMinor: 0, allocatedSpendMinor: 0, expenseCount: 0 };
+          current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.expenseCount = checkedAddMinor(current.expenseCount, minor(row.expense_count)); categoryTrends.set(key, current);
+        }
+        return { scope: groupId ? 'group' : 'global', trendFrom: opts.trendFrom, trendTo: opts.trendTo, categoryTrends: [...categoryTrends.values()].map((item) => groupId ? item : { ...item, groupSpendMinor: item.allocatedSpendMinor }) };
+      }
       const current = await aggregate(opts.from, opts.to);
-      const personalPrimary = (summary: SpendingInsights['summaries'][number]) => groupId ? summary : { ...summary, groupSpendMinor: summary.allocatedSpendMinor };
-      const personalBucket = (bucket: SpendingInsights['buckets'][number]) => groupId ? bucket : { ...bucket, groupSpendMinor: bucket.allocatedSpendMinor };
-      const personalCategory = (category: SpendingInsights['categories'][number]) => groupId ? category : { ...category, groupSpendMinor: category.allocatedSpendMinor };
-      const result: SpendingInsights = { scope: groupId ? 'group' : 'global', ...(opts.from ? { from: opts.from } : {}), ...(opts.to ? { to: opts.to } : {}), summaries: current.summaries.map(personalPrimary), buckets: current.buckets.map(personalBucket), categories: current.categories.map(personalCategory),
-        ...(groupId ? { participants: current.participantRows.map((row) => ({ personId: text(row.person_id), name: text(row.person_name), currency: currency(row.currency), shareMinor: minor(row.share_minor) })) } : { groups: current.groupRows.map((row) => ({ groupId: text(row.group_id), groupName: text(row.group_name), currency: currency(row.currency), allocatedSpendMinor: minor(row.allocated_spend_minor), yourShareMinor: minor(row.your_share_minor), expenseCount: number(row.expense_count) })) }),
-      };
-      if (opts.from && opts.to) {
-        const start = Date.parse(`${opts.from}T00:00:00Z`), end = Date.parse(`${opts.to}T00:00:00Z`), days = Math.round((end - start) / 86_400_000) + 1;
-        const previousTo = new Date(start - 86_400_000).toISOString().slice(0, 10), previousFrom = new Date(start - days * 86_400_000).toISOString().slice(0, 10);
-        const previous = await aggregate(previousFrom, previousTo);
-        result.previous = { from: previousFrom, to: previousTo, summaries: previous.summaries.map(personalPrimary) };
+      const result: SpendingInsightSummaryResponse = { scope: groupId ? 'group' : 'global', ...(opts.from ? { from: opts.from } : {}), ...(opts.to ? { to: opts.to } : {}), summaries: current.summaries };
+      if (opts.comparisonFrom && opts.comparisonTo) {
+        const previous = await aggregate(opts.comparisonFrom, opts.comparisonTo);
+        result.previous = { from: opts.comparisonFrom, to: opts.comparisonTo, summaries: previous.summaries };
       }
       return result;
     } catch (error) {
@@ -1491,7 +1496,7 @@ export class Repository {
   private static isRevisionUnique(error: unknown) {
     return Repository.isUnique(error) && error instanceof Error && /revisions\.(entity_type|entity_id|revision)/i.test(error.message);
   }
-  private static isBalanceOverflow(error: unknown) { return error instanceof Error && /BALANCE_OVERFLOW|ledger total|integer overflow/i.test(error.message); }
+   private static isBalanceOverflow(error: unknown) { return error instanceof BalanceOverflowError || error instanceof Error && /BALANCE_OVERFLOW|ledger total|integer overflow|safe integer range/i.test(error.message); }
   private static isPermanentGenerationError(error: unknown) {
     return error instanceof RangeError || (error instanceof Error && /too many sql variables|bind parameter|malformed json|syntax error|no such (?:function|table|column)|not null constraint|check constraint|foreign key constraint|datatype mismatch|validation failed|invalid (?:scheduled|recurrence|participant|calendar|input|data)|unable to resolve local calendar date/i.test(error.message));
   }

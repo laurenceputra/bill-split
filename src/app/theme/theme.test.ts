@@ -60,6 +60,10 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/:where\(\.section-title\) \+ p\s*\{[\s\S]*margin-top: 0;/);
   });
 
+  it('keeps adjacent insight summary cards at least twelve pixels apart on narrow screens', () => {
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.insight-summary-grid\s*\{[\s\S]*gap: var\(--space-3\);/);
+  });
+
   it('normalizes disclosure flow and nested surfaces without changing semantic sections', () => {
     expect(tokensCss).toContain('--control-min-height: 2.75rem;');
     expect(css).toMatch(/\.section-title\s*>\s*h2\s*\{[\s\S]*margin: 0;/);
@@ -89,7 +93,7 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('>Manage people</Link>');
     expect(css).toMatch(/\.people-summary-compact \+ \.inline-action\s*\{[\s\S]*display: flex;[\s\S]*margin-top: var\(--space-2\);/);
     expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.schedule-row__actions\s*\{[\s\S]*flex-basis: 100%;[\s\S]*justify-content: flex-start;/);
-    expect(css).toMatch(/\.insight-chart \.insight-bar__header a,[\s\S]*\.cache-status > \.inline-action\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*min-height: var\(--control-min-height\);/);
+    expect(css).toMatch(/\.cache-status > \.inline-action\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*min-height: var\(--control-min-height\);/);
   });
 
   it('lets conditional status messages use the containing form grid gap', () => {
@@ -101,6 +105,13 @@ describe('responsive navigation layout contract', () => {
     expect(css).toContain('var(--safe-bottom)');
     expect(css).toContain('var(--safe-left)');
     expect(css).toContain('var(--safe-right)');
+  });
+
+  it('keeps sr-only content assistive-technology-visible and associates trend values', () => {
+    expect(baseCss).toMatch(/\.sr-only:not\(:focus\):not\(:active\)\s*\{[\s\S]*position: absolute;[\s\S]*width: 1px;[\s\S]*height: 1px;[\s\S]*overflow: hidden;[\s\S]*clip: rect\(0 0 0 0\);/);
+    expect(baseCss).not.toMatch(/\.sr-only[^}]*display:\s*none/);
+    expect(appSource).toMatch(/id=\{valuesId\}\s+className="sr-only"/);
+    expect(appSource).toContain('aria-describedby={valuesId}');
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {

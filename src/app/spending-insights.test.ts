@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { insightBarWidth, insightDateRange, insightQuery, insightSentences, insightTransactionPath, readInsightFilters, validInsightRange } from './spending-insights';
+import { categoryTrendDirection, categoryTrendStatus, insightBarWidth, insightComparisonDateRange, insightCurrencySet, insightDateRange, insightMonthLabel, insightQuery, insightTrendDateRange, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
 
 describe('spending insight filters', () => {
   const now = new Date('2026-09-13T12:00:00.000Z');
@@ -20,34 +20,86 @@ describe('spending insight filters', () => {
     expect(insightQuery(valid).toString()).toBe('period=custom&from=2026-08-01&to=2026-08-31&currency=EUR');
   });
 
-  it('keeps bar widths visible and analysis deterministic', () => {
+  it('keeps bar widths visible and ranks sparse category trends by scope', () => {
     expect(insightBarWidth(25, 100)).toBe(25);
     expect(insightBarWidth(0, 0)).toBe(0);
-    const data = {
-      scope: 'global' as const,
-      summaries: [{ currency: 'USD' as const, groupSpendMinor: 10000, allocatedSpendMinor: 4000, yourShareMinor: 4000, youPaidMinor: 2000, expenseCount: 2 }],
-      buckets: [],
-      categories: [{ currency: 'USD' as const, category: 'Food', groupSpendMinor: 10000, allocatedSpendMinor: 4000, expenseCount: 2 }],
-      groups: [{ groupId: 'group-1', groupName: 'Trip', currency: 'USD' as const, allocatedSpendMinor: 4000, yourShareMinor: 4000, expenseCount: 2 }],
-    };
-    expect(insightSentences(data)).toEqual([
-      'USD has 2 counted expenses with USD 40.00 allocated.',
-      'Food is the top allocated category in USD at 40.00.',
-      'Your allocated share is higher than what you paid in USD.',
-      'Trip has the highest allocated spending in USD among your active groups.',
-    ]);
+    const range = { trendFrom: '2024-11-01', trendTo: '2025-04-02' };
+    const rows = [
+      { currency: 'USD' as const, bucket: '2025-04', category: 'B', groupSpendMinor: 900, allocatedSpendMinor: 100, expenseCount: 1 },
+      { currency: 'USD' as const, bucket: '2025-03', category: 'A', groupSpendMinor: 100, allocatedSpendMinor: 700, expenseCount: 1 },
+    ];
+    expect(topCategoryTrends(rows, 'USD', 'allocated', range).map((item) => item.category)).toEqual(['A', 'B']);
+    expect(topCategoryTrends(rows, 'USD', 'group', range).map((item) => item.category)).toEqual(['B', 'A']);
+    expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values).toHaveLength(6);
+    expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values.find((item) => item.bucket === '2025-02')?.value).toBe(0);
   });
 
-  it('uses local calendar boundaries across leap years and protects incomplete drilldowns', () => {
+  it('ignores out-of-range buckets and deterministically fills only the top four categories', () => {
+    const range = { trendFrom: '2025-01-01', trendTo: '2025-06-15' };
+    const rows = ['D', 'C', 'B', 'A', 'E'].map((category) => ({ currency: 'USD' as const, bucket: '2025-06', category, groupSpendMinor: 1000, allocatedSpendMinor: 1000, expenseCount: 1 }));
+    rows.push({ currency: 'USD', bucket: '2024-12', category: 'E', groupSpendMinor: 100000, allocatedSpendMinor: 100000, expenseCount: 1 });
+    const result = topCategoryTrends(rows, 'USD', 'group', range);
+    expect(result.map((item) => item.category)).toEqual(['A', 'B', 'C', 'D']);
+    expect(result).toHaveLength(4);
+    expect(result.find((item) => item.category === 'E')).toBeUndefined();
+  });
+
+  it('rejects unsafe category amount and count aggregation', () => {
+    const range = { trendFrom: '2025-01-01', trendTo: '2025-06-15' };
+    const row = { currency: 'USD' as const, bucket: '2025-06', category: 'Overflow', groupSpendMinor: Number.MAX_SAFE_INTEGER, allocatedSpendMinor: Number.MAX_SAFE_INTEGER, expenseCount: 1 };
+    expect(() => topCategoryTrends([row, row], 'USD', 'group', range)).toThrow('safe integer range');
+  });
+
+  it('keeps category statuses honest about incomplete months', () => {
+    const months = ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06'];
+    const item = { category: 'Food', currency: 'USD' as const, total: 300, values: months.map((bucket, index) => ({ bucket, value: index === 3 ? 100 : index === 4 ? 200 : index === 5 ? 300 : 0, expenseCount: 1 })) };
+    expect(categoryTrendStatus(item, months).text).toContain('from Apr to May');
+    const down = { ...item, values: months.map((bucket, index) => ({ bucket, value: index === 3 ? 200 : index === 4 ? 100 : 0, expenseCount: 1 })) };
+    expect(categoryTrendStatus(down, months)).toMatchObject({ kind: 'down' });
+    const unchanged = { ...item, values: months.map((bucket, index) => ({ bucket, value: index === 3 || index === 4 ? 100 : 0, expenseCount: 1 })) };
+    expect(categoryTrendStatus(unchanged, months)).toMatchObject({ kind: 'unchanged' });
+    const firstSeen = { ...item, values: months.map((bucket, index) => ({ bucket, value: index === 5 ? 300 : 0, expenseCount: 1 })), total: 300 };
+    expect(categoryTrendStatus(firstSeen, months)).toMatchObject({ kind: 'first-seen' });
+    const resumed = { ...item, values: months.map((bucket, index) => ({ bucket, value: index === 1 || index === 5 ? 300 : 0, expenseCount: 1 })), total: 600 };
+    expect(categoryTrendStatus(resumed, months)).toMatchObject({ kind: 'resumed' });
+    const resumedCompleted = { ...item, values: months.map((bucket, index) => ({ bucket, value: index === 1 || index === 4 ? 300 : 0, expenseCount: 1 })), total: 600 };
+    expect(categoryTrendStatus(resumedCompleted, months)).toMatchObject({ kind: 'resumed' });
+    const resumedAfterComparisonHistory = { ...item, values: months.slice(-3).map((bucket, index) => ({ bucket, value: index === 0 || index === 2 ? 300 : 0, expenseCount: 1 })), total: 600 };
+    expect(categoryTrendStatus(resumedAfterComparisonHistory, months.slice(-3))).toMatchObject({ kind: 'resumed' });
+  });
+
+  it('uses local calendar boundaries across leap years', () => {
     expect(insightDateRange('month', new Date(2024, 1, 29, 23, 59))).toEqual({ from: '2024-02-01', to: '2024-02-29' });
     expect(insightDateRange('last-month', new Date(2024, 2, 1))).toEqual({ from: '2024-02-01', to: '2024-02-29' });
     expect(validInsightRange('2024-02-29', '2024-03-01')).toBe(true);
     expect(validInsightRange('2024-03-01', '2024-02-29')).toBe(false);
     expect(insightBarWidth(0, 100)).toBe(0);
-    expect(insightTransactionPath('group/1', { period: 'custom', from: '2026-01-01', to: '2026-01-31', currency: 'EUR' }, 'Food')).toBe('/activity?group=group%2F1&view=transactions&kind=expense&from=2026-01-01&to=2026-01-31&currency=EUR&category=Food');
-    const allCurrencyRange = { period: 'custom' as const, from: '2026-01-01', to: '2026-01-31' };
-    expect(insightTransactionPath('group/1', { ...allCurrencyRange, currency: 'EUR' }, 'Food')).toBe('/activity?group=group%2F1&view=transactions&kind=expense&from=2026-01-01&to=2026-01-31&currency=EUR&category=Food');
-    expect(insightTransactionPath('group/1', { ...allCurrencyRange, currency: 'EUR' })).toBe('/activity?group=group%2F1&view=transactions&kind=expense&from=2026-01-01&to=2026-01-31&currency=EUR');
-    expect(insightTransactionPath('group-1', { period: 'all' }, 'Uncategorized')).toBe('/activity?group=group-1&view=transactions&kind=expense');
+  });
+
+  it('covers six local calendar months across year and leap boundaries', () => {
+    expect(insightTrendDateRange(new Date(2024, 2, 1))).toEqual({ trendFrom: '2023-10-01', trendTo: '2024-03-01' });
+    expect(insightTrendDateRange(new Date(2024, 1, 29, 23, 59))).toEqual({ trendFrom: '2023-09-01', trendTo: '2024-02-29' });
+    expect(insightTrendMonths({ trendFrom: '2023-09-01', trendTo: '2024-02-29' })).toEqual(['2023-09', '2023-10', '2023-11', '2023-12', '2024-01', '2024-02']);
+    expect(categoryTrendDirection(100, 0)).toBe('new');
+    expect(categoryTrendDirection(0, 0)).toBe('unchanged');
+    expect(categoryTrendDirection(50, 100)).toBe('down');
+    expect(categoryTrendDirection(100, 50)).toBe('up');
+    expect(insightMonthLabel('2024-03')).toMatch(/Mar/i);
+  });
+
+  it('builds explicit comparison intervals for every preset and custom range', () => {
+    const marchThirteenth = new Date(2026, 2, 13, 12);
+    expect(insightComparisonDateRange('month', insightDateRange('month', marchThirteenth), marchThirteenth)).toEqual({ from: '2026-02-01', to: '2026-02-13' });
+    const marchThirtyFirst = new Date(2026, 2, 31, 12);
+    expect(insightComparisonDateRange('month', insightDateRange('month', marchThirtyFirst), marchThirtyFirst)).toEqual({ from: '2026-02-01', to: '2026-02-28' });
+    const leapDay = new Date(2024, 1, 29, 12);
+    expect(insightComparisonDateRange('year', insightDateRange('year', leapDay), leapDay)).toEqual({ from: '2023-01-01', to: '2023-02-28' });
+    expect(insightComparisonDateRange('last-month', insightDateRange('last-month', marchThirtyFirst), marchThirtyFirst)).toEqual({ from: '2026-01-01', to: '2026-01-31' });
+    expect(insightComparisonDateRange('custom', { from: '2024-03-01', to: '2024-03-31' })).toEqual({ from: '2024-01-30', to: '2024-02-29' });
+    expect(insightComparisonDateRange('all', {})).toEqual({});
+  });
+
+  it('keeps current and previous-only currencies in the summary currency union', () => {
+    expect(insightCurrencySet({ scope: 'global', summaries: [{ currency: 'USD', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }], previous: { from: '2026-01-01', to: '2026-01-31', summaries: [{ currency: 'EUR', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }] } }, { scope: 'global', trendFrom: '2026-01-01', trendTo: '2026-06-01', categoryTrends: [] })).toEqual(['EUR', 'USD']);
   });
 });

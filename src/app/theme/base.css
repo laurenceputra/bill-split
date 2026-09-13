@@ -55,6 +55,20 @@ textarea:focus-visible {
   outline-offset: 3px;
 }
 
+/* Keep semantic labels available to assistive technology without showing
+   utility text in the visual layout. Focused elements remain discoverable. */
+.sr-only:not(:focus):not(:active) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 h1,
 h2,
 h3,
