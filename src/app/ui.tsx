@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
@@ -193,8 +193,12 @@ export function Surface({ children, className = '' }: { children: ReactNode; cla
   return <div className={`surface ${className}`.trim()}>{children}</div>;
 }
 
-export function Field({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) {
-  return <label className={`field ${className}`.trim()}><span>{label}</span>{children}</label>;
+export function Field({ label, children, className = '', error, errorId }: { label: string; children: ReactNode; className?: string; error?: string; errorId?: string }) {
+  const childProps = isValidElement(children) ? (children as ReactElement<Record<string, unknown>>).props : undefined;
+  const describedBy = typeof childProps?.['aria-describedby'] === 'string' ? childProps['aria-describedby'] : undefined;
+  const resolvedErrorId = errorId || describedBy?.split(/\s+/)[0] || `${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-error`;
+  const describedChild = error && isValidElement(children) ? cloneElement(children as ReactElement<Record<string, unknown>>, { 'aria-invalid': true, 'aria-describedby': [describedBy, resolvedErrorId].filter(Boolean).join(' ') }) : children;
+  return <label className={`field ${className}`.trim()}><span>{label}</span>{describedChild}{error ? <small id={resolvedErrorId} className="field-error" role="alert">{error}</small> : null}</label>;
 }
 
 export function Money({ amountMinor, currency, tone, size = 'normal' }: { amountMinor: number; currency: string; tone?: 'positive' | 'debt'; size?: 'normal' | 'large' }) {

@@ -1,4 +1,4 @@
-import type { Activity, AuditDisclosureEvent, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, Transaction } from '../shared/types';
+import type { Activity, AuditDisclosureEvent, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsights, Transaction } from '../shared/types';
 import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
@@ -28,6 +28,7 @@ export type TransactionPage = { transactions: Transaction[]; nextCursor?: string
 export type ActivityPage = { activity: Activity[]; nextCursor?: string };
 export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
 export type AuditDisclosurePage = { audit: AuditDisclosureEvent[]; nextCursor?: string };
+export type SpendingInsightsOptions = { from?: string; to?: string; currency?: string };
 export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
 export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
 const TRANSACTION_HISTORY_PAGE_LIMIT = 25;
@@ -2310,6 +2311,23 @@ export async function getGlobalTransactionPage(groupId: string | undefined, opti
       const cached = await cacheRead(() => readGlobalTransactions(identity.user.id));
       if (cached && isSufficientTransactionHistoryPage(cached.limit)) return offline({ transactions: cached.transactions, nextCursor: cached.nextCursor });
     }
+    throw error;
+  }
+}
+
+/** Insights are intentionally not served from the bounded transaction cache.
+ * Offline UI must say unavailable rather than imply that a partial history is
+ * a complete aggregate. */
+export async function getSpendingInsights(groupId?: string, options: SpendingInsightsOptions = {}, signal?: AbortSignal): Promise<CachedResult<SpendingInsights>> {
+  const query = new URLSearchParams();
+  if (groupId) query.set('group', groupId);
+  if (options.from) query.set('from', options.from);
+  if (options.to) query.set('to', options.to);
+  if (options.currency) query.set('currency', options.currency);
+  try {
+    return (await apiWithMeta<SpendingInsights>(`/spending-insights?${query}`, { signal })).data;
+  } catch (error) {
+    if (groupId && isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId);
     throw error;
   }
 }

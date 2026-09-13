@@ -33,6 +33,17 @@ class TransactionRouteStatement extends MemberStatement {
 class TransactionRouteDb {
   prepare(sql: string) { return new TransactionRouteStatement(sql); }
 }
+class InsightsRouteStatement extends MemberStatement {
+  async all<T>() {
+    if (this.sql.includes('SELECT group_id,MAX(group_name)')) return { results: [{ group_id: 'group-1', group_name: 'Group', currency: 'USD', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, you_paid_minor: 600, expense_count: 2 }] as T[] };
+    if (this.sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: [{ group_id: 'group-1', currency: 'USD', bucket: '2026-01', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, expense_count: 2 }] as T[] };
+    if (this.sql.includes('SELECT group_id,currency,COALESCE(NULLIF(TRIM(category)')) return { results: [{ group_id: 'group-1', currency: 'USD', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
+    return { results: [{ currency: 'USD', person_id: 'person-1', person_name: 'Dev', share_minor: 400 }] as T[] };
+  }
+}
+class InsightsRouteDb {
+  prepare(sql: string) { return new InsightsRouteStatement(sql); }
+}
 class TriggerOverflowStatement extends MemberStatement {
   async all<T>() {
     if (this.sql.includes('FROM people p JOIN group_members')) return { results: [{ person_id: '00000000-0000-4000-8000-000000000003', name: 'Dev', email: null, joined_at: '', role: 'owner' }, { person_id: '00000000-0000-4000-8000-000000000004', name: 'Other', email: null, joined_at: '', role: 'member' }] as T[] };
@@ -405,6 +416,24 @@ describe('worker boundary', () => {
     const response = await worker.fetch(new Request('https://split.example/api/activity?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
     expect(response.status).toBe(404);
     expect(((await response.json()) as any).error.code).toBe('GROUP_NOT_FOUND');
+  });
+  it('does not leak spending insights for an unauthorized group filter', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND' } });
+  });
+  it('returns grouped spending insight aggregates for an authorized group', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/spending-insights?group=00000000-0000-0000-0000-000000000009&from=2026-01-01&to=2026-01-31', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new InsightsRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ scope: 'group', summaries: [{ groupSpendMinor: 1000, allocatedSpendMinor: 400, yourShareMinor: 400, youPaidMinor: 600 }], participants: [{ shareMinor: 400 }] });
+  });
+  it.each([
+    ['from=2026-02-30', 'INVALID_DATE'],
+    ['currency=invalid', 'INVALID_FILTER'],
+  ])('rejects invalid spending insight query %s', async (query, code) => {
+    const response = await worker.fetch(new Request(`https://split.example/api/spending-insights?${query}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env(), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code } });
   });
   it('allows an active group member through the group authorization lookup', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);

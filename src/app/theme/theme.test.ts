@@ -69,7 +69,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.generic-invitation-disclosure\[open\]\s*\{[\s\S]*gap: var\(--space-3\);/);
     expect(css).toMatch(/\.transaction-filters-disclosure\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
     expect(css).toMatch(/\.transaction-filters\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;/);
+    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;[\s\S]*padding: var\(--surface-padding\);/);
     expect(css).toMatch(/\.pending-transactions\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(css).toMatch(/\.split-default-choices\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(appSource).toContain('className="transaction-filters-disclosure"');
@@ -87,6 +87,9 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('Load more audit events');
     expect(appSource).toContain('Clear cached data');
     expect(appSource).toContain('>Manage people</Link>');
+    expect(css).toMatch(/\.people-summary-compact \+ \.inline-action\s*\{[\s\S]*display: flex;[\s\S]*margin-top: var\(--space-2\);/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.schedule-row__actions\s*\{[\s\S]*flex-basis: 100%;[\s\S]*justify-content: flex-start;/);
+    expect(css).toMatch(/\.insight-chart \.insight-bar__header a,[\s\S]*\.cache-status > \.inline-action\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*min-height: var\(--control-min-height\);/);
   });
 
   it('lets conditional status messages use the containing form grid gap', () => {

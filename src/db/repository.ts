@@ -1,7 +1,7 @@
-import { groupSplitDefaultInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
+import { groupSplitDefaultInput, supportedCurrencies, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, Transaction } from '../shared/types';
-import { checkedMinor } from '../shared/money';
+import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsights, Transaction } from '../shared/types';
+import { checkedAddMinor, checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
@@ -22,7 +22,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_FILTER' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -1389,6 +1389,84 @@ export class Repository {
   /** One authorized keyset timeline across every active group for the user. */
   async globalTransactionPage(userId: string, groupId?: string, opts: { kind?: Transaction['kind']; q?: string; person?: string; category?: string; from?: string; to?: string; currency?: string; limit?: number; cursor?: string; offset?: number } = {}) {
     return this.transactionPageForScope(userId, groupId, opts);
+  }
+  /** Return bounded D1 aggregates without paging transaction history. Global
+   * results are personal: an expense is counted only when the authenticated
+   * user's active membership has a positive split allocation. Aggregation is
+   * first grouped by group so combining groups uses checked arithmetic rather
+   * than allowing a cross-group SQLite SUM to overflow. */
+  async spendingInsights(userId: string, groupId?: string, opts: { from?: string; to?: string; currency?: string } = {}): Promise<SpendingInsights> {
+    for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Insight dates must be real YYYY-MM-DD dates');
+    if (opts.from && opts.to && opts.from > opts.to) throw new RepositoryError('INVALID_DATE', 'Insight start date must not be after its end date');
+    if (opts.currency && !supportedCurrencies.includes(opts.currency as typeof supportedCurrencies[number])) throw new RepositoryError('INVALID_FILTER', 'Insight currency is not supported');
+    const aggregate = async (from?: string, to?: string) => {
+      const scope = groupId ? 'gm.group_id=?' : '1=1';
+      const scopeArgs = groupId ? [userId, groupId] : [userId];
+      const dateFilter = `${from ? ' AND e.expense_date>=?' : ''}${to ? ' AND e.expense_date<=?' : ''}${opts.currency ? ' AND e.currency=?' : ''}`;
+      const dateArgs = [ ...(from ? [from] : []), ...(to ? [to] : []), ...(opts.currency ? [opts.currency] : []) ];
+      const cte = `WITH authorized_expenses AS (
+        SELECT e.id,e.group_id,e.amount_minor,e.currency,e.expense_date,e.category,g.name AS group_name,gm.person_id AS current_person_id
+        FROM expenses e JOIN groups g ON g.id=e.group_id
+        JOIN group_members gm ON gm.group_id=e.group_id AND gm.user_id=? AND gm.deleted_at IS NULL
+        JOIN users insight_user ON insight_user.id=gm.user_id AND insight_user.deleted_at IS NULL
+        WHERE ${scope} AND g.deleted_at IS NULL AND e.deleted_at IS NULL${dateFilter}
+      ), enriched_expenses AS (
+        SELECT authorized_expenses.*,
+          (SELECT COALESCE(SUM(split.amount_minor),0) FROM splits split WHERE split.expense_id=authorized_expenses.id AND split.person_id=authorized_expenses.current_person_id) AS your_share_minor,
+          (SELECT COALESCE(SUM(payer.amount_minor),0) FROM payers payer WHERE payer.expense_id=authorized_expenses.id AND payer.person_id=authorized_expenses.current_person_id) AS you_paid_minor
+        FROM authorized_expenses
+      )`;
+      const args = [...scopeArgs, ...dateArgs];
+      const source = groupId ? 'enriched_expenses' : 'enriched_expenses WHERE your_share_minor>0';
+      const rows = async (sql: string) => (await this.db.prepare(`${cte} ${sql}`).bind(...args).all<Row>()).results;
+      const summaryRows = await rows(`SELECT group_id,MAX(group_name) AS group_name,currency,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,SUM(you_paid_minor) AS you_paid_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency ORDER BY group_id,currency`);
+      const bucketRows = await rows(`SELECT group_id,currency,substr(expense_date,1,7) AS bucket,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,bucket ORDER BY bucket,currency,group_id`);
+      const categoryRows = await rows(`SELECT group_id,currency,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') AS category,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') ORDER BY currency,allocated_spend_minor DESC,category,group_id`);
+      const groupRows = groupId ? [] : summaryRows;
+      const add = (left: number, right: unknown) => checkedAddMinor(left, minor(right));
+      const summaries = new Map<string, { currency: SpendingInsights['summaries'][number]['currency']; groupSpendMinor: number; allocatedSpendMinor: number; yourShareMinor: number; youPaidMinor: number; expenseCount: number }>();
+      for (const row of summaryRows) {
+        const key = text(row.currency), current = summaries.get(key) || { currency: currency(row.currency), groupSpendMinor: 0, allocatedSpendMinor: 0, yourShareMinor: 0, youPaidMinor: 0, expenseCount: 0 };
+        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.youPaidMinor = add(current.youPaidMinor, row.you_paid_minor); current.expenseCount += number(row.expense_count); summaries.set(key, current);
+      }
+      const buckets = new Map<string, SpendingInsights['buckets'][number]>();
+      for (const row of bucketRows) {
+        const key = `${text(row.currency)}:${text(row.bucket)}`, current = buckets.get(key) || { currency: currency(row.currency), bucket: text(row.bucket), groupSpendMinor: 0, allocatedSpendMinor: 0, yourShareMinor: 0, expenseCount: 0 };
+        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.expenseCount += number(row.expense_count); buckets.set(key, current);
+      }
+      const categories = new Map<string, SpendingInsights['categories'][number]>();
+      for (const row of categoryRows) {
+        const key = `${text(row.currency)}:${text(row.category)}`, current = categories.get(key) || { currency: currency(row.currency), category: text(row.category), groupSpendMinor: 0, allocatedSpendMinor: 0, expenseCount: 0 };
+        current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.expenseCount += number(row.expense_count); categories.set(key, current);
+      }
+      const participantRows = groupId ? (await this.db.prepare(`SELECT e.currency,s.person_id,COALESCE(p.name,'Deleted account') AS person_name,SUM(s.amount_minor) AS share_minor
+        FROM expenses e JOIN groups g ON g.id=e.group_id AND g.deleted_at IS NULL
+        JOIN group_members gm ON gm.group_id=e.group_id AND gm.user_id=? AND gm.deleted_at IS NULL
+        JOIN users insight_user ON insight_user.id=gm.user_id AND insight_user.deleted_at IS NULL
+        JOIN splits s ON s.expense_id=e.id LEFT JOIN people p ON p.id=s.person_id
+        WHERE gm.group_id=? AND e.deleted_at IS NULL${dateFilter}
+        GROUP BY e.currency,s.person_id,COALESCE(p.name,'Deleted account') ORDER BY e.currency,share_minor DESC,person_name`).bind(userId, groupId, ...dateArgs).all<Row>()).results : [];
+      return { summaries: [...summaries.values()], buckets: [...buckets.values()], categories: [...categories.values()], groupRows, participantRows };
+    };
+    try {
+      const current = await aggregate(opts.from, opts.to);
+      const personalPrimary = (summary: SpendingInsights['summaries'][number]) => groupId ? summary : { ...summary, groupSpendMinor: summary.allocatedSpendMinor };
+      const personalBucket = (bucket: SpendingInsights['buckets'][number]) => groupId ? bucket : { ...bucket, groupSpendMinor: bucket.allocatedSpendMinor };
+      const personalCategory = (category: SpendingInsights['categories'][number]) => groupId ? category : { ...category, groupSpendMinor: category.allocatedSpendMinor };
+      const result: SpendingInsights = { scope: groupId ? 'group' : 'global', ...(opts.from ? { from: opts.from } : {}), ...(opts.to ? { to: opts.to } : {}), summaries: current.summaries.map(personalPrimary), buckets: current.buckets.map(personalBucket), categories: current.categories.map(personalCategory),
+        ...(groupId ? { participants: current.participantRows.map((row) => ({ personId: text(row.person_id), name: text(row.person_name), currency: currency(row.currency), shareMinor: minor(row.share_minor) })) } : { groups: current.groupRows.map((row) => ({ groupId: text(row.group_id), groupName: text(row.group_name), currency: currency(row.currency), allocatedSpendMinor: minor(row.allocated_spend_minor), yourShareMinor: minor(row.your_share_minor), expenseCount: number(row.expense_count) })) }),
+      };
+      if (opts.from && opts.to) {
+        const start = Date.parse(`${opts.from}T00:00:00Z`), end = Date.parse(`${opts.to}T00:00:00Z`), days = Math.round((end - start) / 86_400_000) + 1;
+        const previousTo = new Date(start - 86_400_000).toISOString().slice(0, 10), previousFrom = new Date(start - days * 86_400_000).toISOString().slice(0, 10);
+        const previous = await aggregate(previousFrom, previousTo);
+        result.previous = { from: previousFrom, to: previousTo, summaries: previous.summaries.map(personalPrimary) };
+      }
+      return result;
+    } catch (error) {
+      if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
+      throw error;
+    }
   }
   async expense(id: string, includeDeleted = false) { const row = await this.rawExpense(id); return row && (includeDeleted || !row.deleted_at) ? this.hydrateExpense(row) : null; }
   async expenseForUser(id: string, userId: string, includeDeleted = false) {
