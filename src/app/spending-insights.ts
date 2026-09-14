@@ -83,6 +83,8 @@ export function insightQuery(filters: InsightFilters) {
 
 export const insightBarWidth = (value: number, maximum: number) => maximum > 0 ? Math.min(100, Math.max(0, Math.round((value / maximum) * 100))) : 0;
 export const insightCurrencySet = (summary: SpendingInsightSummaryResponse | undefined, trends: SpendingInsightTrends | undefined) => [...new Set([...(summary?.summaries || []).map((item) => item.currency), ...(summary?.previous?.summaries || []).map((item) => item.currency), ...(trends?.categoryTrends || []).map((item) => item.currency)])].sort();
+export const insightCurrencies = (summary: SpendingInsightSummaryResponse | undefined, trends: SpendingInsightTrends | undefined, selected?: Currency) => [...new Set([...(selected ? [selected] : []), ...insightCurrencySet(summary, trends)])].sort();
+export const effectiveInsightCurrency = (selected: Currency | undefined, currencies: Currency[], preferred: Currency[] = currencies) => selected && currencies.includes(selected) ? selected : preferred.find((currency) => currencies.includes(currency)) || currencies[0];
 export type FilledCategoryTrend = { category: string; currency: Currency; values: Array<{ bucket: string; value: number; expenseCount: number }>; total: number };
 
 /** Fill sparse rows, count only requested months, and rank with checked arithmetic. */

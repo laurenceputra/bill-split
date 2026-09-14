@@ -68,6 +68,7 @@ const viewports: Viewport[] = [
   { width: 896, height: 900 },
   { width: 1440, height: 900 },
 ];
+const insightViewports: Viewport[] = [{ width: 320, height: 844 }, ...viewports];
 
 const ids = {
   rich: '00000000-0000-4000-8000-000000003002',
@@ -167,6 +168,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       findings.push({ kind, severity, scenarioName, authState, route, viewport, context, selector, detail, actual });
     };
     const visible = (element: Element) => {
+      if (element.classList.contains('sr-only')) return false;
       // A closed <details> keeps its summary interactive while its other
       // descendants can retain layout-like bounds in Chromium. Treat only the
       // direct summary subtree as visible; this prevents hidden schedule
@@ -195,7 +197,14 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
     };
     const contentWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
     if (contentWidth > viewport.width + 1) add('horizontal-overflow', 'major', `Document scroll width ${contentWidth}px exceeds viewport width ${viewport.width}px`, 'html/body', contentWidth - viewport.width);
+    const internalOverflowDescendant = (element: Element) => {
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        if (parent.matches('.insight-currency-tabs,.category-trend-list')) return true;
+      }
+      return false;
+    };
     for (const element of Array.from(document.querySelectorAll('body *')).filter(visible)) {
+      if (internalOverflowDescendant(element)) continue;
       const box = boxOf(element);
       if (box.left < -1 || box.right > viewport.width + 1) add('horizontal-overflow-element', 'major', `Visible bounds are ${Math.round(box.left)}..${Math.round(box.right)}px`, selector(element), Math.max(-box.left, box.right - viewport.width));
     }
@@ -363,7 +372,7 @@ async function visibleCount(page: Page, selector: string) {
   }).length);
 }
 
-async function assertRendered(page: Page, scenario: Scenario, observations: ApiObservation[]) {
+async function assertRendered(page: Page, scenario: Scenario, observations: ApiObservation[], viewport: Viewport) {
   const expected = scenario.expected;
   const finalUrl = new URL(page.url());
   const expectedOrigin = new URL(BASE_URL).origin;
@@ -390,22 +399,90 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
     if (await visibleCount(page, '.app-error-boundary') !== 0) throw new Error('Scenario rendered the application error fallback');
     if (expected.content === 'Spending insights' && expected.mode === 'normal') {
       const body = await page.locator('body').innerText();
+      const populatedInsight = scenario.name === 'global-insights' || scenario.name === 'group-insights';
       if (body.includes('What stands out')) throw new Error('Detailed insights still render generated prose');
-     if (scenario.name === 'global-insights' && !body.includes('your allocated share')) throw new Error('Global insight scope wording is missing');
-     if (scenario.name === 'group-insights' && !body.includes('total group spending')) throw new Error('Group insight scope wording is missing');
-        const comparison = localComparisonRange();
-       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && !body.includes(`Compared with ${comparison.from} to ${comparison.to}`)) throw new Error('Selected-period summary did not show exact comparison dates');
-       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && (!body.includes('USD') || !body.includes('EUR') || !body.includes('(new)'))) throw new Error('Summary did not render zero-filled currencies and new-spend comparison');
-      const overflowingTrendRows = await page.locator('.category-trend-bars').evaluateAll((elements) => elements.filter((element) => element.scrollWidth > element.clientWidth + 1).length);
-      if (overflowingTrendRows) throw new Error('Category trend mini charts overflow their containers');
-      if (await page.locator('.category-trend-list a').count()) throw new Error('Category trend cards unexpectedly link to transaction history');
-      for (const row of await page.locator('.category-trend-list > li').all()) {
-        if (await row.locator('.category-trend-month').count() !== 6) throw new Error('Category trend did not render six calendar months');
-        if (!(await row.innerText()).includes('MTD')) throw new Error('Category trend did not identify the current month-to-date amount');
+      if (scenario.name === 'global-insights' && !body.includes('your allocated share')) throw new Error('Global insight scope wording is missing');
+      if (scenario.name === 'group-insights' && !body.includes('total group spending')) throw new Error('Group insight scope wording is missing');
+      const comparison = localComparisonRange();
+      if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && !body.includes(`Compared with ${comparison.from} to ${comparison.to}`)) throw new Error('Selected-period summary did not show exact comparison dates');
+      if (populatedInsight) {
+        if (!body.includes('USD') || !body.includes('EUR')) throw new Error('Insight currency tabs did not render all available currencies');
+        const overflowingTrendRows = await page.locator('.category-trend-bars').evaluateAll((elements) => elements.filter((element) => element.scrollWidth > element.clientWidth + 1).length);
+        if (overflowingTrendRows) throw new Error('Category trend mini charts overflow their containers');
+        if (await page.locator('.category-trend-list a').count()) throw new Error('Category trend cards unexpectedly link to transaction history');
+         for (const row of await page.locator('.category-trend-list > li').all()) {
+           if (await row.locator('.category-trend-month').count() !== 6) throw new Error('Category trend did not render six calendar months');
+           if (!(await row.innerText()).includes('MTD')) throw new Error('Category trend did not identify the current month-to-date amount');
+         }
+         const categoryRail = page.locator('.category-trend-list');
+         const categoryNameLayout = await categoryRail.locator('.category-trend-name').evaluateAll((elements) => elements.map((element) => {
+           const range = document.createRange();
+           range.selectNodeContents(element);
+           return { width: element.getBoundingClientRect().width, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size };
+         }));
+         if (categoryNameLayout.some(({ width, lines }) => width < 80 || lines > 2)) throw new Error(`Category names collapsed under stress-sized amounts: ${JSON.stringify(categoryNameLayout)}`);
+         const zeroBars = await page.locator('.category-trend-bar').evaluateAll((elements) => elements.filter((element) => Number.parseFloat(getComputedStyle(element).height) === 0).length);
+        if (!zeroBars) throw new Error('Sparse category fixture did not render zero-height bars');
+        const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
+        await expect(tablist).toHaveCount(1);
+        const tabs = tablist.getByRole('tab');
+        expect(await tabs.count()).toBeGreaterThan(1);
+        const initialTab = page.locator('.insight-currency-tab[aria-selected="true"]');
+        await expect(initialTab).toHaveCount(1);
+        const initialCurrency = await initialTab.innerText();
+        await expect(page.getByRole('tabpanel', { name: initialCurrency })).toBeVisible();
+        await expect(page.locator('.insight-currency-panel .insight-summary-card')).toHaveCount(1);
+        await expect(page.locator('.insight-currency-panel .insight-category-trends')).toHaveCount(1);
+        await expect(initialTab).toHaveText('USD');
+        await expect(page.locator('.insight-currency-panel .insight-summary-card')).toContainText('(new)');
+        for (const tab of await tabs.all()) await expect(tab).toHaveAttribute('aria-controls', 'insight-currency-panel');
+         const railLayout = await categoryRail.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, cardCount: element.children.length, cardExtent: Array.from(element.children).reduce((total, child) => total + child.getBoundingClientRect().width, 0) + Math.max(0, element.children.length - 1) * Number.parseFloat(getComputedStyle(element).columnGap || '0'), columns: getComputedStyle(element).gridTemplateColumns }));
+        const documentWidth = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
+        if (viewport.width < 896) {
+          if (railLayout.display !== 'flex' || railLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(railLayout.overflowX)) throw new Error('Narrow insight categories did not use a single-row internally scrollable horizontal rail');
+           if (railLayout.cardCount > 1 && railLayout.cardExtent > railLayout.clientWidth + 1 && railLayout.scrollWidth <= railLayout.clientWidth + 1) throw new Error('Narrow insight categories exceeded their rail without internal overflow');
+           if (documentWidth > viewport.width + 1) throw new Error('Narrow insight categories caused document-level overflow');
+           if (viewport.width === 390) {
+             const railBox = await categoryRail.boundingBox();
+             const nextCardBox = await categoryRail.locator(':scope > li').nth(1).boundingBox();
+             const visibleNextCardWidth = railBox && nextCardBox ? Math.min(railBox.x + railBox.width, nextCardBox.x + nextCardBox.width) - Math.max(railBox.x, nextCardBox.x) : 0;
+             if (visibleNextCardWidth < 24) throw new Error('390px insight categories did not expose a visible partial next card in the horizontal rail');
+           }
+         } else if (railLayout.display !== 'grid' || railLayout.columns.split(' ').length !== railLayout.cardCount || railLayout.cardCount > 4 || new Set(await categoryRail.locator(':scope > li').evaluateAll((elements) => elements.map((element) => Math.round(element.getBoundingClientRect().top)))).size > 1) {
+          throw new Error('Desktop insight categories did not fit one row with at most four appropriately sized columns');
+        }
+        const initialIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.getAttribute('aria-selected') === 'true'));
+        const otherIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.textContent?.trim() === 'EUR'));
+        if (otherIndex < 0) throw new Error('Comparison fixture did not expose an EUR currency tab');
+        const otherCurrency = await tabs.nth(otherIndex).innerText();
+        await page.locator(`#insight-currency-tab-${otherCurrency}`).click();
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `currency switch at ${viewport.width}px`).toHaveText(otherCurrency);
+        expect(new URL(page.url()).searchParams.get('currency')).toBe(otherCurrency);
+        await expect(page.locator('.insight-currency-panel .insight-summary-card')).toContainText(otherCurrency);
+        await expect(page.locator('.insight-currency-panel .insight-category-trends')).toContainText(otherCurrency);
+        await page.locator('.insight-currency-tab[aria-selected="true"]').press('End');
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `End key at ${viewport.width}px`).toHaveText(await tabs.nth((await tabs.count()) - 1).innerText());
+        await page.locator('.insight-currency-tab[aria-selected="true"]').press('Home');
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `Home key at ${viewport.width}px`).toHaveText(await tabs.nth(0).innerText());
+        await page.locator('.insight-currency-tab[aria-selected="true"]').press('ArrowRight');
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `ArrowRight at ${viewport.width}px`).toHaveText(await tabs.nth((await tabs.count()) - 1).innerText());
+        await page.locator('.insight-currency-tab[aria-selected="true"]').press('ArrowLeft');
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `Arrow cycle at ${viewport.width}px`).toHaveText(await tabs.nth(0).innerText());
+        await tabs.nth(initialIndex).click();
+        await expect(page.locator('.insight-currency-tab[aria-selected="true"]'), `return to initial currency at ${viewport.width}px`).toHaveText(initialCurrency);
+        const tabIndices = await tabs.evaluateAll((elements) => elements.map((element) => ({ selected: element.getAttribute('aria-selected') === 'true', tabIndex: (element as HTMLButtonElement).tabIndex })));
+        expect(tabIndices.filter((tab) => tab.selected && tab.tabIndex === 0)).toHaveLength(1);
+        expect(tabIndices.filter((tab) => !tab.selected && tab.tabIndex !== -1)).toHaveLength(0);
+        const tablistLayout = await tablist.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), targets: Array.from(element.querySelectorAll('button')).map((button) => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })) }));
+        if (viewport.width <= 320) {
+          if (tablistLayout.display !== 'flex' || tablistLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(tablistLayout.overflowX)) throw new Error('320px currency tabs did not remain a single-row internally scrollable tablist');
+          if (tablistLayout.documentWidth > viewport.width + 1) throw new Error('320px currency tabs caused document-level overflow');
+          if (tablistLayout.targets.some((target) => target.width < 44 || target.height < 44)) throw new Error('320px currency tab touch target is smaller than 44px');
+          await tabs.nth(0).focus();
+          if (await tabs.nth(0).evaluate((element) => document.activeElement !== element)) throw new Error('320px currency tab cannot receive focus');
+        }
       }
-      const zeroBars = await page.locator('.category-trend-bar').evaluateAll((elements) => elements.filter((element) => Number.parseFloat(getComputedStyle(element).height) === 0).length);
-       if (!zeroBars) throw new Error('Sparse category fixture did not render zero-height bars');
-     }
+    }
      if (scenario.name === 'populated-home') {
        const globalCompact = page.locator('.insights-compact').filter({ hasText: 'Spending snapshot' });
        if (await globalCompact.count() !== 1) throw new Error('Populated home did not render the global compact insights card');
@@ -556,12 +633,14 @@ function assertAuthenticatedRequest(requests: ApiRequestObservation[], auth: str
 test.describe.configure({ mode: 'serial' });
 
 test('browser audit matrix captures validated routes, geometry, and full-page screenshots', async ({ browser }, testInfo) => {
+  test.setTimeout(360_000);
   const findings: Finding[] = [];
   const failures: HarnessFailure[] = [];
   const coverage: Coverage[] = [];
   const artifactDirectory = auditArtifactDirectory('normal');
   for (const scenario of scenarios) {
-    for (const viewport of viewports) {
+    const scenarioViewports = scenario.name === 'group-insights' || scenario.name === 'global-insights' || scenario.name === 'empty-global-insights' || scenario.name === 'custom-insights' || scenario.name === 'invalid-custom-insights' ? insightViewports : viewports;
+    for (const viewport of scenarioViewports) {
       const context = await openContext(browser, scenario.auth, viewport);
       const page = await context.newPage();
       const observations: ApiObservation[] = [];
@@ -583,7 +662,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
         await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => undefined);
         if (scenario.auth && !apiHeaders.some((request) => request.path === apiPaths.me && request.headers['x-dev-email'] === scenario.auth)) throw new Error(`Authenticated context did not send X-Dev-Email: ${scenario.auth}`);
         if (!scenario.auth && apiHeaders.some((request) => request.headers['x-dev-email'])) throw new Error('Public landing context sent X-Dev-Email');
-        await assertRendered(page, scenario, observations);
+        await assertRendered(page, scenario, observations, viewport);
         if (scenario.name === 'custom-insights' || scenario.name === 'invalid-custom-insights') {
            if (!apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=trends'))) throw new Error('Invalid or incomplete custom insight range did not request independent trends');
            if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=summary'))) throw new Error('Invalid or incomplete custom insight range made a selected-period summary request');
@@ -601,7 +680,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             await expect(page.getByText(scenario.expandedAudit.content, { exact: true })).toBeVisible();
             expect(observations.some((observation) => observation.path === apiPaths.auditEntity(ids.rich, scenario.expandedAudit.entityType, scenario.expandedAudit.entityId) && observation.status >= 200 && observation.status < 300)).toBe(true);
             const expandedScenario: Scenario = { ...scenario, name: `${scenario.name}-audit-open`, context: `${scenario.context} / audit disclosure open`, expected: { ...scenario.expected, content: scenario.expandedAudit.content } };
-            await assertRendered(page, expandedScenario, observations);
+            await assertRendered(page, expandedScenario, observations, viewport);
             coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [audit open]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
             await reportForPage(page, expandedScenario, `${scenario.path} [audit open]`, viewport, artifactDirectory, findings, failures);
           } catch (error) {
@@ -615,7 +694,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             await mateo.locator('summary').click();
             await expect(mateo.getByLabel('Email for Mateo Silva')).toBeVisible();
             const expandedScenario: Scenario = { ...scenario, name: 'group-management-add-email', context: 'GroupManagement / Mateo Silva (ledger-only person 002005) Add email disclosure open', expected: { ...scenario.expected } };
-            await assertRendered(page, expandedScenario, observations);
+            await assertRendered(page, expandedScenario, observations, viewport);
             coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [add email]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
             await reportForPage(page, expandedScenario, `${scenario.path} [add email]`, viewport, artifactDirectory, findings, failures);
           } catch (error) {
@@ -627,7 +706,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             await page.locator('.summary-row').click();
             await expect(page.locator('.modal-sheet')).toBeVisible();
             const modalScenario: Scenario = { ...scenario, name: `${scenario.name}-payer-modal`, context: 'ExpenseForm / payer modal (touch/mobile-tablet coverage)', expected: { mode: 'modal', heading: 'Add expense', content: 'Who paid?' } };
-            await assertRendered(page, modalScenario, observations);
+            await assertRendered(page, modalScenario, observations, viewport);
             coverage.push({ scenarioName: modalScenario.name, authState: authState(modalScenario.auth), route: `${scenario.path} [payer modal]`, viewport, context: modalScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
             await reportForPage(page, modalScenario, `${scenario.path} [payer modal]`, viewport, artifactDirectory, findings, failures);
           } catch (error) {
@@ -652,6 +731,64 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   expect(failures, 'The audit matrix should complete without harness failures').toEqual([]);
 });
 
+test('currency insight deep links restore the selected tab without filtering API data', async ({ browser }) => {
+  for (const viewport of [{ width: 320, height: 844 }, { width: 1440, height: 900 }]) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const page = await context.newPage();
+    const insightRequests: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === apiPaths.spendingInsights) insightRequests.push(url.href);
+    });
+    await page.route('**/api/spending-insights*', (route) => {
+      const fixture = populatedInsightFixture('global');
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) });
+    });
+    try {
+      await page.goto(`${BASE_URL}/activity?view=insights&period=month&currency=USD`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(900);
+      const selectedTab = page.locator('.insight-currency-tab[aria-selected="true"]');
+      const panel = page.locator('.insight-currency-panel');
+      await expect(selectedTab).toHaveText('USD');
+      await expect(panel.locator('.insight-summary-card')).toContainText('USD');
+      await expect(panel.locator('.insight-category-trends')).toContainText('USD');
+      await expect(panel.locator('.insight-summary-card')).toContainText('(new)');
+      expect(new URL(page.url()).searchParams.get('currency')).toBe('USD');
+
+      const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
+      const tablistLayout = await tablist.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), targets: Array.from(element.querySelectorAll('button')).map((button) => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })) }));
+      if (tablistLayout.display !== 'flex' || tablistLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(tablistLayout.overflowX) || tablistLayout.documentWidth > viewport.width + 1 || tablistLayout.targets.some((target) => target.width < 44 || target.height < 44)) throw new Error(`Currency tablist failed ${viewport.width}px layout constraints: ${JSON.stringify(tablistLayout)}`);
+
+      const categoryRail = page.locator('.category-trend-list');
+      await expect(categoryRail).toHaveAttribute('tabindex', '0');
+      await expect(categoryRail).toHaveAttribute('aria-label', 'Highest-spend categories');
+      const categoryLayout = await categoryRail.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, cardCount: element.children.length, rows: new Set(Array.from(element.children).map((child) => Math.round(child.getBoundingClientRect().top))).size, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), columns: getComputedStyle(element).gridTemplateColumns }));
+      if (viewport.width === 320) {
+        if (categoryLayout.cardCount !== 4 || categoryLayout.display !== 'flex' || categoryLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(categoryLayout.overflowX) || categoryLayout.scrollWidth <= categoryLayout.clientWidth || categoryLayout.rows !== 1 || categoryLayout.documentWidth > viewport.width + 1) throw new Error('320px category rail did not provide four internally scrolling cards without document overflow');
+      } else if (categoryLayout.cardCount !== 4 || categoryLayout.display !== 'grid' || categoryLayout.columns.split(' ').length !== 4 || categoryLayout.rows !== 1 || categoryLayout.documentWidth > viewport.width + 1) {
+        throw new Error('1440px category cards did not fit one non-overflowing grid row');
+      }
+
+      const eurTab = tablist.getByRole('tab', { name: 'EUR', exact: true });
+      await eurTab.click();
+      await expect(page.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText('EUR');
+      expect(new URL(page.url()).searchParams.get('currency')).toBe('EUR');
+      await expect(panel.locator('.insight-summary-card')).toContainText('EUR');
+      await expect(panel.locator('.insight-category-trends')).toContainText('EUR');
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(900);
+      await expect(page.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText('EUR');
+      expect(new URL(page.url()).searchParams.get('currency')).toBe('EUR');
+      await expect(panel.locator('.insight-summary-card')).toContainText('EUR');
+      await expect(panel.locator('.insight-category-trends')).toContainText('EUR');
+      expect(insightRequests.length).toBeGreaterThan(0);
+      expect(insightRequests.every((requestUrl) => !new URL(requestUrl).searchParams.has('currency'))).toBe(true);
+    } finally {
+      await context.close();
+    }
+  }
+});
+
 test('intercepted loading, API error, offline, and modal states render their intended UI', async ({ browser }, testInfo) => {
   const findings: Finding[] = [];
   const failures: HarnessFailure[] = [];
@@ -671,7 +808,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await errorPage.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
       await errorPage.waitForTimeout(900);
       assertAuthenticatedRequest(errorRequests, DEV_EMAIL);
-      await assertRendered(errorPage, errorScenario, errorObservations);
+      await assertRendered(errorPage, errorScenario, errorObservations, viewport);
       coverage.push({ scenarioName: errorScenario.name, authState: authState(errorScenario.auth), route: errorScenario.path, viewport, context: errorScenario.context, rendered: true, apiSuccesses: errorObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(errorPage, errorScenario, '/ [API error]', viewport, artifactDirectory, findings, failures);
     } catch (error) {
@@ -692,7 +829,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await insightsErrorPage.goto(`${BASE_URL}${insightsErrorScenario.path}`, { waitUntil: 'domcontentloaded' });
       await insightsErrorPage.waitForTimeout(900);
       assertAuthenticatedRequest(insightsErrorRequests, DEV_EMAIL);
-      await assertRendered(insightsErrorPage, insightsErrorScenario, insightsErrorObservations);
+      await assertRendered(insightsErrorPage, insightsErrorScenario, insightsErrorObservations, viewport);
       coverage.push({ scenarioName: insightsErrorScenario.name, authState: authState(insightsErrorScenario.auth), route: insightsErrorScenario.path, viewport, context: insightsErrorScenario.context, rendered: true, apiSuccesses: insightsErrorObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(insightsErrorPage, insightsErrorScenario, insightsErrorScenario.path, viewport, artifactDirectory, findings, failures);
     } catch (error) {
@@ -722,7 +859,7 @@ test('intercepted loading, API error, offline, and modal states render their int
          await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded' });
          await page.waitForTimeout(900);
          assertAuthenticatedRequest(requests, DEV_EMAIL);
-         await assertRendered(page, scenario, observations);
+          await assertRendered(page, scenario, observations, viewport);
          if (independent.failedView === 'trends') {
            if (await page.locator('.insight-summary-grid').count() !== 1) throw new Error('Summary-success sibling did not render its summary grid');
          } else if (await page.locator('.category-trend-list').count() === 0) {
@@ -749,7 +886,7 @@ test('intercepted loading, API error, offline, and modal states render their int
       await loadingPage.goto(`${BASE_URL}${loadingScenario.path}`, { waitUntil: 'domcontentloaded' });
       await loadingPage.waitForTimeout(500);
       assertAuthenticatedRequest(loadingRequests, DEV_EMAIL);
-      await assertRendered(loadingPage, loadingScenario, loadingObservations);
+      await assertRendered(loadingPage, loadingScenario, loadingObservations, viewport);
       coverage.push({ scenarioName: loadingScenario.name, authState: authState(loadingScenario.auth), route: loadingScenario.path, viewport, context: loadingScenario.context, rendered: true, apiSuccesses: loadingObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(loadingPage, loadingScenario, loadingScenario.path, viewport, artifactDirectory, findings, failures);
     } catch (error) {
@@ -770,11 +907,11 @@ test('intercepted loading, API error, offline, and modal states render their int
       await offlinePage.goto(`${BASE_URL}${offlineScenario.path}`, { waitUntil: 'domcontentloaded' });
       await offlinePage.waitForTimeout(900);
       assertAuthenticatedRequest(offlineRequests, DEV_EMAIL);
-      await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Spending insights' } }, offlineObservations);
+       await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Spending insights' } }, offlineObservations, viewport);
       await offlineContext.setOffline(true);
        await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
        await offlinePage.waitForTimeout(150);
-       await assertRendered(offlinePage, offlineScenario, offlineObservations);
+        await assertRendered(offlinePage, offlineScenario, offlineObservations, viewport);
        expect(await offlinePage.locator('.category-trend-list').count()).toBeGreaterThan(0);
       coverage.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: offlineScenario.path, viewport, context: offlineScenario.context, rendered: true, apiSuccesses: offlineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(offlinePage, offlineScenario, `${offlineScenario.path} [offline]`, viewport, artifactDirectory, findings, failures);
@@ -799,7 +936,7 @@ test('intercepted loading, API error, offline, and modal states render their int
        await coldOfflinePage.getByRole('link', { name: 'Insights', exact: true }).click();
        await coldOfflinePage.waitForTimeout(250);
        assertAuthenticatedRequest(coldOfflineRequests, DEV_EMAIL);
-       await assertRendered(coldOfflinePage, coldOfflineScenario, coldOfflineObservations);
+        await assertRendered(coldOfflinePage, coldOfflineScenario, coldOfflineObservations, viewport);
        expect(await coldOfflinePage.getByText('Six-month trends are unavailable offline; no cached data is available.', { exact: true }).count()).toBe(1);
        expect(await coldOfflinePage.getByText('Loading…', { exact: true }).count()).toBe(0);
        coverage.push({ scenarioName: coldOfflineScenario.name, authState: authState(coldOfflineScenario.auth), route: coldOfflineScenario.path, viewport, context: coldOfflineScenario.context, rendered: true, apiSuccesses: coldOfflineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
