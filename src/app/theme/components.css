@@ -1748,6 +1748,17 @@ summary {
   min-width: 0;
 }
 
+/* The page is the outer insight surface. These semantic sections preserve
+   landmarks while leaving the summary and trend modules as the visible cards. */
+.insight-section {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
 .insight-chart h3 {
   margin: 0;
 }
@@ -1880,9 +1891,11 @@ summary {
 }
 
 .category-trend-values {
+  display: block;
   width: 1px;
   min-width: 0;
   max-width: 1px;
+  overflow: hidden;
   table-layout: fixed;
 }
 
@@ -2880,6 +2893,10 @@ input[inputmode="decimal"] {
   }
 
   .category-trend-plot {
+    min-width: 0;
+  }
+
+  .category-trend-plot--long {
     min-width: 24rem;
   }
 
