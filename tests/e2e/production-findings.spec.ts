@@ -1,7 +1,98 @@
-import { test, expect, newAuthenticatedContext, REGISTERED_EMAIL, BASE_URL } from './fixtures';
+import { test, expect, newAuthenticatedContext, DEV_EMAIL, REGISTERED_EMAIL, BASE_URL } from './fixtures';
 
 const GROUP_ID = '00000000-0000-4000-8000-000000003002';
 const EMPTY_GROUP_ID = '00000000-0000-4000-8000-000000003001';
+const SECOND_GROUP_ID = '00000000-0000-4000-8000-000000003003';
+
+function shortInsightFixture(monthCount: number) {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const date = (value: Date) => `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  const trendFrom = date(new Date(now.getFullYear(), now.getMonth() - 5, 1));
+  const trendTo = date(now);
+  const firstMonth = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+  const months = Array.from({ length: 6 }, (_, index) => date(new Date(firstMonth.getFullYear(), firstMonth.getMonth() + index, 1)).slice(0, 7));
+  const categoryTrends = ['Food', 'Travel', 'Bills', 'Other'].flatMap((category, categoryIndex) => months.slice(-monthCount).map((bucket, monthIndex) => ({ currency: 'USD', bucket, category, groupSpendMinor: (categoryIndex + 1) * (monthIndex + 1) * 100, allocatedSpendMinor: (categoryIndex + 1) * (monthIndex + 1) * 50, expenseCount: 1 })));
+  return { summary: { scope: 'global' as const, summaries: [{ currency: 'USD' as const, groupSpendMinor: 1000, allocatedSpendMinor: 500, yourShareMinor: 500, youPaidMinor: 500, expenseCount: categoryTrends.length }] }, trends: { scope: 'global' as const, trendFrom, trendTo, categoryTrends } };
+}
+
+test('fits one-, two-, and three-month insight spans on narrow screens', async ({ browser }) => {
+  for (const monthCount of [1, 2, 3]) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 320, height: 844 });
+    const page = await context.newPage();
+    const fixture = shortInsightFixture(monthCount);
+    await page.route(`${BASE_URL}/api/spending-insights**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }));
+    try {
+      await page.goto(`${BASE_URL}/activity?view=insights&period=month`, { waitUntil: 'domcontentloaded' });
+      const plot = page.locator('.category-trend-plot');
+      await expect(plot).toHaveCount(1);
+      await expect(plot.locator('.category-trend-month')).toHaveCount(monthCount);
+      const layout = await plot.evaluate((element) => ({ scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), labels: Array.from(element.querySelectorAll('.category-trend-month small')).map((label) => { const range = document.createRange(); range.selectNodeContents(label); return new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size; }) }));
+      expect(layout.scrollWidth, JSON.stringify(layout)).toBeLessThanOrEqual(layout.clientWidth + 1);
+      expect(layout.documentWidth, JSON.stringify(layout)).toBeLessThanOrEqual(321);
+      expect(layout.labels, JSON.stringify(layout)).toEqual(Array(monthCount).fill(1));
+    } finally {
+      await context.close();
+    }
+  }
+});
+
+test('clears stale insight currency when History changes group scope', async ({ authenticatedPage }) => {
+  const insightRequests: string[] = [];
+  authenticatedPage.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/spending-insights') insightRequests.push(url.href);
+  });
+  await authenticatedPage.route(`${BASE_URL}/api/spending-insights**`, (route) => {
+    const group = new URL(route.request().url()).searchParams.get('group');
+    const currency = group === GROUP_ID ? 'EUR' as const : group === SECOND_GROUP_ID ? 'GBP' as const : 'USD' as const;
+    const fixture = shortInsightFixture(1);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      ...(new URL(route.request().url()).searchParams.get('view') === 'trends'
+        ? { ...fixture.trends, scope: group ? 'group' : 'global', categoryTrends: fixture.trends.categoryTrends.map((row) => ({ ...row, currency })) }
+        : { ...fixture.summary, scope: group ? 'group' : 'global', summaries: fixture.summary.summaries.map((summary) => ({ ...summary, currency })) }),
+    }) });
+  });
+
+  await authenticatedPage.goto(`/activity?group=${GROUP_ID}&view=insights&period=custom&from=2026-01-01&to=2026-01-31&currency=EUR`);
+  const groupFilter = authenticatedPage.getByLabel('Filter history by group');
+  await expect(groupFilter).toHaveValue(GROUP_ID);
+  await expect(authenticatedPage.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText('EUR');
+  await expect.poll(() => [...new Set(insightRequests.map((requestUrl) => new URL(requestUrl).searchParams.get('view')))].sort()).toEqual(['summary', 'trends']);
+
+  const selectScope = async (group: string | undefined, currency: string) => {
+    const requestStart = insightRequests.length;
+    await groupFilter.selectOption(group ? { value: group } : { label: 'All groups' });
+    await expect.poll(() => [...new Set(insightRequests.slice(requestStart).map((requestUrl) => new URL(requestUrl).searchParams.get('view')))].sort()).toEqual(['summary', 'trends']);
+    const subsequentRequests = insightRequests.slice(requestStart).map((requestUrl) => new URL(requestUrl));
+    expect(subsequentRequests.every((url) => (url.searchParams.get('group') || undefined) === group)).toBe(true);
+    expect(subsequentRequests.every((url) => !url.searchParams.has('currency'))).toBe(true);
+    const summaryRequests = subsequentRequests.filter((url) => url.searchParams.get('view') === 'summary');
+    expect(summaryRequests.length).toBeGreaterThan(0);
+    expect(summaryRequests.every((url) => url.searchParams.get('from') === '2026-01-01' && url.searchParams.get('to') === '2026-01-31')).toBe(true);
+    await expect.poll(() => {
+      const url = new URL(authenticatedPage.url());
+      return { group: url.searchParams.get('group') || undefined, period: url.searchParams.get('period'), from: url.searchParams.get('from'), to: url.searchParams.get('to'), currency: url.searchParams.get('currency') };
+    }).toEqual({ group, period: 'custom', from: '2026-01-01', to: '2026-01-31', currency: null });
+    await expect(authenticatedPage.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText(currency);
+  };
+
+  await selectScope(SECOND_GROUP_ID, 'GBP');
+  const reloadRequestStart = insightRequests.length;
+  await authenticatedPage.reload({ waitUntil: 'domcontentloaded' });
+  await expect(authenticatedPage.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText('GBP');
+  await expect.poll(() => [...new Set(insightRequests.slice(reloadRequestStart).map((requestUrl) => new URL(requestUrl).searchParams.get('view')))].sort()).toEqual(['summary', 'trends']);
+  await selectScope(undefined, 'USD');
+  await selectScope(GROUP_ID, 'EUR');
+
+  await authenticatedPage.goto(`/activity?group=${GROUP_ID}&view=transactions&currency=EUR&from=2026-01-01&to=2026-01-31`);
+  await expect(groupFilter).toHaveValue(GROUP_ID);
+  await groupFilter.selectOption(SECOND_GROUP_ID);
+  await expect.poll(() => {
+    const url = new URL(authenticatedPage.url());
+    return { group: url.searchParams.get('group'), currency: url.searchParams.get('currency'), from: url.searchParams.get('from'), to: url.searchParams.get('to') };
+  }).toEqual({ group: SECOND_GROUP_ID, currency: 'EUR', from: '2026-01-01', to: '2026-01-31' });
+});
 
 test('shows targeted participant controls to owners but not regular members', async ({ authenticatedPage, browser }) => {
   let invitationGets = 0;
