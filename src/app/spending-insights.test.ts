@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categoryTrendDirection, categoryTrendStatus, insightBarWidth, insightComparisonDateRange, insightCurrencySet, insightDateRange, insightMonthLabel, insightQuery, insightTrendDateRange, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
+import { categoryTrendDirection, categoryTrendStatus, effectiveInsightCurrency, insightBarWidth, insightCategoryColor, insightComparisonDateRange, insightCurrencySet, insightCurrencies, insightDateRange, insightMonthLabel, insightQuery, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
 
 describe('spending insight filters', () => {
   const now = new Date('2026-09-13T12:00:00.000Z');
@@ -20,6 +20,10 @@ describe('spending insight filters', () => {
     expect(insightQuery(valid).toString()).toBe('period=custom&from=2026-08-01&to=2026-08-31&currency=EUR');
   });
 
+  it('keeps a direct currency deep link authoritative', () => {
+    expect(readInsightFilters(new URLSearchParams('period=month&currency=GBP'), now)).toMatchObject({ period: 'month', currency: 'GBP' });
+  });
+
   it('keeps bar widths visible and ranks sparse category trends by scope', () => {
     expect(insightBarWidth(25, 100)).toBe(25);
     expect(insightBarWidth(0, 0)).toBe(0);
@@ -32,6 +36,29 @@ describe('spending insight filters', () => {
     expect(topCategoryTrends(rows, 'USD', 'group', range).map((item) => item.category)).toEqual(['B', 'A']);
     expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values).toHaveLength(6);
     expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values.find((item) => item.bucket === '2025-02')?.value).toBe(0);
+  });
+
+  it('uses one shared trend scale while preserving zero and small non-zero bars', () => {
+    const range = { trendFrom: '2025-01-01', trendTo: '2025-06-15' };
+    const rows = [
+      { currency: 'USD' as const, bucket: '2025-01', category: 'Large', groupSpendMinor: 1000, allocatedSpendMinor: 1000, expenseCount: 1 },
+      { currency: 'USD' as const, bucket: '2025-02', category: 'Small', groupSpendMinor: 1, allocatedSpendMinor: 1, expenseCount: 1 },
+    ];
+    const categories = topCategoryTrends(rows, 'USD', 'group', range);
+    expect(insightTrendMaximum(categories)).toBe(1000);
+    expect(insightTrendBarHeight(0, 1000)).toBe(0);
+    expect(insightTrendBarHeight(1, 1000)).toBe(4);
+    expect(insightTrendBarHeight(1000, 1000)).toBe(100);
+  });
+
+  it('keeps retained category colors stable when the current set changes', () => {
+    const colorSet = (categories: string[]) => new Map(categories.map((category) => [category, insightCategoryColor(category)]));
+    const initial = colorSet(['Travel', 'Food', 'Coffee']);
+    const changed = colorSet(['Bills', 'Travel', 'Food', 'Coffee']);
+    expect(changed.get('Travel')).toBe(initial.get('Travel'));
+    expect(changed.get('Food')).toBe(initial.get('Food'));
+    expect(changed.get('Coffee')).toBe(initial.get('Coffee'));
+    expect(insightCategoryColor('Travel')).toBe(insightCategoryColor('Travel'));
   });
 
   it('ignores out-of-range buckets and deterministically fills only the top four categories', () => {
@@ -101,5 +128,23 @@ describe('spending insight filters', () => {
 
   it('keeps current and previous-only currencies in the summary currency union', () => {
     expect(insightCurrencySet({ scope: 'global', summaries: [{ currency: 'USD', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }], previous: { from: '2026-01-01', to: '2026-01-31', summaries: [{ currency: 'EUR', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }] } }, { scope: 'global', trendFrom: '2026-01-01', trendTo: '2026-06-01', categoryTrends: [] })).toEqual(['EUR', 'USD']);
+  });
+
+  it('keeps a valid URL currency tab available when its current data is empty', () => {
+    const summary = { scope: 'global' as const, summaries: [{ currency: 'USD' as const, groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }] };
+    const trends = { scope: 'global' as const, trendFrom: '2026-01-01', trendTo: '2026-06-01', categoryTrends: [] };
+    const currencies = insightCurrencies(summary, trends, 'EUR');
+    expect(currencies).toEqual(['EUR', 'USD']);
+    expect(effectiveInsightCurrency('EUR', currencies)).toBe('EUR');
+    expect(effectiveInsightCurrency(undefined, currencies, ['USD'])).toBe('USD');
+    expect(effectiveInsightCurrency('GBP', currencies)).toBe('EUR');
+  });
+
+  it('keeps the first effective implicit currency when more data resolves', () => {
+    const initial = insightCurrencies({ scope: 'global', summaries: [{ currency: 'EUR', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }] }, undefined);
+    const resolved = insightCurrencies({ scope: 'global', summaries: [{ currency: 'USD', groupSpendMinor: 100, allocatedSpendMinor: 100, yourShareMinor: 100, youPaidMinor: 0, expenseCount: 1 }] }, { scope: 'global', trendFrom: '2026-01-01', trendTo: '2026-06-01', categoryTrends: [{ currency: 'EUR', bucket: '2026-06', category: 'Food', groupSpendMinor: 100, allocatedSpendMinor: 100, expenseCount: 1 }] });
+    const implicit = effectiveInsightCurrency(undefined, initial, initial);
+    expect(implicit).toBe('EUR');
+    expect(effectiveInsightCurrency(undefined, resolved, [implicit])).toBe('EUR');
   });
 });

@@ -82,7 +82,19 @@ export function insightQuery(filters: InsightFilters) {
 }
 
 export const insightBarWidth = (value: number, maximum: number) => maximum > 0 ? Math.min(100, Math.max(0, Math.round((value / maximum) * 100))) : 0;
+export const insightTrendMaximum = (categories: FilledCategoryTrend[]) => Math.max(0, ...categories.flatMap((item) => item.values.map((value) => value.value)));
+export const insightTrendBarHeight = (value: number, maximum: number) => value === 0 ? 0 : Math.max(4, insightBarWidth(value, maximum));
+const insightCategoryPalette = ['#5b21b6', '#0f766e', '#b45309', '#9d174d', '#1d4ed8', '#166534', '#9f1239', '#334155', '#0369a1', '#6b21a8', '#3f6212', '#c2410c'] as const;
+const insightCategoryHash = (category: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < category.length; index += 1) hash = Math.imul(hash ^ category.charCodeAt(index), 16777619);
+  return hash >>> 0;
+};
+/** Derive a stable, accessible color from the category identity rather than its current rank. */
+export const insightCategoryColor = (category: string) => insightCategoryPalette[insightCategoryHash(category) % insightCategoryPalette.length];
 export const insightCurrencySet = (summary: SpendingInsightSummaryResponse | undefined, trends: SpendingInsightTrends | undefined) => [...new Set([...(summary?.summaries || []).map((item) => item.currency), ...(summary?.previous?.summaries || []).map((item) => item.currency), ...(trends?.categoryTrends || []).map((item) => item.currency)])].sort();
+export const insightCurrencies = (summary: SpendingInsightSummaryResponse | undefined, trends: SpendingInsightTrends | undefined, selected?: Currency) => [...new Set([...(selected ? [selected] : []), ...insightCurrencySet(summary, trends)])].sort();
+export const effectiveInsightCurrency = (selected: Currency | undefined, currencies: Currency[], preferred: Currency[] = currencies) => selected && currencies.includes(selected) ? selected : preferred.find((currency) => currencies.includes(currency)) || currencies[0];
 export type FilledCategoryTrend = { category: string; currency: Currency; values: Array<{ bucket: string; value: number; expenseCount: number }>; total: number };
 
 /** Fill sparse rows, count only requested months, and rank with checked arithmetic. */

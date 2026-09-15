@@ -197,7 +197,8 @@ export function Field({ label, children, className = '', error, errorId }: { lab
   const childProps = isValidElement(children) ? (children as ReactElement<Record<string, unknown>>).props : undefined;
   const describedBy = typeof childProps?.['aria-describedby'] === 'string' ? childProps['aria-describedby'] : undefined;
   const resolvedErrorId = errorId || describedBy?.split(/\s+/)[0] || `${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-error`;
-  const describedChild = error && isValidElement(children) ? cloneElement(children as ReactElement<Record<string, unknown>>, { 'aria-invalid': true, 'aria-describedby': [describedBy, resolvedErrorId].filter(Boolean).join(' ') }) : children;
+  const describedByTokens = describedBy?.split(/\s+/).filter(Boolean) || [];
+  const describedChild = error && isValidElement(children) ? cloneElement(children as ReactElement<Record<string, unknown>>, { 'aria-invalid': true, 'aria-describedby': [...new Set([...describedByTokens, resolvedErrorId])].join(' ') }) : children;
   return <label className={`field ${className}`.trim()}><span>{label}</span>{describedChild}{error ? <small id={resolvedErrorId} className="field-error" role="alert">{error}</small> : null}</label>;
 }
 
