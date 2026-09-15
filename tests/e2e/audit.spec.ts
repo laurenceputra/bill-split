@@ -63,6 +63,7 @@ type Scenario = {
 
 const viewports: Viewport[] = [
   { width: 390, height: 844 },
+  { width: 430, height: 844 },
   { width: 768, height: 1024 },
   { width: 895, height: 900 },
   { width: 896, height: 900 },
@@ -199,7 +200,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
     if (contentWidth > viewport.width + 1) add('horizontal-overflow', 'major', `Document scroll width ${contentWidth}px exceeds viewport width ${viewport.width}px`, 'html/body', contentWidth - viewport.width);
     const internalOverflowDescendant = (element: Element) => {
       for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-        if (parent.matches('.insight-currency-tabs,.category-trend-list')) return true;
+        if (parent.matches('.insight-currency-tabs,.category-trend-bars')) return true;
       }
       return false;
     };
@@ -407,22 +408,26 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && !body.includes(`Compared with ${comparison.from} to ${comparison.to}`)) throw new Error('Selected-period summary did not show exact comparison dates');
       if (populatedInsight) {
         if (!body.includes('USD') || !body.includes('EUR')) throw new Error('Insight currency tabs did not render all available currencies');
-        const overflowingTrendRows = await page.locator('.category-trend-bars').evaluateAll((elements) => elements.filter((element) => element.scrollWidth > element.clientWidth + 1).length);
-        if (overflowingTrendRows) throw new Error('Category trend mini charts overflow their containers');
-        if (await page.locator('.category-trend-list a').count()) throw new Error('Category trend cards unexpectedly link to transaction history');
-         for (const row of await page.locator('.category-trend-list > li').all()) {
-           if (await row.locator('.category-trend-month').count() !== 6) throw new Error('Category trend did not render six calendar months');
-           if (!(await row.innerText()).includes('MTD')) throw new Error('Category trend did not identify the current month-to-date amount');
-         }
-         const categoryRail = page.locator('.category-trend-list');
-         const categoryNameLayout = await categoryRail.locator('.category-trend-name').evaluateAll((elements) => elements.map((element) => {
-           const range = document.createRange();
-           range.selectNodeContents(element);
-           return { width: element.getBoundingClientRect().width, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size };
-         }));
-         if (categoryNameLayout.some(({ width, lines }) => width < 80 || lines > 2)) throw new Error(`Category names collapsed under stress-sized amounts: ${JSON.stringify(categoryNameLayout)}`);
-         const zeroBars = await page.locator('.category-trend-bar').evaluateAll((elements) => elements.filter((element) => Number.parseFloat(getComputedStyle(element).height) === 0).length);
-        if (!zeroBars) throw new Error('Sparse category fixture did not render zero-height bars');
+         const trendGraph = page.locator('.category-trend-figure');
+         await expect(trendGraph).toHaveCount(1);
+         const trendPlot = trendGraph.locator('.category-trend-bars');
+         if (await trendPlot.locator('.category-trend-month').count() !== 6) throw new Error('Grouped category trend did not render six calendar month groups');
+         if (await trendPlot.locator('.category-trend-bar').count() !== 24) throw new Error('Grouped category trend did not render 24 fixture bars');
+         if (await trendGraph.locator('.category-trend-summary').count() !== 4) throw new Error('Grouped category trend did not render four compact category summaries');
+         if (await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.some((element) => !element.textContent?.includes('MTD') || !element.textContent.includes('over 6 months') || !element.querySelector('.category-trend-direction')))) throw new Error('Category summaries omitted MTD, six-month total, or trend status');
+         const categoryColors = await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
+         const barColors = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
+         if (barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; })) throw new Error('Category bars and legend markers did not preserve category color identity');
+         const currentLabels = await trendPlot.locator('.category-trend-month small').evaluateAll((elements) => elements.filter((element) => / MTD$/.test(element.textContent || '')).map((element) => { const range = document.createRange(); range.selectNodeContents(element); return { text: element.textContent, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size }; }));
+         if (currentLabels.length !== 1 || currentLabels[0].lines !== 1 || !/^[A-Z][a-z]{2} MTD$/.test(currentLabels[0].text || '')) throw new Error(`Current month label did not remain one line: ${JSON.stringify(currentLabels)}`);
+         const scale = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => { const values = elements.map((element) => Number(element.getAttribute('data-value'))); const maximum = Math.max(...values); return { values, maximum, heights: elements.map((element) => Number.parseFloat(getComputedStyle(element).height)), width: getComputedStyle(elements[0]).width }; });
+         if (!scale.values.includes(0) || !scale.heights.includes(0)) throw new Error('Sparse category fixture did not preserve true zero-height bars');
+         if (scale.width !== '7.2px' && scale.width !== '0.45rem') throw new Error(`Category trend bars are not thin: ${scale.width}`);
+         if (scale.values.some((value, barIndex) => Math.abs(scale.heights[barIndex] - (value === 0 ? 0 : Math.max(4, Math.round((value / scale.maximum) * 100) * 112 / 100))) > 2)) throw new Error('Category trend bars did not use one shared maximum');
+         const valuesTable = trendGraph.locator('table');
+         await expect(valuesTable).toHaveCount(1);
+         if ((await valuesTable.locator('tbody tr').count()) !== 4 || (await valuesTable.locator('tbody td').count()) !== 24) throw new Error('Exact month-by-category values are not exposed in the accessible table');
+         if (!/\$(?:1,234,567\.89|617,283\.95)/.test(await valuesTable.innerText())) throw new Error('Accessible category values did not expose exact stress-sized amounts');
         const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
         await expect(tablist).toHaveCount(1);
         const tabs = tablist.getByRole('tab');
@@ -436,21 +441,13 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         await expect(initialTab).toHaveText('USD');
         await expect(page.locator('.insight-currency-panel .insight-summary-card')).toContainText('(new)');
         for (const tab of await tabs.all()) await expect(tab).toHaveAttribute('aria-controls', 'insight-currency-panel');
-         const railLayout = await categoryRail.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, cardCount: element.children.length, cardExtent: Array.from(element.children).reduce((total, child) => total + child.getBoundingClientRect().width, 0) + Math.max(0, element.children.length - 1) * Number.parseFloat(getComputedStyle(element).columnGap || '0'), columns: getComputedStyle(element).gridTemplateColumns }));
-        const documentWidth = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
-        if (viewport.width < 896) {
-          if (railLayout.display !== 'flex' || railLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(railLayout.overflowX)) throw new Error('Narrow insight categories did not use a single-row internally scrollable horizontal rail');
-           if (railLayout.cardCount > 1 && railLayout.cardExtent > railLayout.clientWidth + 1 && railLayout.scrollWidth <= railLayout.clientWidth + 1) throw new Error('Narrow insight categories exceeded their rail without internal overflow');
-           if (documentWidth > viewport.width + 1) throw new Error('Narrow insight categories caused document-level overflow');
-           if (viewport.width === 390) {
-             const railBox = await categoryRail.boundingBox();
-             const nextCardBox = await categoryRail.locator(':scope > li').nth(1).boundingBox();
-             const visibleNextCardWidth = railBox && nextCardBox ? Math.min(railBox.x + railBox.width, nextCardBox.x + nextCardBox.width) - Math.max(railBox.x, nextCardBox.x) : 0;
-             if (visibleNextCardWidth < 24) throw new Error('390px insight categories did not expose a visible partial next card in the horizontal rail');
-           }
-         } else if (railLayout.display !== 'grid' || railLayout.columns.split(' ').length !== railLayout.cardCount || railLayout.cardCount > 4 || new Set(await categoryRail.locator(':scope > li').evaluateAll((elements) => elements.map((element) => Math.round(element.getBoundingClientRect().top)))).size > 1) {
-          throw new Error('Desktop insight categories did not fit one row with at most four appropriately sized columns');
-        }
+         const plotLayout = await trendPlot.evaluate((element) => ({ overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }));
+         const documentWidth = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
+          if (plotLayout.scrollWidth > plotLayout.clientWidth + 1 && !['auto', 'scroll'].includes(plotLayout.overflowX)) throw new Error('Grouped insight plot overflow was not contained internally');
+          if (documentWidth > viewport.width + 1) throw new Error('Insight categories caused document-level overflow');
+          if (viewport.width >= 896 && plotLayout.scrollWidth > plotLayout.clientWidth + 1) {
+           throw new Error('Desktop grouped insight plot did not fit all six month groups without scrolling');
+         }
         const initialIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.getAttribute('aria-selected') === 'true'));
         const otherIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.textContent?.trim() === 'EUR'));
         if (otherIndex < 0) throw new Error('Comparison fixture did not expose an EUR currency tab');
@@ -755,19 +752,26 @@ test('currency insight deep links restore the selected tab without filtering API
       await expect(panel.locator('.insight-summary-card')).toContainText('(new)');
       expect(new URL(page.url()).searchParams.get('currency')).toBe('USD');
 
-      const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
-      const tablistLayout = await tablist.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), targets: Array.from(element.querySelectorAll('button')).map((button) => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })) }));
-      if (tablistLayout.display !== 'flex' || tablistLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(tablistLayout.overflowX) || tablistLayout.documentWidth > viewport.width + 1 || tablistLayout.targets.some((target) => target.width < 44 || target.height < 44)) throw new Error(`Currency tablist failed ${viewport.width}px layout constraints: ${JSON.stringify(tablistLayout)}`);
+       const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
+       const tablistLayout = await tablist.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), targets: Array.from(element.querySelectorAll('button')).map((button) => ({ width: button.getBoundingClientRect().width, height: button.getBoundingClientRect().height })) }));
+       if (tablistLayout.display !== 'flex' || tablistLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(tablistLayout.overflowX) || tablistLayout.documentWidth > viewport.width + 1 || tablistLayout.targets.some((target) => target.width < 44 || target.height < 44)) throw new Error(`Currency tablist failed ${viewport.width}px layout constraints: ${JSON.stringify(tablistLayout)}`);
 
-      const categoryRail = page.locator('.category-trend-list');
-      await expect(categoryRail).toHaveAttribute('tabindex', '0');
-      await expect(categoryRail).toHaveAttribute('aria-label', 'Highest-spend categories');
-      const categoryLayout = await categoryRail.evaluate((element) => ({ display: getComputedStyle(element).display, flexWrap: getComputedStyle(element).flexWrap, overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, cardCount: element.children.length, rows: new Set(Array.from(element.children).map((child) => Math.round(child.getBoundingClientRect().top))).size, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), columns: getComputedStyle(element).gridTemplateColumns }));
-      if (viewport.width === 320) {
-        if (categoryLayout.cardCount !== 4 || categoryLayout.display !== 'flex' || categoryLayout.flexWrap !== 'nowrap' || !['auto', 'scroll'].includes(categoryLayout.overflowX) || categoryLayout.scrollWidth <= categoryLayout.clientWidth || categoryLayout.rows !== 1 || categoryLayout.documentWidth > viewport.width + 1) throw new Error('320px category rail did not provide four internally scrolling cards without document overflow');
-      } else if (categoryLayout.cardCount !== 4 || categoryLayout.display !== 'grid' || categoryLayout.columns.split(' ').length !== 4 || categoryLayout.rows !== 1 || categoryLayout.documentWidth > viewport.width + 1) {
-        throw new Error('1440px category cards did not fit one non-overflowing grid row');
-      }
+       const categoryGraph = page.locator('.category-trend-figure');
+       const categoryPlot = categoryGraph.locator('.category-trend-bars');
+       await expect(categoryGraph).toHaveCount(1);
+       await expect(categoryPlot).toHaveAttribute('tabindex', '0');
+       await expect(categoryPlot).toHaveAttribute('aria-label', 'USD category spending chart');
+       if (await categoryPlot.locator('.category-trend-month').count() !== 6 || await categoryPlot.locator('.category-trend-bar').count() !== 24 || await categoryGraph.locator('.category-trend-summary').count() !== 4) throw new Error(`Grouped category chart fixture is incomplete at ${viewport.width}px`);
+       const categoryColors = await categoryGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
+       const barColors = await categoryPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
+       const barColorMismatch = barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; });
+       if (barColorMismatch) throw new Error(`Grouped category bars did not match their legend markers at ${viewport.width}px`);
+       const categoryLayout = await categoryPlot.evaluate((element) => ({ overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) }));
+       if (viewport.width === 320) {
+         if (!['auto', 'scroll'].includes(categoryLayout.overflowX) || categoryLayout.scrollWidth <= categoryLayout.clientWidth || categoryLayout.documentWidth > viewport.width + 1) throw new Error('320px grouped category plot did not contain its internal overflow');
+       } else if (categoryLayout.scrollWidth > categoryLayout.clientWidth + 1 || categoryLayout.documentWidth > viewport.width + 1) {
+         throw new Error('1440px grouped category plot did not fit without document overflow');
+       }
 
       const eurTab = tablist.getByRole('tab', { name: 'EUR', exact: true });
       await eurTab.click();
@@ -862,8 +866,8 @@ test('intercepted loading, API error, offline, and modal states render their int
           await assertRendered(page, scenario, observations, viewport);
          if (independent.failedView === 'trends') {
            if (await page.locator('.insight-summary-grid').count() !== 1) throw new Error('Summary-success sibling did not render its summary grid');
-         } else if (await page.locator('.category-trend-list').count() === 0) {
-           throw new Error('Trend-success sibling did not render a populated category trend list');
+          } else if (await page.locator('.category-trend-figure').count() === 0) {
+            throw new Error('Trend-success sibling did not render a populated grouped category chart');
          }
          coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
          await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
@@ -912,7 +916,7 @@ test('intercepted loading, API error, offline, and modal states render their int
        await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
        await offlinePage.waitForTimeout(150);
         await assertRendered(offlinePage, offlineScenario, offlineObservations, viewport);
-       expect(await offlinePage.locator('.category-trend-list').count()).toBeGreaterThan(0);
+        expect(await offlinePage.locator('.category-trend-figure').count()).toBeGreaterThan(0);
       coverage.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: offlineScenario.path, viewport, context: offlineScenario.context, rendered: true, apiSuccesses: offlineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
       await reportForPage(offlinePage, offlineScenario, `${offlineScenario.path} [offline]`, viewport, artifactDirectory, findings, failures);
     } catch (error) {

@@ -1763,61 +1763,114 @@ summary {
   gap: var(--space-2);
 }
 
-.category-trend-list {
-  display: grid;
-  contain: layout;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-4);
+.category-trend-figure {
+  min-width: 0;
   margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
-.category-trend-list:focus-visible {
+.category-trend-guidance {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.category-trend-bars {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: var(--space-2) 0;
+  scrollbar-width: thin;
+}
+
+.category-trend-bars:focus-visible {
   outline: 3px solid var(--color-focus);
   outline-offset: 3px;
 }
 
-.category-trend-rail-hint {
-  display: none;
-}
-
-.category-trend-list--1 {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.category-trend-list--2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.category-trend-list--3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.category-trend-list > li {
+.category-trend-plot {
   display: grid;
-  gap: var(--space-1);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2);
   min-width: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
 }
 
-.category-trend-heading {
+.category-trend-month {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-  gap: var(--space-1);
+  grid-template-rows: 7rem auto;
+  align-items: end;
+  min-width: 0;
+  text-align: center;
 }
 
+.category-trend-month-bars {
+  display: flex;
+  height: 7rem;
+  align-items: end;
+  justify-content: center;
+  gap: 0.2rem;
+  border-bottom: 1px solid var(--color-border-strong);
+}
+
+.category-trend-bar {
+  display: block;
+  width: 0.45rem;
+  flex: 0 0 0.45rem;
+  min-height: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.category-trend-month small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.category-trend-legend {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.category-trend-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-2);
+}
+
+.category-trend-marker {
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.2rem;
+  border-radius: 50%;
+}
+
+.category-trend-summary__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.category-trend-name,
 .category-trend-current,
-.category-trend-total {
-  font-variant-numeric: tabular-nums;
+.category-trend-total,
+.category-trend-direction {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .category-trend-name {
   font-weight: 800;
+}
+
+.category-trend-current,
+.category-trend-total {
+  font-variant-numeric: tabular-nums;
 }
 
 .category-trend-total,
@@ -1826,40 +1879,15 @@ summary {
   font-size: var(--text-xs);
 }
 
-.category-trend-bars {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  align-items: end;
-  gap: 0.2rem;
+.category-trend-values {
+  width: 1px;
   min-width: 0;
-  padding-top: var(--space-2);
+  max-width: 1px;
+  table-layout: fixed;
 }
 
-.category-trend-month {
-  display: grid;
-  grid-template-rows: 3rem auto;
-  align-items: end;
-  min-width: 0;
-  text-align: center;
-}
-
-.category-trend-bar {
-  display: block;
-  width: min(1.5rem, 100%);
-  justify-self: center;
-  min-height: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: var(--color-primary);
-}
-
-.category-trend-month:last-child .category-trend-bar {
-  background: var(--color-accent, var(--color-primary));
-}
-
-.category-trend-month small {
-  overflow-wrap: anywhere;
-  color: var(--color-ink-muted);
-  font-size: var(--text-xs);
+.category-trend-values :is(caption, th, td) {
+  overflow: hidden;
 }
 
 .balance-cards {
@@ -2843,24 +2871,6 @@ input[inputmode="decimal"] {
 }
 
 @media (max-width: 55.999rem) {
-  .category-trend-list {
-    display: flex;
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
-    scroll-padding-inline: var(--space-3);
-    scroll-snap-type: x mandatory;
-    padding: 0 0 var(--space-2);
-  }
-
-  .category-trend-list > li {
-    flex: 0 0 min(18rem, calc(100% - var(--space-10)));
-    scroll-snap-align: start;
-  }
-
-  .category-trend-rail-hint {
-    display: block;
-  }
-
   .cache-status > .inline-action {
     display: inline-flex;
     min-width: var(--control-min-height);
@@ -2869,8 +2879,12 @@ input[inputmode="decimal"] {
     justify-content: center;
   }
 
-  .category-trend-heading {
-    grid-template-columns: minmax(0, 1fr);
+  .category-trend-plot {
+    min-width: 24rem;
+  }
+
+  .category-trend-legend {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .schedule-row__actions {

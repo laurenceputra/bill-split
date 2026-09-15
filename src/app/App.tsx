@@ -22,7 +22,7 @@ import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collec
 import { hasTransactionFilters, readTransactionFilters, transactionFilterCount, transactionFilterKey, writeTransactionFilters, type TransactionFilters } from './transaction-filters';
 import { transactionCategory, transactionContext, transactionDate, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 import { createSessionActivityScheduler } from './session-activity';
-import { categoryTrendStatus, effectiveInsightCurrency, insightBarWidth, insightComparisonDateRange, insightCurrencies, insightMonthLabel, insightTrendDateRange, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
+import { categoryTrendStatus, effectiveInsightCurrency, insightCategoryColor, insightComparisonDateRange, insightCurrencies, insightMonthLabel, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -1180,8 +1180,44 @@ function SimplifiedCategoryTrendModule({ data, currencyValue, index }: { data: S
   const moneyText = (value: number) => new Intl.NumberFormat(undefined, { style: 'currency', currency: currencyValue }).format(value / 100);
   const currentMonth = months.at(-1);
   const headingId = `insight-${data.scope}-${currencyValue}-${index}-categories-heading`;
-  const railHintId = `${headingId}-rail-hint`;
-  return <section className="insight-chart insight-category-trends" aria-labelledby={headingId}><div className="insight-module-heading"><div><h4 id={headingId}>Highest-spend categories</h4><p className="muted">Latest six local calendar months · {currencyValue} · {data.scope === 'global' ? 'your allocated share' : 'total group spending'}</p></div></div>{categories.length ? <><ol className={`category-trend-list category-trend-list--${categories.length}`} tabIndex={0} aria-label="Highest-spend categories" aria-describedby={categories.length > 1 ? railHintId : undefined}>{categories.map((item, categoryIndex) => { const currentValue = item.values.at(-1)?.value || 0; const maximum = Math.max(0, ...item.values.map((value) => value.value)); const status = categoryTrendStatus(item, months); const valuesId = `insight-${data.scope}-${currencyValue}-${index}-${categoryIndex}-values`; const exactValues = item.values.map((value) => `${value.bucket} ${moneyText(value.value)}`).join(', '); return <li key={item.category}><div className="category-trend-heading"><span className="category-trend-name">{item.category}</span><span className="category-trend-current">{moneyText(currentValue)} MTD</span><span className="category-trend-total">{moneyText(item.total)} over 6 months</span></div><span className={`category-trend-direction category-trend-direction--${status.kind}`}>{status.text}</span><span id={valuesId} className="sr-only">{item.category} monthly values: {exactValues}</span><div className="category-trend-bars" role="group" aria-label={`${item.category} monthly spending`} aria-describedby={valuesId}>{item.values.map((value) => <span className="category-trend-month" key={value.bucket}><span className="category-trend-bar" style={{ height: `${value.value === 0 ? 0 : Math.max(4, insightBarWidth(value.value, maximum))}%` }} aria-hidden="true" /><small>{insightMonthLabel(value.bucket)}{value.bucket === currentMonth ? ' · MTD' : ''}</small></span>)}</div></li>; })}</ol>{categories.length > 1 ? <span id={railHintId} className="sr-only category-trend-rail-hint">More categories may be available horizontally on narrow screens.</span> : null}</> : <p className="muted">No counted category spending in these six months.</p>}</section>;
+  const guidanceId = `${headingId}-guidance`;
+  const valuesId = `${headingId}-values`;
+  const maximum = insightTrendMaximum(categories);
+  const categoryColors = new Map(categories.map((item) => [item.category, insightCategoryColor(item.category)] as const));
+  const statuses = categories.map((item) => categoryTrendStatus(item, months));
+  return <section className="insight-chart insight-category-trends" aria-labelledby={headingId}>
+    <div className="insight-module-heading"><div><h4 id={headingId}>Highest-spend categories</h4><p className="muted">Latest six local calendar months · {currencyValue} · {data.scope === 'global' ? 'your allocated share' : 'total group spending'}</p></div></div>
+    {categories.length ? <>
+      <figure className="category-trend-figure" aria-labelledby={headingId} aria-describedby={guidanceId}>
+        <div id={guidanceId} className="category-trend-guidance muted">Bars share one scale; very small non-zero values use a minimum visible marker. Exact amounts are in the table.</div>
+        <div className="category-trend-bars" tabIndex={0} role="group" aria-label={`${currencyValue} category spending chart`} aria-describedby={guidanceId} aria-details={valuesId}>
+          <div className="category-trend-plot">
+            {months.map((month) => <div className="category-trend-month" data-month={month} key={month}>
+              <div className="category-trend-month-bars" aria-hidden="true">
+                {categories.map((item) => {
+                  const value = item.values.find((entry) => entry.bucket === month)?.value || 0;
+                  return <span className="category-trend-bar" data-category={item.category} data-value={value} data-month={month} key={item.category} style={{ backgroundColor: categoryColors.get(item.category), height: `${insightTrendBarHeight(value, maximum)}%` }} />;
+                })}
+              </div>
+              <small>{insightMonthLabel(month)}{month === currentMonth ? ' MTD' : ''}</small>
+            </div>)}
+          </div>
+        </div>
+      <ul className="category-trend-legend" aria-label="Category summaries">
+        {categories.map((item, categoryIndex) => { return <li className="category-trend-summary" data-category={item.category} key={item.category}>
+          <span className="category-trend-marker" data-category={item.category} aria-hidden="true" style={{ backgroundColor: categoryColors.get(item.category) }} />
+          <div className="category-trend-summary__copy"><strong className="category-trend-name">{item.category}</strong><span className="category-trend-current">{moneyText(item.values.at(-1)?.value || 0)} MTD</span><span className="category-trend-total">{moneyText(item.total)} over 6 months</span><span className={`category-trend-direction category-trend-direction--${statuses[categoryIndex].kind}`}>{statuses[categoryIndex].text}</span></div>
+        </li>; })}
+      </ul>
+      <table id={valuesId} className="sr-only category-trend-values">
+        <caption>Exact monthly {currencyValue} values by category</caption>
+        <thead><tr><th scope="col">Category</th>{months.map((month) => <th scope="col" key={month}>{insightMonthLabel(month)}{month === currentMonth ? ' MTD' : ''}</th>)}</tr></thead>
+        <tbody>{categories.map((item) => <tr key={item.category}><th scope="row">{item.category}</th>{item.values.map((value) => <td key={value.bucket}>{moneyText(value.value)}</td>)}</tr>)}</tbody>
+      </table>
+        <figcaption className="sr-only">Six-month category spending bars for {currencyValue}. Exact values are available in the table below.</figcaption>
+      </figure>
+    </> : <p className="muted">No counted category spending in these six months.</p>}
+  </section>;
 }
 
 function InsightCurrencyTabs({ currencies, selectedCurrency, onSelect }: { currencies: Currency[]; selectedCurrency?: Currency; onSelect: (currency: Currency) => void }) {

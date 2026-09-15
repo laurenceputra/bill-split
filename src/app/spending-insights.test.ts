@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categoryTrendDirection, categoryTrendStatus, effectiveInsightCurrency, insightBarWidth, insightComparisonDateRange, insightCurrencySet, insightCurrencies, insightDateRange, insightMonthLabel, insightQuery, insightTrendDateRange, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
+import { categoryTrendDirection, categoryTrendStatus, effectiveInsightCurrency, insightBarWidth, insightCategoryColor, insightComparisonDateRange, insightCurrencySet, insightCurrencies, insightDateRange, insightMonthLabel, insightQuery, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
 
 describe('spending insight filters', () => {
   const now = new Date('2026-09-13T12:00:00.000Z');
@@ -36,6 +36,29 @@ describe('spending insight filters', () => {
     expect(topCategoryTrends(rows, 'USD', 'group', range).map((item) => item.category)).toEqual(['B', 'A']);
     expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values).toHaveLength(6);
     expect(topCategoryTrends(rows, 'USD', 'allocated', range)[0].values.find((item) => item.bucket === '2025-02')?.value).toBe(0);
+  });
+
+  it('uses one shared trend scale while preserving zero and small non-zero bars', () => {
+    const range = { trendFrom: '2025-01-01', trendTo: '2025-06-15' };
+    const rows = [
+      { currency: 'USD' as const, bucket: '2025-01', category: 'Large', groupSpendMinor: 1000, allocatedSpendMinor: 1000, expenseCount: 1 },
+      { currency: 'USD' as const, bucket: '2025-02', category: 'Small', groupSpendMinor: 1, allocatedSpendMinor: 1, expenseCount: 1 },
+    ];
+    const categories = topCategoryTrends(rows, 'USD', 'group', range);
+    expect(insightTrendMaximum(categories)).toBe(1000);
+    expect(insightTrendBarHeight(0, 1000)).toBe(0);
+    expect(insightTrendBarHeight(1, 1000)).toBe(4);
+    expect(insightTrendBarHeight(1000, 1000)).toBe(100);
+  });
+
+  it('keeps retained category colors stable when the current set changes', () => {
+    const colorSet = (categories: string[]) => new Map(categories.map((category) => [category, insightCategoryColor(category)]));
+    const initial = colorSet(['Travel', 'Food', 'Coffee']);
+    const changed = colorSet(['Bills', 'Travel', 'Food', 'Coffee']);
+    expect(changed.get('Travel')).toBe(initial.get('Travel'));
+    expect(changed.get('Food')).toBe(initial.get('Food'));
+    expect(changed.get('Coffee')).toBe(initial.get('Coffee'));
+    expect(insightCategoryColor('Travel')).toBe(insightCategoryColor('Travel'));
   });
 
   it('ignores out-of-range buckets and deterministically fills only the top four categories', () => {
