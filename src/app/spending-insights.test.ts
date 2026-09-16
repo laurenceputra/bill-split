@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categoryTrendDirection, categoryTrendStatus, effectiveInsightCurrency, insightBarWidth, insightCategoryColor, insightComparisonDateRange, insightCurrencySet, insightCurrencies, insightDateRange, insightMonthLabel, insightQuery, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
+import { categoryTrendDirection, categoryTrendStatus, effectiveInsightCurrency, insightActivitySpanText, insightBarWidth, insightCategoryColor, insightComparisonDateRange, insightCurrencySet, insightCurrencies, insightDateRange, insightDisplayedTrendMonths, insightMonthLabel, insightQuery, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonthLabel, insightTrendMonths, insightTrendReferenceLabel, readInsightFilters, topCategoryTrends, validInsightRange } from './spending-insights';
 
 describe('spending insight filters', () => {
   const now = new Date('2026-09-13T12:00:00.000Z');
@@ -69,6 +69,40 @@ describe('spending insight filters', () => {
     expect(result.map((item) => item.category)).toEqual(['A', 'B', 'C', 'D']);
     expect(result).toHaveLength(4);
     expect(result.find((item) => item.category === 'E')).toBeUndefined();
+  });
+
+  it('derives a dynamic activity span from the visible categories', () => {
+    const months = ['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06'];
+    const category = (name: string, amounts: number[]) => ({ category: name, currency: 'USD' as const, total: amounts.reduce((sum, amount) => sum + amount, 0), values: months.map((bucket, index) => ({ bucket, value: amounts[index], expenseCount: amounts[index] ? 1 : 0 })) });
+    const categories = [category('Food', [0, 100, 0, 0, 300, 0]), category('Travel', [0, 0, 200, 0, 0, 0])];
+    expect(insightDisplayedTrendMonths(categories, months)).toEqual(['2025-02', '2025-03', '2025-04', '2025-05']);
+    expect(insightActivitySpanText(['2025-02', '2025-03', '2025-04', '2025-05'])).toContain('Feb–May');
+    expect(insightDisplayedTrendMonths([category('Empty', [0, 0, 0, 0, 0, 0])], months)).toEqual([]);
+    expect(insightDisplayedTrendMonths([category('One', [0, 0, 0, 0, 0, 10])], months)).toEqual(['2025-06']);
+    expect(topCategoryTrends([{ currency: 'USD', bucket: '2025-02', category: 'Food', groupSpendMinor: 100, allocatedSpendMinor: 100, expenseCount: 1 }, { currency: 'EUR', bucket: '2025-01', category: 'Foreign', groupSpendMinor: 999999, allocatedSpendMinor: 999999, expenseCount: 1 }], 'USD', 'group', { trendFrom: '2025-01-01', trendTo: '2025-06-01' }).map((item) => item.category)).toEqual(['Food']);
+  });
+
+  it('trims months using only the visible top-four series', () => {
+    const range = { trendFrom: '2025-01-01', trendTo: '2025-06-01' };
+    const rows = [
+      ...['A', 'B', 'C', 'D'].map((category) => ({ currency: 'USD' as const, bucket: '2025-03', category, groupSpendMinor: 1000, allocatedSpendMinor: 1000, expenseCount: 1 })),
+      { currency: 'USD' as const, bucket: '2025-01', category: 'E', groupSpendMinor: 1, allocatedSpendMinor: 1, expenseCount: 1 },
+    ];
+    const visible = topCategoryTrends(rows, 'USD', 'group', range);
+    expect(visible.map((item) => item.category)).toEqual(['A', 'B', 'C', 'D']);
+    expect(insightDisplayedTrendMonths(visible, insightTrendMonths(range))).toEqual(['2025-03']);
+  });
+
+  it('caps an activity span at the latest six source months and can omit the current month', () => {
+    const months = ['2024-12', '2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06'];
+    const fullValues = months.map((bucket, index) => ({ bucket, value: index > 0 ? 100 : 0, expenseCount: index > 0 ? 1 : 0 }));
+    expect(insightDisplayedTrendMonths([{ category: 'Food', currency: 'USD', total: 600, values: fullValues }], months)).toEqual(['2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06']);
+    const values = months.map((bucket, index) => ({ bucket, value: index === 1 ? 100 : index === 4 ? 200 : 0, expenseCount: index === 1 || index === 4 ? 1 : 0 }));
+    expect(insightDisplayedTrendMonths([{ category: 'Food', currency: 'USD', total: 300, values }], months)).toEqual(['2025-01', '2025-02', '2025-03', '2025-04']);
+    expect(insightTrendMonthLabel('2025-04', '2025-06')).toBe('Apr');
+    expect(insightTrendReferenceLabel('2025-04', '2025-06')).toBe('Apr');
+    expect(insightTrendMonthLabel('2025-06', '2025-06')).toBe('Jun MTD');
+    expect(insightTrendReferenceLabel('2025-06', '2025-06')).toBe('MTD');
   });
 
   it('rejects unsafe category amount and count aggregation', () => {

@@ -103,6 +103,14 @@ function localInsightRange() {
   return { trendFrom: date(new Date(now.getFullYear(), now.getMonth() - 5, 1)), trendTo: date(now) };
 }
 
+function localMonthKeys(trendFrom: string, count: number) {
+  const [year, month] = trendFrom.slice(0, 7).split('-').map(Number);
+  return Array.from({ length: count }, (_, index) => {
+    const value = new Date(year, month - 1 + index, 1);
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}`;
+  });
+}
+
 function localComparisonRange() {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, '0');
@@ -112,16 +120,27 @@ function localComparisonRange() {
   return { from: date(month), to: date(end) };
 }
 
+const utcMonthLabel = (bucket: string) => new Intl.DateTimeFormat(undefined, { month: 'short', timeZone: 'UTC' }).format(new Date(`${bucket}-01T00:00:00Z`));
+
 function populatedInsightFixture(scope: 'global' | 'group', emptySummary = false) {
   const { trendFrom, trendTo } = localInsightRange();
   const comparison = localComparisonRange();
-  const fromMonth = new Date(`${trendFrom.slice(0, 7)}-01T00:00:00Z`);
-  const months = Array.from({ length: 6 }, (_, index) => { const value = new Date(fromMonth); value.setUTCMonth(value.getUTCMonth() + index); return value.toISOString().slice(0, 7); });
-  const values = [[0, 0, 400000, 0, 900000, 123456789], [0, 125000, 0, 500000, 0, 34567890], [50000, 0, 0, 0, 100000, 2345678], [0, 0, 25000, 0, 0, 987654]];
+  const months = localMonthKeys(trendFrom, 6);
+  const values = [[0, 125000, 0, 0, 123456789, 0], [0, 0, 400000, 0, 0, 0], [0, 0, 0, 0, 2345678, 0], [0, 25000, 0, 0, 987654, 0]];
   const categoryTrends = emptySummary ? [] : values.flatMap((amounts, categoryIndex) => amounts.flatMap((amount, monthIndex) => amount ? [{ currency: 'USD', bucket: months[monthIndex], category: `Category ${String.fromCharCode(65 + categoryIndex)}`, groupSpendMinor: amount, allocatedSpendMinor: Math.round(amount / 2), expenseCount: 1 }] : []));
   const summary = { scope, summaries: emptySummary ? [] : [{ currency: 'USD', groupSpendMinor: 987654321, allocatedSpendMinor: 456789012, yourShareMinor: 456789012, youPaidMinor: 123456789, expenseCount: 12 }], ...(emptySummary ? {} : { previous: { from: comparison.from, to: comparison.to, summaries: [{ currency: 'EUR', groupSpendMinor: 700000000, allocatedSpendMinor: 350000000, yourShareMinor: 350000000, youPaidMinor: 100000000, expenseCount: 8 }] } }) };
   const trends = { scope, trendFrom, trendTo, categoryTrends };
   return { summary, trends };
+}
+
+function displayedFixtureTrend(fixture: ReturnType<typeof populatedInsightFixture>, primary: 'allocatedSpendMinor' | 'groupSpendMinor') {
+  const categoryTotals = new Map<string, number>();
+  for (const row of fixture.trends.categoryTrends) categoryTotals.set(row.category, (categoryTotals.get(row.category) || 0) + row[primary]);
+  const categories = [...categoryTotals.entries()].sort((first, second) => second[1] - first[1] || first[0].localeCompare(second[0])).slice(0, 4).map(([category]) => category);
+  const sourceMonths = localMonthKeys(fixture.trends.trendFrom, 6);
+  const activeMonths = sourceMonths.filter((month) => fixture.trends.categoryTrends.some((row) => categories.includes(row.category) && row.bucket === month && row[primary] > 0));
+  const displayedMonths = activeMonths.length ? sourceMonths.slice(sourceMonths.indexOf(activeMonths[0]), sourceMonths.indexOf(activeMonths.at(-1)!) + 1) : [];
+  return { displayedMonths, categories };
 }
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights];
@@ -304,9 +323,32 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
     }
 
     for (const element of Array.from(document.querySelectorAll('.surface,section,.card,.empty')).filter(visible)) {
+      if (element.matches('.insight-section')) continue;
       const style = getComputedStyle(element);
       const padding = Math.min(parseFloat(style.paddingTop), parseFloat(style.paddingRight), parseFloat(style.paddingBottom), parseFloat(style.paddingLeft));
       if (padding < 12) add('surface-padding', 'minor', `Flow surface internal padding is ${padding}px; expected at least 12px`, selector(element), padding);
+    }
+
+    const surfaceRootSelector = '.surface,section,.card,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-metric,.insight-summary-card,.insight-category-trends,.balance-card,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"]';
+    const paintedSurface = (element: Element) => {
+      if (!element.matches(surfaceRootSelector)) return false;
+      const style = getComputedStyle(element);
+      const hasBorder = ['Top', 'Right', 'Bottom', 'Left'].some((side) => Number.parseFloat(style[`border${side}Width` as 'borderTopWidth']) > 0 && style[`border${side}Style` as 'borderTopStyle'] !== 'none');
+      const hasBackground = style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+      return hasBorder || hasBackground || style.boxShadow !== 'none';
+    };
+    const cardSurfaceDepth = (root: Element) => {
+      const dialogRoot = root.closest('.modal-sheet,[role="dialog"]');
+      let depth = 0;
+      for (let current: Element | null = root; current && current !== document.body; current = current.parentElement) {
+        if (paintedSurface(current)) depth += 1;
+        if (current === dialogRoot) break;
+      }
+      return depth;
+    };
+    for (const root of Array.from(document.querySelectorAll(surfaceRootSelector)).filter((element) => visible(element) && !element.matches('.modal-backdrop'))) {
+      const depth = cardSurfaceDepth(root);
+      if (depth > 2) add('card-surface-hierarchy-depth', 'major', `Visible painted card/surface ancestor depth is ${depth}; project maximum is two`, selector(root), depth);
     }
 
     const flowSurface = (element: Element) => element.matches('.surface,section,.card,.empty,.offline-banner,.error,.list,.secondary-fields,.landing-note,.landing-proof > div');
@@ -408,26 +450,54 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
       if ((scenario.name === 'global-insights' || scenario.name === 'group-insights') && !body.includes(`Compared with ${comparison.from} to ${comparison.to}`)) throw new Error('Selected-period summary did not show exact comparison dates');
       if (populatedInsight) {
         if (!body.includes('USD') || !body.includes('EUR')) throw new Error('Insight currency tabs did not render all available currencies');
-         const trendGraph = page.locator('.category-trend-figure');
-         await expect(trendGraph).toHaveCount(1);
-         const trendPlot = trendGraph.locator('.category-trend-bars');
-         if (await trendPlot.locator('.category-trend-month').count() !== 6) throw new Error('Grouped category trend did not render six calendar month groups');
-         if (await trendPlot.locator('.category-trend-bar').count() !== 24) throw new Error('Grouped category trend did not render 24 fixture bars');
-         if (await trendGraph.locator('.category-trend-summary').count() !== 4) throw new Error('Grouped category trend did not render four compact category summaries');
-         if (await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.some((element) => !element.textContent?.includes('MTD') || !element.textContent.includes('over 6 months') || !element.querySelector('.category-trend-direction')))) throw new Error('Category summaries omitted MTD, six-month total, or trend status');
-         const categoryColors = await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
-         const barColors = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
-         if (barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; })) throw new Error('Category bars and legend markers did not preserve category color identity');
-         const currentLabels = await trendPlot.locator('.category-trend-month small').evaluateAll((elements) => elements.filter((element) => / MTD$/.test(element.textContent || '')).map((element) => { const range = document.createRange(); range.selectNodeContents(element); return { text: element.textContent, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size }; }));
-         if (currentLabels.length !== 1 || currentLabels[0].lines !== 1 || !/^[A-Z][a-z]{2} MTD$/.test(currentLabels[0].text || '')) throw new Error(`Current month label did not remain one line: ${JSON.stringify(currentLabels)}`);
-         const scale = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => { const values = elements.map((element) => Number(element.getAttribute('data-value'))); const maximum = Math.max(...values); return { values, maximum, heights: elements.map((element) => Number.parseFloat(getComputedStyle(element).height)), width: getComputedStyle(elements[0]).width }; });
-         if (!scale.values.includes(0) || !scale.heights.includes(0)) throw new Error('Sparse category fixture did not preserve true zero-height bars');
-         if (scale.width !== '7.2px' && scale.width !== '0.45rem') throw new Error(`Category trend bars are not thin: ${scale.width}`);
-         if (scale.values.some((value, barIndex) => Math.abs(scale.heights[barIndex] - (value === 0 ? 0 : Math.max(4, Math.round((value / scale.maximum) * 100) * 112 / 100))) > 2)) throw new Error('Category trend bars did not use one shared maximum');
-         const valuesTable = trendGraph.locator('table');
-         await expect(valuesTable).toHaveCount(1);
-         if ((await valuesTable.locator('tbody tr').count()) !== 4 || (await valuesTable.locator('tbody td').count()) !== 24) throw new Error('Exact month-by-category values are not exposed in the accessible table');
-         if (!/\$(?:1,234,567\.89|617,283\.95)/.test(await valuesTable.innerText())) throw new Error('Accessible category values did not expose exact stress-sized amounts');
+        const trendGraph = page.locator('.category-trend-figure');
+        await expect(trendGraph).toHaveCount(1);
+        const trendPlot = trendGraph.locator('.category-trend-bars');
+        const fixture = populatedInsightFixture(scenario.name === 'group-insights' ? 'group' : 'global');
+        const primary = scenario.name === 'group-insights' ? 'groupSpendMinor' : 'allocatedSpendMinor';
+        const { displayedMonths, categories } = displayedFixtureTrend(fixture, primary);
+        const categoryCount = categories.length;
+        const actualCurrentMonth = fixture.trends.trendTo.slice(0, 7);
+        const expectedReferenceLabel = utcMonthLabel(displayedMonths.at(-1)!);
+        const expectedHeaders = ['Category', ...displayedMonths.map((month) => `${utcMonthLabel(month)}${month === actualCurrentMonth ? ' MTD' : ''}`)];
+        const expectedSpanText = `across ${displayedMonths.length}-month span`;
+        if (await trendPlot.locator('.category-trend-month').count() !== displayedMonths.length) throw new Error(`Grouped category trend did not render the fixture-derived ${displayedMonths.length} month groups`);
+        if (await trendPlot.locator('.category-trend-bar').count() !== displayedMonths.length * categoryCount) throw new Error(`Grouped category trend did not render ${displayedMonths.length * categoryCount} fixture bars`);
+        if (await trendGraph.locator('.category-trend-summary').count() !== categoryCount) throw new Error(`Grouped category trend did not render ${categoryCount} compact category summaries`);
+        if (await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.some((element) => !element.textContent?.includes(expectedReferenceLabel) || !element.textContent.includes(expectedSpanText) || !element.querySelector('.category-trend-direction')))) throw new Error('Category summaries omitted the displayed reference month, span total, or trend status');
+        const categoryColors = await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
+        const barColors = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
+        if (barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; })) throw new Error('Category bars and legend markers did not preserve category color identity');
+        const currentLabels = await trendPlot.locator('.category-trend-month small').evaluateAll((elements) => elements.filter((element) => / MTD$/.test(element.textContent || '')).map((element) => { const range = document.createRange(); range.selectNodeContents(element); return { text: element.textContent, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size }; }));
+        if (currentLabels.length !== 0) throw new Error(`A trimmed historical span incorrectly labeled a month MTD: ${JSON.stringify(currentLabels)}`);
+        const monthLabels = await trendPlot.locator('.category-trend-month small').evaluateAll((elements) => elements.map((element) => { const range = document.createRange(); range.selectNodeContents(element); return { text: element.textContent, lines: new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size }; }));
+        if (monthLabels.some((label) => label.lines !== 1)) throw new Error(`Displayed month label wrapped: ${JSON.stringify(monthLabels)}`);
+        const scale = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => { const values = elements.map((element) => Number(element.getAttribute('data-value'))); const maximum = Math.max(...values); return { values, maximum, heights: elements.map((element) => Number.parseFloat(getComputedStyle(element).height)), width: getComputedStyle(elements[0]).width }; });
+        if (!scale.values.includes(0) || !scale.heights.includes(0)) throw new Error('Sparse category fixture did not preserve true zero-height bars');
+        if (scale.width !== '7.2px' && scale.width !== '0.45rem') throw new Error(`Category trend bars are not thin: ${scale.width}`);
+        if (scale.values.some((value, barIndex) => Math.abs(scale.heights[barIndex] - (value === 0 ? 0 : Math.max(4, Math.round((value / scale.maximum) * 100) * 112 / 100))) > 2)) throw new Error('Category trend bars did not use one shared maximum');
+        const trendCurrency = fixture.trends.categoryTrends.find((row) => categories.includes(row.category))?.currency ?? fixture.summary.summaries[0]?.currency ?? 'USD';
+        const valuesTable = trendGraph.getByRole('table', { name: `Exact displayed-span ${trendCurrency} values by category`, exact: true });
+        await expect(valuesTable).toHaveCount(1);
+        const expectedTable = await page.evaluate(({ rows, orderedCategories, months, primaryValue, currentMonth, currency }) => {
+          const formatters = new Map<string, Intl.NumberFormat>();
+          const format = (currency: string, value: number) => {
+            let formatter = formatters.get(currency);
+            if (!formatter) { formatter = new Intl.NumberFormat(undefined, { style: 'currency', currency }); formatters.set(currency, formatter); }
+            return formatter.format(value / 100);
+          };
+          return {
+            headers: ['Category', ...months.map((month) => `${new Intl.DateTimeFormat(undefined, { month: 'short', timeZone: 'UTC' }).format(new Date(`${month}-01T00:00:00Z`))}${month === currentMonth ? ' MTD' : ''}`)],
+            rows: orderedCategories.map((category) => ({ category, values: months.map((month) => format(currency, rows.filter((row) => row.category === category && row.bucket === month).reduce((sum, row) => sum + row[primaryValue], 0))) })),
+          };
+        }, { rows: fixture.trends.categoryTrends, orderedCategories: categories, months: displayedMonths, primaryValue: primary, currentMonth: actualCurrentMonth, currency: trendCurrency });
+        const actualTable = await valuesTable.evaluate((table) => ({
+          headers: Array.from(table.querySelectorAll('thead th')).map((cell) => cell.textContent?.trim() || ''),
+          rows: Array.from(table.querySelectorAll('tbody tr')).map((row) => ({ category: row.querySelector('th')?.textContent?.trim() || '', values: Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent?.trim() || '') })),
+        }));
+        expect(actualTable.headers).toEqual(expectedHeaders);
+        expect(actualTable.headers).toEqual(expectedTable.headers);
+        expect(actualTable.rows).toEqual(expectedTable.rows);
         const tablist = page.getByRole('tablist', { name: 'Spending insight currencies' });
         await expect(tablist).toHaveCount(1);
         const tabs = tablist.getByRole('tab');
@@ -441,13 +511,13 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         await expect(initialTab).toHaveText('USD');
         await expect(page.locator('.insight-currency-panel .insight-summary-card')).toContainText('(new)');
         for (const tab of await tabs.all()) await expect(tab).toHaveAttribute('aria-controls', 'insight-currency-panel');
-         const plotLayout = await trendPlot.evaluate((element) => ({ overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }));
-         const documentWidth = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
-          if (plotLayout.scrollWidth > plotLayout.clientWidth + 1 && !['auto', 'scroll'].includes(plotLayout.overflowX)) throw new Error('Grouped insight plot overflow was not contained internally');
-          if (documentWidth > viewport.width + 1) throw new Error('Insight categories caused document-level overflow');
-          if (viewport.width >= 896 && plotLayout.scrollWidth > plotLayout.clientWidth + 1) {
-           throw new Error('Desktop grouped insight plot did not fit all six month groups without scrolling');
-         }
+        const plotLayout = await trendPlot.evaluate((element) => ({ overflowX: getComputedStyle(element).overflowX, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }));
+        const documentWidth = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth));
+        if (plotLayout.scrollWidth > plotLayout.clientWidth + 1 && !['auto', 'scroll'].includes(plotLayout.overflowX)) throw new Error('Grouped insight plot overflow was not contained internally');
+        if (documentWidth > viewport.width + 1) throw new Error('Insight categories caused document-level overflow');
+        if (viewport.width >= 896 && plotLayout.scrollWidth > plotLayout.clientWidth + 1) {
+          throw new Error('Desktop grouped insight plot did not fit the displayed month groups without scrolling');
+        }
         const initialIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.getAttribute('aria-selected') === 'true'));
         const otherIndex = await tabs.evaluateAll((elements) => elements.findIndex((element) => element.textContent?.trim() === 'EUR'));
         if (otherIndex < 0) throw new Error('Comparison fixture did not expose an EUR currency tab');
@@ -737,8 +807,8 @@ test('currency insight deep links restore the selected tab without filtering API
       const url = new URL(request.url());
       if (url.pathname === apiPaths.spendingInsights) insightRequests.push(url.href);
     });
+    const fixture = populatedInsightFixture('global');
     await page.route('**/api/spending-insights*', (route) => {
-      const fixture = populatedInsightFixture('global');
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) });
     });
     try {
@@ -761,7 +831,13 @@ test('currency insight deep links restore the selected tab without filtering API
        await expect(categoryGraph).toHaveCount(1);
        await expect(categoryPlot).toHaveAttribute('tabindex', '0');
        await expect(categoryPlot).toHaveAttribute('aria-label', 'USD category spending chart');
-       if (await categoryPlot.locator('.category-trend-month').count() !== 6 || await categoryPlot.locator('.category-trend-bar').count() !== 24 || await categoryGraph.locator('.category-trend-summary').count() !== 4) throw new Error(`Grouped category chart fixture is incomplete at ${viewport.width}px`);
+       await expect(categoryGraph.getByRole('table', { name: 'Exact displayed-span USD values by category', exact: true })).toHaveCount(1);
+         const { displayedMonths, categories } = displayedFixtureTrend(fixture, 'allocatedSpendMinor');
+         const categoryCount = categories.length;
+        const actualMonthCount = await categoryPlot.locator('.category-trend-month').count();
+        const actualBarCount = await categoryPlot.locator('.category-trend-bar').count();
+        const actualCategoryCount = await categoryGraph.locator('.category-trend-summary').count();
+        if (actualMonthCount !== displayedMonths.length || actualBarCount !== displayedMonths.length * categoryCount || actualCategoryCount !== categoryCount) throw new Error(`Grouped category chart fixture is incomplete at ${viewport.width}px: expected ${displayedMonths.length}/${displayedMonths.length * categoryCount}/${categoryCount}, got ${actualMonthCount}/${actualBarCount}/${actualCategoryCount}`);
        const categoryColors = await categoryGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
        const barColors = await categoryPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
        const barColorMismatch = barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; });
@@ -790,6 +866,35 @@ test('currency insight deep links restore the selected tab without filtering API
     } finally {
       await context.close();
     }
+  }
+});
+
+test('labels the displayed current month MTD and uses it for category references', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 1440, height: 900 });
+  const page = await context.newPage();
+  const fixture = populatedInsightFixture('global');
+  const currentMonth = fixture.trends.trendTo.slice(0, 7);
+  const currentFixture = {
+    ...fixture,
+    trends: {
+      ...fixture.trends,
+      categoryTrends: [...fixture.trends.categoryTrends, { currency: 'USD' as const, bucket: currentMonth, category: 'Category A', groupSpendMinor: 321000, allocatedSpendMinor: 160500, expenseCount: 1 }],
+    },
+  };
+  await page.route('**/api/spending-insights*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? currentFixture.trends : currentFixture.summary) }));
+  try {
+    await page.goto(`${BASE_URL}/activity?view=insights&period=month`, { waitUntil: 'domcontentloaded' });
+    const graph = page.locator('.category-trend-figure');
+    await expect(graph).toHaveCount(1);
+    const axisLabels = graph.locator('.category-trend-month small');
+    await expect(axisLabels.filter({ hasText: 'MTD' })).toHaveCount(1);
+    await expect(axisLabels.filter({ hasText: `${utcMonthLabel(currentMonth)} MTD` })).toHaveCount(1);
+    const references = graph.locator('.category-trend-current');
+    await expect(references).toHaveCount(4);
+    for (const reference of await references.all()) await expect(reference).toContainText('MTD');
+    await expect(graph.locator('thead th').filter({ hasText: 'MTD' })).toHaveCount(1);
+  } finally {
+    await context.close();
   }
 });
 
@@ -941,7 +1046,7 @@ test('intercepted loading, API error, offline, and modal states render their int
        await coldOfflinePage.waitForTimeout(250);
        assertAuthenticatedRequest(coldOfflineRequests, DEV_EMAIL);
         await assertRendered(coldOfflinePage, coldOfflineScenario, coldOfflineObservations, viewport);
-       expect(await coldOfflinePage.getByText('Six-month trends are unavailable offline; no cached data is available.', { exact: true }).count()).toBe(1);
+        expect(await coldOfflinePage.getByText('Category trends are unavailable offline; no cached data is available.', { exact: true }).count()).toBe(1);
        expect(await coldOfflinePage.getByText('Loading…', { exact: true }).count()).toBe(0);
        coverage.push({ scenarioName: coldOfflineScenario.name, authState: authState(coldOfflineScenario.auth), route: coldOfflineScenario.path, viewport, context: coldOfflineScenario.context, rendered: true, apiSuccesses: coldOfflineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
        await reportForPage(coldOfflinePage, coldOfflineScenario, coldOfflineScenario.path, viewport, artifactDirectory, findings, failures);

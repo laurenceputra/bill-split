@@ -10,6 +10,7 @@ const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.meta.url), 'utf8');
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
+const auditSource = readFileSync(new URL('../../../tests/e2e/audit.spec.ts', import.meta.url), 'utf8');
 
 describe('responsive navigation layout contract', () => {
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
@@ -80,6 +81,24 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('className="schedule-list-content"');
   });
 
+  it('keeps insight semantic sections presentation-only so modules stop at two visible card levels', () => {
+    expect(css).toMatch(/\.insight-section\s*\{[\s\S]*margin: 0;[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
+    expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-summary-heading/);
+    expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-change-heading/);
+    expect(appSource).toContain('className="insights-page"');
+    expect(appSource).toContain('className="insight-summary-card"');
+    expect(appSource).toContain('className="insight-chart insight-category-trends"');
+  });
+
+  it('audits explicit painted surface roots once while treating dialogs as separate roots', () => {
+    expect(auditSource).toContain('const surfaceRootSelector =');
+    for (const root of ['.surface', 'section', '.card', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.balance-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
+    expect(auditSource).toContain('querySelectorAll(surfaceRootSelector)');
+    expect(auditSource).toContain('.modal-sheet,[role="dialog"]');
+    expect(auditSource).toContain("!element.matches('.modal-backdrop')");
+    expect(auditSource).toContain('if (depth > 2) add');
+  });
+
   it('keeps standalone section actions content-sized without shrinking grouped controls', () => {
     expect(css).toMatch(/section\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\),[\s\S]*?\.surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\)\s*\{[\s\S]*?justify-self:\s*start;/);
     expect(css).toMatch(/\.full-width-button\s*\{[\s\S]*width:\s*100%;/);
@@ -110,7 +129,8 @@ describe('responsive navigation layout contract', () => {
   it('keeps sr-only content assistive-technology-visible and associates the grouped trend chart values', () => {
     expect(baseCss).toMatch(/\.sr-only:not\(:focus\):not\(:active\)\s*\{[\s\S]*position: absolute;[\s\S]*width: 1px;[\s\S]*height: 1px;[\s\S]*overflow: hidden;[\s\S]*clip: rect\(0 0 0 0\);/);
     expect(baseCss).not.toMatch(/\.sr-only[^}]*display:\s*none/);
-    expect(appSource).toMatch(/<table id=\{valuesId\} className="sr-only category-trend-values">/);
+    expect(appSource).toMatch(/<div className="sr-only category-trend-values-wrapper">\s*<table id=\{valuesId\} className="category-trend-values">/);
+    expect(appSource).not.toMatch(/<table id=\{valuesId\}[^>]*role=/);
     expect(appSource).toContain('aria-describedby={guidanceId}');
     expect(appSource).toContain('aria-describedby={guidanceId} aria-details={valuesId}');
     expect(appSource).toContain('<figure className="category-trend-figure"');
@@ -119,9 +139,12 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('insightTrendBarHeight(value, maximum)');
     expect(css).toMatch(/\.category-trend-bar\s*\{[\s\S]*width:\s*0\.45rem;/);
     expect(css).not.toMatch(/\.category-trend-(?:bar|marker)--\d/);
-    expect(css).toMatch(/\.category-trend-values\s*\{[\s\S]*max-width:\s*1px;[\s\S]*table-layout:\s*fixed;/);
+    expect(css).toMatch(/\.category-trend-values-wrapper\s*\{[\s\S]*display:\s*block;[\s\S]*max-width:\s*1px;[\s\S]*overflow:\s*hidden;/);
+    expect(css).not.toMatch(/\.category-trend-values\s*\{[^}]*display:/);
     expect(css).toMatch(/\.category-trend-month\s+small\s*\{[\s\S]*white-space:\s*nowrap;/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot\s*\{[\s\S]*min-width:\s*24rem;/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot\s*\{[\s\S]*min-width:\s*0;/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot--long\s*\{[\s\S]*min-width:\s*24rem;/);
+    expect(appSource).toContain("months.length > 3 ? ' category-trend-plot--long' : ''");
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {

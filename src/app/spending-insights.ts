@@ -116,6 +116,34 @@ export function topCategoryTrends(rows: SpendingInsightCategoryTrend[], currency
   return [...byCategory.values()].sort((a, b) => b.total - a.total || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0)).slice(0, 4);
 }
 
+/**
+ * Find the contiguous activity span represented by the visible categories.
+ * The category rows retain the complete source window for trend comparisons;
+ * only the chart/table presentation trims inactive edges.
+ */
+export function insightDisplayedTrendMonths(categories: FilledCategoryTrend[], sourceMonths: string[]) {
+  const months = sourceMonths.slice(-6);
+  const hasSpend = (bucket: string) => categories.some((category) => (category.values.find((value) => value.bucket === bucket)?.value || 0) > 0);
+  const first = months.findIndex(hasSpend);
+  if (first < 0) return [];
+  let last = months.length - 1;
+  while (last > first && !hasSpend(months[last])) last -= 1;
+  return months.slice(first, last + 1);
+}
+
+export function insightActivitySpanText(displayMonths: string[]) {
+  if (!displayMonths.length) return 'No category activity in the local calendar window (up to six months).';
+  const first = insightMonthLabel(displayMonths[0]);
+  const last = insightMonthLabel(displayMonths.at(-1) || displayMonths[0]);
+  const span = first === last ? first : `${first}–${last}`;
+  const count = displayMonths.length;
+  return `${span} · ${count}-month activity span (up to six local calendar months)`;
+}
+
+export const insightTrendValue = (category: FilledCategoryTrend, bucket: string | undefined) => bucket ? category.values.find((value) => value.bucket === bucket)?.value || 0 : 0;
+export const insightTrendMonthLabel = (bucket: string, actualCurrentMonth: string | undefined) => `${insightMonthLabel(bucket)}${bucket === actualCurrentMonth ? ' MTD' : ''}`;
+export const insightTrendReferenceLabel = (referenceMonth: string | undefined, actualCurrentMonth: string | undefined) => referenceMonth === actualCurrentMonth ? 'MTD' : referenceMonth ? insightMonthLabel(referenceMonth) : '';
+
 export const categoryTrendDirection = (latest: number, previous: number): 'up' | 'down' | 'unchanged' | 'new' => previous === 0 ? (latest === 0 ? 'unchanged' : 'new') : latest > previous ? 'up' : latest < previous ? 'down' : 'unchanged';
 
 export type CategoryTrendStatus = { kind: 'up' | 'down' | 'unchanged' | 'first-seen' | 'resumed' | 'no-baseline'; text: string };

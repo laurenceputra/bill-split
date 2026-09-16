@@ -22,7 +22,7 @@ import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collec
 import { hasTransactionFilters, readTransactionFilters, transactionFilterCount, transactionFilterKey, writeTransactionFilters, type TransactionFilters } from './transaction-filters';
 import { transactionCategory, transactionContext, transactionDate, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 import { createSessionActivityScheduler } from './session-activity';
-import { categoryTrendStatus, effectiveInsightCurrency, insightCategoryColor, insightComparisonDateRange, insightCurrencies, insightMonthLabel, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonths, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
+import { categoryTrendStatus, effectiveInsightCurrency, insightActivitySpanText, insightCategoryColor, insightComparisonDateRange, insightCurrencies, insightDisplayedTrendMonths, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonthLabel, insightTrendMonths, insightTrendReferenceLabel, insightTrendValue, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const operationId = () => crypto.randomUUID();
@@ -1171,52 +1171,58 @@ function InsightPrimarySummary({ summary, data, previous }: { summary: SpendingI
 }
 
 function InsightUnavailableOffline({ label }: { label: string }) {
-  return <p className="offline-banner" role="status">{label} {label === 'Six-month trends' ? 'are' : 'is'} unavailable offline; no cached data is available.</p>;
+  return <p className="offline-banner" role="status">{label} {label === 'Category trends' ? 'are' : 'is'} unavailable offline; no cached data is available.</p>;
 }
 
 function SimplifiedCategoryTrendModule({ data, currencyValue, index }: { data: SpendingInsightTrends; currencyValue: Currency; index: number }) {
-  const months = insightTrendMonths({ trendFrom: data.trendFrom, trendTo: data.trendTo });
+  const sourceMonths = insightTrendMonths({ trendFrom: data.trendFrom, trendTo: data.trendTo });
   const categories = topCategoryTrends(data.categoryTrends, currencyValue, data.scope === 'global' ? 'allocated' : 'group', { trendFrom: data.trendFrom, trendTo: data.trendTo });
+  const months = insightDisplayedTrendMonths(categories, sourceMonths);
   const moneyText = (value: number) => new Intl.NumberFormat(undefined, { style: 'currency', currency: currencyValue }).format(value / 100);
-  const currentMonth = months.at(-1);
+  const actualCurrentMonth = sourceMonths.at(-1);
+  const referenceMonth = months.at(-1);
   const headingId = `insight-${data.scope}-${currencyValue}-${index}-categories-heading`;
   const guidanceId = `${headingId}-guidance`;
   const valuesId = `${headingId}-values`;
   const maximum = insightTrendMaximum(categories);
   const categoryColors = new Map(categories.map((item) => [item.category, insightCategoryColor(item.category)] as const));
-  const statuses = categories.map((item) => categoryTrendStatus(item, months));
+  const statuses = categories.map((item) => categoryTrendStatus(item, sourceMonths));
   return <section className="insight-chart insight-category-trends" aria-labelledby={headingId}>
-    <div className="insight-module-heading"><div><h4 id={headingId}>Highest-spend categories</h4><p className="muted">Latest six local calendar months · {currencyValue} · {data.scope === 'global' ? 'your allocated share' : 'total group spending'}</p></div></div>
+    <div className="insight-module-heading"><div><h4 id={headingId}>Highest-spend categories</h4><p className="muted">{insightActivitySpanText(months)} · {currencyValue} · {data.scope === 'global' ? 'your allocated share' : 'total group spending'}</p></div></div>
     {categories.length ? <>
-      <figure className="category-trend-figure" aria-labelledby={headingId} aria-describedby={guidanceId}>
-        <div id={guidanceId} className="category-trend-guidance muted">Bars share one scale; very small non-zero values use a minimum visible marker. Exact amounts are in the table.</div>
-        <div className="category-trend-bars" tabIndex={0} role="group" aria-label={`${currencyValue} category spending chart`} aria-describedby={guidanceId} aria-details={valuesId}>
-          <div className="category-trend-plot">
-            {months.map((month) => <div className="category-trend-month" data-month={month} key={month}>
-              <div className="category-trend-month-bars" aria-hidden="true">
-                {categories.map((item) => {
-                  const value = item.values.find((entry) => entry.bucket === month)?.value || 0;
-                  return <span className="category-trend-bar" data-category={item.category} data-value={value} data-month={month} key={item.category} style={{ backgroundColor: categoryColors.get(item.category), height: `${insightTrendBarHeight(value, maximum)}%` }} />;
-                })}
-              </div>
-              <small>{insightMonthLabel(month)}{month === currentMonth ? ' MTD' : ''}</small>
-            </div>)}
+      {months.length ? <>
+        <figure className="category-trend-figure" aria-labelledby={headingId} aria-describedby={guidanceId}>
+          <div id={guidanceId} className="category-trend-guidance muted">Bars share one scale; very small non-zero values use a minimum visible marker. Exact displayed-span amounts are in the table.</div>
+          <div className="category-trend-bars" tabIndex={0} role="group" aria-label={`${currencyValue} category spending chart`} aria-describedby={guidanceId} aria-details={valuesId}>
+            <div className={`category-trend-plot${months.length > 3 ? ' category-trend-plot--long' : ''}`} style={{ gridTemplateColumns: `repeat(${months.length}, minmax(0, 1fr))` }}>
+              {months.map((month) => <div className="category-trend-month" data-month={month} key={month}>
+                <div className="category-trend-month-bars" aria-hidden="true">
+                  {categories.map((item) => {
+                    const value = insightTrendValue(item, month);
+                    return <span className="category-trend-bar" data-category={item.category} data-value={value} data-month={month} key={item.category} style={{ backgroundColor: categoryColors.get(item.category), height: `${insightTrendBarHeight(value, maximum)}%` }} />;
+                  })}
+                </div>
+                <small>{insightTrendMonthLabel(month, actualCurrentMonth)}</small>
+              </div>)}
+            </div>
           </div>
-        </div>
-      <ul className="category-trend-legend" aria-label="Category summaries">
-        {categories.map((item, categoryIndex) => { return <li className="category-trend-summary" data-category={item.category} key={item.category}>
-          <span className="category-trend-marker" data-category={item.category} aria-hidden="true" style={{ backgroundColor: categoryColors.get(item.category) }} />
-          <div className="category-trend-summary__copy"><strong className="category-trend-name">{item.category}</strong><span className="category-trend-current">{moneyText(item.values.at(-1)?.value || 0)} MTD</span><span className="category-trend-total">{moneyText(item.total)} over 6 months</span><span className={`category-trend-direction category-trend-direction--${statuses[categoryIndex].kind}`}>{statuses[categoryIndex].text}</span></div>
-        </li>; })}
-      </ul>
-      <table id={valuesId} className="sr-only category-trend-values">
-        <caption>Exact monthly {currencyValue} values by category</caption>
-        <thead><tr><th scope="col">Category</th>{months.map((month) => <th scope="col" key={month}>{insightMonthLabel(month)}{month === currentMonth ? ' MTD' : ''}</th>)}</tr></thead>
-        <tbody>{categories.map((item) => <tr key={item.category}><th scope="row">{item.category}</th>{item.values.map((value) => <td key={value.bucket}>{moneyText(value.value)}</td>)}</tr>)}</tbody>
-      </table>
-        <figcaption className="sr-only">Six-month category spending bars for {currencyValue}. Exact values are available in the table below.</figcaption>
-      </figure>
-    </> : <p className="muted">No counted category spending in these six months.</p>}
+          <ul className="category-trend-legend" aria-label="Category summaries">
+            {categories.map((item, categoryIndex) => { return <li className="category-trend-summary" data-category={item.category} key={item.category}>
+              <span className="category-trend-marker" data-category={item.category} aria-hidden="true" style={{ backgroundColor: categoryColors.get(item.category) }} />
+              <div className="category-trend-summary__copy"><strong className="category-trend-name">{item.category}</strong><span className="category-trend-current">{moneyText(insightTrendValue(item, referenceMonth))} {insightTrendReferenceLabel(referenceMonth, actualCurrentMonth)}</span><span className="category-trend-total">{moneyText(checkedSumMinor(months.map((month) => insightTrendValue(item, month))))} across {months.length}-month span</span><span className={`category-trend-direction category-trend-direction--${statuses[categoryIndex].kind}`}>{statuses[categoryIndex].text}</span></div>
+            </li>; })}
+          </ul>
+          <div className="sr-only category-trend-values-wrapper">
+            <table id={valuesId} className="category-trend-values">
+              <caption>Exact displayed-span {currencyValue} values by category</caption>
+              <thead><tr><th scope="col">Category</th>{months.map((month) => <th scope="col" key={month}>{insightTrendMonthLabel(month, actualCurrentMonth)}</th>)}</tr></thead>
+              <tbody>{categories.map((item) => <tr key={item.category}><th scope="row">{item.category}</th>{months.map((month) => <td key={month}>{moneyText(insightTrendValue(item, month))}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
+          <figcaption className="sr-only">Category spending bars for {currencyValue} across the displayed activity span. Exact values are available in the table below.</figcaption>
+        </figure>
+      </> : <p className="muted">{insightActivitySpanText(months)}</p>}
+    </> : <p className="muted">{insightActivitySpanText(months)}</p>}
   </section>;
 }
 
@@ -1251,22 +1257,22 @@ function InsightSummarySection({ resource, currency, groupId, online, retry, sum
   const current = currency ? data?.summaries.find((item) => item.currency === currency) : undefined;
   const previous = currency ? data?.previous?.summaries.find((item) => item.currency === currency) : undefined;
   let content: ReactNode;
-  if (!summaryValid) content = <p className="muted" role="status">Choose two valid dates to load the selected-period summary. Six-month trends remain available.</p>;
+  if (!summaryValid) content = <p className="muted" role="status">Choose two valid dates to load the selected-period summary. Category trends remain available in the capped local calendar window.</p>;
   else if (!data) content = !online ? <InsightUnavailableOffline label="Selected-period summary" /> : resource.error ? <ErrorBox error={resource.error} onRetry={online ? retry : undefined} id="insights-summary-error" /> : <Loading />;
   else content = <>{!online ? <p className="cache-status" role="status">Refresh unavailable offline; showing cached selected-period summary.</p> : resource.revalidating || resource.error || resource.stale || resource.offline ? <ResourceNotice resource={resource} label="selected-period summary" retry={online ? retry : undefined} /> : null}{current || previous ? <div className="insight-summary-grid" aria-label="Selected-period spending summary"><InsightPrimarySummary summary={current || zeroInsightSummary(currency!)} data={data} previous={previous} /></div> : <Empty>No counted expenses in this period. Settlements, scheduled expenses, deleted expenses, and pending offline expenses are excluded.</Empty>}</>;
-  return <section aria-labelledby="insight-summary-heading"><div className="section-title"><h3 id="insight-summary-heading">{groupId ? 'How much did this group spend?' : 'How much did I spend?'}</h3><span className="muted">Selected period</span></div>{content}</section>;
+  return <section className="insight-section" aria-labelledby="insight-summary-heading"><div className="section-title"><h3 id="insight-summary-heading">{groupId ? 'How much did this group spend?' : 'How much did I spend?'}</h3><span className="muted">Selected period</span></div>{content}</section>;
 }
 
 function InsightTrendsSection({ resource, currency, online, retry }: { resource: ResourceSnapshot<SpendingInsightTrends>; currency?: Currency; online: boolean; retry?: () => void }) {
   let content: ReactNode;
-  if (!resource.data) content = !online ? <InsightUnavailableOffline label="Six-month trends" /> : resource.error ? <ErrorBox error={resource.error} onRetry={online ? retry : undefined} id="insights-trends-error" /> : <Loading />;
+  if (!resource.data) content = !online ? <InsightUnavailableOffline label="Category trends" /> : resource.error ? <ErrorBox error={resource.error} onRetry={online ? retry : undefined} id="insights-trends-error" /> : <Loading />;
   else {
     const trendData = resource.data;
-    const cacheNotice = !online ? <p className="cache-status" role="status">Refresh unavailable offline; showing cached six-month trends.</p> : resource.revalidating || resource.error || resource.stale || resource.offline ? <ResourceNotice resource={resource} label="six-month trends" retry={online ? retry : undefined} /> : null;
-    const trend = currency ? <SimplifiedCategoryTrendModule data={trendData} currencyValue={currency} index={0} /> : <Empty>No counted category spending in these six months.</Empty>;
+    const cacheNotice = !online ? <p className="cache-status" role="status">Refresh unavailable offline; showing cached category trends.</p> : resource.revalidating || resource.error || resource.stale || resource.offline ? <ResourceNotice resource={resource} label="category trends" retry={online ? retry : undefined} /> : null;
+    const trend = currency ? <SimplifiedCategoryTrendModule data={trendData} currencyValue={currency} index={0} /> : <Empty>No counted category spending in the local calendar window.</Empty>;
     content = <>{cacheNotice}{trend}</>;
   }
-  return <section aria-labelledby="insight-change-heading"><div className="section-title"><h3 id="insight-change-heading">Where is spending changing?</h3><span className="muted">Independent six-month view</span></div>{content}</section>;
+  return <section className="insight-section" aria-labelledby="insight-change-heading"><div className="section-title"><h3 id="insight-change-heading">Where is spending changing?</h3><span className="muted">Independent activity window</span></div>{content}</section>;
 }
 
 function SpendingInsightsPage({ groupId, groupName }: { groupId?: string; groupName?: string }) {
@@ -1312,15 +1318,15 @@ function SpendingInsightsPage({ groupId, groupName }: { groupId?: string; groupN
 function History() {
   const [searchParams, setSearchParams] = useSearchParams();
   const groupId = searchParams.get('group') || undefined;
-   const view = searchParams.get('view') === 'transactions' ? 'transactions' : searchParams.get('view') === 'insights' ? 'insights' : 'changes';
+  const view = searchParams.get('view') === 'transactions' ? 'transactions' : searchParams.get('view') === 'insights' ? 'insights' : 'changes';
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
   const groupsResource = useResource<{ groups: Group[] }>(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id, (signal) => getGroups(signal), RESOURCE_FRESHNESS.groups, me.data?.id ? () => hydrateGroups(me.data!.id) : undefined);
   const groups = groupsResource.data?.groups || [];
   const selectedGroup = groupId ? groups.find((group) => group.id === groupId) : undefined;
   useEffect(() => { if (groupId || !searchParams.has('person')) return; const next = new URLSearchParams(searchParams); next.delete('person'); setSearchParams(next, { replace: true }); }, [groupId, searchParams, setSearchParams]);
-  const changeGroup = (nextGroup: string) => { const next = new URLSearchParams(searchParams); if (nextGroup) next.set('group', nextGroup); else next.delete('group'); next.delete('person'); setSearchParams(next); };
-   const tabPath = (nextView: 'transactions' | 'changes' | 'insights') => { const next = new URLSearchParams(searchParams); next.set('view', nextView); if (nextView !== 'insights') { next.delete('period'); next.delete('from'); next.delete('to'); next.delete('currency'); } return `/activity?${next}`; };
-   return <Layout><div className="page-title"><div><p className="eyebrow">Authorized groups</p><h1>History</h1></div></div><div className="activity-filter reading-width"><Field label="Filter by group"><select aria-label="Filter history by group" value={groupId || ''} onChange={(event) => changeGroup(event.target.value)}><option value="">All groups</option>{groups.map((group) => <option value={group.id} key={group.id}>{groupDisplayName(group)}</option>)}</select></Field></div>{groupsResource.error ? <ErrorBox error={groupsResource.error} onRetry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} id="history-groups-error" /> : null}{groupId && groupsResource.data && !selectedGroup ? <p className="error" role="alert">This group is no longer available to your account. Choose another group or view all groups.</p> : null}{groupsResource.data === undefined ? groupsResource.error ? null : <Loading /> : <><nav className="history-tabs" aria-label="History views"><Link className={view === 'changes' ? 'active' : ''} aria-current={view === 'changes' ? 'page' : undefined} to={tabPath('changes')}>Changes</Link><Link className={view === 'transactions' ? 'active' : undefined} aria-current={view === 'transactions' ? 'page' : undefined} to={tabPath('transactions')}>Transactions</Link><Link className={view === 'insights' ? 'active' : undefined} aria-current={view === 'insights' ? 'page' : undefined} to={tabPath('insights')}>Insights</Link></nav>{view === 'transactions' ? <HistoryTransactions groupId={groupId} groups={groups} /> : view === 'insights' ? <SpendingInsightsPage groupId={groupId} groupName={selectedGroup ? groupDisplayName(selectedGroup) : undefined} /> : <HistoryChanges groupId={groupId} />}</>}</Layout>;
+  const changeGroup = (nextGroup: string) => { const next = new URLSearchParams(searchParams); if (nextGroup) next.set('group', nextGroup); else next.delete('group'); next.delete('person'); if (view === 'insights') next.delete('currency'); setSearchParams(next); };
+  const tabPath = (nextView: 'transactions' | 'changes' | 'insights') => { const next = new URLSearchParams(searchParams); next.set('view', nextView); if (nextView !== 'insights') { next.delete('period'); next.delete('from'); next.delete('to'); next.delete('currency'); } return `/activity?${next}`; };
+  return <Layout><div className="page-title"><div><p className="eyebrow">Authorized groups</p><h1>History</h1></div></div><div className="activity-filter reading-width"><Field label="Filter by group"><select aria-label="Filter history by group" value={groupId || ''} onChange={(event) => changeGroup(event.target.value)}><option value="">All groups</option>{groups.map((group) => <option value={group.id} key={group.id}>{groupDisplayName(group)}</option>)}</select></Field></div>{groupsResource.error ? <ErrorBox error={groupsResource.error} onRetry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} id="history-groups-error" /> : null}{groupId && groupsResource.data && !selectedGroup ? <p className="error" role="alert">This group is no longer available to your account. Choose another group or view all groups.</p> : null}{groupsResource.data === undefined ? groupsResource.error ? null : <Loading /> : <><nav className="history-tabs" aria-label="History views"><Link className={view === 'changes' ? 'active' : ''} aria-current={view === 'changes' ? 'page' : undefined} to={tabPath('changes')}>Changes</Link><Link className={view === 'transactions' ? 'active' : undefined} aria-current={view === 'transactions' ? 'page' : undefined} to={tabPath('transactions')}>Transactions</Link><Link className={view === 'insights' ? 'active' : undefined} aria-current={view === 'insights' ? 'page' : undefined} to={tabPath('insights')}>Insights</Link></nav>{view === 'transactions' ? <HistoryTransactions groupId={groupId} groups={groups} /> : view === 'insights' ? <SpendingInsightsPage groupId={groupId} groupName={selectedGroup ? groupDisplayName(selectedGroup) : undefined} /> : <HistoryChanges groupId={groupId} />}</>}</Layout>;
 }
 
 function LegacyActivityRedirect() {
