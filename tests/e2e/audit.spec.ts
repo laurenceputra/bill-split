@@ -476,9 +476,9 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         if (!scale.values.includes(0) || !scale.heights.includes(0)) throw new Error('Sparse category fixture did not preserve true zero-height bars');
         if (scale.width !== '7.2px' && scale.width !== '0.45rem') throw new Error(`Category trend bars are not thin: ${scale.width}`);
         if (scale.values.some((value, barIndex) => Math.abs(scale.heights[barIndex] - (value === 0 ? 0 : Math.max(4, Math.round((value / scale.maximum) * 100) * 112 / 100))) > 2)) throw new Error('Category trend bars did not use one shared maximum');
-        const valuesTable = trendGraph.locator('table');
-        await expect(valuesTable).toHaveCount(1);
         const trendCurrency = fixture.trends.categoryTrends.find((row) => categories.includes(row.category))?.currency ?? fixture.summary.summaries[0]?.currency ?? 'USD';
+        const valuesTable = trendGraph.getByRole('table', { name: `Exact displayed-span ${trendCurrency} values by category`, exact: true });
+        await expect(valuesTable).toHaveCount(1);
         const expectedTable = await page.evaluate(({ rows, orderedCategories, months, primaryValue, currentMonth, currency }) => {
           const formatters = new Map<string, Intl.NumberFormat>();
           const format = (currency: string, value: number) => {
@@ -831,6 +831,7 @@ test('currency insight deep links restore the selected tab without filtering API
        await expect(categoryGraph).toHaveCount(1);
        await expect(categoryPlot).toHaveAttribute('tabindex', '0');
        await expect(categoryPlot).toHaveAttribute('aria-label', 'USD category spending chart');
+       await expect(categoryGraph.getByRole('table', { name: 'Exact displayed-span USD values by category', exact: true })).toHaveCount(1);
          const { displayedMonths, categories } = displayedFixtureTrend(fixture, 'allocatedSpendMinor');
          const categoryCount = categories.length;
         const actualMonthCount = await categoryPlot.locator('.category-trend-month').count();

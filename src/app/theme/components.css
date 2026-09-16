@@ -1890,16 +1890,11 @@ summary {
   font-size: var(--text-xs);
 }
 
-.category-trend-values {
+.category-trend-values-wrapper {
   display: block;
   width: 1px;
   min-width: 0;
   max-width: 1px;
-  overflow: hidden;
-  table-layout: fixed;
-}
-
-.category-trend-values :is(caption, th, td) {
   overflow: hidden;
 }
 

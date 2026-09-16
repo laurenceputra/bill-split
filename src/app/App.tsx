@@ -1212,11 +1212,13 @@ function SimplifiedCategoryTrendModule({ data, currencyValue, index }: { data: S
               <div className="category-trend-summary__copy"><strong className="category-trend-name">{item.category}</strong><span className="category-trend-current">{moneyText(insightTrendValue(item, referenceMonth))} {insightTrendReferenceLabel(referenceMonth, actualCurrentMonth)}</span><span className="category-trend-total">{moneyText(checkedSumMinor(months.map((month) => insightTrendValue(item, month))))} across {months.length}-month span</span><span className={`category-trend-direction category-trend-direction--${statuses[categoryIndex].kind}`}>{statuses[categoryIndex].text}</span></div>
             </li>; })}
           </ul>
-          <table id={valuesId} className="sr-only category-trend-values">
-            <caption>Exact displayed-span {currencyValue} values by category</caption>
-            <thead><tr><th scope="col">Category</th>{months.map((month) => <th scope="col" key={month}>{insightTrendMonthLabel(month, actualCurrentMonth)}</th>)}</tr></thead>
-            <tbody>{categories.map((item) => <tr key={item.category}><th scope="row">{item.category}</th>{months.map((month) => <td key={month}>{moneyText(insightTrendValue(item, month))}</td>)}</tr>)}</tbody>
-          </table>
+          <div className="sr-only category-trend-values-wrapper">
+            <table id={valuesId} className="category-trend-values">
+              <caption>Exact displayed-span {currencyValue} values by category</caption>
+              <thead><tr><th scope="col">Category</th>{months.map((month) => <th scope="col" key={month}>{insightTrendMonthLabel(month, actualCurrentMonth)}</th>)}</tr></thead>
+              <tbody>{categories.map((item) => <tr key={item.category}><th scope="row">{item.category}</th>{months.map((month) => <td key={month}>{moneyText(insightTrendValue(item, month))}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
           <figcaption className="sr-only">Category spending bars for {currencyValue} across the displayed activity span. Exact values are available in the table below.</figcaption>
         </figure>
       </> : <p className="muted">{insightActivitySpanText(months)}</p>}

@@ -129,7 +129,8 @@ describe('responsive navigation layout contract', () => {
   it('keeps sr-only content assistive-technology-visible and associates the grouped trend chart values', () => {
     expect(baseCss).toMatch(/\.sr-only:not\(:focus\):not\(:active\)\s*\{[\s\S]*position: absolute;[\s\S]*width: 1px;[\s\S]*height: 1px;[\s\S]*overflow: hidden;[\s\S]*clip: rect\(0 0 0 0\);/);
     expect(baseCss).not.toMatch(/\.sr-only[^}]*display:\s*none/);
-    expect(appSource).toMatch(/<table id=\{valuesId\} className="sr-only category-trend-values">/);
+    expect(appSource).toMatch(/<div className="sr-only category-trend-values-wrapper">\s*<table id=\{valuesId\} className="category-trend-values">/);
+    expect(appSource).not.toMatch(/<table id=\{valuesId\}[^>]*role=/);
     expect(appSource).toContain('aria-describedby={guidanceId}');
     expect(appSource).toContain('aria-describedby={guidanceId} aria-details={valuesId}');
     expect(appSource).toContain('<figure className="category-trend-figure"');
@@ -138,7 +139,8 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('insightTrendBarHeight(value, maximum)');
     expect(css).toMatch(/\.category-trend-bar\s*\{[\s\S]*width:\s*0\.45rem;/);
     expect(css).not.toMatch(/\.category-trend-(?:bar|marker)--\d/);
-    expect(css).toMatch(/\.category-trend-values\s*\{[\s\S]*max-width:\s*1px;[\s\S]*table-layout:\s*fixed;/);
+    expect(css).toMatch(/\.category-trend-values-wrapper\s*\{[\s\S]*display:\s*block;[\s\S]*max-width:\s*1px;[\s\S]*overflow:\s*hidden;/);
+    expect(css).not.toMatch(/\.category-trend-values\s*\{[^}]*display:/);
     expect(css).toMatch(/\.category-trend-month\s+small\s*\{[\s\S]*white-space:\s*nowrap;/);
     expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot\s*\{[\s\S]*min-width:\s*0;/);
     expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot--long\s*\{[\s\S]*min-width:\s*24rem;/);
