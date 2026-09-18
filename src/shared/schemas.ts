@@ -20,6 +20,15 @@ export const ownershipTransferInput = z.object({ person_id: id });
 export const transactionVersionInput = z.object({ version: z.number().int().positive() });
 export const categorySuggestionInput = z.object({ description: z.string().trim().min(1).max(240) });
 export const groupInput = z.object({ name: z.string().trim().min(1).max(120), currency: currency.default('USD') });
+export const groupPersonInput = personInput;
+export const groupCreationInput = groupInput.extend({
+  people: z.array(groupPersonInput).max(100).default([]).superRefine((people, context) => {
+    const emails = people.map((person) => person.email?.toLowerCase()).filter((email): email is string => Boolean(email));
+    if (new Set(emails).size !== emails.length) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Each participant email must be unique' });
+  }),
+  client_operation_id: z.string().trim().min(1).max(100).optional(),
+});
+export const groupConversionInput = z.object({ name: z.string().trim().min(1).max(120) });
 export const friendInput = personInput.extend({ currency: currency.default('USD'), client_operation_id: z.string().trim().min(1).max(100).optional() });
 export const payerInput = z.object({ person_id: id, amount_minor: safeMinor });
 export const splitInput = z.object({ person_id: id, amount_minor: safeMinor, metadata: z.record(z.unknown()).optional() });
@@ -67,6 +76,7 @@ export type GroupSplitDefaultInput = z.infer<typeof groupSplitDefaultInput>;
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
 export type FriendInput = z.infer<typeof friendInput>;
+export type GroupCreationInput = z.infer<typeof groupCreationInput>;
 export type InvitationInput = z.infer<typeof invitationInput>;
 export type ScheduledExpenseInput = z.infer<typeof scheduledExpenseInput>;
 export type CategorySuggestionInput = z.infer<typeof categorySuggestionInput>;

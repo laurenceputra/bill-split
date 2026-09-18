@@ -350,6 +350,36 @@ class FriendDb {
   prepare(sql: string) { return new FriendStatement(this, sql); }
   async batch(statements: FriendStatement[]) { this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args }))); return []; }
 }
+class NamedGroupDb {
+  batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+  canonical: Record<string, unknown> | null = null;
+  claim: Record<string, unknown> | null = null;
+  race = false;
+  prepare(sql: string) { return new NamedGroupStatement(this, sql); }
+  async batch(statements: NamedGroupStatement[]) {
+    this.batches.push(statements.map((statement) => ({ sql: statement.sql, args: statement.args })));
+    if (this.race && statements.some((statement) => statement.sql.includes('INSERT INTO people'))) {
+      this.race = false;
+      this.canonical = { id: 'person-raced', name: 'Raced person', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
+      throw new Error('UNIQUE constraint failed: idx_people_email_normalized');
+    }
+    for (const statement of statements) {
+      if (statement.sql.includes('INSERT INTO idempotency_keys')) this.claim = { request_hash: statement.args[4], entity_id: statement.args[5], kind: statement.args[0], user_id: statement.args[1], operation_id: statement.args[3] };
+    }
+    return statements.map(() => ({ meta: { changes: 1 } }));
+  }
+}
+class NamedGroupStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: NamedGroupDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async first<T>() {
+    if (this.sql.includes('FROM idempotency_keys')) return this.db.claim as T | null;
+    if (this.sql.includes('FROM people WHERE lower(email)')) return this.db.canonical as T | null;
+    if (this.sql.includes('FROM groups g JOIN group_members')) return { id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', kind: 'named', role: 'owner', member_count: 3, counterpart_name: null } as T;
+    return null;
+  }
+}
 class FriendStatement {
   args: unknown[] = [];
   constructor(private readonly db: FriendDb, readonly sql: string) {}
@@ -387,6 +417,31 @@ class FriendIdempotencyStatement {
     if (this.sql.includes('FROM people WHERE id=')) return this.db.creator as T | null;
     if (this.sql.includes('lower(email)')) return (this.db.race ? null : this.db.person) as T | null;
     if (this.sql.includes('FROM groups g JOIN')) return this.db.claim ? { id: this.args[0], name: 'With Friend', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend' } as T : null;
+    return null;
+  }
+}
+class ConversionDb {
+  kind: 'peer' | 'named' = 'peer';
+  owner = true;
+  prepare(sql: string) { return new ConversionStatement(this, sql); }
+}
+class ConversionStatement {
+  args: unknown[] = [];
+  constructor(private readonly db: ConversionDb, readonly sql: string) {}
+  bind(...args: unknown[]) { this.args = args; return this; }
+  async run() {
+    if (this.sql.includes("SET kind='named'")) {
+      if (this.db.kind === 'peer' && this.db.owner) { this.db.kind = 'named'; return { meta: { changes: 1 } }; }
+      return { meta: { changes: 0 } };
+    }
+    if (this.sql.includes("kind!='peer'")) return { meta: { changes: 0 } };
+    return { meta: { changes: 0 } };
+  }
+  async first<T>() {
+    if (this.sql.includes('SELECT deleted_at FROM users')) return null;
+    if (this.sql.includes('SELECT g.kind FROM groups g JOIN group_members')) return this.db.owner ? { kind: this.db.kind } as T : null;
+    if (this.sql.includes('SELECT kind FROM groups g JOIN group_members')) return this.db.owner ? { kind: this.db.kind } as T : null;
+    if (this.sql.includes('FROM groups g JOIN group_members')) return { id: 'group-1', name: this.db.kind === 'peer' ? 'With Friend' : 'Shared', currency: 'USD', created_at: '', updated_at: '', kind: this.db.kind, role: 'owner', member_count: 2, counterpart_name: 'Friend' } as T;
     return null;
   }
 }
@@ -544,6 +599,9 @@ class TargetedInvitationDb {
   expired = false;
   createdTarget: string | null = 'ledger-person';
   existingEmail = 'friend@example.com';
+  targetUserId: string | null = null;
+  targetUserEmail: string | null = null;
+  groupKind: 'named' | 'peer' = 'named';
   revocationChanges = 0;
   insertChanges = 1;
   prepare(sql: string) { return new TargetedInvitationStatement(this, sql); }
@@ -559,14 +617,15 @@ class TargetedInvitationStatement {
   constructor(private readonly db: TargetedInvitationDb, readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; return this; }
   async first<T>() {
+    if (this.sql.includes('SELECT kind FROM groups')) return { kind: this.db.groupKind } as T;
     if (this.sql.includes('owner_user.email')) return { owner_email: 'owner@example.com' } as T;
-    if (this.sql.includes("gm.role='member' AND gm.user_id IS NULL")) return this.db.target ? { person_id: 'ledger-person' } as T : null;
+    if (this.sql.includes("gm.role='member' AND gm.user_id IS NULL")) return this.db.target ? { person_id: 'ledger-person', user_id: this.db.targetUserId, linked_email: this.db.targetUserEmail } as T : null;
     if (this.sql.includes('SELECT 1 FROM group_members gm JOIN users u')) return this.db.represented ? { represented: 1 } as T : null;
     if (this.db.expired && this.sql.includes('FROM group_invitations') && this.sql.includes('expires_at>?') && !this.sql.includes('WHERE id=?')) return null;
     if (this.sql.includes('ORDER BY CASE WHEN target_person_id IS NOT NULL THEN 0 ELSE 1 END') && (this.db.emailConflict || this.db.existing)) return { id: 'existing-email', group_id: 'group-1', email_normalized: this.db.existingEmail, created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.emailConflict === 'other-target' ? 'other-person' : null, revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
     if (this.sql.includes('target_person_id IS NOT NULL') && this.db.emailConflict === 'other-target') return { id: 'existing-email', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'other-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
     if (this.sql.includes('ORDER BY created_at DESC LIMIT 1') && this.db.existing) return { id: 'invitation-1', group_id: 'group-1', email_normalized: this.db.existingEmail, created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
-    if (this.sql.includes('FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.createdTarget, revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: this.db.targetUserEmail || 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.createdTarget, revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
     return null;
   }
 }
@@ -575,6 +634,10 @@ class TargetedAcceptanceDb {
   wrongEmail = false;
   acceptChanges = true;
   ambiguous = false;
+  targetUserId: string | null = null;
+  targetUserEmail: string | null = null;
+  generic = false;
+  peer = false;
   prepare(sql: string) { return new TargetedAcceptanceStatement(this, sql); }
   async batch(statements: TargetedAcceptanceStatement[]) {
     this.batches.push(statements);
@@ -586,7 +649,10 @@ class TargetedAcceptanceStatement {
   bind(..._args: unknown[]) { return this; }
   async first<T>() {
     if (this.sql.includes('SELECT * FROM users WHERE id=')) return { id: 'user-1', email: 'friend@example.com', deleted_at: null } as T;
-    if (this.sql.includes('FROM group_invitations WHERE id=? AND email_normalized=?')) return this.db.wrongEmail ? null : { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('FROM group_invitations WHERE id=? AND email_normalized=?')) return this.db.wrongEmail ? null : { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.generic ? null : 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
+    if (this.sql.includes('SELECT p.user_id,target_user.email')) return { user_id: this.db.targetUserId, linked_email: this.db.targetUserEmail } as T;
+    if (this.sql.includes('SELECT kind FROM groups')) return { kind: this.db.peer ? 'peer' : 'named' } as T;
+    if (this.sql.includes('SELECT p.user_id,target_user.email')) return { user_id: null, linked_email: null } as T;
     if (this.sql.includes('SELECT id FROM group_invitations WHERE group_id=')) return this.db.ambiguous ? { id: 'other-invitation' } as T : null;
     if (this.sql.includes('SELECT * FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: '2026-01-02T00:00:00.000Z', accepted_by: 'user-1', rejected_at: null } as T;
     return null;
@@ -990,6 +1056,27 @@ describe('repository targeted invitations', () => {
     await expect(new Repository(representedDb as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
   });
 
+  it('rejects generic invitation creation for a peer ledger', async () => {
+    const db = new TargetedInvitationDb();
+    db.groupKind = 'peer';
+    await expect(new Repository(db as never).createInvitation('group-1', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'PEER_LIMIT' });
+    expect(db.batches).toHaveLength(0);
+  });
+
+  it('only permits the normalized email of a canonical person linked to another active account', async () => {
+    const db = new TargetedInvitationDb();
+    db.targetUserId = 'user-2';
+    db.targetUserEmail = 'canonical@example.com';
+    await expect(new Repository(db as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'friend@example.com')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+    expect(db.batches).toHaveLength(0);
+
+    const matching = new TargetedInvitationDb();
+    matching.targetUserId = 'user-2';
+    matching.targetUserEmail = 'canonical@example.com';
+    await expect(new Repository(matching as never).createTargetedInvitation('group-1', 'ledger-person', 'owner-1', 'CANONICAL@example.com')).resolves.toMatchObject({ email: 'canonical@example.com' });
+    expect(matching.batches[0][0].sql).toContain('target_person.user_id IS NULL');
+  });
+
   it('rejects a wrong-email acceptance and a competing acceptance without partial writes', async () => {
     const wrongEmailDb = new TargetedAcceptanceDb();
     wrongEmailDb.wrongEmail = true;
@@ -1000,6 +1087,22 @@ describe('repository targeted invitations', () => {
     raceDb.acceptChanges = false;
     await expect(new Repository(raceDb as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(raceDb.batches[0]).toHaveLength(2);
+  });
+
+  it('rejects acceptance when the targeted canonical person is linked to a different account', async () => {
+    const db = new TargetedAcceptanceDb();
+    db.targetUserId = 'user-2';
+    db.targetUserEmail = 'other@example.com';
+    await expect(new Repository(db as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'INVITATION_INVALID' });
+    expect(db.batches).toHaveLength(0);
+  });
+
+  it('rejects generic invitation acceptance for a peer ledger', async () => {
+    const db = new TargetedAcceptanceDb();
+    db.generic = true;
+    db.peer = true;
+    await expect(new Repository(db as never).acceptInvitation('invitation-1', 'user-1')).rejects.toMatchObject({ code: 'PEER_LIMIT' });
+    expect(db.batches).toHaveLength(0);
   });
 
   it('fails closed when duplicate pending invitations exist for an accepting email', async () => {
@@ -1343,13 +1446,13 @@ describe('repository friend creation', () => {
     ]));
   });
 
-  it('uses an existing email person and preserves their linked user membership', async () => {
+  it('uses an existing email person but keeps the new membership ledger-only until consent', async () => {
     const db = new FriendDb();
     db.existing = { id: 'person-2', name: 'Friend', email: 'friend@example.com', user_id: 'user-2', created_at: '' };
     await new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Friend', email: 'FRIEND@example.com', currency: 'EUR' });
-     expect(db.batches[0]).toHaveLength(5);
-    const memberStatements = db.batches[0].filter((statement) => statement.sql.includes('INSERT INTO group_members'));
-    expect(memberStatements[1].args[2]).toBe('user-2');
+     expect(db.batches[0]).toHaveLength(6);
+     const memberStatements = db.batches[0].filter((statement) => statement.sql.includes('INSERT INTO group_members'));
+     expect(memberStatements[1].sql).toContain('NULL');
   });
 
   it('returns one original group for retries and conflicts on a changed payload', async () => {
@@ -1391,6 +1494,66 @@ describe('repository friend creation', () => {
     db.creator = { id: 'person-1', email: 'owner@example.com', user_id: 'user-1' };
     await expect(new Repository(db as never).createFriend('user-1', 'person-1', { name: 'Owner', email: 'OWNER@example.com', currency: 'USD' })).rejects.toMatchObject({ code: 'SELF_FRIEND' });
     expect(db.batches).toHaveLength(0);
+  });
+});
+
+describe('repository named group creation', () => {
+  it('creates the owner, ledger-only participants, projection state, invitations, and idempotency claim atomically', async () => {
+    const db = new NamedGroupDb();
+    const repository = new Repository(db as never);
+    const group = await repository.createGroup('user-1', 'person-1', {
+      name: 'Shared', currency: 'USD', people: [{ name: 'Alex', email: 'alex@example.com' }], client_operation_id: 'group-op',
+    });
+    expect(group).toMatchObject({ kind: 'named' });
+    expect(db.batches).toHaveLength(1);
+    expect(db.batches[0].map((statement) => statement.sql)).toEqual(expect.arrayContaining([
+      expect.stringContaining("INSERT INTO groups(id,name,currency,kind"),
+      expect.stringContaining('INSERT INTO group_members'),
+      expect.stringContaining('INSERT INTO group_invitations'),
+      expect.stringContaining('INSERT INTO ledger_summary_state'),
+      expect.stringContaining('INSERT INTO projection_state'),
+      expect.stringContaining('INSERT INTO idempotency_keys'),
+    ]));
+    expect(db.batches[0].find((statement) => statement.sql.includes('INSERT INTO group_members') && statement.sql.includes('NULL'))).toBeDefined();
+  });
+
+  it('retries a named-group batch after a concurrent canonical email collision', async () => {
+    const db = new NamedGroupDb();
+    db.race = true;
+    const group = await new Repository(db as never).createGroup('user-1', 'person-1', { name: 'Shared', currency: 'USD', people: [{ name: 'Friend', email: 'friend@example.com' }] });
+    expect(group).toMatchObject({ kind: 'named' });
+    expect(db.batches).toHaveLength(2);
+    expect(db.batches[1].some((statement) => statement.sql.includes('INSERT INTO people'))).toBe(false);
+  });
+
+  it('returns the original named group for an idempotent retry', async () => {
+    const db = new NamedGroupDb();
+    const repository = new Repository(db as never);
+    const first = await repository.createGroup('user-1', 'person-1', { name: 'Shared', currency: 'USD', people: [], client_operation_id: 'same-op' });
+    const retry = await repository.createGroup('user-1', 'person-1', { name: 'Shared', currency: 'USD', people: [], client_operation_id: 'same-op' });
+    expect(retry?.id).toBe(first?.id);
+    expect(db.batches).toHaveLength(1);
+  });
+});
+
+describe('repository peer conversion and limits', () => {
+  it('returns the current named group when an owner retries a successful conversion', async () => {
+    const db = new ConversionDb();
+    const repository = new Repository(db as never);
+    await expect(repository.convertPeerToNamed('group-1', 'user-1', 'Shared')).resolves.toMatchObject({ kind: 'named', name: 'Shared' });
+    await expect(repository.convertPeerToNamed('group-1', 'user-1', 'Different')).resolves.toMatchObject({ kind: 'named', name: 'Shared' });
+  });
+
+  it('does not let ordinary group updates convert or rename a peer', async () => {
+    const db = new ConversionDb();
+    await expect(new Repository(db as never).updateGroup('group-1', 'user-1', { name: 'Renamed', currency: 'USD' })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(db.kind).toBe('peer');
+  });
+
+  it('distinguishes an unauthorized conversion from an already-completed conversion', async () => {
+    const unauthorized = new ConversionDb();
+    unauthorized.owner = false;
+    await expect(new Repository(unauthorized as never).convertPeerToNamed('group-1', 'user-2', 'Shared')).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
   });
 });
 

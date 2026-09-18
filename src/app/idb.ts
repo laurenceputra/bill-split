@@ -586,7 +586,9 @@ export async function patchCachedMemberName(userId: string, personId: string, na
       if (!snapshotRows || !groupsRow || !isSessionGenerationCurrent(generation)) return;
        if (!isProfileRevisionNewer(profileRevision, groupsRow.profileRevision)) return;
        const nextGroups = groupsRow.groups.map((group) => {
-        if (group.memberCount !== 2) return group;
+         // Pre-0028 snapshots do not have kind; the member-count fallback is
+         // only for this cache repair path, never for presentation decisions.
+         if (group.kind !== 'peer' && !(group.kind === undefined && group.memberCount === 2)) return group;
         const snapshot = snapshotRows!.find((candidate) => candidate.userId === userId && candidate.groupId === group.id);
         const counterpart = snapshot?.currentPersonId && snapshot.members?.length === 2
           ? snapshot.members.find((member) => member.personId !== snapshot.currentPersonId)
@@ -608,7 +610,8 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         const members = row.members?.map((member) => member.personId === personId ? { ...member, name } : member);
         const historicalParticipants = row.historicalParticipants?.map((member) => member.personId === personId ? { ...member, name } : member);
         const counterpart = row.currentPersonId && row.members?.length === 2 ? row.members.find((member) => member.personId !== row.currentPersonId) : undefined;
-        const group = row.group && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
+         const legacyPeer = row.group?.kind === undefined && row.group?.memberCount === 2;
+         const group = row.group && (row.group.kind === 'peer' || legacyPeer) && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
         const balances = row.balances && Object.fromEntries(Object.entries(row.balances).map(([currency, balance]) => [currency, {
           ...balance,
           raw: balance.raw.map((item) => ({ ...item, name: replace(item.personId, item.name) })),

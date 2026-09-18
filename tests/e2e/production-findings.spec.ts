@@ -307,6 +307,63 @@ test('contains the open targeted email form across responsive member-row widths'
   }
 });
 
+test('validates and submits the friend creation form with its consent-safe payload', async ({ authenticatedPage: page }) => {
+  let responseStatus = 409;
+  let requestBody: unknown;
+  await page.route(`${BASE_URL}/api/friends`, async (route) => {
+    requestBody = route.request().postDataJSON();
+    if (responseStatus === 409) {
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'CONFLICT', message: 'Friend already exists' } }) });
+      return;
+    }
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ group: { id: '00000000-0000-4000-8000-000000009101' } }) });
+  });
+
+  await page.goto('/friends/new');
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  expect(await page.locator('#friend-name').evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  expect(requestBody).toBeUndefined();
+
+  await page.getByLabel('Friend name').fill('Taylor Reed');
+  await page.getByLabel('Email (optional)').fill('taylor@example.com');
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  await expect(page.locator('#create-friend-error')).toContainText('Friend already exists');
+  expect(requestBody).toMatchObject({ name: 'Taylor Reed', email: 'taylor@example.com', currency: 'USD' });
+  expect((requestBody as { client_operation_id?: string }).client_operation_id).toEqual(expect.any(String));
+
+  responseStatus = 201;
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  await expect.poll(() => page.url()).toContain('/groups/00000000-0000-4000-8000-000000009101');
+});
+
+test('validates and submits an expanded multi-person group creation payload', async ({ authenticatedPage: page }) => {
+  let requestBody: unknown;
+  await page.route(`${BASE_URL}/api/groups`, async (route) => {
+    requestBody = route.request().postDataJSON();
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ group: { id: '00000000-0000-4000-8000-000000009102' } }) });
+  });
+
+  await page.goto('/groups/new');
+  await page.getByRole('button', { name: 'Create group' }).click();
+  expect(await page.locator('#group-name').evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  await page.getByLabel('Group name').fill('Cabin weekend');
+  await page.getByRole('button', { name: 'Create group' }).click();
+  const firstParticipantName = page.locator('.creation-person').nth(0).locator('input[required]');
+  expect(await firstParticipantName.evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  expect(requestBody).toBeUndefined();
+
+  await firstParticipantName.fill('Taylor Reed');
+  await page.getByLabel('Email (optional)').nth(0).fill('taylor@example.com');
+  await page.getByRole('button', { name: 'Add another person' }).click();
+  await page.locator('.creation-person').nth(1).locator('input[required]').fill('Jordan Lee');
+  await page.getByLabel('Email (optional)').nth(1).fill('jordan@example.com');
+  await page.getByRole('button', { name: 'Create group' }).click();
+
+  await expect.poll(() => requestBody).toMatchObject({ name: 'Cabin weekend', currency: 'USD', people: [{ name: 'Taylor Reed', email: 'taylor@example.com' }, { name: 'Jordan Lee', email: 'jordan@example.com' }] });
+  expect((requestBody as { client_operation_id?: string }).client_operation_id).toEqual(expect.any(String));
+  await expect.poll(() => page.url()).toContain('/groups/00000000-0000-4000-8000-000000009102');
+});
+
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {
   const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
   const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };

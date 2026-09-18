@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupCreationInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
 import { BalanceOverflowError } from './money';
 
 const base = { description: 'Lunch', amount_minor: 1000, currency: 'USD' as const, date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }] };
@@ -29,6 +29,12 @@ describe('financial input', () => {
   it('accepts a client operation ID for retry-safe friend creation', () => {
     expect(friendInput.parse({ name: 'Friend', currency: 'USD', client_operation_id: 'friend-op' }).client_operation_id).toBe('friend-op');
     expect(friendInput.safeParse({ name: '   ', currency: 'USD', client_operation_id: 'friend-op' }).success).toBe(false);
+  });
+  it('requires unique participant emails for group creation', () => {
+    const person = { name: 'Friend', email: 'friend@example.com' };
+    expect(groupCreationInput.safeParse({ name: 'Trip', currency: 'USD', people: [person], client_operation_id: 'group-op' }).success).toBe(true);
+    expect(groupCreationInput.safeParse({ name: 'Trip', currency: 'USD', people: [person, { ...person, name: 'Duplicate' }] }).success).toBe(false);
+    expect(groupCreationInput.parse({ name: 'Trip', currency: 'USD' }).people).toEqual([]);
   });
   it('validates weekly recurrence participants, dates, and IANA timezone', () => {
     const value = { ...base, start_date: '2026-01-01', frequency: 'weekly', interval: 1, weekdays: [1, 3], timezone: 'America/New_York' };

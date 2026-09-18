@@ -250,6 +250,7 @@ describe('user-scoped IndexedDB', () => {
       { id: 'larger-group', name: 'Larger group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 3, counterpartName: 'Should stay' },
     ], cachedAt: 'groups-time' });
     await updateGroupSnapshot('user-a', 'friend-group', {
+      group: { id: 'friend-group', name: 'Friend group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 2 },
       currentPersonId: 'person-me',
       members: [
         { personId: 'person-me', name: 'Me', joinedAt: '', role: 'member' },
@@ -272,6 +273,7 @@ describe('user-scoped IndexedDB', () => {
       expect.objectContaining({ id: 'friend-group', counterpartName: 'New name' }),
       expect.objectContaining({ id: 'larger-group', counterpartName: 'Should stay' }),
     ]));
+    expect((await readGroupSnapshot('user-a', 'friend-group'))?.group).toEqual(expect.objectContaining({ counterpartName: 'New name' }));
     expect((await readGroupSnapshot('user-a', 'friend-group'))?.members?.find((member) => member.personId === 'person-friend')?.name).toBe('New name');
   });
 
