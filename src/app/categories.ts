@@ -1,3 +1,5 @@
+import { sortOptionsByLabel } from './dropdown-options';
+
 export const DEFAULT_CATEGORIES = [
   'Groceries', 'Dining', 'Housing', 'Utilities', 'Transportation', 'Travel',
   'Shopping', 'Entertainment', 'Health', 'Household', 'Subscriptions',
@@ -9,5 +11,5 @@ export function categoryRequiresCustomText(category: string) {
 }
 
 export function categoryOptions(custom: readonly string[] = []) {
-  return [...new Set([...DEFAULT_CATEGORIES, ...custom.filter((value) => value.trim())])];
+  return sortOptionsByLabel([...new Set([...DEFAULT_CATEGORIES, ...custom.filter((value) => value.trim())])], (value) => value);
 }
