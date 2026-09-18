@@ -654,7 +654,6 @@ class TargetedAcceptanceStatement {
     if (this.sql.includes('FROM group_invitations WHERE id=? AND email_normalized=?')) return this.db.wrongEmail ? null : { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: this.db.generic ? null : 'ledger-person', revoked_at: null, accepted_at: null, accepted_by: null, rejected_at: null } as T;
     if (this.sql.includes('SELECT p.user_id,target_user.email')) return { user_id: this.db.targetUserId, linked_email: this.db.targetUserEmail } as T;
     if (this.sql.includes('SELECT kind FROM groups')) return { kind: this.db.peer ? 'peer' : 'named' } as T;
-    if (this.sql.includes('SELECT p.user_id,target_user.email')) return { user_id: null, linked_email: null } as T;
     if (this.sql.includes('SELECT id FROM group_invitations WHERE group_id=')) return this.db.ambiguous ? { id: 'other-invitation' } as T : null;
     if (this.sql.includes('SELECT * FROM group_invitations WHERE id=?')) return { id: 'invitation-1', group_id: 'group-1', email_normalized: 'friend@example.com', created_by: 'owner-1', created_at: '2026-01-01T00:00:00.000Z', expires_at: '9999-01-01T00:00:00.000Z', target_person_id: 'ledger-person', revoked_at: null, accepted_at: '2026-01-02T00:00:00.000Z', accepted_by: 'user-1', rejected_at: null } as T;
     return null;
