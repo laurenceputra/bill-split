@@ -436,6 +436,31 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutatio
   });
 }
 
+/** Patch one group in the persisted home snapshot without discarding list-only fields. */
+export async function updateGroupsSnapshot(userId: string, groupId: string, group: Group, generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
+  const db = await open();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(['groups', 'resourceFreshness'], 'readwrite');
+    const groups = tx.objectStore('groups');
+    const request = groups.get(userId);
+    let updated = false;
+    request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      const current = request.result as CachedGroups | undefined;
+      const nextGroups = current?.groups.map((candidate) => candidate.id === groupId ? { ...candidate, ...group } : candidate);
+      if (!current || !nextGroups?.some((candidate, index) => candidate !== current.groups[index])) return;
+      const cachedAt = new Date().toISOString();
+      groups.put({ ...current, groups: nextGroups, cachedAt });
+      tx.objectStore('resourceFreshness').put({ userId, resource: 'groups', resourceKey: 'groups', fetchedAt: cachedAt });
+      updated = true;
+    };
+    tx.oncomplete = () => { db.close(); resolve(updated); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
+
 /** Keep the home snapshot available offline, but make it immediately stale online. */
 export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
   assertSessionGeneration(generation);

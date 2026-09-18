@@ -423,6 +423,7 @@ class FriendIdempotencyStatement {
 class ConversionDb {
   kind: 'peer' | 'named' = 'peer';
   owner = true;
+  peerLimit = false;
   prepare(sql: string) { return new ConversionStatement(this, sql); }
 }
 class ConversionStatement {
@@ -430,6 +431,7 @@ class ConversionStatement {
   constructor(private readonly db: ConversionDb, readonly sql: string) {}
   bind(...args: unknown[]) { this.args = args; return this; }
   async run() {
+    if (this.sql.includes("SET kind='peer'") && this.db.peerLimit) throw new Error('D1_ERROR: PEER_LIMIT');
     if (this.sql.includes("SET kind='named'")) {
       if (this.db.kind === 'peer' && this.db.owner) { this.db.kind = 'named'; return { meta: { changes: 1 } }; }
       return { meta: { changes: 0 } };
@@ -1554,6 +1556,12 @@ describe('repository peer conversion and limits', () => {
     const unauthorized = new ConversionDb();
     unauthorized.owner = false;
     await expect(new Repository(unauthorized as never).convertPeerToNamed('group-1', 'user-2', 'Shared')).rejects.toMatchObject({ code: 'OWNER_REQUIRED' });
+  });
+
+  it('maps a D1 peer-limit trigger from named-to-peer conversion', async () => {
+    const db = new ConversionDb();
+    db.kind = 'named'; db.peerLimit = true;
+    await expect(new Repository(db as never).convertNamedToPeer('group-1', 'user-1')).rejects.toMatchObject({ code: 'PEER_LIMIT' });
   });
 });
 

@@ -40,6 +40,7 @@ const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_e
 const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
 const profileRevisionSql = readFileSync(new URL('../../migrations/0027_profile_revision.sql', moduleUrl), 'utf8');
 const groupKindSql = readFileSync(new URL('../../migrations/0028_group_kind.sql', moduleUrl), 'utf8');
+const bidirectionalGroupKindSql = readFileSync(new URL('../../migrations/0029_bidirectional_group_kind_guards.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
@@ -317,6 +318,19 @@ describe('group kind migration', () => {
     expect(groupKindSql).toMatch(/CREATE TRIGGER[\s\S]*peer_group_member_limit_insert[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
     expect(groupKindSql).toMatch(/targeted_invitation_account_guard/i);
     expect(groupKindSql).toMatch(/CREATE UNIQUE INDEX[\s\S]*idx_idempotency_group_operation[\s\S]*kind='group\.create'/i);
+  });
+});
+
+describe('bidirectional group kind guards', () => {
+  it('serializes named-to-peer conversion against active members and generic invitations', () => {
+    expect(bidirectionalGroupKindSql).toMatch(/DROP TRIGGER IF EXISTS peer_group_member_limit_insert[\s\S]*DROP TRIGGER IF EXISTS peer_group_kind_limit/i);
+    expect(bidirectionalGroupKindSql).toMatch(/UPDATE group_invitations[\s\S]*SET revoked_at=strftime\('%Y-%m-%dT%H:%M:%fZ','now'\)[\s\S]*target_person_id IS NULL[\s\S]*kind='peer'/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_kind_eligibility[\s\S]*COUNT\(\*\)[\s\S]*!=2[\s\S]*target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_person_restore_guard[\s\S]*BEFORE UPDATE OF deleted_at ON people[\s\S]*OLD\.deleted_at IS NOT NULL[\s\S]*NEW\.deleted_at IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_generic_invitation_guard[\s\S]*NEW\.target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_generic_invitation_update_guard[\s\S]*BEFORE UPDATE[\s\S]*NEW\.target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_targeted_invitation_update_guard[\s\S]*NEW\.target_person_id IS NOT NULL[\s\S]*NEW\.expires_at>strftime[\s\S]*NOT EXISTS[\s\S]*active_member[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS targeted_invitation_account_update_guard[\s\S]*NEW\.target_person_id IS NOT NULL[\s\S]*lower\(target_user\.email\)!=lower\(NEW\.email_normalized\)[\s\S]*RAISE\(ABORT,'INVITATION_TARGET_ACCOUNT_MISMATCH'\)/i);
   });
 });
 

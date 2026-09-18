@@ -121,6 +121,70 @@ test('shows targeted participant controls to owners but not regular members', as
   }
 });
 
+test('explains named-group peer eligibility across responsive and invitation states', async ({ authenticatedPage, browser }) => {
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  await expect(authenticatedPage.getByRole('heading', { name: 'Relationship type' })).toBeVisible();
+  await expect(authenticatedPage.getByText('Exactly two active ledger participants are required.')).toBeVisible();
+  await expect(authenticatedPage.getByRole('button', { name: 'Convert to peer relationship' })).toHaveCount(0);
+
+  const viewports = [{ width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 895, height: 900 }, { width: 896, height: 900 }, { width: 1440, height: 900 }];
+  const installNamedGroupRoutes = async (page: typeof authenticatedPage, invitations: unknown[] = [], kind: () => 'named' | 'peer' = () => 'named') => {
+    await page.route(`${BASE_URL}/api/groups/${GROUP_ID}`, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json() as { group: Record<string, unknown>; members: unknown[]; historicalParticipants?: unknown[] };
+      body.members = body.members.slice(0, 2);
+      body.historicalParticipants = body.historicalParticipants?.slice(0, 2);
+      body.group.memberCount = 2;
+      body.group.kind = kind();
+      await route.fulfill({ response, body: JSON.stringify(body) });
+    });
+    await page.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations }) }));
+  };
+
+  const eligibleContext = await newAuthenticatedContext(browser, DEV_EMAIL);
+  try {
+    const eligiblePage = await eligibleContext.newPage();
+    let converted = false;
+    let conversionCalls = 0;
+    await installNamedGroupRoutes(eligiblePage, [], () => converted ? 'peer' : 'named');
+    await eligiblePage.route(`${BASE_URL}/api/groups/${GROUP_ID}/convert-to-peer`, async (route) => {
+      conversionCalls += 1;
+      converted = true;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ group: { id: GROUP_ID, name: 'Europe trip · USD + EUR', currency: 'USD', kind: 'peer', createdAt: '', updatedAt: '', role: 'owner', memberCount: 2, counterpartName: 'Sam Rivera' } }) });
+    });
+    await eligiblePage.setViewportSize(viewports[0]);
+    await eligiblePage.goto(`/groups/${GROUP_ID}/manage`, { waitUntil: 'domcontentloaded' });
+    for (const viewport of viewports) {
+      await eligiblePage.setViewportSize(viewport);
+      const peerButton = eligiblePage.getByRole('button', { name: 'Convert to peer relationship' });
+      await expect(peerButton).toBeVisible();
+      const bounds = await peerButton.boundingBox();
+      expect(bounds, `peer conversion action at ${viewport.width}px`).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    }
+    eligiblePage.once('dialog', (dialog) => void dialog.accept());
+    await eligiblePage.getByRole('button', { name: 'Convert to peer relationship' }).click();
+    await expect(eligiblePage.getByRole('button', { name: 'Convert to named group' })).toBeVisible();
+    expect(conversionCalls).toBe(1);
+  } finally {
+    await eligibleContext.close();
+  }
+
+  const pendingContext = await newAuthenticatedContext(browser, DEV_EMAIL);
+  try {
+    const pendingPage = await pendingContext.newPage();
+    await installNamedGroupRoutes(pendingPage, [{ id: 'generic-invitation', groupId: GROUP_ID, email: 'generic@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' }]);
+    await pendingPage.setViewportSize(viewports[0]);
+    await pendingPage.goto(`/groups/${GROUP_ID}/manage`, { waitUntil: 'domcontentloaded' });
+    await expect(pendingPage.getByRole('button', { name: 'Convert to peer relationship' })).toHaveCount(0);
+    await expect(pendingPage.getByRole('button', { name: 'Convert to named group' })).toHaveCount(0);
+    await expect(pendingPage.getByText('Revoke pending generic group invitations first.')).toBeVisible();
+  } finally {
+    await pendingContext.close();
+  }
+});
+
 test('keeps Add email unavailable while owner invitations are loading', async ({ authenticatedPage }) => {
   let release!: () => void;
   const delayed = new Promise<void>((resolve) => { release = resolve; });

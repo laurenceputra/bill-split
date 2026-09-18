@@ -329,7 +329,7 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
       FROM (SELECT group_id,currency,net_minor FROM ranked_balances WHERE balance_rank<=2 ORDER BY group_id,balance_rank) GROUP BY group_id
   )
   SELECT g.*,gm.role,
-    (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
+    (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
     (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
       WHERE other_member.group_id=g.id AND other_member.person_id<>gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name LIMIT 1) AS counterpart_name,
     COALESCE(balance_json.balance_summaries,'[]') AS balance_summaries

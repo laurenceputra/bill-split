@@ -10,7 +10,7 @@ export default defineConfig({
     miniflare: { bindings: { TEST_MIGRATIONS: migrations } },
   })],
   test: {
-    include: ['src/db/group-summary.integration.test.ts', 'src/db/group-summary.performance.test.ts', 'src/db/profile-revision.integration.test.ts'],
+    include: ['src/db/group-summary.integration.test.ts', 'src/db/group-summary.performance.test.ts', 'src/db/profile-revision.integration.test.ts', 'src/db/group-kind.integration.test.ts'],
     setupFiles: ['./src/db/cloudflare-integration.setup.ts'],
     fileParallelism: false,
     testTimeout: 120_000,

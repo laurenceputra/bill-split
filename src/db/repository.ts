@@ -130,7 +130,7 @@ function mapGroup(row: Row | null): Group | null {
 }
 
 const authorizedGroupSelect = `SELECT g.*,gm.role,
-  (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
+  (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
     WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
     ORDER BY p.name LIMIT 1) AS counterpart_name
@@ -595,6 +595,7 @@ export class Repository {
         this.db.prepare("INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users owner_user ON owner_user.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN people represented_person ON represented_person.id=represented.person_id LEFT JOIN users represented_user ON represented_user.id=represented.user_id AND represented_user.deleted_at IS NULL WHERE represented.group_id=? AND represented.user_id IS NOT NULL AND represented.deleted_at IS NULL AND represented_person.deleted_at IS NULL AND lower(COALESCE(represented_user.email,represented_person.email))=?) AND NOT EXISTS (SELECT 1 FROM group_invitations pending WHERE pending.group_id=? AND pending.email_normalized=? AND pending.revoked_at IS NULL AND pending.accepted_at IS NULL AND pending.rejected_at IS NULL)").bind(id, groupId, normalized, userId, t, expires, groupId, userId, groupId, normalized, groupId, normalized),
       ]);
     } catch (error) {
+      if (Repository.isPeerLimit(error)) throw Repository.peerLimit('Peer relationships cannot accept generic invitations');
       if (!Repository.isUnique(error)) throw error;
       const current = await this.db.prepare("SELECT * FROM group_invitations WHERE group_id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY CASE WHEN target_person_id IS NOT NULL THEN 0 ELSE 1 END,created_at DESC LIMIT 1").bind(groupId, normalized, t).first<Row>();
       if (current) return this.mapInvitation(current);
@@ -615,7 +616,7 @@ export class Repository {
   async createTargetedInvitation(groupId: string, personId: string, userId: string, email: string): Promise<GroupInvitation> {
     const normalized = normalizeEmail(email), t = now(), id = uid(), expires = invitationExpiry(new Date(t));
     if (!normalized) throw new RepositoryError('INVITATION_INVALID', 'A normalized email is required');
-    const groupState = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
+    const groupState = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
     if (groupState?.kind === 'peer' && number(groupState.member_count) > 2) throw new RepositoryError('PEER_LIMIT', 'Peer relationships can have at most two active participants');
     const owner = await this.db.prepare('SELECT owner_user.email AS owner_email FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL').bind(groupId, userId).first<Row>();
     if (!owner) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can create invitations'); }
@@ -943,6 +944,38 @@ export class Repository {
     }
     return this.group(id, userId);
   }
+  async convertNamedToPeer(id: string, userId: string) {
+    const timestamp = now();
+    // Repeat eligibility in the UPDATE: the reads below only provide an
+    // actionable error and are not the serialization point for this mutation.
+    let result: { meta?: { changes?: number } };
+    try {
+      result = await this.db.prepare(`UPDATE groups SET kind='peer',updated_at=? WHERE id=? AND kind='named' AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id
+          WHERE owner_member.group_id=groups.id AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL)
+        AND (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id
+          WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL)=2
+        AND NOT EXISTS (SELECT 1 FROM group_invitations pending_invitation WHERE pending_invitation.group_id=groups.id AND pending_invitation.target_person_id IS NULL
+          AND pending_invitation.revoked_at IS NULL AND pending_invitation.accepted_at IS NULL AND pending_invitation.rejected_at IS NULL AND pending_invitation.expires_at>?)`).bind(timestamp, id, userId, timestamp).run();
+    } catch (cause) {
+      if (Repository.isPeerLimit(cause)) throw Repository.peerLimit('The named group no longer meets the requirements for a peer relationship');
+      throw cause;
+    }
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const current = await this.db.prepare("SELECT g.kind FROM groups g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=? AND gm.role='owner' AND g.deleted_at IS NULL AND gm.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users owner_user WHERE owner_user.id=gm.user_id AND owner_user.deleted_at IS NULL)").bind(id, userId).first<Row>();
+      if (!current) throw new RepositoryError('OWNER_REQUIRED', 'Only the active group owner can convert a named group to a peer relationship');
+      if (current.kind === 'peer') return this.group(id, userId);
+      const state = await this.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=g.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS active_member_count,
+        EXISTS (SELECT 1 FROM group_invitations pending_invitation WHERE pending_invitation.group_id=g.id AND pending_invitation.target_person_id IS NULL AND pending_invitation.revoked_at IS NULL AND pending_invitation.accepted_at IS NULL AND pending_invitation.rejected_at IS NULL AND pending_invitation.expires_at>?) AS pending_generic_invitation
+        FROM groups g WHERE g.id=? AND g.kind='named' AND g.deleted_at IS NULL`).bind(timestamp, id).first<Row>();
+      if (number(state?.active_member_count) !== 2) throw Repository.peerLimit('A peer relationship requires exactly two active ledger participants');
+      if (flag(state?.pending_generic_invitation)) throw Repository.peerLimit('Revoke pending generic group invitations before converting to a peer relationship');
+      throw new RepositoryError('CONFLICT', 'The group changed before it could be converted to a peer relationship');
+    }
+    return this.group(id, userId);
+  }
   async deleteGroup(id: string, userId?: string) {
     const guard = userId ? " AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)" : '';
     const args = userId ? [now(), now(), id, id, userId] : [now(), now(), id];
@@ -951,7 +984,7 @@ export class Repository {
   }
   async addPerson(groupId: string, person: { name: string; email?: string | null }, userId?: string, creatorPersonId?: string) {
     const id = uid(), t = now(), email = person.email?.trim().toLowerCase() ?? null;
-    const peer = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
+    const peer = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
     if (peer?.kind === 'peer' && number(peer.member_count) >= 2) throw new RepositoryError('PEER_LIMIT', 'Peer relationships can have at most two active participants');
     const ownerGuard = userId ? { sql: 'EXISTS (SELECT 1 FROM group_members owner_member WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users owner_user WHERE owner_user.id=? AND owner_user.deleted_at IS NULL)', args: [groupId, userId, userId] } : { sql: '1=1', args: [] as unknown[] };
     if (email) {
@@ -1585,7 +1618,7 @@ export class Repository {
     return { id: text(existing.entity_id), claim: false };
   }
   private static isUnique(error: unknown) { return error instanceof Error && /unique|constraint/i.test(error.message); }
-  private static isPeerLimit(error: unknown) { return error instanceof Error && /PEER_LIMIT|peer_group_member_limit/i.test(error.message); }
+  private static isPeerLimit(error: unknown) { return error instanceof Error && /PEER_LIMIT|peer_group_(?:member_limit|kind_limit|kind_eligibility|generic_invitation_guard)/i.test(error.message); }
   private static isTargetAccountMismatch(error: unknown) { return error instanceof Error && /INVITATION_TARGET_ACCOUNT_MISMATCH/i.test(error.message); }
   private static peerLimit(message = 'Peer relationships can have at most two active participants') { return new RepositoryError('PEER_LIMIT', message); }
   private static isUniquenessError(error: unknown) { return error instanceof Error && /unique/i.test(error.message); }

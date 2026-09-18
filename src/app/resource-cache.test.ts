@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, refreshVisiblePrivateResources, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import { applyConfirmedGroup, blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, refreshVisiblePrivateResources, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
+import type { GroupResponse } from '../shared/types';
 
 afterEach(() => { setResourceAuthLifecycleReady(true); resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
@@ -328,6 +329,39 @@ describe('resource cache', () => {
 
     expect(getResourceSnapshot(scoped, 'user-a').stale).toBe(true);
     expect(getResourceSnapshot(global, 'user-a').stale).toBe(true);
+  });
+
+  it('patches a confirmed group before background revalidation', async () => {
+    setResourceIdentity('user-a');
+    const groupKey = resourceKeys.group('user-a', 'group-1');
+    const groupsKey = resourceKeys.groups('user-a');
+    const named = { id: 'group-1', name: 'Stored', currency: 'USD' as const, kind: 'named' as const, createdAt: '', updatedAt: '' };
+    const peer = { ...named, kind: 'peer' as const };
+    seedResource(groupKey, 'user-a', { group: named, members: [], historicalParticipants: [], splitDefault: null, currentPersonId: null });
+    seedResource(groupsKey, 'user-a', { groups: [{ ...named, balanceSummaries: [{ currency: 'EUR', netMinor: -250 }] }] });
+
+    await applyConfirmedGroup('group-1', 'user-a', peer);
+
+    expect(getResourceSnapshot<{ group: typeof peer }>(groupKey, 'user-a').data?.group).toMatchObject({ kind: 'peer' });
+    expect(getResourceSnapshot<{ groups: Array<typeof named> }>(groupsKey, 'user-a').data?.groups[0]).toMatchObject({ kind: 'peer', balanceSummaries: [{ currency: 'EUR', netMinor: -250 }] });
+  });
+
+  it('keeps a confirmed group ahead of an old GET and a failed forced refresh', async () => {
+    setResourceIdentity('user-a');
+    const key = resourceKeys.group('user-a', 'group-1');
+    const named = { id: 'group-1', name: 'Stored', currency: 'USD' as const, kind: 'named' as const, createdAt: '', updatedAt: '' };
+    const peer = { ...named, kind: 'peer' as const };
+    let resolveOld!: (value: GroupResponse) => void;
+    const oldRequest = new Promise<GroupResponse>((resolve) => { resolveOld = resolve; });
+    configureResource(key, 'user-a', () => oldRequest);
+    seedResource(key, 'user-a', { group: named, members: [], historicalParticipants: [], splitDefault: null, currentPersonId: null });
+    const refresh = revalidate<GroupResponse>(key, 'user-a', { force: true, reason: 'mutation' });
+    await applyConfirmedGroup('group-1', 'user-a', peer);
+    resolveOld({ group: named, members: [], historicalParticipants: [], splitDefault: null, currentPersonId: null });
+    await refresh;
+    configureResource(key, 'user-a', async () => { throw new Error('refresh failed'); });
+    await expect(revalidate<GroupResponse>(key, 'user-a', { force: true, reason: 'mutation' })).resolves.toMatchObject({ group: peer });
+    expect(getResourceSnapshot<GroupResponse>(key, 'user-a').data?.group).toMatchObject({ kind: 'peer' });
   });
 
   it('invalidates every filtered expense resource for the mutated group', async () => {

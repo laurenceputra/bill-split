@@ -2057,6 +2057,10 @@ export async function convertPeerToNamedGroup(id: string, name: string) {
   return api<{ group: Group }>(`/groups/${id}/convert-to-named`, { method: 'POST', body: JSON.stringify({ name }) });
 }
 
+export async function convertNamedToPeerGroup(id: string) {
+  return api<{ group: Group }>(`/groups/${id}/convert-to-peer`, { method: 'POST' });
+}
+
 export async function updateGroupSplitDefault(id: string, input: GroupSplitDefaultInput) {
   return api<{ splitDefault: GroupSplitDefault }>(`/groups/${id}/split-default`, { method: 'PUT', body: JSON.stringify(input) });
 }

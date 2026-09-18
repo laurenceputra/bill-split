@@ -29,7 +29,7 @@ CREATE TRIGGER IF NOT EXISTS peer_group_member_limit_insert
 BEFORE INSERT ON group_members
 WHEN NEW.deleted_at IS NULL
   AND EXISTS (SELECT 1 FROM groups WHERE id=NEW.group_id AND kind='peer' AND deleted_at IS NULL)
-  AND (SELECT COUNT(*) FROM group_members WHERE group_id=NEW.group_id AND deleted_at IS NULL)>=2
+  AND (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=NEW.group_id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL)>=2
 BEGIN
   SELECT RAISE(ABORT,'PEER_LIMIT');
 END;
@@ -39,15 +39,15 @@ BEFORE UPDATE OF group_id,person_id,deleted_at ON group_members
 WHEN NEW.deleted_at IS NULL
   AND (OLD.deleted_at IS NOT NULL OR OLD.group_id!=NEW.group_id OR OLD.person_id!=NEW.person_id)
   AND EXISTS (SELECT 1 FROM groups WHERE id=NEW.group_id AND kind='peer' AND deleted_at IS NULL)
-  AND (SELECT COUNT(*) FROM group_members WHERE group_id=NEW.group_id AND deleted_at IS NULL AND person_id!=OLD.person_id)>=2
+  AND (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=NEW.group_id AND active_member.deleted_at IS NULL AND active_member.person_id!=OLD.person_id AND active_person.deleted_at IS NULL)>=2
 BEGIN
   SELECT RAISE(ABORT,'PEER_LIMIT');
 END;
 
 CREATE TRIGGER IF NOT EXISTS peer_group_kind_limit
 BEFORE UPDATE OF kind ON groups
-WHEN NEW.kind='peer' AND OLD.kind!='peer'
-  AND (SELECT COUNT(*) FROM group_members WHERE group_id=NEW.id AND deleted_at IS NULL)>2
+  WHEN NEW.kind='peer' AND OLD.kind!='peer'
+  AND (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=NEW.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL)!=2
 BEGIN
   SELECT RAISE(ABORT,'PEER_LIMIT');
 END;
