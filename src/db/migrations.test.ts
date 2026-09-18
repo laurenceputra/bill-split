@@ -39,6 +39,8 @@ const incrementalProjectionTotalsSql = readFileSync(new URL('../../migrations/00
 const expenseSuggestionLookupSql = readFileSync(new URL('../../migrations/0025_expense_suggestion_lookup.sql', moduleUrl), 'utf8');
 const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_targeted_group_invitations.sql', moduleUrl), 'utf8');
 const profileRevisionSql = readFileSync(new URL('../../migrations/0027_profile_revision.sql', moduleUrl), 'utf8');
+const groupKindSql = readFileSync(new URL('../../migrations/0028_group_kind.sql', moduleUrl), 'utf8');
+const bidirectionalGroupKindSql = readFileSync(new URL('../../migrations/0029_bidirectional_group_kind_guards.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
@@ -307,6 +309,31 @@ describe('profile revision migration', () => {
   });
 });
 
+describe('group kind migration', () => {
+  it('adds a constrained discriminator, backfills friend-created groups, and scopes group idempotency', () => {
+    expect(groupKindSql).toMatch(/ALTER TABLE groups ADD COLUMN kind TEXT NOT NULL DEFAULT 'named' CHECK\(kind IN \('named','peer'\)\)/i);
+    expect(groupKindSql).toMatch(/UPDATE groups[\s\S]*kind='peer'[\s\S]*friend\.create/i);
+    expect(groupKindSql).toMatch(/COUNT\(\*\)[\s\S]*=2/i);
+    expect(groupKindSql).toMatch(/UPDATE group_invitations[\s\S]*target_person_id IS NULL[\s\S]*kind='peer'/i);
+    expect(groupKindSql).toMatch(/CREATE TRIGGER[\s\S]*peer_group_member_limit_insert[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(groupKindSql).toMatch(/targeted_invitation_account_guard/i);
+    expect(groupKindSql).toMatch(/CREATE UNIQUE INDEX[\s\S]*idx_idempotency_group_operation[\s\S]*kind='group\.create'/i);
+  });
+});
+
+describe('bidirectional group kind guards', () => {
+  it('serializes named-to-peer conversion against active members and generic invitations', () => {
+    expect(bidirectionalGroupKindSql).toMatch(/DROP TRIGGER IF EXISTS peer_group_member_limit_insert[\s\S]*DROP TRIGGER IF EXISTS peer_group_kind_limit/i);
+    expect(bidirectionalGroupKindSql).toMatch(/UPDATE group_invitations[\s\S]*SET revoked_at=strftime\('%Y-%m-%dT%H:%M:%fZ','now'\)[\s\S]*target_person_id IS NULL[\s\S]*kind='peer'/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_kind_eligibility[\s\S]*COUNT\(\*\)[\s\S]*!=2[\s\S]*target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_person_restore_guard[\s\S]*BEFORE UPDATE OF deleted_at ON people[\s\S]*OLD\.deleted_at IS NOT NULL[\s\S]*NEW\.deleted_at IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_generic_invitation_guard[\s\S]*NEW\.target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_generic_invitation_update_guard[\s\S]*BEFORE UPDATE[\s\S]*NEW\.target_person_id IS NULL[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS peer_group_targeted_invitation_update_guard[\s\S]*NEW\.target_person_id IS NOT NULL[\s\S]*NEW\.expires_at>strftime[\s\S]*NOT EXISTS[\s\S]*active_member[\s\S]*RAISE\(ABORT,'PEER_LIMIT'\)/i);
+    expect(bidirectionalGroupKindSql).toMatch(/CREATE TRIGGER IF NOT EXISTS targeted_invitation_account_update_guard[\s\S]*NEW\.target_person_id IS NOT NULL[\s\S]*lower\(target_user\.email\)!=lower\(NEW\.email_normalized\)[\s\S]*RAISE\(ABORT,'INVITATION_TARGET_ACCOUNT_MISMATCH'\)/i);
+  });
+});
+
 describe('scheduled completion migration integration', () => {
   it('upgrades a populated local D1 database without losing scheduled children or foreign keys', async () => {
     const root = fileURLToPath(new URL('../../', moduleUrl));
@@ -327,12 +354,16 @@ describe('scheduled completion migration integration', () => {
        INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-1','Migration Group','USD','2026-01-01','2026-01-01');
        INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-multiple','Multiple Owners','USD','2026-01-01','2026-01-01');
        INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES('group-ownerless','Ownerless Group','USD','2026-01-01','2026-01-01');
+       INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) VALUES
+         ('friend.create','user-1','group-ownerless','legacy-friend','hash','group-ownerless','2026-01-01'),
+         ('friend.create','user-1','group-multiple','legacy-large-friend','hash-large','group-multiple','2026-01-01');
        INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES('group-1','person-1','user-1','2026-01-01','owner');
        INSERT INTO people(id,name,email,created_at) VALUES('person-2','Second','second@example.com','2026-01-01');
        INSERT INTO people(id,name,email,created_at) VALUES('person-3','Third','third@example.com','2026-01-01');
        INSERT INTO people(id,name,email,created_at) VALUES('person-4','Fourth','fourth@example.com','2026-01-01');
        INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-multiple','person-3','2026-01-03','owner');
        INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-multiple','person-2','2026-01-03','owner');
+       INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-multiple','person-4','2026-01-04','member');
        INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-ownerless','person-4','2026-01-02','member');
        INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('group-ownerless','person-3','2026-01-01','member');
        INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,category,created_by,created_at,updated_at,version) VALUES('expense-1','group-1','ÉCLAIR',1000,'USD','2026-01-01','Dining','user-1','2026-01-01','2026-01-01',1);
@@ -372,7 +403,8 @@ describe('scheduled completion migration integration', () => {
           cp(join(root, 'migrations', '0024_incremental_projection_totals.sql'), join(migrationsDir, '0024_incremental_projection_totals.sql')),
           cp(join(root, 'migrations', '0025_expense_suggestion_lookup.sql'), join(migrationsDir, '0025_expense_suggestion_lookup.sql')),
            cp(join(root, 'migrations', '0026_targeted_group_invitations.sql'), join(migrationsDir, '0026_targeted_group_invitations.sql')),
-           cp(join(root, 'migrations', '0027_profile_revision.sql'), join(migrationsDir, '0027_profile_revision.sql')),
+            cp(join(root, 'migrations', '0027_profile_revision.sql'), join(migrationsDir, '0027_profile_revision.sql')),
+            cp(join(root, 'migrations', '0028_group_kind.sql'), join(migrationsDir, '0028_group_kind.sql')),
         ]);
        run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
 
@@ -386,6 +418,10 @@ describe('scheduled completion migration integration', () => {
        expect(query('SELECT cursor_id FROM scheduled_generation_cursor WHERE id=1;')).toEqual([{ cursor_id: null }]);
        expect(query('SELECT name FROM sqlite_master WHERE type=\'table\' AND name IN (\'group_invitations\',\'audit_events\') ORDER BY name;')).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }]);
        expect(query("SELECT name FROM pragma_table_info('group_invitations') WHERE name='target_person_id';")).toEqual([{ name: 'target_person_id' }]);
+       expect(query("SELECT name FROM pragma_table_info('groups') WHERE name='kind';")).toEqual([{ name: 'kind' }]);
+       expect(query("SELECT kind FROM groups WHERE id='group-1';")).toEqual([{ kind: 'named' }]);
+       expect(query("SELECT kind FROM groups WHERE id='group-ownerless';")).toEqual([{ kind: 'peer' }]);
+       expect(query("SELECT kind FROM groups WHERE id='group-multiple';")).toEqual([{ kind: 'named' }]);
        expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_group_invitations_target','idx_group_invitations_pending_target','idx_group_invitations_pending_email') ORDER BY name;")).toEqual([{ name: 'idx_group_invitations_pending_email' }, { name: 'idx_group_invitations_pending_target' }, { name: 'idx_group_invitations_target' }]);
         expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;")).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
        expect(query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_expenses_suggestion_lookup';")).toEqual([{ name: 'idx_expenses_suggestion_lookup' }]);

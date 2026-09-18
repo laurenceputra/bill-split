@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import worker, { cronStageOrder } from './index';
-import { Repository } from '../db/repository';
+import { Repository, RepositoryError } from '../db/repository';
 
 class Statement {
   constructor(protected readonly sql: string) {}
@@ -11,6 +11,12 @@ class Statement {
 }
 class MemberStatement extends Statement {
   async first() { if (this.sql.includes('deleted_email_hash')) return null; if (this.sql.includes('FROM users')) return { id: 'user-1', email: 'dev@example.com' }; if (this.sql.includes('FROM groups g JOIN')) return { id: '00000000-0000-4000-8000-000000000009', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'member' }; if (this.sql.includes('FROM people')) return { id: 'person-1', name: 'Dev' }; return null; }
+}
+class OwnerStatement extends MemberStatement {
+  async first(): Promise<any> { const value = await super.first(); return this.sql.includes('FROM groups g JOIN') && value ? { ...(value as Record<string, unknown>), role: 'owner' } : value; }
+}
+class OwnerDb {
+  prepare(sql: string) { return new OwnerStatement(sql); }
 }
 class CurrentPersonStatement extends MemberStatement {
   async first(): Promise<any> {
@@ -532,11 +538,20 @@ describe('worker boundary', () => {
     expect(response.status).toBe(403);
     expect(((await response.json()) as any).error.code).toBe('OWNER_REQUIRED');
   });
+  it('maps named-to-peer repository eligibility errors through the owner route', async () => {
+    const conversion = vi.spyOn(Repository.prototype, 'convertNamedToPeer').mockRejectedValue(new RepositoryError('PEER_LIMIT', 'A peer relationship requires exactly two active ledger participants'));
+    try {
+      const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/convert-to-peer', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new OwnerDb() }), {} as ExecutionContext);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: 'PEER_LIMIT', message: 'A peer relationship requires exactly two active ledger participants' } });
+    } finally { conversion.mockRestore(); }
+  });
   it('enforces owner-only invitation and member administration routes', async () => {
     const paths: Array<[string, string]> = [
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'GET'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/invitations', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/members/person-1', 'DELETE'],
+      ['/api/groups/00000000-0000-0000-0000-000000000009/convert-to-peer', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/transfer-ownership', 'POST'],
       ['/api/groups/00000000-0000-0000-0000-000000000009/split-default', 'DELETE'],
     ];

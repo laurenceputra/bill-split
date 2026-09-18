@@ -266,9 +266,15 @@ test('direct section and surface forms own their flow spacing', async ({ authent
   const marginOf = async (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).margin);
 
   await page.goto('/');
-  await page.getByRole('button', { name: '+ Add friend' }).click();
+  await page.getByRole('link', { name: '+ Add friend' }).click();
   await expect(page.locator('.surface form')).toBeVisible();
   expect(await marginOf(page.locator('.surface form'))).toBe('0px');
+
+  await page.goto('/groups/new');
+  await expect(page.getByRole('heading', { name: 'New group' })).toBeVisible();
+  await expect(page.locator('.surface form')).toBeVisible();
+  await page.getByRole('button', { name: 'Add another person' }).click();
+  await expect(page.locator('.creation-person')).toHaveCount(2);
 
   await page.goto(`/groups/${richGroupId}/manage`);
   const groupSettingsForm = page.locator('#settings section.group-settings > form');

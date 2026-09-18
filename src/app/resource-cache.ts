@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { invalidateCachedGroups, updateGroupSnapshot } from './idb';
+import { invalidateCachedGroups, updateGroupSnapshot, updateGroupsSnapshot } from './idb';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
+import type { Group, GroupResponse } from '../shared/types';
 
 /** The shortest freshness window used by the application. */
 export const MIN_RESOURCE_FRESHNESS_MS = 30_000;
@@ -275,6 +276,19 @@ export function patchResourceData<T>(key: ResourceKey, userId: string, patch: (d
   resource.snapshot = stable({ ...resource.snapshot, data: patch(resource.snapshot.data as T), fetchedAt: now(), stale: false, offline: false, error: undefined });
   notify(resource);
   return true;
+}
+/** Apply a server-confirmed group discriminator before its background refresh. */
+export async function applyConfirmedGroup(groupId: string, userId: string, group: Group, generation = captureSessionGeneration()) {
+  if (!isSessionGenerationCurrent(generation)) return;
+  // Abort/fence a GET that started before the mutation. The persisted
+  // mutation generation below protects the same race in IndexedDB.
+  invalidateResource(resourceKeys.group(userId, groupId), userId, { revalidate: false });
+  invalidateResource(resourceKeys.groups(userId), userId, { revalidate: false });
+  patchResourceData<GroupResponse>(resourceKeys.group(userId, groupId), userId, (data) => ({ ...data, group }));
+  patchResourceData<{ groups: Group[] }>(resourceKeys.groups(userId), userId, (data) => ({ ...data, groups: data.groups.map((candidate) => candidate.id === groupId ? { ...candidate, ...group } : candidate) }));
+  await invalidatePersistedCaches(userId, generation, { groups: false });
+  try { await updateGroupSnapshot(userId, groupId, { group }, generation); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
+  try { await updateGroupsSnapshot(userId, groupId, group, generation); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 }
 export function invalidateResourcePrefix(prefix: string, userId = activeUserId || '', options: { revalidate?: boolean } = {}) {
   for (const [key, resource] of entries) if (key.startsWith(prefix) && (!userId || resource.snapshot.userId === userId)) invalidateResource(key, userId, options);

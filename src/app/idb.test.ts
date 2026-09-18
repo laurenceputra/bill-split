@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, updateOfflineTrustName } from './idb';
+import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, updateGroupsSnapshot, updateOfflineTrustName } from './idb';
 import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
@@ -244,12 +244,19 @@ describe('user-scoped IndexedDB', () => {
     expect((await readGroups('user-a'))?.groups[0].balanceSummaries).toEqual([{ currency: 'EUR', netMinor: -250 }]);
   });
 
+  it('merges a confirmed group into the persisted home snapshot', async () => {
+    await saveGroups({ userId: 'user-a', groups: [{ id: 'group-a', name: 'A', currency: 'USD', kind: 'named', createdAt: '', updatedAt: '', balanceSummaries: [{ currency: 'EUR', netMinor: -250 }], memberCount: 2 }], cachedAt: 'groups-time' });
+    await expect(updateGroupsSnapshot('user-a', 'group-a', { id: 'group-a', name: 'A', currency: 'USD', kind: 'peer', createdAt: '', updatedAt: '' })).resolves.toBe(true);
+    expect((await readGroups('user-a'))?.groups[0]).toMatchObject({ kind: 'peer', balanceSummaries: [{ currency: 'EUR', netMinor: -250 }], memberCount: 2 });
+  });
+
   it('updates a renamed counterpart in the persisted home group label only when the snapshot identifies that counterpart', async () => {
     await saveGroups({ userId: 'user-a', groups: [
       { id: 'friend-group', name: 'Friend group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 2, counterpartName: 'Old name' },
       { id: 'larger-group', name: 'Larger group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 3, counterpartName: 'Should stay' },
     ], cachedAt: 'groups-time' });
     await updateGroupSnapshot('user-a', 'friend-group', {
+      group: { id: 'friend-group', name: 'Friend group', currency: 'USD', createdAt: '', updatedAt: '', memberCount: 2 },
       currentPersonId: 'person-me',
       members: [
         { personId: 'person-me', name: 'Me', joinedAt: '', role: 'member' },
@@ -272,6 +279,7 @@ describe('user-scoped IndexedDB', () => {
       expect.objectContaining({ id: 'friend-group', counterpartName: 'New name' }),
       expect.objectContaining({ id: 'larger-group', counterpartName: 'Should stay' }),
     ]));
+    expect((await readGroupSnapshot('user-a', 'friend-group'))?.group).toEqual(expect.objectContaining({ counterpartName: 'New name' }));
     expect((await readGroupSnapshot('user-a', 'friend-group'))?.members?.find((member) => member.personId === 'person-friend')?.name).toBe('New name');
   });
 

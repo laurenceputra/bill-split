@@ -150,8 +150,10 @@ const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
   { name: 'empty-home', path: '/', auth: EMPTY_EMAIL, context: 'Home / empty groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'No groups yet', apiPaths: privateHomeApis } },
+  { name: 'friend-creation', path: '/friends/new', auth: DEV_EMAIL, context: 'FriendCreation / dedicated friend form with consent guidance', expected: { mode: 'normal', heading: 'Add friend', content: 'Friend name', apiPaths: [apiPaths.me] } },
+  { name: 'group-creation', path: '/groups/new', auth: DEV_EMAIL, context: 'GroupCreation / owner and participant form', expected: { mode: 'normal', heading: 'New group', content: 'Group name', apiPaths: [apiPaths.me] } },
   { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
-  { name: 'group-management', path: `/groups/${ids.rich}/manage`, auth: DEV_EMAIL, context: 'GroupManagement / owner people, invitations, and split-default controls', expected: { mode: 'normal', heading: 'Manage group', content: 'People', apiPaths: groupManagementApis(ids.rich) } },
+  { name: 'group-management', path: `/groups/${ids.rich}/manage`, auth: DEV_EMAIL, context: 'GroupManagement / owner people, invitations, split-default, and named-group relationship controls', expected: { mode: 'normal', heading: 'Manage group', content: 'Relationship type', apiPaths: groupManagementApis(ids.rich) } },
   { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, finalPath: `/activity?group=${ids.rich}&view=transactions`, auth: DEV_EMAIL, context: 'Legacy transaction route / canonical History transactions tab fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.group(ids.rich), apiPaths.globalTransactions, apiPaths.categories] } },
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
@@ -735,9 +737,29 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
            if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=summary'))) throw new Error('Invalid or incomplete custom insight range made a selected-period summary request');
           await assertCustomInsightAccessibility(page, scenario.name === 'invalid-custom-insights');
         }
-        coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
-        await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
-        if (scenario.expandedAudit) {
+         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+         await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+         if (scenario.name === 'group-creation') {
+           try {
+             await page.getByRole('button', { name: 'Add another person' }).click();
+             await page.getByLabel('Name').nth(0).fill('Taylor Reed');
+             await page.getByLabel('Name').nth(1).fill('Jordan Lee');
+             await expect(page.getByText('Person 2', { exact: true })).toBeVisible();
+             const expandedScenario: Scenario = { ...scenario, name: 'group-creation-multi-person', context: 'GroupCreation / expanded multi-person named form', expected: { ...scenario.expected, content: 'Person 2' } };
+             await assertRendered(page, expandedScenario, observations, viewport);
+             coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [multi-person]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+             await reportForPage(page, expandedScenario, `${scenario.path} [multi-person]`, viewport, artifactDirectory, findings, failures);
+             await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+             await expect(page.getByRole('button', { name: 'Create group' })).toBeDisabled();
+             const offlineScenario: Scenario = { ...expandedScenario, name: 'group-creation-offline', context: 'GroupCreation / expanded form with connection-required mutation disabled', expected: { mode: 'offline', heading: 'New group', content: 'Group creation requires a connection.' } };
+             await assertRendered(page, offlineScenario, observations, viewport);
+             coverage.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: `${scenario.path} [offline]`, viewport, context: offlineScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+             await reportForPage(page, offlineScenario, `${scenario.path} [offline]`, viewport, artifactDirectory, findings, failures);
+           } catch (error) {
+             failures.push({ scenarioName: 'group-creation-states', authState: authState(scenario.auth), route: scenario.path, viewport, detail: `Creation form states could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+           }
+         }
+         if (scenario.expandedAudit) {
           try {
             const auditSummary = page.getByText('View audit history', { exact: true });
             await expect(auditSummary).toBeVisible();

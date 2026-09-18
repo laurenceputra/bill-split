@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, coordinateAuthBootstrap, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getSpendingInsightSummary, getSpendingInsightTrends, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
+import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, convertNamedToPeerGroup, coordinateAuthBootstrap, createGroup, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getSpendingInsightSummary, getSpendingInsightTrends, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveOfflineTrust, saveVerifiedIdentity } from './idb';
@@ -152,6 +152,28 @@ describe('frontend API errors and cache fallback', () => {
     const page = await getActivityPage(undefined, { limit: 1 });
     expect(page.activity).toEqual([]);
     expect(page.nextCursor).toBe('next-page');
+  });
+
+  it('keeps the legacy minimal group creation request compatible', async () => {
+    const calls: Array<{ path: string; body?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ path: String(request), body: init?.body as string | undefined });
+      return json({ group: { id: 'group-a', name: 'Shared', currency: 'USD', kind: 'named', createdAt: '', updatedAt: '' } });
+    }));
+    await createGroup({ name: 'Shared', currency: 'USD' });
+    expect(calls).toEqual([{ path: '/api/groups', body: JSON.stringify({ name: 'Shared', currency: 'USD' }) }]);
+  });
+
+  it('requests named-to-peer conversion without a payload', async () => {
+    await establishAuthenticatedMutationSession('clerk-peer-conversion');
+    let request: { path: string; method?: string; body?: BodyInit | null } | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      request = { path: String(input), method: init?.method, body: init?.body };
+      return json({ group: { id: 'group-a', name: 'Shared', currency: 'USD', kind: 'peer', createdAt: '', updatedAt: '' } });
+    }));
+
+    await convertNamedToPeerGroup('group-a');
+    expect(request).toEqual({ path: '/api/groups/group-a/convert-to-peer', method: 'POST', body: undefined });
   });
 
   it('uses the backend cursor contracts for invitations, transactions, audit, and restore', async () => {

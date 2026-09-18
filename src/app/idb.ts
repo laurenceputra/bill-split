@@ -436,6 +436,31 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutatio
   });
 }
 
+/** Patch one group in the persisted home snapshot without discarding list-only fields. */
+export async function updateGroupsSnapshot(userId: string, groupId: string, group: Group, generation = captureSessionGeneration()) {
+  assertSessionGeneration(generation);
+  const db = await open();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = db.transaction(['groups', 'resourceFreshness'], 'readwrite');
+    const groups = tx.objectStore('groups');
+    const request = groups.get(userId);
+    let updated = false;
+    request.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      const current = request.result as CachedGroups | undefined;
+      const nextGroups = current?.groups.map((candidate) => candidate.id === groupId ? { ...candidate, ...group } : candidate);
+      if (!current || !nextGroups?.some((candidate, index) => candidate !== current.groups[index])) return;
+      const cachedAt = new Date().toISOString();
+      groups.put({ ...current, groups: nextGroups, cachedAt });
+      tx.objectStore('resourceFreshness').put({ userId, resource: 'groups', resourceKey: 'groups', fetchedAt: cachedAt });
+      updated = true;
+    };
+    tx.oncomplete = () => { db.close(); resolve(updated); };
+    tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+    tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
+  });
+}
+
 /** Keep the home snapshot available offline, but make it immediately stale online. */
 export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
   assertSessionGeneration(generation);
@@ -586,7 +611,9 @@ export async function patchCachedMemberName(userId: string, personId: string, na
       if (!snapshotRows || !groupsRow || !isSessionGenerationCurrent(generation)) return;
        if (!isProfileRevisionNewer(profileRevision, groupsRow.profileRevision)) return;
        const nextGroups = groupsRow.groups.map((group) => {
-        if (group.memberCount !== 2) return group;
+         // Pre-0028 snapshots do not have kind; the member-count fallback is
+         // only for this cache repair path, never for presentation decisions.
+         if (group.kind !== 'peer' && !(group.kind === undefined && group.memberCount === 2)) return group;
         const snapshot = snapshotRows!.find((candidate) => candidate.userId === userId && candidate.groupId === group.id);
         const counterpart = snapshot?.currentPersonId && snapshot.members?.length === 2
           ? snapshot.members.find((member) => member.personId !== snapshot.currentPersonId)
@@ -608,7 +635,8 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         const members = row.members?.map((member) => member.personId === personId ? { ...member, name } : member);
         const historicalParticipants = row.historicalParticipants?.map((member) => member.personId === personId ? { ...member, name } : member);
         const counterpart = row.currentPersonId && row.members?.length === 2 ? row.members.find((member) => member.personId !== row.currentPersonId) : undefined;
-        const group = row.group && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
+         const legacyPeer = row.group?.kind === undefined && row.group?.memberCount === 2;
+         const group = row.group && (row.group.kind === 'peer' || legacyPeer) && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
         const balances = row.balances && Object.fromEntries(Object.entries(row.balances).map(([currency, balance]) => [currency, {
           ...balance,
           raw: balance.raw.map((item) => ({ ...item, name: replace(item.personId, item.name) })),

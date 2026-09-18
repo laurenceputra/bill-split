@@ -22,7 +22,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_FILTER' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'PEER_LIMIT' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_FILTER' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -121,7 +121,7 @@ function mapGroup(row: Row | null): Group | null {
     }
   })();
   return {
-    id: text(row.id), name: text(row.name), currency: currency(row.currency), createdAt: text(row.created_at), updatedAt: text(row.updated_at),
+    id: text(row.id), name: text(row.name), currency: currency(row.currency), kind: row.kind === 'peer' ? 'peer' : 'named', createdAt: text(row.created_at), updatedAt: text(row.updated_at),
     ...(row.role ? { role: text(row.role) as Group['role'] } : {}),
     ...(row.member_count == null ? {} : { memberCount: number(row.member_count) }),
     ...(row.counterpart_name == null ? {} : { counterpartName: text(row.counterpart_name) }),
@@ -130,14 +130,14 @@ function mapGroup(row: Row | null): Group | null {
 }
 
 const authorizedGroupSelect = `SELECT g.*,gm.role,
-  (SELECT COUNT(*) FROM group_members member_count WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL) AS member_count,
+  (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
     WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
     ORDER BY p.name LIMIT 1) AS counterpart_name
    FROM groups g JOIN group_members gm ON gm.group_id=g.id
    WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
 
-const groupDisplayNameSql = (memberAlias: string) => `CASE WHEN (SELECT COUNT(*) FROM group_members display_member WHERE display_member.group_id=g.id AND display_member.deleted_at IS NULL)=2 THEN COALESCE((SELECT display_person.name FROM people display_person JOIN group_members display_other ON display_other.person_id=display_person.id WHERE display_other.group_id=g.id AND display_other.person_id<>${memberAlias}.person_id AND display_other.deleted_at IS NULL AND display_person.deleted_at IS NULL LIMIT 1),g.name) ELSE g.name END`;
+const groupDisplayNameSql = (memberAlias: string) => `CASE WHEN g.kind='peer' THEN COALESCE((SELECT display_person.name FROM people display_person JOIN group_members display_other ON display_other.person_id=display_person.id WHERE display_other.group_id=g.id AND display_other.person_id<>${memberAlias}.person_id AND display_other.deleted_at IS NULL AND display_person.deleted_at IS NULL LIMIT 1),g.name) ELSE g.name END`;
 
 export class Repository {
   constructor(private readonly db: D1Database, private readonly identityTombstoneKey?: string) {}
@@ -580,6 +580,8 @@ export class Repository {
   async createInvitation(groupId: string, userId: string, email: string): Promise<GroupInvitation> {
     const normalized = normalizeEmail(email), id = uid(), t = now(), expires = invitationExpiry(new Date(t));
     if (!normalized) throw new RepositoryError('INVITATION_INVALID', 'A normalized email is required');
+    const groupKind = await this.db.prepare('SELECT kind FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>();
+    if (groupKind?.kind === 'peer') throw new RepositoryError('PEER_LIMIT', 'Peer relationships only support a targeted invitation for their ledger participant');
     const targetedExisting = await this.db.prepare("SELECT * FROM group_invitations WHERE group_id=? AND email_normalized=? AND target_person_id IS NOT NULL AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT 1").bind(groupId, normalized, t).first<Row>();
     if (targetedExisting) return this.mapInvitation(targetedExisting);
     const existing = await this.db.prepare("SELECT * FROM group_invitations WHERE group_id=? AND email_normalized=? AND target_person_id IS NULL AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT 1").bind(groupId, normalized, t).first<Row>();
@@ -593,6 +595,7 @@ export class Repository {
         this.db.prepare("INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members gm ON gm.group_id=g.id JOIN users owner_user ON owner_user.id=gm.user_id WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN people represented_person ON represented_person.id=represented.person_id LEFT JOIN users represented_user ON represented_user.id=represented.user_id AND represented_user.deleted_at IS NULL WHERE represented.group_id=? AND represented.user_id IS NOT NULL AND represented.deleted_at IS NULL AND represented_person.deleted_at IS NULL AND lower(COALESCE(represented_user.email,represented_person.email))=?) AND NOT EXISTS (SELECT 1 FROM group_invitations pending WHERE pending.group_id=? AND pending.email_normalized=? AND pending.revoked_at IS NULL AND pending.accepted_at IS NULL AND pending.rejected_at IS NULL)").bind(id, groupId, normalized, userId, t, expires, groupId, userId, groupId, normalized, groupId, normalized),
       ]);
     } catch (error) {
+      if (Repository.isPeerLimit(error)) throw Repository.peerLimit('Peer relationships cannot accept generic invitations');
       if (!Repository.isUnique(error)) throw error;
       const current = await this.db.prepare("SELECT * FROM group_invitations WHERE group_id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY CASE WHEN target_person_id IS NOT NULL THEN 0 ELSE 1 END,created_at DESC LIMIT 1").bind(groupId, normalized, t).first<Row>();
       if (current) return this.mapInvitation(current);
@@ -613,11 +616,14 @@ export class Repository {
   async createTargetedInvitation(groupId: string, personId: string, userId: string, email: string): Promise<GroupInvitation> {
     const normalized = normalizeEmail(email), t = now(), id = uid(), expires = invitationExpiry(new Date(t));
     if (!normalized) throw new RepositoryError('INVITATION_INVALID', 'A normalized email is required');
+    const groupState = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
+    if (groupState?.kind === 'peer' && number(groupState.member_count) > 2) throw new RepositoryError('PEER_LIMIT', 'Peer relationships can have at most two active participants');
     const owner = await this.db.prepare('SELECT owner_user.email AS owner_email FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL').bind(groupId, userId).first<Row>();
     if (!owner) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can create invitations'); }
     if (normalizeEmail(text(owner.owner_email)) === normalized) throw new RepositoryError('SELF_FRIEND', 'You cannot invite your own email');
-    const target = await this.db.prepare('SELECT gm.person_id FROM group_members gm JOIN groups g ON g.id=gm.group_id JOIN people p ON p.id=gm.person_id WHERE gm.group_id=? AND gm.person_id=? AND gm.role=\'member\' AND gm.user_id IS NULL AND gm.deleted_at IS NULL AND g.deleted_at IS NULL AND p.deleted_at IS NULL').bind(groupId, personId).first<Row>();
+    const target = await this.db.prepare("SELECT gm.person_id,p.user_id,target_user.email AS linked_email FROM group_members gm JOIN groups g ON g.id=gm.group_id JOIN people p ON p.id=gm.person_id LEFT JOIN users target_user ON target_user.id=p.user_id AND target_user.deleted_at IS NULL WHERE gm.group_id=? AND gm.person_id=? AND gm.role='member' AND gm.user_id IS NULL AND gm.deleted_at IS NULL AND g.deleted_at IS NULL AND p.deleted_at IS NULL AND (p.user_id IS NULL OR target_user.id IS NOT NULL)").bind(groupId, personId).first<Row>();
     if (!target) throw new RepositoryError('INVITATION_INVALID', 'The target must be an active ledger-only group member');
+    if (target.user_id != null && normalizeEmail(text(target.linked_email)) !== normalized) throw new RepositoryError('INVITATION_INVALID', 'A linked participant can only be invited at the linked account email');
     const represented = await this.db.prepare('SELECT 1 FROM group_members gm JOIN users u ON u.id=gm.user_id WHERE gm.group_id=? AND lower(u.email)=? AND gm.deleted_at IS NULL AND u.deleted_at IS NULL').bind(groupId, normalized).first<Row>();
     if (represented) throw new RepositoryError('INVITATION_INVALID', 'That account is already an active group member');
     const existing = await this.db.prepare('SELECT * FROM group_invitations WHERE group_id=? AND target_person_id=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? ORDER BY created_at DESC LIMIT 1').bind(groupId, personId, t).first<Row>();
@@ -627,11 +633,13 @@ export class Repository {
     let result: Array<{ meta?: { changes?: number } }>;
     try {
       result = await this.db.batch([
-        this.db.prepare('UPDATE group_invitations SET revoked_at=? WHERE group_id=? AND (target_person_id=? OR (target_person_id IS NULL AND email_normalized=?) OR (target_person_id IS NOT NULL AND email_normalized=? AND expires_at<=?)) AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members target JOIN people target_person ON target_person.id=target.person_id WHERE target.group_id=? AND target.person_id=? AND target.role=\'member\' AND target.user_id IS NULL AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN users represented_user ON represented_user.id=represented.user_id WHERE represented.group_id=? AND lower(represented_user.email)=? AND represented.deleted_at IS NULL AND represented_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_invitations conflicting WHERE conflicting.group_id=? AND conflicting.email_normalized=? AND conflicting.target_person_id IS NOT NULL AND conflicting.target_person_id!=? AND conflicting.revoked_at IS NULL AND conflicting.accepted_at IS NULL AND conflicting.rejected_at IS NULL AND conflicting.expires_at>?)').bind(t, groupId, personId, normalized, normalized, t, groupId, groupId, personId, groupId, userId, groupId, normalized, groupId, normalized, personId, t),
-        this.db.prepare('INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members target ON target.group_id=g.id JOIN people p ON p.id=target.person_id JOIN group_members owner_member ON owner_member.group_id=g.id JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE g.id=? AND g.deleted_at IS NULL AND target.person_id=? AND target.role=\'member\' AND target.user_id IS NULL AND target.deleted_at IS NULL AND p.deleted_at IS NULL AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN users represented_user ON represented_user.id=represented.user_id WHERE represented.group_id=? AND lower(represented_user.email)=? AND represented.deleted_at IS NULL AND represented_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_invitations pending WHERE pending.group_id=? AND pending.email_normalized=? AND pending.revoked_at IS NULL AND pending.accepted_at IS NULL AND pending.rejected_at IS NULL)').bind(id, groupId, normalized, userId, t, expires, personId, groupId, personId, userId, groupId, normalized, groupId, normalized),
+         this.db.prepare("UPDATE group_invitations SET revoked_at=? WHERE group_id=? AND (target_person_id=? OR (target_person_id IS NULL AND email_normalized=?) OR (target_person_id IS NOT NULL AND email_normalized=? AND expires_at<=?)) AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND EXISTS (SELECT 1 FROM groups g WHERE g.id=? AND g.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members target JOIN people target_person ON target_person.id=target.person_id LEFT JOIN users target_user ON target_user.id=target_person.user_id AND target_user.deleted_at IS NULL WHERE target.group_id=? AND target.person_id=? AND target.role='member' AND target.user_id IS NULL AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL AND (target_person.user_id IS NULL OR (target_user.id IS NOT NULL AND lower(target_user.email)=?))) AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN users represented_user ON represented_user.id=represented.user_id WHERE represented.group_id=? AND lower(represented_user.email)=? AND represented.deleted_at IS NULL AND represented_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_invitations conflicting WHERE conflicting.group_id=? AND conflicting.email_normalized=? AND conflicting.target_person_id IS NOT NULL AND conflicting.target_person_id!=? AND conflicting.revoked_at IS NULL AND conflicting.accepted_at IS NULL AND conflicting.rejected_at IS NULL AND conflicting.expires_at>?)").bind(t, groupId, personId, normalized, normalized, t, groupId, groupId, personId, normalized, groupId, userId, groupId, normalized, groupId, normalized, personId, t),
+         this.db.prepare("INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM groups g JOIN group_members target ON target.group_id=g.id JOIN people p ON p.id=target.person_id LEFT JOIN users target_user ON target_user.id=p.user_id AND target_user.deleted_at IS NULL JOIN group_members owner_member ON owner_member.group_id=g.id JOIN users owner_user ON owner_user.id=owner_member.user_id WHERE g.id=? AND g.deleted_at IS NULL AND target.person_id=? AND target.role='member' AND target.user_id IS NULL AND target.deleted_at IS NULL AND p.deleted_at IS NULL AND (p.user_id IS NULL OR (target_user.id IS NOT NULL AND lower(target_user.email)=?)) AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members represented JOIN users represented_user ON represented_user.id=represented.user_id WHERE represented.group_id=? AND lower(represented_user.email)=? AND represented.deleted_at IS NULL AND represented_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_invitations pending WHERE pending.group_id=? AND pending.email_normalized=? AND pending.revoked_at IS NULL AND pending.accepted_at IS NULL AND pending.rejected_at IS NULL)").bind(id, groupId, normalized, userId, t, expires, personId, groupId, personId, normalized, userId, groupId, normalized, groupId, normalized),
       ]);
-    } catch (error) {
-      // The partial unique index is the serialization point for two owners
+     } catch (error) {
+       if (Repository.isTargetAccountMismatch(error)) throw new RepositoryError('INVITATION_INVALID', 'A linked participant can only be invited at the linked account email');
+       if (Repository.isPeerLimit(error)) throw Repository.peerLimit();
+       // The partial unique index is the serialization point for two owners
       // replacing/creating an invitation for the same participant. A retry is
       // idempotent only when it addresses that participant with that email.
       if (!Repository.isUnique(error)) throw error;
@@ -669,24 +677,37 @@ export class Repository {
     if (text(invitation.expires_at) <= t) throw new RepositoryError('INVITATION_EXPIRED', 'This invitation has expired');
     const targetPersonId = invitation.target_person_id == null ? null : text(invitation.target_person_id);
     if (targetPersonId) {
+      const targetPerson = await this.db.prepare("SELECT p.user_id,target_user.email AS linked_email FROM people p LEFT JOIN users target_user ON target_user.id=p.user_id AND target_user.deleted_at IS NULL WHERE p.id=? AND p.deleted_at IS NULL").bind(targetPersonId).first<Row>();
+      if (!targetPerson || (targetPerson.user_id != null && (text(targetPerson.user_id) !== userId || normalizeEmail(text(targetPerson.linked_email)) !== email))) {
+        throw new RepositoryError('INVITATION_INVALID', 'This invitation no longer matches the targeted participant account');
+      }
       const result = await this.db.batch([
-        this.db.prepare("UPDATE group_invitations SET accepted_at=?,accepted_by=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members target JOIN people target_person ON target_person.id=target.person_id WHERE target.group_id=? AND target.person_id=? AND target.role='member' AND target.user_id IS NULL AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members other WHERE other.group_id=? AND other.user_id=? AND other.deleted_at IS NULL AND other.person_id!=?)").bind(t, userId, invitationId, email, t, groupId, userId, groupId, targetPersonId, groupId, userId, targetPersonId),
-        this.db.prepare("UPDATE group_members SET user_id=? WHERE group_id=? AND person_id=? AND user_id IS NULL AND role='member' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_invitations target_invite WHERE target_invite.id=? AND target_invite.target_person_id=? AND target_invite.accepted_at=? AND target_invite.accepted_by=?) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members other WHERE other.group_id=? AND other.user_id=? AND other.deleted_at IS NULL AND other.person_id!=?)").bind(userId, groupId, targetPersonId, invitationId, targetPersonId, t, userId, userId, groupId, userId, targetPersonId),
+        this.db.prepare("UPDATE group_invitations SET accepted_at=?,accepted_by=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members target JOIN people target_person ON target_person.id=target.person_id WHERE target.group_id=? AND target.person_id=? AND target.role='member' AND target.user_id IS NULL AND target.deleted_at IS NULL AND target_person.deleted_at IS NULL AND (target_person.user_id IS NULL OR target_person.user_id=?)) AND NOT EXISTS (SELECT 1 FROM group_members other WHERE other.group_id=? AND other.user_id=? AND other.deleted_at IS NULL AND other.person_id!=?)").bind(t, userId, invitationId, email, t, groupId, userId, groupId, targetPersonId, userId, groupId, userId, targetPersonId),
+        this.db.prepare("UPDATE group_members SET user_id=? WHERE group_id=? AND person_id=? AND user_id IS NULL AND role='member' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM people target_person WHERE target_person.id=? AND (target_person.user_id IS NULL OR target_person.user_id=?)) AND EXISTS (SELECT 1 FROM group_invitations target_invite WHERE target_invite.id=? AND target_invite.target_person_id=? AND target_invite.accepted_at=? AND target_invite.accepted_by=?) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members other WHERE other.group_id=? AND other.user_id=? AND other.deleted_at IS NULL AND other.person_id!=?)").bind(userId, groupId, targetPersonId, targetPersonId, userId, invitationId, targetPersonId, t, userId, userId, groupId, userId, targetPersonId),
       ]);
       if (result.some((statement) => Number((statement as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0) === 0)) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The targeted invitation changed before it could be accepted'); }
       const accepted = await this.db.prepare('SELECT * FROM group_invitations WHERE id=?').bind(invitationId).first<Row>();
       if (!accepted) throw new RepositoryError('DATABASE_ERROR', 'The accepted invitation could not be read');
       return this.mapInvitation(accepted);
     }
-    const groupPerson = await this.db.prepare('SELECT p.* FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND lower(p.email)=? AND p.deleted_at IS NULL').bind(groupId, email).first<Row>();
+    const groupState = await this.db.prepare("SELECT kind FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
+    if (groupState?.kind === 'peer') throw Repository.peerLimit('Peer ledgers only accept targeted invitations for their existing participant');
+    const groupPerson = await this.db.prepare('SELECT p.* FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? AND lower(p.email)=? AND p.deleted_at IS NULL AND (p.user_id IS NULL OR p.user_id=?)').bind(groupId, email, userId).first<Row>();
     const linkedPerson = groupPerson ?? await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND user_id=? AND deleted_at IS NULL').bind(email, userId).first<Row>();
     const personId = text(linkedPerson?.id || uid()), statements = [
       this.db.prepare("UPDATE group_invitations SET accepted_at=?,accepted_by=? WHERE id=? AND email_normalized=? AND revoked_at IS NULL AND accepted_at IS NULL AND rejected_at IS NULL AND expires_at>? AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(t, userId, invitationId, email, t, groupId, userId),
       ...(linkedPerson ? [] : [this.db.prepare("INSERT INTO people(id,name,email,user_id,created_at) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(personId, email.split('@')[0], email, userId, t, invitationId, userId, userId)]),
-      this.db.prepare("UPDATE group_members SET user_id=?,deleted_at=NULL,role='member' WHERE group_id=? AND person_id=? AND EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(userId, groupId, personId, invitationId, userId, userId),
-      this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? )").bind(groupId, personId, userId, t, invitationId, userId, userId, groupId, personId),
+      this.db.prepare("UPDATE group_members SET user_id=?,deleted_at=NULL,role='member' WHERE group_id=? AND person_id=? AND EXISTS (SELECT 1 FROM people target_person WHERE target_person.id=? AND (target_person.user_id IS NULL OR target_person.user_id=?)) AND EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL)").bind(userId, groupId, personId, personId, userId, invitationId, userId, userId),
+      this.db.prepare("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE EXISTS (SELECT 1 FROM people target_person WHERE target_person.id=? AND (target_person.user_id IS NULL OR target_person.user_id=?)) AND EXISTS (SELECT 1 FROM group_invitations WHERE id=? AND accepted_by=? AND accepted_at IS NOT NULL) AND EXISTS (SELECT 1 FROM users accept_user WHERE accept_user.id=? AND accept_user.deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? )").bind(groupId, personId, userId, t, personId, userId, invitationId, userId, userId, groupId, personId),
     ];
-    const result = await this.db.batch(statements);
+    let result: Array<{ meta?: { changes?: number } }>;
+    try {
+      result = await this.db.batch(statements);
+    } catch (cause) {
+      if (Repository.isPeerLimit(cause)) throw Repository.peerLimit();
+      if (Repository.isTargetAccountMismatch(cause)) throw new RepositoryError('INVITATION_INVALID', 'The invitation target is linked to a different account');
+      throw cause;
+    }
     if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The invitation changed before it could be accepted'); }
     const accepted = await this.db.prepare('SELECT * FROM group_invitations WHERE id=?').bind(invitationId).first<Row>();
     if (!accepted) throw new RepositoryError('DATABASE_ERROR', 'The accepted invitation could not be read');
@@ -782,18 +803,59 @@ export class Repository {
     throw new RepositoryError('MEMBER_REQUIRED', 'You are not an active member of this group');
   }
   async leaveMember(groupId: string, userId: string) { return this.leaveGroup(groupId, userId); }
-  async createGroup(userId: string, personId: string, input: { name: string; currency: string }) {
-    const id = uid(), t = now(), queueTime = Date.now();
-    const activeUser = this.activeUserGuard(userId);
-    const createdGroup = `EXISTS (SELECT 1 FROM groups created_group WHERE created_group.id=? AND created_group.name=? AND created_group.currency=? AND created_group.created_at=? AND created_group.deleted_at IS NULL)
+  async createGroup(userId: string, personId: string, input: { name: string; currency: string; people?: Array<{ name: string; email?: string | null }>; client_operation_id?: string }, retryCanonicalCollision = true): Promise<Group | null> {
+    const name = input.name.trim(), people = input.people ?? [], operationId = input.client_operation_id;
+    const normalizedPeople = people.map((person) => ({ name: person.name.trim(), email: person.email?.trim().toLowerCase() || null }));
+    const hash = stableJson({ ...input, name, people: normalizedPeople });
+    if (operationId) {
+      const existingClaim = await this.db.prepare('SELECT * FROM idempotency_keys WHERE kind=? AND user_id=? AND operation_id=?').bind('group.create', userId, operationId).first<Row>();
+      if (existingClaim) {
+        if (text(existingClaim.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
+        const original = await this.group(text(existingClaim.entity_id), userId);
+        if (original) return original;
+        throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable');
+      }
+    }
+    const activeUser = this.activeUserGuard(userId), id = uid(), t = now(), queueTime = Date.now();
+    const participants = await Promise.all(normalizedPeople.map(async (person) => {
+      const existing = person.email ? await this.db.prepare('SELECT * FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(person.email).first<Row>() : null;
+      if (existing && (text(existing.id) === personId || text(existing.user_id) === userId)) throw new RepositoryError('SELF_FRIEND', 'You cannot add your own linked person to a group');
+      return { ...person, id: existing ? text(existing.id) : uid(), isNew: !existing };
+    }));
+    const createdGroup = `EXISTS (SELECT 1 FROM groups created_group WHERE created_group.id=? AND created_group.name=? AND created_group.currency=? AND created_group.kind='named' AND created_group.created_at=? AND created_group.deleted_at IS NULL)
       AND EXISTS (SELECT 1 FROM group_members created_owner WHERE created_owner.group_id=? AND created_owner.person_id=? AND created_owner.user_id=? AND created_owner.role='owner' AND created_owner.deleted_at IS NULL)`;
-    const result = await this.db.batch([
-       this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, input.name, input.currency, t, t, ...activeUser.args),
+    const statements = [
+      this.db.prepare(`INSERT INTO groups(id,name,currency,kind,created_at,updated_at) SELECT ?,?,?, 'named',?,? WHERE ${activeUser.sql}`).bind(id, name, input.currency, t, t, ...activeUser.args),
       this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND created_at=? AND deleted_at IS NULL)`).bind(id, personId, userId, t, ...activeUser.args, id, t),
-          this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,?,1,? WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,available_at_ms=excluded.available_at_ms,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, queueTime, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
-         this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, input.name, input.currency, t, id, personId, userId),
-    ]);
-    if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
+      ...participants.flatMap((person) => [
+        ...(person.isNew ? [this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${activeUser.sql}`).bind(person.id, person.name, person.email, t, ...activeUser.args)] : []),
+        this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,NULL,?,'member' WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND created_at=? AND deleted_at IS NULL)`).bind(id, person.id, t, ...activeUser.args, id, t),
+      ]),
+      ...participants.filter((person) => person.email).map((person) => this.db.prepare(`INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id IS NULL AND deleted_at IS NULL)`).bind(uid(), id, person.email, userId, t, invitationExpiry(new Date(t)), person.id, ...activeUser.args, id, id, person.id)),
+      this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,?,1,? WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,available_at_ms=excluded.available_at_ms,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, queueTime, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, name, input.currency, t, id, personId, userId),
+      this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND ${createdGroup} ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, name, input.currency, t, id, personId, userId),
+      ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL)`).bind('group.create', userId, id, operationId, hash, id, t, ...activeUser.args, id)] : []),
+    ];
+    try {
+      const result = await this.db.batch(statements);
+      if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot create a group');
+    } catch (error) {
+      if (Repository.isTargetAccountMismatch(error)) throw new RepositoryError('INVITATION_INVALID', 'A linked participant can only be invited at the linked account email');
+      if (operationId && Repository.isUnique(error)) {
+        const winner = await this.db.prepare('SELECT * FROM idempotency_keys WHERE kind=? AND user_id=? AND operation_id=?').bind('group.create', userId, operationId).first<Row>();
+        if (winner) {
+          if (text(winner.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
+          const original = await this.group(text(winner.entity_id), userId);
+          if (original) return original;
+        }
+      }
+      if (retryCanonicalCollision && Repository.isUnique(error)) {
+        const canonical = await Promise.all(normalizedPeople.filter((person) => person.email).map((person) => this.db.prepare('SELECT id FROM people WHERE lower(email)=? AND deleted_at IS NULL').bind(person.email).first<Row>()));
+        if (canonical.some(Boolean)) return this.createGroup(userId, personId, input, false);
+      }
+      if (Repository.isUnique(error) && normalizedPeople.some((person) => person.email)) throw new RepositoryError('CONFLICT', 'A participant email changed while creating the group; retry the request');
+      throw error;
+    }
     return this.group(id, userId);
   }
   async createFriend(userId: string, personId: string, input: { name: string; email?: string | null; currency: string; client_operation_id?: string }) {
@@ -820,12 +882,12 @@ export class Repository {
     const id = uid(), friendId = uid(), t = now(), queueTime = Date.now();
     const create = async (target: Row | null) => {
       const targetPersonId = target ? text(target.id) : friendId;
-      const targetUserId = target?.user_id == null ? null : text(target.user_id);
       const statements = [
         ...(target ? [] : [this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${activeUser.sql}`).bind(friendId, name, email, t, ...activeUser.args)]),
-        this.db.prepare(`INSERT INTO groups(id,name,currency,created_at,updated_at) SELECT ?,?,?,?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
+        this.db.prepare(`INSERT INTO groups(id,name,currency,kind,created_at,updated_at) SELECT ?,?,?, 'peer',?,? WHERE ${activeUser.sql}`).bind(id, `With ${name}`, input.currency, t, t, ...activeUser.args),
         this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'owner' WHERE ${activeUser.sql}`).bind(id, personId, userId, t, ...activeUser.args),
-        this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,?,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, targetUserId, t, ...activeUser.args),
+        this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,NULL,?,'member' WHERE ${activeUser.sql}`).bind(id, targetPersonId, t, ...activeUser.args),
+        ...(email ? [this.db.prepare(`INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id IS NULL AND deleted_at IS NULL)`).bind(uid(), id, email, userId, t, invitationExpiry(new Date(t)), targetPersonId, ...activeUser.args, id, id, targetPersonId)] : []),
          this.db.prepare(`INSERT INTO ledger_summary_state(group_id,status,maintenance_due,available_at_ms,checkpoint_through,discovery_complete,updated_at) SELECT ?,'ready',0,?,?,1,? WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO UPDATE SET status='ready',maintenance_due=0,available_at_ms=excluded.available_at_ms,checkpoint_through=excluded.checkpoint_through,discovery_complete=1,updated_at=excluded.updated_at`).bind(id, queueTime, previousMonth(t.slice(0, 10)), t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
          this.db.prepare(`INSERT INTO projection_state(group_id,status,backfill_cursor,updated_at,ledger_totals_ready,reconciliation_due) SELECT ?,'ready',NULL,?,1,0 WHERE ${activeUser.sql} AND EXISTS (SELECT 1 FROM groups WHERE id=? AND name=? AND currency=? AND created_at=? AND deleted_at IS NULL) AND EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=? AND user_id=? AND role='owner' AND deleted_at IS NULL) ON CONFLICT(group_id) DO NOTHING`).bind(id, t, ...activeUser.args, id, `With ${name}`, input.currency, t, id, personId, userId),
         ...(operationId ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${activeUser.sql}`).bind('friend.create', userId, id, operationId, hash, id, t, ...activeUser.args)] : []),
@@ -837,6 +899,7 @@ export class Repository {
     try {
       await create(existing);
     } catch (error) {
+      if (Repository.isTargetAccountMismatch(error)) throw new RepositoryError('INVITATION_INVALID', 'A linked participant can only be invited at the linked account email');
       const unique = Repository.isUnique(error);
       if (operationId && unique) {
         const winner = await this.db.prepare('SELECT * FROM idempotency_keys WHERE kind=? AND user_id=? AND operation_id=?').bind('friend.create', userId, operationId).first<Row>();
@@ -859,8 +922,58 @@ export class Repository {
     return this.group(id, userId);
   }
   async updateGroup(id: string, userId: string, input: { name: string; currency: string }) {
-    const result = await this.db.prepare("UPDATE groups SET name=?,currency=?,updated_at=? WHERE id=? AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(input.name, input.currency, now(), id, id, userId).run();
-    if (Number(result.meta?.changes ?? 0) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update this group'); }
+    const result = await this.db.prepare("UPDATE groups SET name=?,currency=?,updated_at=? WHERE id=? AND kind!='peer' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(input.name, input.currency, now(), id, id, userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const current = await this.db.prepare('SELECT kind FROM groups g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=? AND gm.role=\'owner\' AND g.deleted_at IS NULL AND gm.deleted_at IS NULL').bind(id, userId).first<Row>();
+      if (current?.kind === 'peer') throw new RepositoryError('CONFLICT', 'Convert the peer group before changing its name or currency');
+      throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can update this group');
+    }
+    return this.group(id, userId);
+  }
+  async convertPeerToNamed(id: string, userId: string, name: string) {
+    const value = name.trim();
+    if (!value) throw new RepositoryError('CONFLICT', 'A named group requires a name');
+    const result = await this.db.prepare("UPDATE groups SET kind='named',name=?,updated_at=? WHERE id=? AND kind='peer' AND deleted_at IS NULL AND EXISTS (SELECT 1 FROM group_members gm JOIN users owner_user ON owner_user.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=? AND gm.role='owner' AND gm.deleted_at IS NULL AND owner_user.deleted_at IS NULL)").bind(value, now(), id, id, userId).run();
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const current = await this.db.prepare('SELECT g.kind FROM groups g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=? AND gm.role=\'owner\' AND g.deleted_at IS NULL AND gm.deleted_at IS NULL').bind(id, userId).first<Row>();
+      if (!current) throw new RepositoryError('OWNER_REQUIRED', 'Only the active owner can convert a peer group');
+      if (current.kind === 'named') return this.group(id, userId);
+      throw new RepositoryError('OWNER_REQUIRED', 'Only the active owner can convert a peer group');
+    }
+    return this.group(id, userId);
+  }
+  async convertNamedToPeer(id: string, userId: string) {
+    const timestamp = now();
+    // Repeat eligibility in the UPDATE: the reads below only provide an
+    // actionable error and are not the serialization point for this mutation.
+    let result: { meta?: { changes?: number } };
+    try {
+      result = await this.db.prepare(`UPDATE groups SET kind='peer',updated_at=? WHERE id=? AND kind='named' AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM group_members owner_member JOIN users owner_user ON owner_user.id=owner_member.user_id
+          WHERE owner_member.group_id=groups.id AND owner_member.user_id=? AND owner_member.role='owner' AND owner_member.deleted_at IS NULL AND owner_user.deleted_at IS NULL)
+        AND (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id
+          WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL)=2
+        AND NOT EXISTS (SELECT 1 FROM group_invitations pending_invitation WHERE pending_invitation.group_id=groups.id AND pending_invitation.target_person_id IS NULL
+          AND pending_invitation.revoked_at IS NULL AND pending_invitation.accepted_at IS NULL AND pending_invitation.rejected_at IS NULL AND pending_invitation.expires_at>?)`).bind(timestamp, id, userId, timestamp).run();
+    } catch (cause) {
+      if (Repository.isPeerLimit(cause)) throw Repository.peerLimit('The named group no longer meets the requirements for a peer relationship');
+      throw cause;
+    }
+    if (Number(result.meta?.changes ?? 0) === 0) {
+      await this.throwIfDeleted(userId);
+      const current = await this.db.prepare("SELECT g.kind FROM groups g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=? AND gm.role='owner' AND g.deleted_at IS NULL AND gm.deleted_at IS NULL AND EXISTS (SELECT 1 FROM users owner_user WHERE owner_user.id=gm.user_id AND owner_user.deleted_at IS NULL)").bind(id, userId).first<Row>();
+      if (!current) throw new RepositoryError('OWNER_REQUIRED', 'Only the active group owner can convert a named group to a peer relationship');
+      if (current.kind === 'peer') return this.group(id, userId);
+      const state = await this.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=g.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS active_member_count,
+        EXISTS (SELECT 1 FROM group_invitations pending_invitation WHERE pending_invitation.group_id=g.id AND pending_invitation.target_person_id IS NULL AND pending_invitation.revoked_at IS NULL AND pending_invitation.accepted_at IS NULL AND pending_invitation.rejected_at IS NULL AND pending_invitation.expires_at>?) AS pending_generic_invitation
+        FROM groups g WHERE g.id=? AND g.kind='named' AND g.deleted_at IS NULL`).bind(timestamp, id).first<Row>();
+      if (number(state?.active_member_count) !== 2) throw Repository.peerLimit('A peer relationship requires exactly two active ledger participants');
+      if (flag(state?.pending_generic_invitation)) throw Repository.peerLimit('Revoke pending generic group invitations before converting to a peer relationship');
+      throw new RepositoryError('CONFLICT', 'The group changed before it could be converted to a peer relationship');
+    }
     return this.group(id, userId);
   }
   async deleteGroup(id: string, userId?: string) {
@@ -871,6 +984,8 @@ export class Repository {
   }
   async addPerson(groupId: string, person: { name: string; email?: string | null }, userId?: string, creatorPersonId?: string) {
     const id = uid(), t = now(), email = person.email?.trim().toLowerCase() ?? null;
+    const peer = await this.db.prepare("SELECT kind,(SELECT COUNT(*) FROM group_members active_member JOIN people active_person ON active_person.id=active_member.person_id WHERE active_member.group_id=groups.id AND active_member.deleted_at IS NULL AND active_person.deleted_at IS NULL) AS member_count FROM groups WHERE id=? AND deleted_at IS NULL").bind(groupId).first<Row>();
+    if (peer?.kind === 'peer' && number(peer.member_count) >= 2) throw new RepositoryError('PEER_LIMIT', 'Peer relationships can have at most two active participants');
     const ownerGuard = userId ? { sql: 'EXISTS (SELECT 1 FROM group_members owner_member WHERE owner_member.group_id=? AND owner_member.user_id=? AND owner_member.role=\'owner\' AND owner_member.deleted_at IS NULL) AND EXISTS (SELECT 1 FROM users owner_user WHERE owner_user.id=? AND owner_user.deleted_at IS NULL)', args: [groupId, userId, userId] } : { sql: '1=1', args: [] as unknown[] };
     if (email) {
       const linkedUser = userId ? await this.db.prepare('SELECT email FROM users WHERE id=?').bind(userId).first<Row>() : null;
@@ -883,10 +998,16 @@ export class Repository {
         // to join this group. Only an already accepted active membership may
         // retain its user binding; every new or reactivated membership stays
         // ledger-only until invitation acceptance.
-        const result = await this.db.batch([
-          this.db.prepare(`UPDATE group_members SET user_id=CASE WHEN deleted_at IS NULL AND user_id IS NOT NULL THEN user_id ELSE NULL END,deleted_at=NULL,role=CASE WHEN deleted_at IS NULL THEN role ELSE 'member' END WHERE group_id=? AND person_id=? AND ${ownerGuard.sql}`).bind(groupId, existing.id, ...ownerGuard.args),
-          this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,NULL,?,'member' WHERE ${ownerGuard.sql} AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=?)`).bind(groupId, existing.id, t, ...ownerGuard.args, groupId, existing.id),
-        ]);
+         let result: Array<{ meta?: { changes?: number } }>;
+         try {
+           result = await this.db.batch([
+             this.db.prepare(`UPDATE group_members SET user_id=CASE WHEN deleted_at IS NULL AND user_id IS NOT NULL THEN user_id ELSE NULL END,deleted_at=NULL,role=CASE WHEN deleted_at IS NULL THEN role ELSE 'member' END WHERE group_id=? AND person_id=? AND ${ownerGuard.sql}`).bind(groupId, existing.id, ...ownerGuard.args),
+             this.db.prepare(`INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) SELECT ?,?,NULL,?,'member' WHERE ${ownerGuard.sql} AND NOT EXISTS (SELECT 1 FROM group_members WHERE group_id=? AND person_id=?)`).bind(groupId, existing.id, t, ...ownerGuard.args, groupId, existing.id),
+           ]);
+         } catch (cause) {
+           if (Repository.isPeerLimit(cause)) throw Repository.peerLimit();
+           throw cause;
+         }
         const changes = result.length ? result.reduce((total, statement) => total + Number((statement as { meta?: { changes?: number } }).meta?.changes ?? 0), 0) : 1;
         if (userId && changes === 0) {
           await this.throwIfDeleted(userId);
@@ -896,10 +1017,16 @@ export class Repository {
         return { id: text(existing.id), name: text(existing.name), email, createdAt: text(existing.created_at) };
       }
     }
-    const result = await this.db.batch([
-      this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${ownerGuard.sql}`).bind(id, person.name, email, t, ...ownerGuard.args),
-      this.db.prepare(`INSERT INTO group_members(group_id,person_id,joined_at,role) SELECT ?,?,?, 'member' WHERE ${ownerGuard.sql}`).bind(groupId, id, t, ...ownerGuard.args),
-    ]);
+    let result: Array<{ meta?: { changes?: number } }>;
+    try {
+      result = await this.db.batch([
+        this.db.prepare(`INSERT INTO people(id,name,email,created_at) SELECT ?,?,?,? WHERE ${ownerGuard.sql}`).bind(id, person.name, email, t, ...ownerGuard.args),
+        this.db.prepare(`INSERT INTO group_members(group_id,person_id,joined_at,role) SELECT ?,?,?, 'member' WHERE ${ownerGuard.sql}`).bind(groupId, id, t, ...ownerGuard.args),
+      ]);
+    } catch (cause) {
+      if (Repository.isPeerLimit(cause)) throw Repository.peerLimit();
+      throw cause;
+    }
     if (userId && Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('OWNER_REQUIRED', 'Only an active group owner can add people'); }
     return { id, name: person.name, email, createdAt: t };
   }
@@ -1491,6 +1618,9 @@ export class Repository {
     return { id: text(existing.entity_id), claim: false };
   }
   private static isUnique(error: unknown) { return error instanceof Error && /unique|constraint/i.test(error.message); }
+  private static isPeerLimit(error: unknown) { return error instanceof Error && /PEER_LIMIT|peer_group_(?:member_limit|kind_limit|kind_eligibility|generic_invitation_guard)/i.test(error.message); }
+  private static isTargetAccountMismatch(error: unknown) { return error instanceof Error && /INVITATION_TARGET_ACCOUNT_MISMATCH/i.test(error.message); }
+  private static peerLimit(message = 'Peer relationships can have at most two active participants') { return new RepositoryError('PEER_LIMIT', message); }
   private static isUniquenessError(error: unknown) { return error instanceof Error && /unique/i.test(error.message); }
   private static isOccurrenceUnique(error: unknown) { return Repository.isUniquenessError(error) && error instanceof Error && /scheduled_occurrences\.(?:scheduled_expense_id|occurrence_date)/i.test(error.message); }
   private static isRevisionUnique(error: unknown) {

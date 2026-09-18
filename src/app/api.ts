@@ -2041,8 +2041,24 @@ export async function getHistoricalParticipants(groupId: string, signal?: AbortS
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
 
+export async function createGroup(input: { name: string; currency: Group['currency']; people?: Array<{ name: string; email?: string }>; client_operation_id?: string }) {
+  return api<{ group: Group }>('/groups', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function createFriend(input: { name: string; email?: string; currency: Group['currency']; client_operation_id: string }) {
+  return api<{ group: Group }>('/friends', { method: 'POST', body: JSON.stringify(input) });
+}
+
 export async function updateGroup(id: string, input: { name: string; currency: Group['currency'] }) {
   return api<{ group: Group }>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export async function convertPeerToNamedGroup(id: string, name: string) {
+  return api<{ group: Group }>(`/groups/${id}/convert-to-named`, { method: 'POST', body: JSON.stringify({ name }) });
+}
+
+export async function convertNamedToPeerGroup(id: string) {
+  return api<{ group: Group }>(`/groups/${id}/convert-to-peer`, { method: 'POST' });
 }
 
 export async function updateGroupSplitDefault(id: string, input: GroupSplitDefaultInput) {

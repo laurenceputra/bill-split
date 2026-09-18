@@ -121,6 +121,70 @@ test('shows targeted participant controls to owners but not regular members', as
   }
 });
 
+test('explains named-group peer eligibility across responsive and invitation states', async ({ authenticatedPage, browser }) => {
+  await authenticatedPage.goto(`/groups/${GROUP_ID}/manage`);
+  await expect(authenticatedPage.getByRole('heading', { name: 'Relationship type' })).toBeVisible();
+  await expect(authenticatedPage.getByText('Exactly two active ledger participants are required.')).toBeVisible();
+  await expect(authenticatedPage.getByRole('button', { name: 'Convert to peer relationship' })).toHaveCount(0);
+
+  const viewports = [{ width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 895, height: 900 }, { width: 896, height: 900 }, { width: 1440, height: 900 }];
+  const installNamedGroupRoutes = async (page: typeof authenticatedPage, invitations: unknown[] = [], kind: () => 'named' | 'peer' = () => 'named') => {
+    await page.route(`${BASE_URL}/api/groups/${GROUP_ID}`, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json() as { group: Record<string, unknown>; members: unknown[]; historicalParticipants?: unknown[] };
+      body.members = body.members.slice(0, 2);
+      body.historicalParticipants = body.historicalParticipants?.slice(0, 2);
+      body.group.memberCount = 2;
+      body.group.kind = kind();
+      await route.fulfill({ response, body: JSON.stringify(body) });
+    });
+    await page.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations }) }));
+  };
+
+  const eligibleContext = await newAuthenticatedContext(browser, DEV_EMAIL);
+  try {
+    const eligiblePage = await eligibleContext.newPage();
+    let converted = false;
+    let conversionCalls = 0;
+    await installNamedGroupRoutes(eligiblePage, [], () => converted ? 'peer' : 'named');
+    await eligiblePage.route(`${BASE_URL}/api/groups/${GROUP_ID}/convert-to-peer`, async (route) => {
+      conversionCalls += 1;
+      converted = true;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ group: { id: GROUP_ID, name: 'Europe trip · USD + EUR', currency: 'USD', kind: 'peer', createdAt: '', updatedAt: '', role: 'owner', memberCount: 2, counterpartName: 'Sam Rivera' } }) });
+    });
+    await eligiblePage.setViewportSize(viewports[0]);
+    await eligiblePage.goto(`/groups/${GROUP_ID}/manage`, { waitUntil: 'domcontentloaded' });
+    for (const viewport of viewports) {
+      await eligiblePage.setViewportSize(viewport);
+      const peerButton = eligiblePage.getByRole('button', { name: 'Convert to peer relationship' });
+      await expect(peerButton).toBeVisible();
+      const bounds = await peerButton.boundingBox();
+      expect(bounds, `peer conversion action at ${viewport.width}px`).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    }
+    eligiblePage.once('dialog', (dialog) => void dialog.accept());
+    await eligiblePage.getByRole('button', { name: 'Convert to peer relationship' }).click();
+    await expect(eligiblePage.getByRole('button', { name: 'Convert to named group' })).toBeVisible();
+    expect(conversionCalls).toBe(1);
+  } finally {
+    await eligibleContext.close();
+  }
+
+  const pendingContext = await newAuthenticatedContext(browser, DEV_EMAIL);
+  try {
+    const pendingPage = await pendingContext.newPage();
+    await installNamedGroupRoutes(pendingPage, [{ id: 'generic-invitation', groupId: GROUP_ID, email: 'generic@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z' }]);
+    await pendingPage.setViewportSize(viewports[0]);
+    await pendingPage.goto(`/groups/${GROUP_ID}/manage`, { waitUntil: 'domcontentloaded' });
+    await expect(pendingPage.getByRole('button', { name: 'Convert to peer relationship' })).toHaveCount(0);
+    await expect(pendingPage.getByRole('button', { name: 'Convert to named group' })).toHaveCount(0);
+    await expect(pendingPage.getByText('Revoke pending generic group invitations first.')).toBeVisible();
+  } finally {
+    await pendingContext.close();
+  }
+});
+
 test('keeps Add email unavailable while owner invitations are loading', async ({ authenticatedPage }) => {
   let release!: () => void;
   const delayed = new Promise<void>((resolve) => { release = resolve; });
@@ -305,6 +369,63 @@ test('contains the open targeted email form across responsive member-row widths'
       expect(layout.buttonTop).toBeGreaterThanOrEqual(layout.fieldBottom - 1);
     }
   }
+});
+
+test('validates and submits the friend creation form with its consent-safe payload', async ({ authenticatedPage: page }) => {
+  let responseStatus = 409;
+  let requestBody: unknown;
+  await page.route(`${BASE_URL}/api/friends`, async (route) => {
+    requestBody = route.request().postDataJSON();
+    if (responseStatus === 409) {
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'CONFLICT', message: 'Friend already exists' } }) });
+      return;
+    }
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ group: { id: '00000000-0000-4000-8000-000000009101' } }) });
+  });
+
+  await page.goto('/friends/new');
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  expect(await page.locator('#friend-name').evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  expect(requestBody).toBeUndefined();
+
+  await page.getByLabel('Friend name').fill('Taylor Reed');
+  await page.getByLabel('Email (optional)').fill('taylor@example.com');
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  await expect(page.locator('#create-friend-error')).toContainText('Friend already exists');
+  expect(requestBody).toMatchObject({ name: 'Taylor Reed', email: 'taylor@example.com', currency: 'USD' });
+  expect((requestBody as { client_operation_id?: string }).client_operation_id).toEqual(expect.any(String));
+
+  responseStatus = 201;
+  await page.getByRole('button', { name: 'Add friend' }).click();
+  await expect.poll(() => page.url()).toContain('/groups/00000000-0000-4000-8000-000000009101');
+});
+
+test('validates and submits an expanded multi-person group creation payload', async ({ authenticatedPage: page }) => {
+  let requestBody: unknown;
+  await page.route(`${BASE_URL}/api/groups`, async (route) => {
+    requestBody = route.request().postDataJSON();
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ group: { id: '00000000-0000-4000-8000-000000009102' } }) });
+  });
+
+  await page.goto('/groups/new');
+  await page.getByRole('button', { name: 'Create group' }).click();
+  expect(await page.locator('#group-name').evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  await page.getByLabel('Group name').fill('Cabin weekend');
+  await page.getByRole('button', { name: 'Create group' }).click();
+  const firstParticipantName = page.locator('.creation-person').nth(0).locator('input[required]');
+  expect(await firstParticipantName.evaluate((element) => !(element as HTMLInputElement).checkValidity())).toBe(true);
+  expect(requestBody).toBeUndefined();
+
+  await firstParticipantName.fill('Taylor Reed');
+  await page.getByLabel('Email (optional)').nth(0).fill('taylor@example.com');
+  await page.getByRole('button', { name: 'Add another person' }).click();
+  await page.locator('.creation-person').nth(1).locator('input[required]').fill('Jordan Lee');
+  await page.getByLabel('Email (optional)').nth(1).fill('jordan@example.com');
+  await page.getByRole('button', { name: 'Create group' }).click();
+
+  await expect.poll(() => requestBody).toMatchObject({ name: 'Cabin weekend', currency: 'USD', people: [{ name: 'Taylor Reed', email: 'taylor@example.com' }, { name: 'Jordan Lee', email: 'jordan@example.com' }] });
+  expect((requestBody as { client_operation_id?: string }).client_operation_id).toEqual(expect.any(String));
+  await expect.poll(() => page.url()).toContain('/groups/00000000-0000-4000-8000-000000009102');
 });
 
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {
