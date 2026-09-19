@@ -1996,6 +1996,12 @@ summary {
   margin: 0;
 }
 
+/* Kind is the primary history control above the disclosure. Keep the
+   secondary filters focused on search and transaction attributes. */
+.transaction-filters > .field:nth-child(2) {
+  display: none;
+}
+
 .transaction-filters-disclosure > .cache-status {
   margin: 0;
 }

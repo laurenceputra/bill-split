@@ -4,16 +4,14 @@ export const transactionKey = (transaction: Transaction) => `${transaction.kind}
 
 export const transactionDate = (transaction: Transaction) => transaction.date;
 
-export const transactionTypeLabel = (transaction: Transaction) => transaction.kind === 'expense' ? 'Expense' : 'Settlement';
+export const transactionTypeLabel = (transaction: Transaction) => transaction.kind === 'expense' ? 'Expense' : transaction.kind === 'settlement' ? 'Settlement' : 'Credit';
 
 export function transactionTitle(transaction: Transaction): string {
-  return transaction.kind === 'expense'
-    ? transaction.description
-    : `${transaction.fromName} paid ${transaction.toName}`;
+  return transaction.kind === 'expense' ? transaction.description : transaction.kind === 'settlement' ? `${transaction.fromName} paid ${transaction.toName}` : `${transaction.subtype === 'refund' ? 'Refund' : 'Claim'} credit`;
 }
 
 export function transactionPeople(transaction: Transaction): string | undefined {
-  return transaction.kind === 'settlement' ? `${transaction.fromName} → ${transaction.toName}` : undefined;
+  return transaction.kind === 'settlement' ? `${transaction.fromName} → ${transaction.toName}` : transaction.kind === 'credit' ? (transaction.deliveryMode === 'direct_provider_offset' ? 'Direct provider offset' : 'Member reimbursement') : undefined;
 }
 
 const contextualName = (name: string, personId: string, currentPersonId?: string | null) => personId === currentPersonId ? 'You' : name || 'Removed participant';

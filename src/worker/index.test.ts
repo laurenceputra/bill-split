@@ -62,6 +62,22 @@ class TriggerOverflowDb {
   prepare(sql: string) { return new TriggerOverflowStatement(sql); }
   async batch(_statements: unknown[]) { throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); }
 }
+class CreditTriggerOverflowDb {
+  constructor(readonly deleted = false) {}
+  prepare(sql: string) { return new CreditTriggerOverflowStatement(this, sql); }
+  async batch(_statements: unknown[]) { throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); }
+}
+class CreditTriggerOverflowStatement extends MemberStatement {
+  constructor(private readonly db: CreditTriggerOverflowDb, sql: string) { super(sql); }
+  async first<T>() {
+    if (this.sql.includes('FROM credits c')) return { id: 'credit-1', group_id: '00000000-0000-4000-8000-000000000009', subtype: 'claim', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', credit_date: '2026-01-01', note: null, created_by: 'user-1', created_at: '2026-01-01', updated_at: '2026-01-01', deleted_at: this.db.deleted ? new Date().toISOString() : null, version: 1, client_operation_id: null } as T;
+    return super.first() as Promise<T>;
+  }
+  async all<T>() {
+    if (this.sql.includes('credit_applications') || this.sql.includes('credit_allocations')) return { results: [] as T[] };
+    return super.all() as Promise<{ results: T[] }>;
+  }
+}
 class SummaryGroupsStatement extends Statement {
   async all<T>() {
     if (this.sql.includes('FROM groups g JOIN')) return { results: [{ id: 'group-1', name: 'Shared', currency: 'USD', created_at: '', updated_at: '', role: 'owner', member_count: 2, counterpart_name: 'Friend', balance_summaries: '[{"currency":"USD","net_minor":500},{"currency":"EUR","net_minor":-250}]' }] as T[] };
@@ -518,6 +534,17 @@ describe('worker boundary', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code } });
   });
+  it.each(['/api/groups/00000000-0000-0000-0000-000000000009/transactions?kind=credit', '/api/transactions?kind=credit'])('accepts credit transaction filters on %s', async (path) => {
+    const response = await worker.fetch(new Request(`https://split.example${path}`, { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: new TransactionRouteDb() }), {} as ExecutionContext);
+    expect(response.status).toBe(200);
+  });
+  it('rejects client-supplied allocations for direct-provider credits at the API boundary', async () => {
+    const response = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-0000-0000-000000000009/credits', {
+      method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subtype: 'refund', delivery_mode: 'direct_provider_offset', amount_minor: 100, currency: 'USD', date: '2026-01-01', applications: [{ expense_id: '00000000-0000-0000-0000-000000000001', amount_minor: 100 }], allocations: [{ person_id: '00000000-0000-0000-0000-000000000003', allocation_type: 'recipient', amount_minor: 100 }, { person_id: '00000000-0000-0000-0000-000000000004', allocation_type: 'beneficiary', amount_minor: 100 }] }),
+    }), env({ DB: { prepare: (sql: string) => new MemberStatement(sql) } }), {} as ExecutionContext);
+    expect(response.status).toBe(400);
+  });
   it('does not enable the development bypass for near-miss environments', async () => {
     const response = await worker.fetch(new Request('https://split.example/api/me', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ ENVIRONMENT: 'Development' }), {} as ExecutionContext);
     expect(response.status).toBe(401);
@@ -592,6 +619,14 @@ describe('worker boundary', () => {
     const settlementResponse = await worker.fetch(new Request('https://split.example/api/groups/00000000-0000-4000-8000-000000000009/settlements', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ from_person_id: '00000000-0000-4000-8000-000000000003', to_person_id: '00000000-0000-4000-8000-000000000004', amount_minor: 100, currency: 'USD', date: '2025-01-01' }) }), env({ DB: database }), {} as ExecutionContext);
     expect(settlementResponse.status).toBe(422);
     expect(await settlementResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+  });
+  it('maps D1 ledger trigger failures to 422 for credit update and restore writes', async () => {
+    const updateResponse = await worker.fetch(new Request('https://split.example/api/credits/credit-1', { method: 'PUT', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ subtype: 'claim', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01', version: 1, applications: [], allocations: [{ person_id: '00000000-0000-4000-8000-000000000003', allocation_type: 'recipient', amount_minor: 100 }, { person_id: '00000000-0000-0000-0000-000000000004', allocation_type: 'beneficiary', amount_minor: 100 }] }) }), env({ DB: new CreditTriggerOverflowDb() }), {} as ExecutionContext);
+    expect(updateResponse.status).toBe(422);
+    expect(await updateResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
+    const restoreResponse = await worker.fetch(new Request('https://split.example/api/credits/credit-1/restore', { method: 'POST', headers: { ...sameOriginHeaders, 'X-Dev-Email': 'dev@example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ version: 1 }) }), env({ DB: new CreditTriggerOverflowDb(true) }), {} as ExecutionContext);
+    expect(restoreResponse.status).toBe(422);
+    expect(await restoreResponse.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
   });
 
   it('creates and lists scheduled expenses through authenticated group routes', async () => {

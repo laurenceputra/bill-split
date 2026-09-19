@@ -41,9 +41,32 @@ const targetedInvitationSql = readFileSync(new URL('../../migrations/0026_target
 const profileRevisionSql = readFileSync(new URL('../../migrations/0027_profile_revision.sql', moduleUrl), 'utf8');
 const groupKindSql = readFileSync(new URL('../../migrations/0028_group_kind.sql', moduleUrl), 'utf8');
 const bidirectionalGroupKindSql = readFileSync(new URL('../../migrations/0029_bidirectional_group_kind_guards.sql', moduleUrl), 'utf8');
+const creditProjectionSql = readFileSync(new URL('../../migrations/0031_credit_projection_support.sql', moduleUrl), 'utf8');
+const creditSafetySql = readFileSync(new URL('../../migrations/0032_credit_safety_guards.sql', moduleUrl), 'utf8');
+const creditAggregateSafetySql = readFileSync(new URL('../../migrations/0033_credit_aggregate_guards.sql', moduleUrl), 'utf8');
 const monthlySummarySql = readFileSync(new URL('./monthly-summary.ts', moduleUrl), 'utf8');
 const ledgerProjectionSql = readFileSync(new URL('./ledger-projection.ts', moduleUrl), 'utf8');
 const repositorySql = readFileSync(new URL('./repository.ts', moduleUrl), 'utf8');
+
+describe('credit projection migration', () => {
+  it('adds mutation and bounded-discovery state and preserves linked expense gross amounts', () => {
+    expect(creditProjectionSql).toMatch(/ALTER TABLE credits ADD COLUMN projection_mutation_id/i);
+    expect(creditProjectionSql).toMatch(/credit_discovery_cursor TEXT/i);
+    expect(creditProjectionSql).toMatch(/credit_cursor TEXT/i);
+    expect(creditProjectionSql).toMatch(/DROP TRIGGER IF EXISTS credit_expense_amount_guard/i);
+    expect(creditProjectionSql).toMatch(/NEW.amount_minor IS NOT OLD.amount_minor/i);
+    expect(creditProjectionSql).toMatch(/UPDATE ledger_summary_state[\s\S]*discovery_complete=0[\s\S]*credit_discovery_cursor=NULL/i);
+    expect(creditProjectionSql).toMatch(/INSERT INTO ledger_period_state[\s\S]*substr\(c\.credit_date,1,7\)/i);
+    expect(creditSafetySql).toMatch(/credit_allocation_safe_guard_insert/i);
+    expect(creditSafetySql).toMatch(/credit_application_safe_guard_insert/i);
+    expect(creditSafetySql).toMatch(/credit_recipient_payer_guard_insert/i);
+    expect(creditSafetySql).toMatch(/BALANCE_OVERFLOW/i);
+    expect(creditAggregateSafetySql).toMatch(/credit_allocations a JOIN credits c/i);
+    expect(creditAggregateSafetySql).toMatch(/expenses_ledger_total_scan_guard_update/i);
+    expect(ledgerProjectionSql).not.toMatch(/NOT EXISTS \(SELECT 1 FROM credits credit WHERE credit\.group_id=.*active/i);
+    expect(monthlySummarySql).toMatch(/discover\('credits', 'credit_date'/i);
+  });
+});
 
 describe('friend idempotency migration', () => {
   it('enforces one friend claim per user and operation, independent of group', () => {

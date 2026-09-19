@@ -1,0 +1,17 @@
+import { describe, expect, it } from 'vitest';
+import { validateCreditDraft, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
+
+const application = (id: string, expenseId: string, amount = '10'): CreditApplicationDraft => ({ id, expenseId, amount });
+const allocation = (id: string, personId: string, allocationType: CreditAllocationDraft['allocationType'], amount = '10'): CreditAllocationDraft => ({ id, personId, allocationType, amount });
+
+describe('credit form draft validation', () => {
+  it('requires every visible application row and rejects duplicate expenses', () => {
+    expect(validateCreditDraft([application('a', 'expense-a'), application('b', '')], [], 'direct_provider_offset')).toContain('Complete');
+    expect(validateCreditDraft([application('a', 'expense-a'), application('b', 'expense-a')], [], 'direct_provider_offset')).toContain('only once');
+  });
+
+  it('accepts complete multi-application rows and catches duplicate allocation sides', () => {
+    expect(validateCreditDraft([application('a', 'expense-a'), application('b', 'expense-b')], [], 'direct_provider_offset')).toBeUndefined();
+    expect(validateCreditDraft([], [allocation('a', 'person-a', 'recipient'), allocation('b', 'person-a', 'recipient')], 'member_reimbursement')).toContain('allocation side');
+  });
+});

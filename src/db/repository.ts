@@ -1,13 +1,13 @@
-import { groupSplitDefaultInput, supportedCurrencies, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
+import { groupSplitDefaultInput, supportedCurrencies, type CreditInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
+import type { Activity, AuditEvent, Credit, CreditTransaction, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import { BalanceOverflowError, checkedAddMinor, checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
-import { balanceProjectionQuery, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
+import { balanceProjectionQuery, boundCreditProjectionDelta, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
 import { normalizeExpenseSplitArrangement, sameGroupSplitArrangement } from '../shared/split-default';
 
@@ -22,7 +22,7 @@ const identityHash = async (value: string, key: string) => {
 type Row = Record<string, unknown>;
 
 export class RepositoryError extends Error {
-  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'PEER_LIMIT' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_FILTER' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
+  constructor(readonly code: 'IDEMPOTENCY_CONFLICT' | 'CONFLICT' | 'DATABASE_ERROR' | 'BALANCE_OVERFLOW' | 'SELF_FRIEND' | 'AUTH_IDENTITY_CONFLICT' | 'OWNER_REQUIRED' | 'FINAL_OWNER' | 'INVITATION_INVALID' | 'INVITATION_EXPIRED' | 'INVITATION_REVOKED' | 'MEMBER_REQUIRED' | 'PEER_LIMIT' | 'INVALID_SEARCH' | 'INVALID_CURSOR' | 'INVALID_PAGINATION' | 'INVALID_DATE' | 'INVALID_FILTER' | 'INVALID_SPLIT_DEFAULT' | 'ACCOUNT_DELETION_BLOCKED' | 'INVALID_CREDIT' | 'CREDIT_EXPENSE_LINKED', message: string, readonly details?: Record<string, unknown>) { super(message); }
 }
 const text = (value: unknown) => String(value ?? '');
 const number = (value: unknown) => Number(value ?? 0);
@@ -31,6 +31,16 @@ const minor = (value: unknown) => checkedMinor(value);
 const currency = (value: unknown) => text(value) as Expense['currency'];
 const stableJson = (value: unknown): string => JSON.stringify(value, (_key, nested) => nested && typeof nested === 'object' && !Array.isArray(nested) ? Object.fromEntries(Object.entries(nested as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) : nested);
 export const normalizeCategoryDescription = normalizeCategoryDescriptionValue;
+
+/** Exact floor((application * original) / expense) without ever rounding a
+ * safe integer through a JavaScript Number multiplication. */
+export function exactProportionalMinor(applicationMinor: number, originalMinor: number, expenseMinor: number) {
+  if (![applicationMinor, originalMinor, expenseMinor].every(Number.isSafeInteger) || applicationMinor < 0 || originalMinor < 0 || expenseMinor <= 0) throw new Error('Credit allocation inputs are outside the safe integer range');
+  const quotient = (BigInt(applicationMinor) * BigInt(originalMinor)) / BigInt(expenseMinor);
+  const result = Number(quotient);
+  if (!Number.isSafeInteger(result)) throw new Error('Credit allocation exceeds the safe integer range');
+  return result;
+}
 
 export type LedgerCursor = { date: string; createdAt: string; id: string };
 const cursorText = (value: unknown) => {
@@ -66,7 +76,7 @@ export const decodeTransactionCursor = (value: string | undefined): TransactionC
     const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
     const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)))) as Partial<TransactionCursor>;
     const keys = Object.keys(parsed).sort().join(','), expectedKeys = 'createdAt,date,id,kind,version';
-    if (keys !== expectedKeys || parsed.version !== 1 || typeof parsed.date !== 'string' || !isCalendarDate(parsed.date) || typeof parsed.createdAt !== 'string' || !parsed.createdAt || parsed.createdAt.length > 128 || !Number.isFinite(Date.parse(parsed.createdAt)) || (parsed.kind !== 'expense' && parsed.kind !== 'settlement') || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200) throw new Error('invalid cursor');
+    if (keys !== expectedKeys || parsed.version !== 1 || typeof parsed.date !== 'string' || !isCalendarDate(parsed.date) || typeof parsed.createdAt !== 'string' || !parsed.createdAt || parsed.createdAt.length > 128 || !Number.isFinite(Date.parse(parsed.createdAt)) || (parsed.kind !== 'expense' && parsed.kind !== 'settlement' && parsed.kind !== 'credit') || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200) throw new Error('invalid cursor');
     return { version: 1, date: parsed.date, createdAt: parsed.createdAt, kind: parsed.kind, id: parsed.id };
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The transaction pagination cursor is invalid'); }
 };
@@ -90,7 +100,7 @@ export const assertLikeSearch = (value: string | undefined) => {
 };
 const escapedLike = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 
-type ExportCursor = { groupId: string; expenseCursor?: string | null; settlementCursor?: string | null };
+type ExportCursor = { groupId: string; expenseCursor?: string | null; settlementCursor?: string | null; creditCursor?: string | null };
 const encodeExportCursor = (value: ExportCursor) => {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
   let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -101,8 +111,8 @@ const decodeExportCursor = (value: string): ExportCursor => {
     if (!/^[A-Za-z0-9_-]{1,1024}$/.test(value)) throw new Error('invalid cursor');
     const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
     const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)))) as Partial<ExportCursor>;
-    if (typeof parsed.groupId !== 'string' || !parsed.groupId || (parsed.expenseCursor !== undefined && parsed.expenseCursor !== null && typeof parsed.expenseCursor !== 'string') || (parsed.settlementCursor !== undefined && parsed.settlementCursor !== null && typeof parsed.settlementCursor !== 'string')) throw new Error('invalid cursor');
-    return { groupId: parsed.groupId, expenseCursor: parsed.expenseCursor, settlementCursor: parsed.settlementCursor };
+    if (typeof parsed.groupId !== 'string' || !parsed.groupId || (parsed.expenseCursor !== undefined && parsed.expenseCursor !== null && typeof parsed.expenseCursor !== 'string') || (parsed.settlementCursor !== undefined && parsed.settlementCursor !== null && typeof parsed.settlementCursor !== 'string') || (parsed.creditCursor !== undefined && parsed.creditCursor !== null && typeof parsed.creditCursor !== 'string')) throw new Error('invalid cursor');
+    return { groupId: parsed.groupId, expenseCursor: parsed.expenseCursor, settlementCursor: parsed.settlementCursor, creditCursor: parsed.creditCursor };
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The export pagination cursor is invalid'); }
 };
 
@@ -175,10 +185,11 @@ export class Repository {
   preferenceStatements(userId: string, description: string, category: string | null | undefined, updatedAt = now()) { return this.categoryPreferenceStatements(userId, description, category, updatedAt); }
 
   /** Summary SQL adapters. They intentionally never read group_balance_projection. */
-  private projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement', entityId: string) { return projectionRevisionGuard(revisionId, entityType, entityId); }
+  private projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement' | 'credit', entityId: string) { return projectionRevisionGuard(revisionId, entityType, entityId); }
   private boundExpenseProjectionDelta(expenseId: string, groupId: string, currencyValue: string, payers: Array<{ personId: string; amountMinor: number }>, splits: Array<{ personId: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundExpenseProjectionDelta(this.db, expenseId, groupId, currencyValue, payers, splits, sign, timestamp, revisionId, date); }
   private boundSettlementProjectionDelta(settlementId: string, groupId: string, currencyValue: string, fromPersonId: string, toPersonId: string, amountMinor: number, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundSettlementProjectionDelta(this.db, settlementId, groupId, currencyValue, fromPersonId, toPersonId, amountMinor, sign, timestamp, revisionId, date); }
-  private projectionMutation(groupId: string, timestamp: string, entity: 'expenses' | 'settlements', id: string, revisionId?: string) { return projectionMutation(this.db, groupId, timestamp, entity, id, revisionId); }
+  private boundCreditProjectionDelta(creditId: string, groupId: string, currencyValue: string, allocations: Array<{ personId: string; allocationType: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId: string | undefined, date: string) { return boundCreditProjectionDelta(this.db, creditId, groupId, currencyValue, allocations, sign, timestamp, revisionId, date); }
+  private projectionMutation(groupId: string, timestamp: string, entity: 'expenses' | 'settlements' | 'credits', id: string, revisionId?: string) { return projectionMutation(this.db, groupId, timestamp, entity, id, revisionId); }
 
   async monthlySummaryMaintenance(options: { maxGroups?: number; maxMonths?: number; chunkSize?: number; deadlineMs?: number } = {}) {
     return runMonthlySummaryMaintenance(this.db, options);
@@ -1038,27 +1049,31 @@ export class Repository {
     // below safely under that limit while still hydrating a page in bulk.
     const payerRows = new Map<string, Row[]>();
     const splitRows = new Map<string, Row[]>();
+    const creditRows = new Map<string, Row[]>();
     const ids = rows.map((row) => text(row.id));
     for (let start = 0; start < ids.length; start += 90) {
       const chunk = ids.slice(start, start + 90);
       const placeholders = chunk.map(() => '?').join(',');
       const [ps, ss] = await Promise.all([
-        this.db.prepare(`SELECT expense_id,person_id,amount_minor FROM payers WHERE expense_id IN (${placeholders}) ORDER BY expense_id,rowid`).bind(...chunk).all<Row>(),
+        this.db.prepare(`SELECT expense_id,person_id,amount_minor,NULL AS credit_id,NULL AS subtype,NULL AS delivery_mode,NULL AS credit_date,'payer' AS row_kind FROM payers WHERE expense_id IN (${placeholders}) UNION ALL SELECT a.expense_id,a.amount_minor,a.amount_minor,c.id,c.subtype,c.delivery_mode,c.credit_date,'credit' FROM credit_applications a JOIN credits c ON c.id=a.credit_id WHERE a.expense_id IN (${placeholders}) AND c.deleted_at IS NULL ORDER BY expense_id`).bind(...chunk, ...chunk).all<Row>(),
         this.db.prepare(`SELECT expense_id,person_id,amount_minor,metadata_json FROM splits WHERE expense_id IN (${placeholders}) ORDER BY expense_id,rowid`).bind(...chunk).all<Row>(),
       ]);
-      for (const payer of ps.results) { const expenseId = text(payer.expense_id); payerRows.set(expenseId, [...(payerRows.get(expenseId) ?? []), payer]); }
+      for (const payer of ps.results) { const expenseId = text(payer.expense_id); if (text(payer.row_kind) === 'credit') creditRows.set(expenseId, [...(creditRows.get(expenseId) ?? []), payer]); else payerRows.set(expenseId, [...(payerRows.get(expenseId) ?? []), payer]); }
       for (const split of ss.results) { const expenseId = text(split.expense_id); splitRows.set(expenseId, [...(splitRows.get(expenseId) ?? []), split]); }
     }
     return rows.map((row) => {
       const payers = payerRows.get(text(row.id)) ?? [];
       const splits = splitRows.get(text(row.id)) ?? [];
+      const linkedCredits = creditRows.get(text(row.id)) ?? [];
+      const totalCreditsMinor = linkedCredits.reduce((sum, credit) => sum + minor(credit.amount_minor), 0);
       return {
       id: text(row.id), groupId: text(row.group_id), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
       date: text(row.expense_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
       createdBy: text(row.created_by), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1,
       clientOperationId: row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })(),
       payers: payers.map((p) => ({ personId: text(p.person_id), amountMinor: minor(p.amount_minor) })),
-      splits: splits.map((s) => ({ personId: text(s.person_id), amountMinor: minor(s.amount_minor), metadata: s.metadata_json ? JSON.parse(text(s.metadata_json)) as Record<string, unknown> : undefined })),
+       splits: splits.map((s) => ({ personId: text(s.person_id), amountMinor: minor(s.amount_minor), metadata: s.metadata_json ? JSON.parse(text(s.metadata_json)) as Record<string, unknown> : undefined })),
+       ...(linkedCredits.length ? { linkedCredits: linkedCredits.map((credit) => ({ creditId: text(credit.credit_id), subtype: text(credit.subtype) as Credit['subtype'], amountMinor: minor(credit.amount_minor), date: text(credit.credit_date), deliveryMode: text(credit.delivery_mode) as Credit['deliveryMode'] })), totalCreditsMinor, netCostMinor: minor(row.amount_minor) - totalCreditsMinor } : {}),
       };
     });
   }
@@ -1422,7 +1437,7 @@ export class Repository {
     if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     assertLikeSearch(opts.q);
     for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates');
-    if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
+     if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement' && opts.kind !== 'credit') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
     const cursor = decodeTransactionCursor(opts.cursor);
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
     const args: unknown[] = [];
@@ -1432,23 +1447,27 @@ export class Repository {
           WHERE authorized_member.group_id=e.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL AND authorized_group.deleted_at IS NULL${groupId ? ' AND authorized_member.group_id=?' : ''})`;
     const scopeArgs = userId === undefined ? [groupId] : [userId, ...(groupId ? [groupId] : [])];
     const unionArgs = userId === undefined ? scopeArgs : [userId, ...scopeArgs];
-    args.push(...unionArgs, ...unionArgs);
-    const groupName = userId !== undefined && groupId === undefined ? groupDisplayNameSql('authorized_member') : 'NULL';
+     args.push(...unionArgs, ...unionArgs);
+     const groupName = userId !== undefined ? groupDisplayNameSql('authorized_member') : 'g.name';
     let sql = `WITH transaction_rows AS (
       SELECT e.id,e.group_id,${groupName} AS group_name,e.description,e.amount_minor,e.currency,e.expense_date AS transaction_date,
         e.category,e.notes,NULL AS note,NULL AS from_person_id,NULL AS to_person_id,NULL AS from_name,NULL AS to_name,
-        e.created_by,e.created_at,e.client_operation_id,'expense' AS kind
+         e.created_by,e.created_at,e.client_operation_id,'expense' AS kind,NULL AS subtype,NULL AS delivery_mode
       FROM expenses e JOIN groups g ON g.id=e.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=e.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL'} WHERE ${scope} AND e.deleted_at IS NULL
       UNION ALL
       SELECT s.id,s.group_id,${groupName},NULL,s.amount_minor,s.currency,s.settlement_date AS transaction_date,
         NULL,NULL,s.note,s.from_person_id,s.to_person_id,
         COALESCE(from_person.name,'Deleted account'),COALESCE(to_person.name,'Deleted account'),
-        s.created_by,s.created_at,s.client_operation_id,'settlement' AS kind
+         s.created_by,s.created_at,s.client_operation_id,'settlement' AS kind,NULL AS subtype,NULL AS delivery_mode
       FROM settlements s JOIN groups g ON g.id=s.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=s.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL'}
       LEFT JOIN people from_person ON from_person.id=s.from_person_id
       LEFT JOIN people to_person ON to_person.id=s.to_person_id
-      WHERE ${scope.replaceAll('e.', 's.')} AND s.deleted_at IS NULL
-    ) SELECT * FROM transaction_rows tr WHERE 1=1`;
+       WHERE ${scope.replaceAll('e.', 's.')} AND s.deleted_at IS NULL
+       UNION ALL
+       SELECT c.id,c.group_id,${groupName},NULL,c.amount_minor,c.currency,c.credit_date,NULL,NULL,c.note,NULL,NULL,NULL,NULL,c.created_by,c.created_at,c.client_operation_id,'credit' AS kind,c.subtype,c.delivery_mode
+        FROM credits c JOIN groups g ON g.id=c.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=c.group_id AND authorized_member.user_id=?1 AND authorized_member.deleted_at IS NULL'}
+       WHERE ${userId === undefined ? 'c.group_id=?1' : `EXISTS (SELECT 1 FROM group_members credit_member WHERE credit_member.group_id=c.group_id AND credit_member.user_id=?1 AND credit_member.deleted_at IS NULL${groupId ? ' AND credit_member.group_id=?3' : ''})`} AND c.deleted_at IS NULL
+     ) SELECT * FROM transaction_rows tr WHERE 1=1`;
     if (opts.kind) { sql += ' AND tr.kind=?'; args.push(opts.kind); }
     if (opts.q) { const escaped = escapedLike(opts.q); assertLikeSearch(escaped); const pattern = `%${escaped}%`; sql += " AND (tr.description LIKE ? ESCAPE '\\' OR tr.notes LIKE ? ESCAPE '\\' OR tr.note LIKE ? ESCAPE '\\')"; args.push(pattern, pattern, pattern); }
     if (opts.category) { sql += " AND tr.kind='expense' AND tr.category=?"; args.push(opts.category); }
@@ -1456,9 +1475,9 @@ export class Repository {
     if (opts.from) { sql += ' AND tr.transaction_date>=?'; args.push(opts.from); }
     if (opts.to) { sql += ' AND tr.transaction_date<=?'; args.push(opts.to); }
     if (opts.person) {
-      sql += ` AND ((tr.kind='expense' AND (tr.id IN (SELECT expense_id FROM payers WHERE person_id=?) OR tr.id IN (SELECT expense_id FROM splits WHERE person_id=?)))
-        OR (tr.kind='settlement' AND (tr.from_person_id=? OR tr.to_person_id=?)))`;
-      args.push(opts.person, opts.person, opts.person, opts.person);
+         sql += ` AND ((tr.kind='expense' AND (tr.id IN (SELECT expense_id FROM payers WHERE person_id=?) OR tr.id IN (SELECT expense_id FROM splits WHERE person_id=?)))
+         OR (tr.kind='settlement' AND (tr.from_person_id=? OR tr.to_person_id=?)) OR (tr.kind='credit' AND tr.id IN (SELECT credit_id FROM credit_allocations WHERE person_id=?)))`;
+       args.push(opts.person, opts.person, opts.person, opts.person, opts.person);
     }
     if (cursor) {
       sql += ` AND (tr.transaction_date<? OR (tr.transaction_date=? AND tr.created_at<?)
@@ -1495,12 +1514,13 @@ export class Repository {
        }
      }
     const items: Transaction[] = pageRows.map((row) => {
-      if (text(row.kind) === 'settlement') return {
+       if (text(row.kind) === 'settlement') return {
          kind: 'settlement', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), note: row.note == null ? null : text(row.note), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id),
         fromName: text(row.from_name), toName: text(row.to_name), createdAt: text(row.created_at),
       };
-      const operation = row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })();
+       if (text(row.kind) === 'credit') return { kind: 'credit', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), subtype: text(row.subtype) as CreditTransaction['subtype'], deliveryMode: text(row.delivery_mode) as CreditTransaction['deliveryMode'], amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.transaction_date), note: row.note == null ? null : text(row.note), createdAt: text(row.created_at) };
+       const operation = row.client_operation_id == null ? null : (() => { const value = text(row.client_operation_id); const prefix = `${text(row.group_id)}:`; return value.startsWith(prefix) ? value.slice(prefix.length) : value; })();
       return {
         kind: 'expense', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), description: text(row.description), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), category: row.category == null ? null : text(row.category), notes: row.notes == null ? null : text(row.notes),
@@ -1623,6 +1643,7 @@ export class Repository {
   private static peerLimit(message = 'Peer relationships can have at most two active participants') { return new RepositoryError('PEER_LIMIT', message); }
   private static isUniquenessError(error: unknown) { return error instanceof Error && /unique/i.test(error.message); }
   private static isOccurrenceUnique(error: unknown) { return Repository.isUniquenessError(error) && error instanceof Error && /scheduled_occurrences\.(?:scheduled_expense_id|occurrence_date)/i.test(error.message); }
+  private static isCreditConstraint(error: unknown) { return error instanceof Error && /CREDIT_APPLICATION_INVALID|CREDIT_ALLOCATION_INVALID|CREDIT_EXPENSE_LINKED|CREDIT_RECIPIENT_INVALID/i.test(error.message); }
   private static isRevisionUnique(error: unknown) {
     return Repository.isUnique(error) && error instanceof Error && /revisions\.(entity_type|entity_id|revision)/i.test(error.message);
   }
@@ -1636,6 +1657,9 @@ export class Repository {
       return await this.db.batch(statements);
     } catch (error) {
       if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
+      if (Repository.isCreditConstraint(error)) throw /CREDIT_EXPENSE_LINKED/i.test(error instanceof Error ? error.message : '')
+        ? new RepositoryError('CREDIT_EXPENSE_LINKED', 'The expense is linked to an active credit and cannot be reduced, re-currencyed, deleted, or restored')
+        : new RepositoryError('INVALID_CREDIT', 'The credit applications, recipients, or allocations are no longer valid');
       // A concurrent mutation can collide on the revision number. Only that
       // known unique constraint is a stale-write signal; child/table errors
       // must retain their original meaning and still roll the batch back.
@@ -1674,8 +1698,8 @@ export class Repository {
       args: [JSON.stringify(unique), groupId],
     };
   }
-  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
-    const table = event.entityType === 'expense' ? 'expenses' : 'settlements';
+  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement' | 'credit'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
+    const table = event.entityType === 'expense' ? 'expenses' : event.entityType === 'settlement' ? 'settlements' : 'credits';
     // Resolve the actor's person and name in the same D1 batch as the
     // mutation. The name is a snapshot; emails are intentionally never
     // selected or written to the audit table.
@@ -1858,8 +1882,133 @@ export class Repository {
      ]);
      if (Number((batchResult[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) { await this.throwIfDeleted(userId); throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored'); }
      const current = await this.settlement(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The settlement changed before it could be restored');
-    return current;
+     return current;
+   }
+
+  private mapCredit(row: Row, applications: Row[] = [], allocations: Row[] = []): Credit {
+    return { id: text(row.id), groupId: text(row.group_id), subtype: text(row.subtype) as Credit['subtype'], deliveryMode: text(row.delivery_mode) as Credit['deliveryMode'], amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.credit_date), note: row.note == null ? null : text(row.note), createdBy: text(row.created_by), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1, clientOperationId: row.client_operation_id == null ? null : text(row.client_operation_id), applications: applications.map((item) => ({ expenseId: text(item.expense_id), amountMinor: minor(item.amount_minor), ...(item.expense_description == null ? {} : { expenseDescription: text(item.expense_description) }), ...(item.expense_date == null ? {} : { expenseDate: text(item.expense_date) }) })), allocations: allocations.map((item) => ({ personId: text(item.person_id), allocationType: text(item.allocation_type) as Credit['allocations'][number]['allocationType'], amountMinor: minor(item.amount_minor) })) };
   }
+  private async hydrateCredit(row: Row): Promise<Credit> {
+    const [applications, allocations] = await Promise.all([
+      this.db.prepare('SELECT a.expense_id,a.amount_minor,e.description AS expense_description,e.expense_date FROM credit_applications a JOIN expenses e ON e.id=a.expense_id WHERE a.credit_id=? ORDER BY e.expense_date DESC,e.id').bind(row.id).all<Row>(),
+      this.db.prepare('SELECT person_id,allocation_type,amount_minor FROM credit_allocations WHERE credit_id=? ORDER BY allocation_type,person_id').bind(row.id).all<Row>(),
+    ]);
+    return this.mapCredit(row, applications.results, allocations.results);
+  }
+  private async hydrateCredits(rows: Row[]): Promise<Credit[]> {
+    if (!rows.length) return [];
+    const ids = JSON.stringify(rows.map((row) => text(row.id)));
+    const [applications, allocations] = await Promise.all([
+      this.db.prepare(`SELECT a.credit_id,a.expense_id,a.amount_minor,e.description AS expense_description,e.expense_date FROM credit_applications a JOIN expenses e ON e.id=a.expense_id WHERE a.credit_id IN (SELECT value FROM json_each(?)) ORDER BY a.credit_id,e.expense_date DESC,e.id`).bind(ids).all<Row>(),
+      this.db.prepare(`SELECT credit_id,person_id,allocation_type,amount_minor FROM credit_allocations WHERE credit_id IN (SELECT value FROM json_each(?)) ORDER BY credit_id,allocation_type,person_id`).bind(ids).all<Row>(),
+    ]);
+    const apps = new Map<string, Row[]>(), sides = new Map<string, Row[]>();
+    for (const row of applications.results) { const key = text(row.credit_id); apps.set(key, [...(apps.get(key) || []), row]); }
+    for (const row of allocations.results) { const key = text(row.credit_id); sides.set(key, [...(sides.get(key) || []), row]); }
+    return rows.map((row) => this.mapCredit(row, apps.get(text(row.id)) || [], sides.get(text(row.id)) || []));
+  }
+  async credit(id: string, includeDeleted = false) { const row = await this.db.prepare(`SELECT * FROM credits WHERE id=?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`).bind(id).first<Row>(); return row ? this.hydrateCredit(row) : null; }
+  async creditForUser(id: string, userId: string, includeDeleted = false) {
+    const row = await this.db.prepare(`SELECT c.* FROM credits c JOIN groups g ON g.id=c.group_id JOIN group_members gm ON gm.group_id=g.id WHERE c.id=? AND gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL${includeDeleted ? '' : ' AND c.deleted_at IS NULL'}`).bind(id, userId).first<Row>();
+    return row ? this.hydrateCredit(row) : null;
+  }
+  async creditPage(groupId: string, options: { limit?: number; cursor?: string } = {}) {
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 100), cursor = decodeLedgerCursor(options.cursor);
+    let sql = 'SELECT * FROM credits WHERE group_id=? AND deleted_at IS NULL'; const args: unknown[] = [groupId];
+    if (cursor) { sql += ' AND (credit_date<? OR (credit_date=? AND created_at<?) OR (credit_date=? AND created_at=? AND id<?))'; args.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.id); }
+    sql += ' ORDER BY credit_date DESC,created_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
+    const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results, pageRows = rows.length > limit ? rows.slice(0, limit) : rows;
+    const items = await this.hydrateCredits(pageRows);
+    const last = pageRows[pageRows.length - 1]; return { items, nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.credit_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
+  }
+  private async creditDefaults(groupId: string, input: CreditInput): Promise<{ allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } }> {
+    if (input.delivery_mode === 'direct_provider_offset' && input.allocations.length) throw new RepositoryError('INVALID_CREDIT', 'Direct-provider allocations are derived from linked expense payers and splits');
+    if (!input.applications.length || input.allocations.length) return { allocations: input.allocations };
+    const requested = JSON.stringify(input.applications);
+    const rows = (await this.db.prepare(`SELECT e.id,e.version,e.amount_minor,e.currency,e.group_id,
+        COALESCE((SELECT json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)) FROM (SELECT person_id,amount_minor FROM payers WHERE expense_id=e.id ORDER BY person_id)),'[]') AS payers_json,
+        COALESCE((SELECT json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)) FROM (SELECT person_id,amount_minor FROM splits WHERE expense_id=e.id ORDER BY person_id)),'[]') AS splits_json
+      FROM expenses e JOIN json_each(?) requested ON json_extract(requested.value,'$.expense_id')=e.id
+      WHERE e.group_id=? AND e.deleted_at IS NULL ORDER BY e.id`).bind(requested, groupId).all<Row>()).results;
+    const applicationByExpense = new Map(input.applications.map((item) => [item.expense_id, item.amount_minor]));
+    const parsed = (value: unknown) => { try { return JSON.parse(text(value)) as Array<{ person_id: string; amount_minor: number }>; } catch { return []; } };
+    const side = (type: 'recipient' | 'beneficiary') => {
+      const totals = new Map<string, number>();
+      for (const row of rows) {
+        const application = applicationByExpense.get(text(row.id));
+        if (application === undefined) continue;
+        const expenseAmount = minor(row.amount_minor), source = parsed(type === 'recipient' ? row.payers_json : row.splits_json);
+        for (const item of source) {
+          const share = exactProportionalMinor(application, minor(item.amount_minor), expenseAmount);
+          totals.set(item.person_id, checkedAddMinor(totals.get(item.person_id) || 0, share));
+        }
+      }
+      const result = [...totals.entries()].map(([person_id, amount_minor]) => ({ person_id, allocation_type: type, amount_minor }));
+      const total = result.reduce((sum, item) => checkedAddMinor(sum, item.amount_minor), 0), remainder = input.amount_minor - total;
+      if (remainder < 0 || (remainder > 0 && !result.length)) throw new RepositoryError('INVALID_CREDIT', 'The linked expense split cannot produce balanced credit allocations');
+      if (remainder > 0) result[0].amount_minor = checkedAddMinor(result[0].amount_minor, remainder);
+      return result.filter((item) => item.amount_minor > 0);
+    };
+    if (input.delivery_mode !== 'direct_provider_offset') throw new RepositoryError('INVALID_CREDIT', 'Member reimbursements require recipient and beneficiary allocations');
+    const guardParts: string[] = [], guardArgs: unknown[] = [];
+    for (const row of rows) {
+      guardParts.push(`EXISTS (SELECT 1 FROM expenses e WHERE e.id=? AND e.group_id=? AND e.version=? AND e.amount_minor=? AND e.currency=? AND e.deleted_at IS NULL
+        AND (SELECT COALESCE(json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)),'[]') FROM (SELECT person_id,amount_minor FROM payers WHERE expense_id=e.id ORDER BY person_id))=?
+        AND (SELECT COALESCE(json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)),'[]') FROM (SELECT person_id,amount_minor FROM splits WHERE expense_id=e.id ORDER BY person_id))=?)`);
+      guardArgs.push(text(row.id), groupId, number(row.version), minor(row.amount_minor), text(row.currency), text(row.payers_json), text(row.splits_json));
+    }
+    return { allocations: [...side('recipient'), ...side('beneficiary')], guard: { sql: guardParts.length ? guardParts.join(' AND ') : '0=1', args: guardArgs } };
+  }
+  private creditInputCheck(input: CreditInput, allocations: CreditInput['allocations']) {
+    if (input.delivery_mode === 'direct_provider_offset' && !input.applications.length) throw new RepositoryError('INVALID_CREDIT', 'Direct-provider credits must link an expense');
+    if (input.applications.length && input.applications.reduce((sum, item) => checkedAddMinor(sum, item.amount_minor), 0) !== input.amount_minor) throw new RepositoryError('INVALID_CREDIT', 'Linked applications must total the credit amount');
+    for (const type of ['recipient', 'beneficiary'] as const) { const total = allocations.filter((item) => item.allocation_type === type).reduce((sum, item) => checkedAddMinor(sum, item.amount_minor), 0); if (total !== input.amount_minor) throw new RepositoryError('INVALID_CREDIT', `${type} allocations must total the credit amount`); }
+  }
+  async createCredit(groupId: string, userId: string, input: CreditInput) {
+    const hash = stableJson(input), operation = input.client_operation_id ? await this.operation('credit.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
+    if (!operation.claim) { const existing = await this.credit(operation.id); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
+    let defaults: { allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
+    try { defaults = await this.creditDefaults(groupId, input); this.creditInputCheck(input, defaults.allocations); } catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); throw error; }
+    const allocations = defaults.allocations;
+    const id = operation.id, t = now(), actor = this.activeMutationGuard(groupId, userId), participants = this.activeParticipantGuard(groupId, allocations.map((item) => item.person_id));
+    const after: Credit = { id, groupId, subtype: input.subtype, deliveryMode: input.delivery_mode, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, createdBy: userId, createdAt: t, updatedAt: t, deletedAt: null, version: 1, clientOperationId: input.client_operation_id ?? null, applications: input.applications.map((item) => ({ expenseId: item.expense_id, amountMinor: item.amount_minor })), allocations: allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })) };
+    const statements = [
+      ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}${defaults.guard ? ` AND ${defaults.guard.sql}` : ''}`).bind('credit.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args, ...(defaults.guard?.args || []))] : []),
+      this.db.prepare(`INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,note,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}${defaults.guard ? ` AND ${defaults.guard.sql}` : ''}`).bind(id, groupId, input.subtype, input.delivery_mode, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, id, ...actor.args, ...participants.args, ...(defaults.guard?.args || [])),
+      this.db.prepare(`INSERT INTO credit_applications(credit_id,expense_id,amount_minor) SELECT ?,json_extract(value,'$.expense_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM credits WHERE id=? AND version=1)`).bind(id, JSON.stringify(input.applications), id),
+      this.db.prepare(`INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.allocation_type'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE EXISTS (SELECT 1 FROM credits WHERE id=? AND version=1)`).bind(id, JSON.stringify(allocations), id),
+      this.auditInsert({ groupId, entityType: 'credit', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
+      ...this.boundCreditProjectionDelta(id, groupId, input.currency, allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })), 1, t, undefined, input.date),
+      this.projectionMutation(groupId, t, 'credits', id),
+    ];
+    try { const result = await this.db.batch(statements); const parentIndex = input.client_operation_id ? 1 : 0; if (Number((result[parentIndex] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0 && defaults.guard) throw new RepositoryError('CONFLICT', 'The linked expense changed while the credit defaults were being calculated'); } catch (error) { if (error instanceof RepositoryError) throw error; if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); if (Repository.isCreditConstraint(error)) throw new RepositoryError('INVALID_CREDIT', 'The credit applications, recipients, or allocations are no longer valid'); if (!input.client_operation_id || !Repository.isUnique(error)) throw error; const existing = await this.existingClaim('credit.create', userId, groupId, input.client_operation_id); if (existing && text(existing.request_hash) === hash) { const found = await this.credit(text(existing.entity_id)); if (found) return found; } throw error; }
+    const created = await this.credit(id); if (!created) throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or a participant is no longer active'); return created;
+  }
+  async updateCredit(id: string, userId: string, input: CreditInput) {
+    if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required');
+    const old = await this.creditForUser(id, userId); if (!old || old.version !== input.version) throw new RepositoryError('CONFLICT', 'The credit was changed by another request');
+    let defaults: { allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
+    try { defaults = await this.creditDefaults(old.groupId, input); this.creditInputCheck(input, defaults.allocations); } catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); throw error; }
+    const allocations = defaults.allocations, next = input.version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, allocations.map((item) => item.person_id));
+    const after = { ...old, subtype: input.subtype, deliveryMode: input.delivery_mode, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, updatedAt: t, version: next, applications: input.applications.map((item) => ({ expenseId: item.expense_id, amountMinor: item.amount_minor })), allocations: allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })) };
+    const revisionGuard = this.projectionRevisionGuard(revisionId, 'credit', id);
+    const statements = [
+      this.db.prepare(`UPDATE credits SET subtype=?,delivery_mode=?,amount_minor=?,currency=?,credit_date=?,note=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql} AND ${participants.sql}${defaults.guard ? ` AND ${defaults.guard.sql}` : ''}`).bind(input.subtype, input.delivery_mode, input.amount_minor, input.currency, input.date, input.note ?? null, t, next, revisionId, id, input.version, ...actor.args, ...participants.args, ...(defaults.guard?.args || [])),
+      this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM credits WHERE id=? AND version=?)').bind(revisionId, 'credit', id, input.version, JSON.stringify(old), userId, t, id, next),
+      ...this.boundCreditProjectionDelta(id, old.groupId, old.currency, old.allocations, -1, t, revisionId, old.date),
+      this.db.prepare(`DELETE FROM credit_applications WHERE credit_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
+      this.db.prepare(`DELETE FROM credit_allocations WHERE credit_id=? AND ${revisionGuard.sql}`).bind(id, ...revisionGuard.args),
+      this.db.prepare(`INSERT INTO credit_applications(credit_id,expense_id,amount_minor) SELECT ?,json_extract(value,'$.expense_id'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(input.applications), ...revisionGuard.args),
+      this.db.prepare(`INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) SELECT ?,json_extract(value,'$.person_id'),json_extract(value,'$.allocation_type'),json_extract(value,'$.amount_minor') FROM json_each(?) WHERE ${revisionGuard.sql}`).bind(id, JSON.stringify(allocations), ...revisionGuard.args),
+      this.auditInsert({ groupId: old.groupId, entityType: 'credit', entityId: id, version: next, action: 'update', actorId: userId, occurredAt: t, before: old, after, revisionId }),
+      ...this.boundCreditProjectionDelta(id, old.groupId, input.currency, allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })), 1, t, revisionId, input.date),
+      this.projectionMutation(old.groupId, t, 'credits', id, revisionId),
+    ];
+     try { const result = await this.conditionalBatch(statements); if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('CONFLICT', defaults.guard ? 'The credit or linked expense was changed by another request' : 'The credit was changed by another request'); } catch (error) { if (error instanceof RepositoryError) throw error; if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); if (Repository.isCreditConstraint(error)) throw new RepositoryError('INVALID_CREDIT', 'The credit applications or allocations are no longer valid'); throw error; }
+    const current = await this.credit(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The credit was changed by another request'); return current;
+  }
+  async deleteCredit(id: string, userId: string, version: number) { const old = await this.creditForUser(id, userId); if (!old) return false; if (old.version !== version) throw new RepositoryError('CONFLICT', 'The credit was changed by another request'); const t = now(), next = version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId); const result = await this.conditionalBatch([this.db.prepare(`UPDATE credits SET deleted_at=?,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NULL AND ${actor.sql}`).bind(t, t, next, revisionId, id, version, ...actor.args), this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM credits WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NOT NULL)').bind(revisionId, 'credit', id, version, JSON.stringify(old), userId, t, id, next, revisionId), ...this.boundCreditProjectionDelta(id, old.groupId, old.currency, old.allocations, -1, t, revisionId, old.date), this.auditInsert({ groupId: old.groupId, entityType: 'credit', entityId: id, version: next, action: 'delete', actorId: userId, occurredAt: t, before: old, after: null, revisionId, mutationMarker: revisionId }), this.projectionMutation(old.groupId, t, 'credits', id, revisionId)]); if (Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 1) === 0) throw new RepositoryError('CONFLICT', 'The credit was changed by another request'); return true; }
+   async restoreCredit(id: string, userId: string, version: number) { const old = await this.creditForUser(id, userId, true); if (!old || !old.deletedAt || !this.withinRestoreWindow(old.deletedAt) || old.version !== version) throw new RepositoryError('CONFLICT', 'The deleted credit is unavailable or was changed by another request'); const next = version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), after = { ...old, deletedAt: null, updatedAt: t, version: next }; try { await this.conditionalBatch([this.db.prepare(`UPDATE credits SET deleted_at=NULL,updated_at=?,version=?,projection_mutation_id=? WHERE id=? AND version=? AND deleted_at IS NOT NULL AND ${actor.sql}`).bind(t, next, revisionId, id, version, ...actor.args), this.db.prepare('INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM credits WHERE id=? AND version=? AND projection_mutation_id=? AND deleted_at IS NULL)').bind(revisionId, 'credit', id, next, JSON.stringify(old), userId, t, id, next, revisionId), ...this.boundCreditProjectionDelta(id, old.groupId, old.currency, old.allocations, 1, t, revisionId, old.date), this.auditInsert({ groupId: old.groupId, entityType: 'credit', entityId: id, version: next, action: 'restore', actorId: userId, occurredAt: t, before: old, after, revisionId, mutationMarker: revisionId }), this.projectionMutation(old.groupId, t, 'credits', id, revisionId)]); } catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); if (Repository.isCreditConstraint(error)) throw new RepositoryError('INVALID_CREDIT', 'The credit cannot be restored because its applications are no longer valid'); throw error; } const current = await this.credit(id); if (!current || current.version !== next) throw new RepositoryError('CONFLICT', 'The credit changed before it could be restored'); return current; }
 
   async revisions(type: string, id: string) {
     const rows = (await this.db.prepare('SELECT id,entity_type,entity_id,revision,snapshot_json,created_by,created_at FROM revisions WHERE entity_type=? AND entity_id=? ORDER BY revision DESC').bind(type, id).all<Row>()).results;
@@ -1890,7 +2039,7 @@ export class Repository {
       Number.isSafeInteger(parsedAmount) ? `Amount ${text(currencyValue)} ${(parsedAmount / 100).toFixed(2)}` : '',
       typeof value('date', 'expense_date') === 'string' || typeof value('settlementDate', 'settlement_date') === 'string' ? `Date ${text(value('date', 'expense_date') ?? value('settlementDate', 'settlement_date'))}` : '',
       entityType === 'expense' && typeof value('notes', 'notes') === 'string' && value('notes', 'notes') ? `Notes “${value('notes', 'notes')}”` : '',
-      entityType === 'settlement' && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',
+       (entityType === 'settlement' || entityType === 'credit') && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',
       value('fromPersonId', 'from_person_id') !== undefined || value('toPersonId', 'to_person_id') !== undefined ? 'Participants updated' : '',
       value('deletedAt', 'deleted_at') != null ? 'Marked deleted' : '',
     ].filter(Boolean);
@@ -1950,7 +2099,8 @@ export class Repository {
         const expenseRows = await this.db.prepare("SELECT id,'expense' AS entity_type FROM expenses WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>();
         if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
         const settlementRows = await this.db.prepare("SELECT id,'settlement' AS entity_type FROM settlements WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>();
-       const transactions = [...expenseRows.results, ...settlementRows.results].sort((left, right) => text(left.id).localeCompare(text(right.id))).slice(0, maxTransactions);
+        const creditRows = await this.db.prepare("SELECT id,'credit' AS entity_type FROM credits WHERE group_id=? ORDER BY id LIMIT ?").bind(groupId, maxTransactions).all<Row>();
+        const transactions = [...expenseRows.results, ...settlementRows.results, ...creditRows.results].sort((left, right) => text(left.id).localeCompare(text(right.id))).slice(0, maxTransactions);
       transactionsScanned += transactions.length;
        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
        const transactionResult = await this.db.batch([
@@ -1958,7 +2108,11 @@ export class Repository {
         // Occurrences are both schedule children and expense FK children.
          this.db.prepare(`DELETE FROM scheduled_occurrences WHERE rowid IN (SELECT occurrence.rowid FROM scheduled_occurrences occurrence JOIN expenses expense ON expense.id=occurrence.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
          this.db.prepare(`DELETE FROM payers WHERE rowid IN (SELECT payer.rowid FROM payers payer JOIN expenses expense ON expense.id=payer.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
-         this.db.prepare(`DELETE FROM splits WHERE rowid IN (SELECT split.rowid FROM splits split JOIN expenses expense ON expense.id=split.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM splits WHERE rowid IN (SELECT split.rowid FROM splits split JOIN expenses expense ON expense.id=split.expense_id WHERE expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM credit_allocations WHERE rowid IN (SELECT allocation.rowid FROM credit_allocations allocation JOIN credits credit ON credit.id=allocation.credit_id WHERE credit.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM credit_applications WHERE rowid IN (SELECT application.rowid FROM credit_applications application JOIN credits credit ON credit.id=application.credit_id WHERE credit.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM revisions WHERE rowid IN (SELECT revision.rowid FROM revisions revision JOIN credits credit ON credit.id=revision.entity_id WHERE revision.entity_type='credit' AND credit.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
+          this.db.prepare(`DELETE FROM credits WHERE rowid IN (SELECT credit.rowid FROM credits credit WHERE credit.group_id=? AND NOT EXISTS (SELECT 1 FROM credit_applications application WHERE application.credit_id=credit.id) AND NOT EXISTS (SELECT 1 FROM credit_allocations allocation WHERE allocation.credit_id=credit.id) AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.entity_type='credit' AND revision.entity_id=credit.id) LIMIT ?)` ).bind(groupId, maxTransactions),
          this.db.prepare(`DELETE FROM revisions WHERE rowid IN (SELECT revision.rowid FROM revisions revision JOIN expenses expense ON expense.id=revision.entity_id WHERE revision.entity_type='expense' AND expense.group_id=? LIMIT ?)` ).bind(groupId, maxTransactions),
         this.db.prepare(`DELETE FROM expenses WHERE rowid IN (SELECT expense.rowid FROM expenses expense WHERE expense.group_id=?
           AND NOT EXISTS (SELECT 1 FROM attachments attachment WHERE attachment.expense_id=expense.id)
@@ -1980,10 +2134,11 @@ export class Repository {
           AND NOT EXISTS (SELECT 1 FROM scheduled_splits split WHERE split.scheduled_expense_id=schedule.id)
            LIMIT ?)` ).bind(groupId, maxTransactions),
       ]);
-      transactionsPurged += Number((transactionResult[5] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
-      transactionsPurged += Number((transactionResult[7] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+       transactionsPurged += Number((transactionResult[7] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+       transactionsPurged += Number((transactionResult[9] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
+       transactionsPurged += Number((transactionResult[11] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
-       const remainingTransaction = await this.db.prepare('SELECT 1 FROM expenses WHERE group_id=? UNION ALL SELECT 1 FROM settlements WHERE group_id=? LIMIT 1').bind(groupId, groupId).first<Row>();
+        const remainingTransaction = await this.db.prepare('SELECT 1 FROM expenses WHERE group_id=? UNION ALL SELECT 1 FROM settlements WHERE group_id=? UNION ALL SELECT 1 FROM credits WHERE group_id=? LIMIT 1').bind(groupId, groupId, groupId).first<Row>();
        if (!withinDeadline(options.deadlineMs)) { incomplete = true; break; }
        const remainingSchedule = await this.db.prepare('SELECT 1 FROM scheduled_expenses WHERE group_id=? LIMIT 1').bind(groupId).first<Row>();
       if (remainingTransaction || remainingSchedule) {
@@ -2002,7 +2157,8 @@ export class Repository {
         const auditEventsDelete = this.db.prepare('DELETE FROM audit_events WHERE rowid IN (SELECT rowid FROM audit_events WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions);
         const parentDelete = this.db.prepare(`DELETE FROM groups WHERE id=? AND deleted_at IS NOT NULL AND deleted_at<?
            AND NOT EXISTS (SELECT 1 FROM expenses child WHERE child.group_id=groups.id)
-           AND NOT EXISTS (SELECT 1 FROM settlements child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM settlements child WHERE child.group_id=groups.id)
+            AND NOT EXISTS (SELECT 1 FROM credits child WHERE child.group_id=groups.id)
            AND NOT EXISTS (SELECT 1 FROM scheduled_expenses child WHERE child.group_id=groups.id)
            AND NOT EXISTS (SELECT 1 FROM group_members child WHERE child.group_id=groups.id)
            AND NOT EXISTS (SELECT 1 FROM group_invitations child WHERE child.group_id=groups.id)
@@ -2040,6 +2196,9 @@ export class Repository {
           this.db.prepare('DELETE FROM group_invitations WHERE rowid IN (SELECT rowid FROM group_invitations WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
          this.db.prepare('DELETE FROM group_split_defaults WHERE rowid IN (SELECT rowid FROM group_split_defaults WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
          this.db.prepare('DELETE FROM idempotency_keys WHERE rowid IN (SELECT rowid FROM idempotency_keys WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM credit_allocations WHERE rowid IN (SELECT credit_allocations.rowid FROM credit_allocations JOIN credits ON credits.id=credit_allocations.credit_id WHERE credits.group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM credit_applications WHERE rowid IN (SELECT credit_applications.rowid FROM credit_applications JOIN credits ON credits.id=credit_applications.credit_id WHERE credits.group_id=? LIMIT ?)').bind(groupId, maxTransactions),
+         this.db.prepare('DELETE FROM credits WHERE rowid IN (SELECT rowid FROM credits WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         this.db.prepare('DELETE FROM group_members WHERE rowid IN (SELECT rowid FROM group_members WHERE group_id=? LIMIT ?)').bind(groupId, maxTransactions),
         // The parent delete repeats the dependent checks in the same D1
         // batch. It therefore cannot race a later metadata insert and never
@@ -2069,8 +2228,14 @@ export class Repository {
         SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.group_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
         FROM expenses e WHERE e.deleted_at IS NULL
         UNION ALL
-        SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
-        FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
+         SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
+         FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
+         UNION ALL
+         SELECT 'credit',c.id,c.id,1,c.group_id,c.note,c.amount_minor,c.currency,c.credit_date,NULL,NULL,c.created_at
+         FROM credits c WHERE c.deleted_at IS NULL
+         UNION ALL
+         SELECT 'credit_deleted',c.id,c.id,0,c.group_id,c.note,c.amount_minor,c.currency,c.credit_date,NULL,NULL,c.created_at
+         FROM credits c WHERE c.deleted_at IS NOT NULL
       ) activity JOIN groups g ON g.id=activity.group_id JOIN group_members gm ON gm.group_id=g.id
        WHERE gm.user_id=? AND gm.deleted_at IS NULL AND g.deleted_at IS NULL${groupId ? ' AND activity.group_id=?' : ''}${boundary}
        ORDER BY activity.created_at DESC,activity.id DESC LIMIT ?
@@ -2099,16 +2264,17 @@ export class Repository {
     ) WHERE category IS NOT NULL AND trim(category)<>'' ORDER BY lower(category),category`).bind(userId, userId, userId).all<Row>()).results;
     return rows.map((row) => text(row.category));
   }
-  async groupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null } = {}) {
+  async groupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null; creditCursor?: string | null } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
-    const [g, members, splitDefault, expenses, settlements] = await Promise.all([
+    const [g, members, splitDefault, expenses, settlements, credits] = await Promise.all([
       this.db.prepare('SELECT * FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>().then(mapGroup),
       this.members(groupId),
       this.getGroupSplitDefault(groupId),
       options.expenseCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.expensePage(groupId, { limit, cursor: options.expenseCursor }),
       options.settlementCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.settlementPage(groupId, { limit, cursor: options.settlementCursor }),
+      options.creditCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.creditPage(groupId, { limit: 100, cursor: options.creditCursor }),
     ]);
-    return { version: 1, exportedAt: now(), group: g, splitDefault, members, expenses: expenses.items, settlements: settlements.items, nextCursor: expenses.nextCursor || settlements.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: settlements.nextCursor ?? null } : undefined };
+    return { version: 1, exportedAt: now(), group: g, splitDefault, members, expenses: expenses.items, settlements: settlements.items, credits: credits.items, nextCursor: expenses.nextCursor || settlements.nextCursor || credits.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: settlements.nextCursor ?? null, credits: credits.nextCursor ?? null } : undefined };
   }
   async exportPage(userId: string, options: { groupCursor?: string; limit?: number } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 1, 1), 2);
@@ -2135,16 +2301,17 @@ export class Repository {
     if (cursor && !groupId) throw new RepositoryError('INVALID_CURSOR', 'The export pagination cursor is invalid');
     let expenseCursor = cursor?.expenseCursor;
     let settlementCursor = cursor?.settlementCursor;
+    let creditCursor = cursor?.creditCursor;
     const groups = [];
     let nextCursor: string | undefined;
     while (groupId && groups.length < limit) {
-      const group = await this.groupExportPage(groupId, { limit: 100, expenseCursor, settlementCursor });
+       const group = await this.groupExportPage(groupId, { limit: 100, expenseCursor, settlementCursor, creditCursor });
       groups.push(group);
       const continuation = group.nextCursor;
       if (continuation) {
         // Do not advance to another group until both streams in this group
         // are exhausted. This is the cursor boundary that prevents truncation.
-        nextCursor = encodeExportCursor({ groupId, expenseCursor: continuation.expenses, settlementCursor: continuation.settlements });
+         nextCursor = encodeExportCursor({ groupId, expenseCursor: continuation.expenses, settlementCursor: continuation.settlements, creditCursor: continuation.credits });
         break;
       }
       const followingGroup = await nextGroup(groupId);
@@ -2154,8 +2321,9 @@ export class Repository {
         break;
       }
       groupId = followingGroup;
-      expenseCursor = undefined;
-      settlementCursor = undefined;
+       expenseCursor = undefined;
+       settlementCursor = undefined;
+       creditCursor = undefined;
     }
     return { version: 1, exportedAt: now(), groups, nextCursor };
   }
