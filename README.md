@@ -45,8 +45,28 @@ keyboard and accessibility-semantic checks:
 
 ```sh
 npm run test:e2e
+npm run test:e2e:local
 npm run test:e2e:audit
 ```
+
+`npm run test:e2e` is always the strict, revision-coupled command: Playwright
+chooses the browser revision that matches the installed package, and it ignores
+all local override variables because it uses the base `playwright.config.ts`.
+`test:e2e:local` is a safe compatibility escape hatch for a pre-existing browser
+cache. The wrapper validates the selected path, hands it to the separate local
+config, and only that config applies `executablePath`. Only this wrapper
+consumes
+`BILLSPLIT_PLAYWRIGHT_EXECUTABLE_PATH`; it validates that explicit path, or
+reads `PLAYWRIGHT_BROWSERS_PATH` (default `/ms-playwright`) and verifies regular
+accessible executable files. Discovery prefers the highest numeric
+`chromium_headless_shell-*` revision, then falls back to the highest numeric
+`chromium-*` full-browser revision. Linux x64 and arm64 cache layouts are
+supported. It prints the selected path and revision and never installs,
+renames, or symlinks a browser. Automatic discovery refuses whenever `CI` is
+non-empty except case-insensitive `0` or `false` (unset and empty are allowed);
+an explicit executable remains an opt-in and is validated before Playwright
+starts. The override may be incompatible with the installed Playwright
+revision, so CI should continue to use the strict command.
 
 The runtime image currently provides Chromium only (`/ms-playwright`); no
 WebKit project is enabled in default CI. Add a separately provisioned,

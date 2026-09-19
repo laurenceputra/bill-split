@@ -133,7 +133,7 @@ export function RefundExpensePickerOptions({ expenses, rows, rowId, editingCredi
 function Loading() { return <p className="muted" role="status">Loading…</p>; }
 function ConnectionBanner({ detail }: { detail: string }) { return <p className="offline-banner" role="status">Offline · {detail}</p>; }
 
-function AllocationRows({ rows, label, currency, people, currentPersonId, onChange, onRemove, minimumRows, showErrors, error }: {
+export function AllocationRows({ rows, label, currency, people, currentPersonId, onChange, onRemove, minimumRows, showErrors, error }: {
   rows: Allocation[];
   label: string;
   currency: Currency;
@@ -157,8 +157,8 @@ function AllocationRows({ rows, label, currency, people, currentPersonId, onChan
         <input required inputMode="decimal" value={row.amount} onChange={(event) => onChange(row.id, { amount: event.target.value, touched: true })} />
       </Field>
       {rows.length > minimumRows ? <Button type="button" variant="secondary" onClick={() => onRemove(row.id)}>Remove</Button> : null}
-      {showErrors && error ? <p role="alert" className="field-error">{error}</p> : null}
     </div>)}
+    {showErrors && error ? <p role="alert" className="field-error">{error}</p> : null}
   </>;
 }
 
@@ -451,7 +451,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
             {cursor ? <Button type="button" variant="secondary" disabled={!online || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading expenses…' : 'Load more expenses'}</Button> : null}
             {expenseError ? <p role="alert">{refundErrorText(expenseError)} <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense details</Button></p> : null}
             {expenseResource.error ? <p className="cache-status" role="status">Showing cached eligible expenses; they may be out of date. <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense list</Button></p> : null}
-          </> : <p className="muted">Standalone records do not change an expense. Explicitly identify who received the money and whose costs should this reduce.</p>}
+           </> : <p className="muted">Standalone records do not change an expense. Explicitly identify who received the money and whose costs this should reduce.</p>}
         </fieldset></Surface>
 
         <Surface><fieldset><legend>Money flow</legend>

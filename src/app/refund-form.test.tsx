@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create } from 'react-test-renderer';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { Credit, Expense, GroupResponse } from '../shared/types';
-import { beneficiaryRowsComplete, beneficiarySnapshotMatches, buildRefundInput, createRefundOperationController, initialRefundApplications, RefundCreateRoute, RefundExpensePickerOptions, RefundForm, refundAllocationPeople, refundApplicationsForPath, refundBeneficiaryPreviewRows, refundErrorText, refundExpenseOptions, removeRefundAllocation } from './refund-form';
+import { AllocationRows, beneficiaryRowsComplete, beneficiarySnapshotMatches, buildRefundInput, createRefundOperationController, initialRefundApplications, RefundCreateRoute, RefundExpensePickerOptions, RefundForm, refundAllocationPeople, refundApplicationsForPath, refundBeneficiaryPreviewRows, refundErrorText, refundExpenseOptions, removeRefundAllocation } from './refund-form';
 import { ApiError } from './api';
 import { resourceKeys, seedResource } from './resource-cache';
 
@@ -65,6 +65,25 @@ describe('refund expense picker behavior', () => {
     vi.stubGlobal('window', { location: { pathname: '/', search: '', hash: '' } });
     const markup = renderToStaticMarkup(<MemoryRouter initialEntries={['/groups/group-1/refund/new']}><Routes><Route path="/groups/:id/refund/new" element={<RefundCreateRoute />} /></Routes></MemoryRouter>);
     expect(markup).toContain('Loading');
+  });
+
+  it('renders one shared allocation validation error after multiple rows', () => {
+    const markup = renderToStaticMarkup(<AllocationRows
+      rows={[
+        { id: 'recipient-1', personId: 'person-1', allocationType: 'recipient', amount: '0.25' },
+        { id: 'recipient-2', personId: 'person-2', allocationType: 'recipient', amount: '0.25' },
+      ]}
+      label="Recipient"
+      currency="USD"
+      people={[{ personId: 'person-1', name: 'One' }, { personId: 'person-2', name: 'Two' }]}
+      onChange={() => undefined}
+      onRemove={() => undefined}
+      minimumRows={1}
+      showErrors
+      error="Recipient amounts must total the refund."
+    />);
+    expect((markup.match(/role="alert"/g) || []).length).toBe(1);
+    expect(markup.indexOf('Recipient amounts must total the refund.')).toBeGreaterThan(markup.lastIndexOf('class="allocation-row"'));
   });
 
   it('offers active allocation members for creation and only retained inactive snapshots for edits', () => {
