@@ -188,6 +188,92 @@ test('transaction filter disclosure remains native and opens for URL filters', a
   await expect(disclosure).toHaveJSProperty('open', false);
 });
 
+test('completed transaction searches preserve cached results on narrow and desktop layouts', async ({ authenticatedPage: page }) => {
+  const submitSearch = async (search: Locator, value: string, result: string) => {
+    await search.fill(value);
+    await search.press('Enter');
+    await expect(page).toHaveURL(new RegExp(`[?&]q=${value}(?:&|$)`));
+    await expect(page.getByText(result)).toBeVisible();
+  };
+
+  for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/groups/${richGroupId}/transactions`);
+    const disclosure = page.locator('details.transaction-filters-disclosure');
+    await disclosure.locator('summary').click();
+    const search = page.getByLabel('Search');
+    await submitSearch(search, 'dinner', 'Dinner by the canal (edited)');
+    await submitSearch(search, 'hotel', 'Hotel near the station');
+
+    await search.fill('dinner');
+    await page.evaluate(() => {
+      type Observation = { loading: boolean; empty: boolean; dinner: boolean; removedDinner: boolean };
+      const panel = document.querySelector('.history-panel');
+      if (!panel) throw new Error('Transaction history panel is unavailable');
+      const observations: Observation[] = [];
+      const read = (): Observation => ({
+        loading: [...panel.querySelectorAll('[role="status"]')].some((element) => element.textContent?.trim() === 'Loading…'),
+        empty: panel.querySelector('.empty') !== null,
+        dinner: panel.textContent?.includes('Dinner by the canal (edited)') === true,
+        removedDinner: false,
+      });
+      const observer = new MutationObserver((records) => observations.push({ ...read(), removedDinner: records.some((record) => [...record.removedNodes].some((node) => node.textContent?.includes('Dinner by the canal (edited)'))) }));
+      observer.observe(panel, { attributes: true, childList: true, characterData: true, subtree: true });
+      (window as Window & { __transactionSearchObserver?: { observer: MutationObserver; observations: Observation[] } }).__transactionSearchObserver = { observer, observations };
+    });
+    await search.press('Enter');
+    await expect(page).toHaveURL(new RegExp('[?&]q=dinner(?:&|$)'));
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    const cachedReturnObservations = await page.evaluate(() => {
+      const handle = (window as Window & { __transactionSearchObserver?: { observer: MutationObserver; observations: Array<{ loading: boolean; empty: boolean; dinner: boolean; removedDinner: boolean }> } }).__transactionSearchObserver;
+      handle?.observer.disconnect();
+      if (handle) delete (window as Window & { __transactionSearchObserver?: unknown }).__transactionSearchObserver;
+      return handle?.observations || [];
+    });
+    expect(cachedReturnObservations.every(({ loading, empty, dinner, removedDinner }) => !loading && !empty && dinner && !removedDinner)).toBe(true);
+    await submitSearch(search, 'dinner', 'Dinner by the canal (edited)');
+  }
+});
+
+test('transaction searches ignore a late result from an earlier scope', async ({ authenticatedPage: page }) => {
+  let releaseHotel!: () => void;
+  let hotelCompleted = false;
+  const hotelResponse = new Promise<void>((resolve) => { releaseHotel = resolve; });
+  await page.route('**/api/transactions**', async (route) => {
+    if (new URL(route.request().url()).searchParams.get('q') === 'hotel') {
+      await hotelResponse;
+      await route.continue();
+      hotelCompleted = true;
+      return;
+    }
+    await route.continue();
+  });
+  let hotelReleased = false;
+  const releaseHotelSafely = () => { if (!hotelReleased) { hotelReleased = true; releaseHotel(); } };
+  try {
+    await page.goto(`/groups/${richGroupId}/transactions`);
+    await page.locator('details.transaction-filters-disclosure summary').click();
+    const search = page.getByLabel('Search');
+    await search.fill('dinner');
+    await search.press('Enter');
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    await search.fill('hotel');
+    await search.press('Enter');
+    await expect(page).toHaveURL(new RegExp('[?&]q=hotel(?:&|$)'));
+    await expect(page.getByText('Loading…', { exact: true })).toBeVisible();
+    await search.fill('dinner');
+    await search.press('Enter');
+    await expect(page).toHaveURL(new RegExp('[?&]q=dinner(?:&|$)'));
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    releaseHotelSafely();
+    await expect.poll(() => hotelCompleted).toBe(true);
+    await expect(page.getByText('Dinner by the canal (edited)')).toBeVisible();
+    await expect(page.getByText('Hotel near the station')).toHaveCount(0);
+  } finally {
+    releaseHotelSafely();
+  }
+});
+
 test('normalizes disclosure spacing and nested surfaces across responsive boundaries', async ({ authenticatedPage: page }) => {
   for (const viewport of [390, 768, 895, 896, 1440]) {
     await page.setViewportSize({ width: viewport, height: viewport < 896 ? 844 : 900 });
