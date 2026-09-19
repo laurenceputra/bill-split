@@ -4,7 +4,7 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'scripts/**/*.test.ts'],
     slowTestThreshold: 1,
   },
 });

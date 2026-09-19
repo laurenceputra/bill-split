@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 import { Repository } from './repository';
 import { all, db, executeSql } from './cloudflare-d1-test';
@@ -12,6 +12,7 @@ type Fixture = {
 };
 
 let fixtureNumber = 0;
+const fixtureGroups = new Set<string>();
 
 const exec = (sql: string, ...args: unknown[]) => args.length
   ? db.prepare(sql).bind(...args).run()
@@ -39,8 +40,14 @@ async function createFixture(label: string): Promise<Fixture> {
       ('${fixture.groupId}','${fixture.personA}','${fixture.userA}','2026-01-01','owner'),
       ('${fixture.groupId}','${fixture.personB}','${fixture.userB}','2026-01-01','member');
   `);
+  fixtureGroups.add(fixture.groupId);
   return fixture;
 }
+
+afterEach(async () => {
+  for (const groupId of fixtureGroups) await exec('DELETE FROM ledger_summary_state WHERE group_id=?', groupId);
+  fixtureGroups.clear();
+});
 
 async function addExpense(fixture: Fixture, id: string, amount: number, date: string, currency = 'USD') {
   await exec(`
@@ -184,6 +191,22 @@ describe('group summaries with the in-process local D1 binding', () => {
     await expect(repo.createCredit(fixture.groupId, fixture.userA, { ...input, amount_minor: 30, applications: [{ expense_id: expenseId, amount_minor: 30 }] })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
   });
 
+  it('rejects a member reimbursement when the linked split changes during derivation without poisoning the idempotency key', async () => {
+    const fixture = await createFixture('member-credit-default-conflict');
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    const racedDb = databaseWithCreditDefaultRace(expenseId);
+    const input = {
+      subtype: 'refund' as const, delivery_mode: 'member_reimbursement' as const, amount_minor: 40,
+      currency: 'USD' as const, date: '2026-01-02', applications: [{ expense_id: expenseId, amount_minor: 40 }],
+      allocations: [{ person_id: fixture.personA, allocation_type: 'recipient' as const, amount_minor: 40 }], client_operation_id: 'member-credit-race-retry',
+    };
+    const repo = new Repository(racedDb as never);
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, input)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await all('SELECT COUNT(*) AS count FROM credits WHERE group_id=?', fixture.groupId)).toEqual([{ count: 0 }]);
+    expect(await all('SELECT COUNT(*) AS count FROM idempotency_keys WHERE kind=? AND operation_id=?', 'credit.create', input.client_operation_id)).toEqual([{ count: 0 }]);
+  });
+
   it('restricts direct-provider recipients to payers and refreshes defaults only when applications change', async () => {
     const fixture = await createFixture('credit-recipient-rules');
     const firstExpense = `${fixture.groupId}-expense-a`, secondExpense = `${fixture.groupId}-expense-b`;
@@ -223,6 +246,115 @@ describe('group summaries with the in-process local D1 binding', () => {
         { person_id: fixture.personB, allocation_type: 'beneficiary', amount_minor: 40 },
       ],
     })).rejects.toMatchObject({ code: 'INVALID_CREDIT' });
+  });
+
+  it('derives and persists linked reimbursement beneficiaries from expense splits with exact remainder parity', async () => {
+    const fixture = await createFixture('member-reimbursement-derived-beneficiaries');
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    await exec('DELETE FROM splits WHERE expense_id=?', expenseId);
+    await exec('INSERT INTO splits(expense_id,person_id,amount_minor) VALUES(?,?,?),(?,?,?)', expenseId, fixture.personA, 33, expenseId, fixture.personB, 67);
+    const created = await new Repository(db).createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 10, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 10 }],
+      allocations: [{ person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 10 }],
+    });
+    expect(created.allocations).toEqual([
+      { personId: fixture.personA, allocationType: 'beneficiary', amountMinor: 4 },
+      { personId: fixture.personB, allocationType: 'beneficiary', amountMinor: 6 },
+      { personId: fixture.personA, allocationType: 'recipient', amountMinor: 10 },
+    ]);
+    await expect(all('SELECT allocation_type,amount_minor FROM credit_allocations WHERE credit_id=? ORDER BY allocation_type,person_id', created.id)).resolves.toEqual([
+      { allocation_type: 'beneficiary', amount_minor: 4 },
+      { allocation_type: 'beneficiary', amount_minor: 6 },
+      { allocation_type: 'recipient', amount_minor: 10 },
+    ]);
+  });
+
+  it('allows linked credit snapshots to retain a removed expense participant while keeping standalone allocations active-only', async () => {
+    const fixture = await createFixture('removed-credit-participant');
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    const repo = new Repository(db);
+    await repo.removeMember(fixture.groupId, fixture.personB, fixture.userA);
+    const input = {
+      subtype: 'refund' as const, delivery_mode: 'member_reimbursement' as const, amount_minor: 40, currency: 'USD' as const, date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [{ person_id: fixture.personA, allocation_type: 'recipient' as const, amount_minor: 40 }],
+    };
+    const created = await repo.createCredit(fixture.groupId, fixture.userA, input);
+    expect(created.allocations).toContainEqual({ personId: fixture.personB, allocationType: 'beneficiary', amountMinor: 40 });
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, {
+      ...input, applications: [], allocations: [{ person_id: fixture.personB, allocation_type: 'recipient', amount_minor: 40 }, { person_id: fixture.personA, allocation_type: 'beneficiary', amount_minor: 40 }],
+    })).rejects.toBeInstanceOf(Error);
+  });
+
+  it('permits note-only updates to preserve removed linked participants and their accounting snapshot', async () => {
+    const fixture = await createFixture('removed-credit-update');
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    const repo = new Repository(db);
+    const created = await repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 40, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [{ person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 }],
+    });
+    await repo.removeMember(fixture.groupId, fixture.personB, fixture.userA);
+    const updated = await repo.updateCredit(created.id, fixture.userA, {
+      subtype: created.subtype, delivery_mode: created.deliveryMode, amount_minor: created.amountMinor, currency: created.currency, date: created.date, note: 'Receipt confirmed', version: created.version,
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [{ person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 }],
+    });
+    expect(updated.note).toBe('Receipt confirmed');
+    expect(updated.allocations).toEqual(created.allocations);
+  });
+
+  it('preserves a removed custom beneficiary only when the update keeps its persisted snapshot', async () => {
+    const fixture = await createFixture('removed-custom-beneficiary');
+    const customPerson = `${fixture.groupId}-custom-person`;
+    await exec(`
+      INSERT INTO people(id,name,created_at) VALUES('${customPerson}','Custom beneficiary','2026-01-01');
+      INSERT INTO group_members(group_id,person_id,joined_at,role) VALUES('${fixture.groupId}','${customPerson}','2026-01-01','member');
+    `);
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    const repo = new Repository(db);
+    const created = await repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 40, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [
+        { person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 },
+        { person_id: customPerson, allocation_type: 'beneficiary', amount_minor: 40 },
+      ],
+    });
+    await repo.removeMember(fixture.groupId, customPerson, fixture.userA);
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 40, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [
+        { person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 },
+        { person_id: customPerson, allocation_type: 'beneficiary', amount_minor: 40 },
+      ],
+    })).rejects.toBeInstanceOf(Error);
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 40, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [
+        { person_id: customPerson, allocation_type: 'recipient', amount_minor: 40 },
+        { person_id: fixture.personA, allocation_type: 'beneficiary', amount_minor: 40 },
+      ],
+    })).rejects.toBeInstanceOf(Error);
+    const unchanged = await repo.updateCredit(created.id, fixture.userA, {
+      subtype: created.subtype, delivery_mode: created.deliveryMode, amount_minor: created.amountMinor, currency: created.currency,
+      date: created.date, note: 'Receipt confirmed', version: created.version,
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: created.allocations.map((allocation) => ({
+        person_id: allocation.personId, allocation_type: allocation.allocationType, amount_minor: allocation.amountMinor,
+      })),
+    });
+    expect(unchanged.allocations).toEqual(created.allocations);
+    await repo.removeMember(fixture.groupId, fixture.personB, fixture.userA);
+    await expect(repo.updateCredit(unchanged.id, fixture.userA, {
+      subtype: unchanged.subtype, delivery_mode: unchanged.deliveryMode, amount_minor: unchanged.amountMinor, currency: unchanged.currency,
+      date: unchanged.date, note: unchanged.note, version: unchanged.version,
+      applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [
+        { person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 },
+        { person_id: fixture.personB, allocation_type: 'beneficiary', amount_minor: 40 },
+      ],
+    })).rejects.toBeInstanceOf(Error);
   });
 
   it('derives direct-provider allocations exactly from every linked bill and rejects overrides', async () => {

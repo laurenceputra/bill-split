@@ -7,6 +7,9 @@ export type NavigationRoute =
   | 'activity'
   | 'settle'
   | 'new-expense'
+  | 'add-transaction'
+  | 'refund-create'
+  | 'refund-edit'
   | 'edit-expense'
   | 'expense-detail'
   | 'credit-detail'
@@ -29,8 +32,8 @@ export type NavigationContext = {
   groupContext?: GroupNavigationContext;
   group?: GroupNavigationContext;
   activeSection: NavigationSection;
-  addAction: 'add-friend' | 'new-expense';
-  addLabel: 'Add friend' | 'Add expense';
+  addAction: 'add-friend' | 'new-expense' | 'add-transaction';
+  addLabel: 'Add friend' | 'Add expense' | 'Add transaction';
   /** The primary destination for this navigation context. */
   primaryPath: string;
   /** The route-specific destination, when one exists. */
@@ -96,7 +99,7 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
         overviewPath: `/groups/${encodeURIComponent(groupId)}`,
         activityPath: `/groups/${encodeURIComponent(groupId)}/activity`,
         settlePath: `/groups/${encodeURIComponent(groupId)}/settle`,
-        addPath: `/groups/${encodeURIComponent(groupId)}/expense/new`,
+        addPath: `/groups/${encodeURIComponent(groupId)}/add`,
       }
     : undefined;
 
@@ -105,12 +108,16 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   else if (path === '/settings') route = 'settings';
   else if (path === '/activity') route = 'activity';
   else if (path === '/expense/new') route = 'new-expense';
+  else if (path === '/add') route = 'add-transaction';
   else if (group && segments.length === 2) route = 'group-overview';
   else if (group && segments[2] === 'manage' && segments.length === 3) route = 'group-manage';
   else if (group && segments[2] === 'transactions' && segments.length === 3) route = 'transactions';
   else if (group && segments[2] === 'activity' && segments.length === 3) route = 'activity';
   else if (group && segments[2] === 'settle' && segments.length === 3) route = 'settle';
+  else if (group && segments[2] === 'add' && segments.length === 3) route = 'add-transaction';
   else if (group && ((segments[2] === 'expense' && segments[3] === 'new') || (segments[2] === 'scheduled-expense' && segments[3] === 'new')) && segments.length === 4) route = 'new-expense';
+  else if (group && ((segments[2] === 'refund' || segments[2] === 'credit') && segments[3] === 'new' && segments.length === 4)) route = 'refund-create';
+  else if (group && ((segments[2] === 'refund' || segments[2] === 'credit') && segments[3] && segments[4] === 'edit' && segments.length === 5)) route = 'refund-edit';
   else if (group && segments[2] === 'expense' && segments[3] && segments.length === 4) route = 'edit-expense';
   else if (group && segments[2] === 'expenses' && segments[3] && segments.length === 4) route = 'expense-detail';
   else if (group && segments[2] === 'credits' && segments[3] && segments.length === 4) route = 'credit-detail';
@@ -120,13 +127,13 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
     route === 'settings' ? 'settings' :
     route === 'activity' ? 'activity' :
     route === 'settle' ? 'settle' :
-    route === 'new-expense' || route === 'edit-expense' ? 'add' :
+     route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'refund-create' || route === 'refund-edit' ? 'add' :
     'groups';
   const canonicalActivityPath = path === '/activity' ? `${path}${search}` : group ? `/activity?group=${encodeURIComponent(group.id)}&view=changes` : '/activity';
   const contextualPath = group
     ? route === 'activity' ? group.activityPath
       : route === 'settle' ? group.settlePath
-        : route === 'new-expense' || route === 'edit-expense' ? group.addPath
+       : route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'refund-create' ? group.addPath
        : route === 'expense-detail' || route === 'credit-detail' ? path
             : group.overviewPath
     : route === 'settings' ? '/settings' : undefined;
@@ -136,14 +143,14 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
     ...(groupId ? { groupId, group } : {}),
     activeSection,
     ...(group ? { groupContext: group } : {}),
-    addAction: 'new-expense',
-    addLabel: 'Add expense',
+    addAction: 'add-transaction',
+    addLabel: 'Add transaction',
     primaryPath: HOME_PATH,
     contextualPath,
     groupsPath: HOME_PATH,
     activityPath: '/activity',
     historyPath: canonicalActivityPath,
-    addPath: group?.addPath || '/expense/new',
+    addPath: group?.addPath || '/add',
     morePath: '/settings',
   };
 }

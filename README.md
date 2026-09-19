@@ -45,8 +45,28 @@ keyboard and accessibility-semantic checks:
 
 ```sh
 npm run test:e2e
+npm run test:e2e:local
 npm run test:e2e:audit
 ```
+
+`npm run test:e2e` is always the strict, revision-coupled command: Playwright
+chooses the browser revision that matches the installed package, and it ignores
+all local override variables because it uses the base `playwright.config.ts`.
+`test:e2e:local` is a safe compatibility escape hatch for a pre-existing browser
+cache. The wrapper validates the selected path, hands it to the separate local
+config, and only that config applies `executablePath`. Only this wrapper
+consumes
+`BILLSPLIT_PLAYWRIGHT_EXECUTABLE_PATH`; it validates that explicit path, or
+reads `PLAYWRIGHT_BROWSERS_PATH` (default `/ms-playwright`) and verifies regular
+accessible executable files. Discovery prefers the highest numeric
+`chromium_headless_shell-*` revision, then falls back to the highest numeric
+`chromium-*` full-browser revision. Linux x64 and arm64 cache layouts are
+supported. It prints the selected path and revision and never installs,
+renames, or symlinks a browser. Automatic discovery refuses whenever `CI` is
+non-empty except case-insensitive `0` or `false` (unset and empty are allowed);
+an explicit executable remains an opt-in and is validated before Playwright
+starts. The override may be incompatible with the installed Playwright
+revision, so CI should continue to use the strict command.
 
 The runtime image currently provides Chromium only (`/ms-playwright`); no
 WebKit project is enabled in default CI. Add a separately provisioned,
@@ -315,14 +335,16 @@ named resources, variables, and secrets.
 
 ## Data and API
 
-Confirmed credits are first-class transactions (`refund` or `claim`) delivered
-as member reimbursements or direct-provider offsets. They use integer minor-unit
-amounts, snapshot recipient/beneficiary allocations, and may be standalone or
-fully applied to one or more same-group, same-currency expenses. Applications
-are capped atomically by both the credit amount and each gross expense; linked
-expenses cannot be reduced, re-currencyed, deleted, or restored while an active
-credit applies. Credits are online-only and appear in transaction history,
-JSON export, and the separate `credits.csv` export.
+Refunds/reimbursements are first-class transactions (the persisted `credit`
+enum remains for compatibility). They use integer minor-unit amounts and save
+recipient and affected-member snapshots. A linked reimbursement requires an
+explicit recipient; when affected members are omitted, the server derives them
+from linked expense splits with exact integer rounding and persists the result.
+Original-payment-or-bill adjustments derive both payer and affected sides.
+Standalone records require both sides explicitly. Applications are capped
+atomically by the refund amount and each gross expense, including edit capacity
+after excluding the record being edited. Refunds are online-only and appear in
+transaction history, JSON export, and the existing `credits.csv` export.
 
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points
