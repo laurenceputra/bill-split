@@ -12,6 +12,16 @@ const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
 const auditSource = readFileSync(new URL('../../../tests/e2e/audit.spec.ts', import.meta.url), 'utf8');
 
+const tokenValue = (name: string) => tokensCss.match(new RegExp(`${name}\\s*:\\s*(#[0-9A-Fa-f]{6})`))?.[1] ?? '';
+const relativeLuminance = (hex: string) => {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+};
+const contrastRatio = (foreground: string, background: string) => {
+  const [lower, higher] = [relativeLuminance(foreground), relativeLuminance(background)].sort((a, b) => a - b);
+  return (higher + 0.05) / (lower + 0.05);
+};
+
 describe('responsive navigation layout contract', () => {
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
     expect(css).toContain('padding-right: max(var(--space-1), var(--safe-right));');
@@ -42,8 +52,8 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
   });
 
-  it('keeps the mobile contracts at 320, 390, and 430 pixels', () => {
-    expect([320, 390, 430].every((viewport) => viewport >= 320 && viewport <= 30 * 16)).toBe(true);
+  it('keeps the mobile contracts at 320 and 390 pixels', () => {
+    expect([320, 390].every((viewport) => viewport >= 320 && viewport <= 30 * 16)).toBe(true);
     expect(baseCss).toContain('html {\n  min-width: 320px;');
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
     expect(css).toContain('.install-slot > .install-control {\n    width: auto;\n  }');
@@ -97,6 +107,21 @@ describe('responsive navigation layout contract', () => {
     expect(auditSource).toContain('.modal-sheet,[role="dialog"]');
     expect(auditSource).toContain("!element.matches('.modal-backdrop')");
     expect(auditSource).toContain('if (depth > 2) add');
+  });
+
+  it('keeps focus and semantic small-text tokens readable on their light surfaces', () => {
+    const white = '#FFFFFF';
+    expect(tokenValue('--color-primary-focus-ring')).toMatch(/^#/);
+    expect(contrastRatio(tokenValue('--color-primary-focus-ring'), white)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(tokenValue('--color-primary-focus-ring'), tokenValue('--color-page'))).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(tokenValue('--color-warning-fg'), tokenValue('--color-warning-bg'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-warning-fg'), tokenValue('--color-warning-subtle'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-debt-fg'), tokenValue('--color-debt-bg'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-debt-fg'), tokenValue('--color-debt-subtle'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-positive-fg'), tokenValue('--color-positive-bg'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-positive-fg'), tokenValue('--color-positive-subtle'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(tokenValue('--color-text-tertiary'), white)).toBeGreaterThanOrEqual(4.5);
+    expect(baseCss).toContain('input::placeholder {\n  color: var(--color-text-tertiary);');
   });
 
   it('keeps standalone section actions content-sized without shrinking grouped controls', () => {
@@ -321,6 +346,37 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.public-sign-up:hover\s*\{[\s\S]*background: var\(--color-secondary-hover\);[\s\S]*color: var\(--color-primary-strong\);/);
     expect(css).toMatch(/\.public-main\s*\{\s*padding-top: clamp\(var\(--space-8\), 5vw, var\(--space-12\)\);/);
     expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
+  });
+
+  it('keeps route composition financial-first at desktop and touch-safe on mobile', () => {
+    expect(appSource).toContain('className="card group-card"');
+    expect(appSource).toContain('<AvatarStack people={people} />');
+    expect(appSource).toContain('className="group-overview-tools"');
+    expect(appSource).toContain('className="group-overview-actions actions"');
+    expect(uiSource).toContain('className={`route-view route-view--${routeClass}`}');
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview\s*\{[\s\S]*grid-template-columns:/);
+    expect(css).toMatch(/\.route-view--expense \.amount-field\s*\{[\s\S]*min-height:/);
+    expect(css).toMatch(/\.modal-sheet:has\(\.payer-list\)\s*\{[\s\S]*align-self: center;/);
+  });
+
+  it('audits the payer modal at every canonical responsive width', () => {
+    expect(auditSource).toContain("if (scenario.name === 'expense-form') {");
+    expect(auditSource).not.toContain("if (scenario.name === 'expense-form' && viewport.width <= 768)");
+    expect(auditSource).toContain('full canonical responsive coverage');
+    expect(auditSource).toContain('test.setTimeout(480_000);');
+    for (const width of [320, 390, 768, 895, 896, 1440]) expect(auditSource).toContain(`{ width: ${width},`);
+  });
+
+  it('keeps home empty actions separate and group cards compact on mobile', () => {
+    expect(appSource).toContain('className="empty-state__actions"');
+    expect(appSource).toContain('to="/friends/new">Add a friend</Link>');
+    expect(appSource).toContain('to="/groups/new">Create a group</Link>');
+    expect(appSource.indexOf('className="group-cards"')).toBeLessThan(appSource.indexOf('<CompactInsights userId='));
+    expect(css).toMatch(/\.empty-state__actions\s*\{[\s\S]*gap: var\(--space-2\);/);
+    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.empty-state__actions\s*\{[\s\S]*flex-direction: column;/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.group-card \.card__balances\s*\{[\s\S]*flex: 0 1 auto;/);
+    expect(css).toMatch(/\.creation-person\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-3\);/);
+    expect(tokensCss).toContain('--color-logo-upper: #B8A6E3;');
   });
 
   it('gives both public sign-in buttons the primary treatment and keeps focus visible', () => {

@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { AuthLoadingShell, Field, SplitTransactionControl } from './ui';
+import { AuthLoadingShell, AvatarStack, Field, SplitTransactionControl } from './ui';
 
 describe('Field', () => {
   it('de-duplicates an error ID already present in aria-describedby', () => {
@@ -84,5 +84,14 @@ describe('AuthLoadingShell', () => {
     expect(markup).toContain('class="nav-item nav-item--add"');
     expect(markup).toContain('class="nav-item__capsule"');
     expect(markup).toContain('aria-hidden="true"');
+  });
+});
+
+describe('AvatarStack', () => {
+  it('uses a singular accessible label for one person', () => {
+    const markup = renderToStaticMarkup(createElement(AvatarStack, { people: [{ name: 'Alex' }] }));
+
+    expect(markup).toContain('aria-label="1 person"');
+    expect(markup).not.toContain('aria-label="1 people"');
   });
 });

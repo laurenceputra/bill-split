@@ -8,8 +8,8 @@
   "start_url": "/",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
-  "background_color": "#f5f2fb",
-  "theme_color": "#6d4aff",
+  "background_color": "#F7F3FA",
+  "theme_color": "#6B4FD3",
   "shortcuts": [
     {"name": "Add expense", "short_name": "Add", "description": "Record a shared expense", "url": "/expense/new", "icons": [{"src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"}]},
     {"name": "View groups", "short_name": "Groups", "description": "Open your shared expense groups", "url": "/", "icons": [{"src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"}]}

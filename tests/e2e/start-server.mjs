@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { E2E_PORT } from './config.mjs';
 import { configuredPersistDir, runPersistDirSelfCheck, verifySafePersistDir } from './persist-dir.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -23,7 +24,7 @@ run(npm, ['run', 'build'], { ...process.env, VITE_DEV_AUTH_BYPASS: 'true' });
 run(process.execPath, ['tests/e2e/prepare-db.mjs']);
 
 const server = spawn(wrangler, [
-  'dev', 'tests/e2e/worker-entry.ts', '--env', 'dev', '--local', '--port', '8788', '--persist-to', persistTo,
+  'dev', 'tests/e2e/worker-entry.ts', '--env', 'dev', '--local', '--port', String(E2E_PORT), '--persist-to', persistTo,
   '--config', 'wrangler.toml', '--show-interactive-dev-session=false',
 ], { cwd: root, env: process.env, stdio: 'inherit' });
 

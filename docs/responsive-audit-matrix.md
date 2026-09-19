@@ -1,4 +1,14 @@
-# Refund/reimbursement responsive audit matrix
+# Warm Ledger responsive audit matrix
+
+Canonical audit widths are **320, 390, 768, 895, 896, and 1440px**. The
+private shell keeps the mobile bottom navigation through 895px and switches to
+the desktop top navigation and two-column group overview at 896px.
+
+The refund/reimbursement matrix below remains the release checklist for the
+dedicated online-only refund flow. The Warm Ledger states cover the newer
+credit and shell surfaces without replacing those refund-specific checks.
+
+## Refund/reimbursement states
 
 Refunds are online-only ledger actions. Mobile DOM order keeps the common
 expense-first path ahead of advanced standalone/custom allocation controls.
@@ -42,3 +52,22 @@ overlap, document overflow, hover/active colors, focus visibility, and the
 computed shared divider width, style, and color. The 895-to-896px desktop
 navigation transition is asserted separately. The three 390x844 reference
 captures are distinct group-overview, refund-form, and focused-helper states.
+
+## Warm Ledger states
+
+| View/state | 320px narrow | 390px mobile | 768px tablet | 895px boundary | 896px desktop | 1440px desktop |
+| --- | --- | --- | --- | --- | --- | --- |
+| Record credit, loaded | Controls stack with the amount hero visible; no horizontal scroll | Form controls remain in DOM order: type, delivery, amount, application, allocations, note, submit | Verify select/field wrapping and no horizontal overflow | Verify disclosure and validation spacing at the breakpoint | Primary submit remains before secondary navigation | Primary submit remains before secondary navigation |
+| Record credit, loading/error/offline | Loading status and inline error are announced; submit is disabled offline | Error text remains adjacent to the form | Error text remains adjacent to the form | Error text remains adjacent to the form | Error and retry remain content-sized | Error and retry remain content-sized |
+| Credit detail, active | Applications and allocations stack; amount remains dominant | Application and allocation snapshots stack as rows; edit/delete follow detail | Verify rows wrap long IDs/notes | Verify deleted labels and restore affordance | Actions remain below the accounting explanation | Actions remain below the accounting explanation |
+| Credit detail, deleted/restore | Restore is the only available mutation and is disabled offline | Tombstone copy remains visible | Tombstone copy remains visible | Restore remains a clear recovery action | Restore and error states remain readable without modal-only context | Restore and error states remain readable without modal-only context |
+| Group home / invitations | Financial status leads each card; invitation actions remain reachable; empty-state actions stack without overlap | Empty and populated states retain separate, touch-sized creation actions; groups precede the spending snapshot | Cards use a denser two-column grid | Check card-to-overview boundary | Cards align amount columns and participant metadata | Cards align amount columns and participant metadata |
+| Group overview | Balances precede transactions; schedules, people, and the grouped tools section disclose below | Same DOM order with touch-sized controls; Record credit and insights stay together after ledger content | Single-column financial reading order | Verify no premature desktop reflow | Balances lead a purposeful main/secondary layout; tools remain grouped after people | Two-column layout keeps money and status dominant |
+| Expense and schedule forms | Amount hero, split controls, and payer sheet fit without zoom | Payer sheet is bottom anchored and targets remain 44px | Verify form grouping and recurring preview | Verify 895/896 transition without focus loss | Payer dialog is centered; amount remains first | Payer dialog and schedule preview remain readable |
+| History and insights | Segmented tabs and filter disclosure stack | Transaction amounts align at row end | Chart/table fallback remains accessible | Verify boundary tab and search behavior | Desktop rows align like a ledger | Desktop rows align like a ledger |
+| Management/settings | Dense groups remain single-column; deletion is last | People/invitations/defaults precede exports and destructive actions | Verify long names and disabled states | Verify boundary spacing | Compact administrative sections | Compact administrative sections |
+
+Credit flows are online-only and preserve the existing mobile-first form shell.
+The record-credit audit scenario uses the existing populated group fixture;
+active and deleted credit detail states remain covered by focused unit and
+integration fixtures until a browser fixture includes a persisted credit.

@@ -429,7 +429,7 @@ test('validates and submits an expanded multi-person group creation payload', as
 });
 
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const existingAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'empty@example.com' };
   const laterAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'target-created-after@example.com' };
@@ -458,7 +458,7 @@ test('binds existing and later accounts to the targeted person without changing 
 });
 
 test('does not grant an existing registered email group access until its invitation is accepted', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const registeredHeaders = { ...browserHeaders, 'X-Dev-Email': 'registered@example.com' };
   const added = await request.post(`/api/groups/${EMPTY_GROUP_ID}/people`, { headers: ownerHeaders, data: { name: 'Renamed registered user', email: 'registered@example.com' } });
@@ -478,7 +478,7 @@ test('does not grant an existing registered email group access until its invitat
 });
 
 test('accepts the schema maximum participant payload in local D1 and keeps removed settlement history usable', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const headers = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const responses = await Promise.all(Array.from({ length: 100 }, (_, index) => request.post(`/api/groups/${GROUP_ID}/people`, { headers, data: { name: `Bounded participant ${index}` } })));
   const people: string[] = [];

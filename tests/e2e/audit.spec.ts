@@ -62,14 +62,14 @@ type Scenario = {
 };
 
 const viewports: Viewport[] = [
+  { width: 320, height: 844 },
   { width: 390, height: 844 },
-  { width: 430, height: 844 },
   { width: 768, height: 1024 },
   { width: 895, height: 900 },
   { width: 896, height: 900 },
   { width: 1440, height: 900 },
 ];
-const insightViewports: Viewport[] = [{ width: 320, height: 844 }, ...viewports];
+const insightViewports: Viewport[] = viewports;
 
 const ids = {
   rich: '00000000-0000-4000-8000-000000003002',
@@ -158,6 +158,7 @@ const scenarios: Scenario[] = [
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
+  { name: 'record-credit', path: `/groups/${ids.rich}/credit/new`, auth: DEV_EMAIL, context: 'CreditForm / refund and claim accounting entry', expected: { mode: 'normal', heading: 'Record credit', content: 'Apply to expenses', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] }, expandedAudit: { entityType: 'expense', entityId: ids.dinner, content: 'Updated expense' } },
   { name: 'refund-form', path: `/groups/${ids.rich}/refund/new`, auth: DEV_EMAIL, context: 'RefundForm / linked expense-first refund state and responsive money-flow controls', expected: { mode: 'normal', heading: 'Record money back', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
   { name: 'settlement-detail-history', path: `/groups/${ids.rich}/settlements/00000000-0000-4000-8000-000000005001`, auth: DEV_EMAIL, context: 'SettlementDetail / edited payment with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'paid', content: 'View audit history', apiPaths: [apiPaths.me, apiPaths.settlement('00000000-0000-4000-8000-000000005001'), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] }, expandedAudit: { entityType: 'settlement', entityId: '00000000-0000-4000-8000-000000005001', content: 'Updated settlement' } },
@@ -197,6 +198,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       // direct summary subtree as visible; this prevents hidden schedule
       // actions from being compared with the next visible group section.
       for (let current: Element | null = element; current; current = current.parentElement) {
+        if (current.classList.contains('sr-only')) return false;
         const ancestorStyle = getComputedStyle(current);
         if (ancestorStyle.display === 'none' || ancestorStyle.visibility === 'hidden' || Number(ancestorStyle.opacity) === 0) return false;
         if (current instanceof HTMLDetailsElement && !current.open) {
@@ -326,7 +328,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
     }
 
     for (const element of Array.from(document.querySelectorAll('.surface,section,.card,.empty')).filter(visible)) {
-      if (element.matches('.insight-section')) continue;
+      if (element.matches('.insight-section,.group-overview-tools .insights-compact')) continue;
       const style = getComputedStyle(element);
       const padding = Math.min(parseFloat(style.paddingTop), parseFloat(style.paddingRight), parseFloat(style.paddingBottom), parseFloat(style.paddingLeft));
       if (padding < 12) add('surface-padding', 'minor', `Flow surface internal padding is ${padding}px; expected at least 12px`, selector(element), padding);
@@ -467,7 +469,7 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         if (await trendPlot.locator('.category-trend-month').count() !== displayedMonths.length) throw new Error(`Grouped category trend did not render the fixture-derived ${displayedMonths.length} month groups`);
         if (await trendPlot.locator('.category-trend-bar').count() !== displayedMonths.length * categoryCount) throw new Error(`Grouped category trend did not render ${displayedMonths.length * categoryCount} fixture bars`);
         if (await trendGraph.locator('.category-trend-summary').count() !== categoryCount) throw new Error(`Grouped category trend did not render ${categoryCount} compact category summaries`);
-        if (await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.some((element) => !element.textContent?.includes(expectedReferenceLabel) || !element.textContent.includes(expectedSpanText) || !element.querySelector('.category-trend-direction')))) throw new Error('Category summaries omitted the displayed reference month, span total, or trend status');
+        if (await trendGraph.locator('.category-trend-summary').evaluateAll((elements, expected) => elements.some((element) => !element.textContent?.includes(expected.expectedReferenceLabel) || !element.textContent.includes(expected.expectedSpanText) || !element.querySelector('.category-trend-direction')), { expectedReferenceLabel, expectedSpanText })) throw new Error('Category summaries omitted the displayed reference month, span total, or trend status');
         const categoryColors = await trendGraph.locator('.category-trend-summary').evaluateAll((elements) => elements.map((element) => { const marker = element.querySelector('.category-trend-marker'); return { category: element.getAttribute('data-category'), color: marker ? getComputedStyle(marker).backgroundColor : '' }; }));
         const barColors = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => elements.map((element) => ({ category: element.getAttribute('data-category'), color: getComputedStyle(element).backgroundColor })));
         if (barColors.some((bar) => { const summary = categoryColors.find((candidate) => candidate.category === bar.category); return !summary || summary.color !== bar.color; })) throw new Error('Category bars and legend markers did not preserve category color identity');
@@ -477,7 +479,8 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         if (monthLabels.some((label) => label.lines !== 1)) throw new Error(`Displayed month label wrapped: ${JSON.stringify(monthLabels)}`);
         const scale = await trendPlot.locator('.category-trend-bar').evaluateAll((elements) => { const values = elements.map((element) => Number(element.getAttribute('data-value'))); const maximum = Math.max(...values); return { values, maximum, heights: elements.map((element) => Number.parseFloat(getComputedStyle(element).height)), width: getComputedStyle(elements[0]).width }; });
         if (!scale.values.includes(0) || !scale.heights.includes(0)) throw new Error('Sparse category fixture did not preserve true zero-height bars');
-        if (scale.width !== '7.2px' && scale.width !== '0.45rem') throw new Error(`Category trend bars are not thin: ${scale.width}`);
+         const width = Number.parseFloat(scale.width);
+         if (!Number.isFinite(width) || Math.abs(width - 7.2) > 0.1) throw new Error(`Category trend bars are not thin: computed ${scale.width} (${width}px), expected approximately 7.2px`);
         if (scale.values.some((value, barIndex) => Math.abs(scale.heights[barIndex] - (value === 0 ? 0 : Math.max(4, Math.round((value / scale.maximum) * 100) * 112 / 100))) > 2)) throw new Error('Category trend bars did not use one shared maximum');
         const trendCurrency = fixture.trends.categoryTrends.find((row) => categories.includes(row.category))?.currency ?? fixture.summary.summaries[0]?.currency ?? 'USD';
         const valuesTable = trendGraph.getByRole('table', { name: `Exact displayed-span ${trendCurrency} values by category`, exact: true });
@@ -760,7 +763,7 @@ function assertAuthenticatedRequest(requests: ApiRequestObservation[], auth: str
 test.describe.configure({ mode: 'serial' });
 
 test('browser audit matrix captures validated routes, geometry, and full-page screenshots', async ({ browser }, testInfo) => {
-  test.setTimeout(360_000);
+  test.setTimeout(900_000);
   const findings: Finding[] = [];
   const failures: HarnessFailure[] = [];
   const coverage: Coverage[] = [];
@@ -873,11 +876,11 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             failures.push({ scenarioName: 'group-management-add-email', authState: authState(scenario.auth), route: `${scenario.path} [add email]`, viewport, detail: `Add-email disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
           }
         }
-        if (scenario.name === 'expense-form' && viewport.width <= 768) {
+        if (scenario.name === 'expense-form') {
           try {
             await page.locator('.summary-row').click();
             await expect(page.locator('.modal-sheet')).toBeVisible();
-            const modalScenario: Scenario = { ...scenario, name: `${scenario.name}-payer-modal`, context: 'ExpenseForm / payer modal (touch/mobile-tablet coverage)', expected: { mode: 'modal', heading: 'Add expense', content: 'Who paid?' } };
+            const modalScenario: Scenario = { ...scenario, name: `${scenario.name}-payer-modal`, context: 'ExpenseForm / payer modal (full canonical responsive coverage)', expected: { mode: 'modal', heading: 'Add expense', content: 'Who paid?' } };
             await assertRendered(page, modalScenario, observations, viewport);
             coverage.push({ scenarioName: modalScenario.name, authState: authState(modalScenario.auth), route: `${scenario.path} [payer modal]`, viewport, context: modalScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
             await reportForPage(page, modalScenario, `${scenario.path} [payer modal]`, viewport, artifactDirectory, findings, failures);
@@ -896,7 +899,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
     'The 44×44 policy is the project touch-target policy and is audited only at touch/mobile/tablet widths (<896px), not as a universal standards failure.',
     'Playwright cannot reliably inject CSS env(safe-area-inset-*) values into Chromium; source assertions cover the safe-area contracts, while real-device inset behavior remains to be checked on notched iOS/Android hardware.',
-    'Payer modal coverage is exercised at 390px and 768px; 895px, 896px, and 1440px modal states are not opened.',
+    'Payer modal coverage is exercised at every canonical width, including the 895px/896px presentation boundary and 1440px desktop.',
     'The matrix reports broad route/fixture coverage separately from actual geometry violations. Findings from a few routes do not establish a global architecture defect.',
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The audit must not contain critical or major geometry findings').toEqual([]);
@@ -1004,6 +1007,7 @@ test('labels the displayed current month MTD and uses it for category references
 });
 
 test('intercepted loading, API error, offline, and modal states render their intended UI', async ({ browser }, testInfo) => {
+  test.setTimeout(480_000);
   const findings: Finding[] = [];
   const failures: HarnessFailure[] = [];
   const coverage: Coverage[] = [];
@@ -1164,7 +1168,7 @@ test('intercepted loading, API error, offline, and modal states render their int
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
      'Intercepted detailed insight loading, independent API-error, retained-cache offline, and cold-offline states are covered across every configured viewport, including 895px, 896px, and 1440px.',
     'The schedule disclosure state matrix uses bounded fixture/interception coverage at 390px; populated disclosure geometry is exercised across the full responsive matrix.',
-    'Payer modal coverage is touch/mobile-tablet only (390px and 768px) because the matrix does not open it at wider viewports.',
+     'Payer modal coverage is exercised at all canonical widths: 320px, 390px, 768px, 895px, 896px, and 1440px.',
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The intercepted-state audit must not contain critical or major geometry findings').toEqual([]);
   expect(failures, 'Intercepted-state screenshots should complete without harness failures').toEqual([]);

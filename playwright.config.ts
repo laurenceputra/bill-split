@@ -1,4 +1,7 @@
 import { defineConfig } from '@playwright/test';
+import { BASE_URL } from './tests/e2e/config.mjs';
+
+const playwrightExecutablePath = process.env.BILLSPLIT_PLAYWRIGHT_EXECUTABLE_PATH;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -13,15 +16,18 @@ export default defineConfig({
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
   ],
   use: {
-    baseURL: 'http://127.0.0.1:8788',
+    baseURL: BASE_URL,
     browserName: 'chromium',
+    ...(playwrightExecutablePath
+      ? { launchOptions: { executablePath: playwrightExecutablePath } }
+      : {}),
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
   },
   webServer: {
     command: 'node tests/e2e/start-server.mjs',
-    url: 'http://127.0.0.1:8788',
+    url: BASE_URL,
     timeout: 120_000,
     reuseExistingServer: false,
     stdout: 'pipe',

@@ -1,25 +1,69 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
-import { SignInButton, SignUpButton } from '@clerk/react';
+import { SignInButton, SignUpButton, useUser } from '@clerk/react';
 import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 
-type IconName = 'groups' | 'activity' | 'more';
+export type IconName = 'groups' | 'activity' | 'add' | 'more' | 'check' | 'warning' | 'close';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
 let modalScrollLocks = 0;
 let modalPreviousOverflow = '';
 
-function Icon({ name }: { name: IconName }) {
-  if (name === 'activity') return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
-  if (name === 'more') return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
-  return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
+export function Icon({ name, className = 'nav-icon' }: { name: IconName; className?: string }) {
+  if (name === 'add') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
+  if (name === 'check') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>;
+  if (name === 'warning') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 3.5 19h17L12 4Z" /><path d="M12 9v4m0 3h.01" /></svg>;
+  if (name === 'close') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>;
+  if (name === 'activity') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
+  if (name === 'more') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
+  return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
 }
 
-export function Button({ children, variant = 'primary', className = '', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' }) {
-  return <button className={`${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} {...props}>{children}</button>;
+export function LogoMark({ className = '' }: { className?: string }) {
+  return <svg className={`brand-logo ${className}`.trim()} viewBox="0 0 32 32" aria-hidden="true"><circle className="brand-logo__base" cx="16" cy="16" r="12" /><path className="brand-logo__upper" d="M4 16a12 12 0 0 1 24 0c-3-1.8-7-2.8-12-2.8S7 14.2 4 16Z" /><path className="brand-logo__gap" d="M4 16.1c3.2-1.8 7.2-2.7 12-2.7s8.8.9 12 2.7c-3.2 1.8-7.2 2.7-12 2.7s-8.8-.9-12-2.7Z" /></svg>;
+}
+
+function Brand({ link = false }: { link?: boolean }) {
+  const content = <><LogoMark /><span>BillSplit</span></>;
+  return link ? <Link className="brand" to="/">{content}</Link> : <span className="brand">{content}</span>;
+}
+
+export function Button({ children, variant = 'primary', loading = false, className = '', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'quiet'; loading?: boolean }) {
+  return <button {...props} className={`${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} aria-busy={loading || undefined} disabled={loading || props.disabled}>{loading ? <span className="button__loading" aria-hidden="true" /> : null}{children}</button>;
+}
+
+export function Avatar({ name, src, size = 'md' }: { name: string; src?: string; size?: 'sm' | 'md' | 'lg' }) {
+  const initials = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || '?';
+  return <span className={`avatar avatar--${size}`} role="img" aria-label={name}>{src ? <img src={src} alt="" /> : initials}</span>;
+}
+
+export function AvatarStack({ people, max = 4 }: { people: Array<{ name: string; src?: string }>; max?: number }) {
+  const visible = people.slice(0, max);
+  const remaining = Math.max(0, people.length - visible.length);
+  return <span className="avatar-stack" aria-label={`${people.length} ${people.length === 1 ? 'person' : 'people'}`}>{visible.map((person) => <Avatar key={`${person.name}-${person.src || ''}`} {...person} size="sm" />)}{remaining ? <span className="avatar avatar--sm avatar--overflow" aria-label={`${remaining} more people`}>+{remaining}</span> : null}</span>;
+}
+
+export function Notice({ children, tone = 'neutral', role = 'status', className = '' }: { children: ReactNode; tone?: 'positive' | 'debt' | 'warning' | 'neutral'; role?: 'status' | 'alert'; className?: string }) {
+  return <div className={`notice notice--${tone} ${className}`.trim()} role={role}>{children}</div>;
+}
+
+export function Card({ children, className = '', as: Component = 'article' }: { children: ReactNode; className?: string; as?: 'article' | 'div' | 'section' }) {
+  return <Component className={`card-surface ${className}`.trim()}>{children}</Component>;
+}
+
+export function PageHeader({ eyebrow, title, actions }: { eyebrow?: ReactNode; title: ReactNode; actions?: ReactNode }) {
+  return <header className="page-header"><div>{eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}<h1>{title}</h1></div>{actions ? <div className="page-header__actions">{actions}</div> : null}</header>;
+}
+
+export function SectionHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+  return <div className="section-header"><div><h2>{title}</h2>{description ? <p className="muted">{description}</p> : null}</div>{actions ? <div className="section-header__actions">{actions}</div> : null}</div>;
+}
+
+export function EmptyState({ children, title }: { children?: ReactNode; title?: ReactNode }) {
+  return <div className="empty empty-state" role="status">{title ? <h2>{title}</h2> : null}{children}</div>;
 }
 
 export function Skeleton({ className = '' }: { className?: string }) {
@@ -36,7 +80,7 @@ export function AuthLoadingShell() {
   return <div className="app-shell auth-loading-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
     <header className="top-bar"><div className="top-bar__inner">
-      <span className="brand" aria-hidden="true"><span className="brand-mark">B</span>BillSplit</span>
+      <span aria-hidden="true"><Brand /></span>
       <div className="auth-loading-nav" aria-hidden="true"><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-add" /><Skeleton className="skeleton--nav-link" /></div>
       <div className="auth-loading-actions" aria-hidden="true"><Skeleton className="skeleton--status" /><Skeleton className="skeleton--install" /></div>
     </div></header>
@@ -58,7 +102,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 export function PublicShell({ children, returnTo = '/', showAuthActions = true }: { children: ReactNode; returnTo?: string; showAuthActions?: boolean }) {
   const safeReturnTo = sanitizeReturnTo(returnTo);
-  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link>{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
+  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Brand link />{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useConnectionState(): ConnectionState {
@@ -191,8 +235,10 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
 export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();
+  const { user } = useUser();
   const unsynced = outbox.length;
-  return <header className="top-bar"><div className="top-bar__inner"><Link className="brand" to="/"><span className="brand-mark" aria-hidden="true">B</span>BillSplit</Link><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  const identityName = user?.fullName || user?.firstName || user?.primaryEmailAddress?.emailAddress || 'Signed-in user';
+  return <header className="top-bar"><div className="top-bar__inner"><Brand link /><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div><span className="desktop-user-avatar"><Avatar name={identityName} src={user?.imageUrl} size="sm" /></span>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {
@@ -221,7 +267,9 @@ export function BottomNav() {
 }
 
 export function Layout({ children }: { children: ReactNode }) {
-  return <AppShell>{children}</AppShell>;
+  const location = useLocation();
+  const routeClass = location.pathname === '/' ? 'home' : location.pathname === '/activity' ? 'history' : location.pathname === '/settings' ? 'settings' : location.pathname.includes('/manage') ? 'group-management' : location.pathname.includes('/credit') ? 'credit' : location.pathname.includes('/settle') || location.pathname.includes('/settlements') ? 'settlement' : location.pathname.includes('/expense') || location.pathname.includes('/scheduled-expense') ? 'expense' : location.pathname.match(/^\/groups\/[^/]+$/) ? 'group-overview' : 'default';
+  return <AppShell><div className={`route-view route-view--${routeClass}`}>{children}</div></AppShell>;
 }
 
 export function Surface({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -241,11 +289,11 @@ export function Money({ amountMinor, currency, tone, size = 'normal' }: { amount
   return <strong className={`money money--${size}${tone ? ` money--${tone}` : ''}`}>{new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amountMinor / 100)}</strong>;
 }
 
-export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' }) {
+export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' | 'warning' | 'neutral' }) {
   return <span className={`status status--${tone}`}>{children}</span>;
 }
 
-export function Modal({ title, description, children, onClose }: { title: string; description?: ReactNode; children: ReactNode; onClose: () => void }) {
+export function Modal({ title, description, children, onClose, className = '' }: { title: string; description?: ReactNode; children: ReactNode; onClose: () => void; className?: string }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
@@ -272,7 +320,7 @@ export function Modal({ title, description, children, onClose }: { title: string
     return () => { document.removeEventListener('keydown', onKeyDown); modalScrollLocks = Math.max(0, modalScrollLocks - 1); if (!modalScrollLocks) document.body.style.overflow = modalPreviousOverflow; previousFocus.current?.focus(); };
   }, []);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="modal-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} ref={dialogRef}>
+    <div className={`modal-sheet ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} ref={dialogRef}>
       <div className="modal-header"><h2 id={titleId}>{title}</h2><Button type="button" variant="secondary" onClick={onClose} aria-label="Close">Close</Button></div>
       {description ? <div id={descriptionId} className="modal-description">{description}</div> : null}
       {children}
