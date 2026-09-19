@@ -291,7 +291,9 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('summary>Add email</summary>');
     expect(appSource).toContain('filter((invitation) => invitation.targetPersonId == null)');
     expect(appSource).toContain('currentPersonId={currentPersonId}');
-    expect(appSource).toContain('expensePersonLabel(payer.personId)');
+    expect(appSource).toContain('personLabel(payer.personId)');
+    expect(appSource).toContain('entityType="expense" userId={me.data?.id}');
+    expect(appSource).toContain('summary>View audit history</summary>');
     expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.member-email-control form\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
   });

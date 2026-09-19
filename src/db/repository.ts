@@ -1683,21 +1683,27 @@ export class Repository {
       AND EXISTS (SELECT 1 FROM group_members schedule_creator_member JOIN people schedule_creator_person ON schedule_creator_person.id=schedule_creator_member.person_id
         WHERE schedule_creator_member.group_id=? AND schedule_creator_member.user_id=? AND schedule_creator_member.deleted_at IS NULL AND schedule_creator_person.deleted_at IS NULL)`, args: [userId, groupId, userId] };
   }
-  private activeParticipantGuard(groupId: string, ids: string[]) {
+  private creditParticipantGuard(groupId: string, ids: string[], unchangedAllocations: CreditInput['allocations'] = [], requestedAllocations?: CreditInput['allocations']) {
     const unique = [...new Set(ids)];
     if (!unique.length) return { sql: '1=0', args: [] as unknown[] };
-    // Keep participant IDs in one JSON bind.  The schema permits 100 payers
-    // and 100 splits, so expanding both arrays into ? parameters can exceed
-    // D1's bound-parameter limit even after de-duplication.
+    const requestedSnapshot = requestedAllocations || unchangedAllocations;
+    const requested = requestedSnapshot.length
+      ? { json: JSON.stringify(requestedSnapshot), value: "json_extract(requested.value,'$.person_id')" }
+      : { json: JSON.stringify(unique), value: 'requested.value' };
+    const unchangedSql = unchangedAllocations.length ? `AND NOT EXISTS (SELECT 1 FROM json_each(?) unchanged
+          WHERE json_extract(unchanged.value,'$.person_id')=${requested.value}
+            AND json_extract(unchanged.value,'$.allocation_type')=json_extract(requested.value,'$.allocation_type')
+            AND json_extract(unchanged.value,'$.amount_minor')=json_extract(requested.value,'$.amount_minor'))` : '';
     return {
       sql: `NOT EXISTS (SELECT 1 FROM json_each(?) requested WHERE NOT EXISTS (
-        SELECT 1 FROM group_members participant JOIN people person ON person.id=participant.person_id
-        WHERE participant.group_id=? AND participant.person_id=requested.value
-          AND participant.deleted_at IS NULL AND person.deleted_at IS NULL
-      ))`,
-      args: [JSON.stringify(unique), groupId],
+         SELECT 1 FROM group_members participant JOIN people person ON person.id=participant.person_id
+         WHERE participant.group_id=? AND participant.person_id=${requested.value}
+           AND participant.deleted_at IS NULL AND person.deleted_at IS NULL
+      ) ${unchangedSql})`,
+      args: [requested.json, groupId, ...(unchangedAllocations.length ? [JSON.stringify(unchangedAllocations)] : [])],
     };
   }
+  private activeParticipantGuard(groupId: string, ids: string[]) { return this.creditParticipantGuard(groupId, ids); }
   private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement' | 'credit'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
     const table = event.entityType === 'expense' ? 'expenses' : event.entityType === 'settlement' ? 'settlements' : 'credits';
     // Resolve the actor's person and name in the same D1 batch as the
@@ -1921,15 +1927,16 @@ export class Repository {
     const items = await this.hydrateCredits(pageRows);
     const last = pageRows[pageRows.length - 1]; return { items, nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.credit_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
   }
-  private async creditDefaults(groupId: string, input: CreditInput): Promise<{ allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } }> {
-    if (input.delivery_mode === 'direct_provider_offset' && input.allocations.length) throw new RepositoryError('INVALID_CREDIT', 'Direct-provider allocations are derived from linked expense payers and splits');
-    if (!input.applications.length || input.allocations.length) return { allocations: input.allocations };
+  private async creditDefaults(groupId: string, input: CreditInput): Promise<{ allocations: CreditInput['allocations']; derivedAllocations?: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } }> {
+    if (input.delivery_mode === 'direct_provider_offset' && input.allocations.length) throw new RepositoryError('INVALID_CREDIT', 'Original-payment adjustments derive affected members from the linked expense');
+    if (!input.applications.length) return { allocations: input.allocations };
     const requested = JSON.stringify(input.applications);
     const rows = (await this.db.prepare(`SELECT e.id,e.version,e.amount_minor,e.currency,e.group_id,
         COALESCE((SELECT json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)) FROM (SELECT person_id,amount_minor FROM payers WHERE expense_id=e.id ORDER BY person_id)),'[]') AS payers_json,
         COALESCE((SELECT json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)) FROM (SELECT person_id,amount_minor FROM splits WHERE expense_id=e.id ORDER BY person_id)),'[]') AS splits_json
       FROM expenses e JOIN json_each(?) requested ON json_extract(requested.value,'$.expense_id')=e.id
       WHERE e.group_id=? AND e.deleted_at IS NULL ORDER BY e.id`).bind(requested, groupId).all<Row>()).results;
+    if (rows.length !== input.applications.length || rows.some((row) => text(row.currency) !== input.currency)) throw new RepositoryError('INVALID_CREDIT', 'Linked expenses must exist, be active, and use the selected currency');
     const applicationByExpense = new Map(input.applications.map((item) => [item.expense_id, item.amount_minor]));
     const parsed = (value: unknown) => { try { return JSON.parse(text(value)) as Array<{ person_id: string; amount_minor: number }>; } catch { return []; } };
     const side = (type: 'recipient' | 'beneficiary') => {
@@ -1949,7 +1956,6 @@ export class Repository {
       if (remainder > 0) result[0].amount_minor = checkedAddMinor(result[0].amount_minor, remainder);
       return result.filter((item) => item.amount_minor > 0);
     };
-    if (input.delivery_mode !== 'direct_provider_offset') throw new RepositoryError('INVALID_CREDIT', 'Member reimbursements require recipient and beneficiary allocations');
     const guardParts: string[] = [], guardArgs: unknown[] = [];
     for (const row of rows) {
       guardParts.push(`EXISTS (SELECT 1 FROM expenses e WHERE e.id=? AND e.group_id=? AND e.version=? AND e.amount_minor=? AND e.currency=? AND e.deleted_at IS NULL
@@ -1957,7 +1963,17 @@ export class Repository {
         AND (SELECT COALESCE(json_group_array(json_object('person_id',person_id,'amount_minor',amount_minor)),'[]') FROM (SELECT person_id,amount_minor FROM splits WHERE expense_id=e.id ORDER BY person_id))=?)`);
       guardArgs.push(text(row.id), groupId, number(row.version), minor(row.amount_minor), text(row.currency), text(row.payers_json), text(row.splits_json));
     }
-    return { allocations: [...side('recipient'), ...side('beneficiary')], guard: { sql: guardParts.length ? guardParts.join(' AND ') : '0=1', args: guardArgs } };
+    const explicitRecipients = input.allocations.filter((item) => item.allocation_type === 'recipient');
+    const explicitBeneficiaries = input.allocations.filter((item) => item.allocation_type === 'beneficiary');
+    if (input.delivery_mode === 'member_reimbursement') {
+      if (!explicitRecipients.length || explicitRecipients.reduce((sum, item) => checkedAddMinor(sum, item.amount_minor), 0) !== input.amount_minor) throw new RepositoryError('INVALID_CREDIT', 'Linked reimbursements require recipient allocations totalling the refund');
+      // A missing affected-member side means “use the linked expense split”.
+      // The derived side is persisted as a snapshot in the same batch.
+       const derivedBeneficiaries = explicitBeneficiaries.length ? [] : side('beneficiary');
+       return { allocations: [...explicitRecipients, ...derivedBeneficiaries, ...explicitBeneficiaries], derivedAllocations: derivedBeneficiaries, guard: { sql: guardParts.join(' AND '), args: guardArgs } };
+    }
+      const derivedAllocations = [...side('recipient'), ...side('beneficiary')];
+      return { allocations: derivedAllocations, derivedAllocations, guard: { sql: guardParts.join(' AND '), args: guardArgs } };
   }
   private creditInputCheck(input: CreditInput, allocations: CreditInput['allocations']) {
     if (input.delivery_mode === 'direct_provider_offset' && !input.applications.length) throw new RepositoryError('INVALID_CREDIT', 'Direct-provider credits must link an expense');
@@ -1967,10 +1983,10 @@ export class Repository {
   async createCredit(groupId: string, userId: string, input: CreditInput) {
     const hash = stableJson(input), operation = input.client_operation_id ? await this.operation('credit.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
     if (!operation.claim) { const existing = await this.credit(operation.id); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
-    let defaults: { allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
+    let defaults: { allocations: CreditInput['allocations']; derivedAllocations?: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
     try { defaults = await this.creditDefaults(groupId, input); this.creditInputCheck(input, defaults.allocations); } catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); throw error; }
     const allocations = defaults.allocations;
-    const id = operation.id, t = now(), actor = this.activeMutationGuard(groupId, userId), participants = this.activeParticipantGuard(groupId, allocations.map((item) => item.person_id));
+    const id = operation.id, t = now(), actor = this.activeMutationGuard(groupId, userId), participants = this.creditParticipantGuard(groupId, allocations.map((item) => item.person_id), defaults.derivedAllocations, allocations);
     const after: Credit = { id, groupId, subtype: input.subtype, deliveryMode: input.delivery_mode, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, createdBy: userId, createdAt: t, updatedAt: t, deletedAt: null, version: 1, clientOperationId: input.client_operation_id ?? null, applications: input.applications.map((item) => ({ expenseId: item.expense_id, amountMinor: item.amount_minor })), allocations: allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })) };
     const statements = [
       ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}${defaults.guard ? ` AND ${defaults.guard.sql}` : ''}`).bind('credit.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args, ...(defaults.guard?.args || []))] : []),
@@ -1987,9 +2003,9 @@ export class Repository {
   async updateCredit(id: string, userId: string, input: CreditInput) {
     if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required');
     const old = await this.creditForUser(id, userId); if (!old || old.version !== input.version) throw new RepositoryError('CONFLICT', 'The credit was changed by another request');
-    let defaults: { allocations: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
+    let defaults: { allocations: CreditInput['allocations']; derivedAllocations?: CreditInput['allocations']; guard?: { sql: string; args: unknown[] } };
     try { defaults = await this.creditDefaults(old.groupId, input); this.creditInputCheck(input, defaults.allocations); } catch (error) { if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow(); throw error; }
-    const allocations = defaults.allocations, next = input.version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.activeParticipantGuard(old.groupId, allocations.map((item) => item.person_id));
+    const allocations = defaults.allocations, next = input.version + 1, t = now(), revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), unchangedAllocations = old.allocations.map((allocation) => ({ person_id: allocation.personId, allocation_type: allocation.allocationType, amount_minor: allocation.amountMinor })), participants = this.creditParticipantGuard(old.groupId, allocations.map((item) => item.person_id), unchangedAllocations, allocations);
     const after = { ...old, subtype: input.subtype, deliveryMode: input.delivery_mode, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, updatedAt: t, version: next, applications: input.applications.map((item) => ({ expenseId: item.expense_id, amountMinor: item.amount_minor })), allocations: allocations.map((item) => ({ personId: item.person_id, allocationType: item.allocation_type, amountMinor: item.amount_minor })) };
     const revisionGuard = this.projectionRevisionGuard(revisionId, 'credit', id);
     const statements = [

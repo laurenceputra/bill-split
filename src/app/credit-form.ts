@@ -1,24 +1,67 @@
-export type CreditApplicationDraft = { id: string; expenseId: string; amount: string };
+import type { Expense } from '../shared/types';
+
+export type CreditApplicationDraft = { id: string; expenseId: string; amount: string; touched?: boolean; provenance?: 'user' | 'default' };
 export type CreditAllocationDraft = { id: string; personId: string; allocationType: 'recipient' | 'beneficiary'; amount: string };
 
-export type CreditFormMode = 'member_reimbursement' | 'direct_provider_offset';
-
-export type CreditFormResourceErrors = { identity?: unknown; group?: unknown; expenses?: unknown };
-export type CreditFormRetryKeys = { identity: string; group: string; expenses: string };
-
-/** Prefer identity recovery, then the failed expense load, then group data. */
-export function selectCreditFormRetryKey(errors: CreditFormResourceErrors, keys: CreditFormRetryKeys): string | undefined {
-  if (errors.identity !== undefined) return keys.identity;
-  if (errors.expenses !== undefined) return keys.expenses;
-  if (errors.group !== undefined) return keys.group;
-  return undefined;
+/** YYYY-MM-DD in the browser's local calendar, rather than UTC. */
+export function localBrowserDate(value = new Date()): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
-export function validateCreditDraft(applications: CreditApplicationDraft[], allocations: CreditAllocationDraft[], mode: CreditFormMode) {
-  if (applications.some((row) => !row.expenseId || !row.amount.trim())) return 'Complete or remove every visible expense application row.';
-  if (new Set(applications.map((row) => row.expenseId)).size !== applications.length) return 'Each expense can appear only once in a credit.';
-  if (mode === 'member_reimbursement' && allocations.some((row) => !row.personId || !row.amount.trim())) return 'Complete or remove every visible allocation row.';
-  const allocationKeys = allocations.filter((row) => row.personId).map((row) => `${row.allocationType}:${row.personId}`);
-  if (new Set(allocationKeys).size !== allocationKeys.length) return 'Each person can appear only once per allocation side.';
-  return undefined;
+export type RefundCapacityExpense = Pick<Expense, 'id' | 'amountMinor' | 'currency' | 'date' | 'description'> & { totalCreditsMinor?: number; linkedCredits?: Expense['linkedCredits'] };
+
+export function remainingRefundableMinor(expense: RefundCapacityExpense, editingCreditId?: string): number {
+  const alreadyRefunded = expense.linkedCredits ? expense.linkedCredits.filter((credit) => credit.creditId !== editingCreditId).reduce((sum, credit) => sum + credit.amountMinor, 0) : (expense.totalCreditsMinor || 0);
+  return Math.max(0, expense.amountMinor - alreadyRefunded);
+}
+
+/** Defaults only untouched rows. User-entered amounts are never overwritten. */
+export function defaultRefundApplications(rows: CreditApplicationDraft[], expenses: RefundCapacityExpense[], totalMinor: number, editingCreditId?: string): CreditApplicationDraft[] {
+  const touchedTotal = rows.filter((row) => row.touched).reduce((sum, row) => {
+    const value = Number(row.amount);
+    return Number.isFinite(value) ? sum + Math.round(value * 100) : sum;
+  }, 0);
+  let unallocated = Math.max(0, totalMinor - touchedTotal);
+  return rows.map((row) => {
+    if (row.touched) return row;
+    const expense = expenses.find((candidate) => candidate.id === row.expenseId);
+    const next = expense ? Math.min(unallocated, remainingRefundableMinor(expense, editingCreditId)) : 0;
+    unallocated -= next;
+    return { ...row, amount: (next / 100).toFixed(2), provenance: 'default' };
+  });
+}
+
+/** Exact floor allocation with a stable first-row remainder shared by the form and repository. */
+export function proportionalRefundShare(applicationMinor: number, shareMinor: number, expenseMinor: number): number {
+  if (![applicationMinor, shareMinor, expenseMinor].every(Number.isSafeInteger) || applicationMinor < 0 || shareMinor < 0 || expenseMinor <= 0) throw new Error('Invalid proportional refund inputs');
+  const result = Number((BigInt(applicationMinor) * BigInt(shareMinor)) / BigInt(expenseMinor));
+  if (!Number.isSafeInteger(result)) throw new Error('Refund share exceeds the safe integer range');
+  return result;
+}
+
+function derivedExpenseSideShares(applications: Array<{ amountMinor: number; expense: Pick<Expense, 'id' | 'amountMinor'> & { splits?: Expense['splits']; payers?: Expense['payers'] } }>, side: 'splits' | 'payers') {
+  const totals = new Map<string, number>();
+  const orderedApplications = [...applications].sort((left, right) => left.expense.id.localeCompare(right.expense.id));
+  for (const application of orderedApplications) for (const allocation of [...(application.expense[side] || [])].sort((left, right) => left.personId.localeCompare(right.personId))) {
+    const share = proportionalRefundShare(application.amountMinor, allocation.amountMinor, application.expense.amountMinor);
+    totals.set(allocation.personId, (totals.get(allocation.personId) || 0) + share);
+  }
+  const target = applications.reduce((sum, application) => sum + application.amountMinor, 0);
+  const current = [...totals.values()].reduce((sum, value) => sum + value, 0);
+  if (totals.size && current < target) {
+    const first = [...totals.keys()][0];
+    totals.set(first, (totals.get(first) || 0) + target - current);
+  }
+  return [...totals.entries()].filter(([, amountMinor]) => amountMinor > 0).map(([personId, amountMinor]) => ({ personId, amountMinor }));
+}
+
+export function derivedBeneficiaryShares(applications: Array<{ amountMinor: number; expense: Pick<Expense, 'id' | 'amountMinor' | 'splits'> }>) {
+  return derivedExpenseSideShares(applications, 'splits');
+}
+
+export function derivedPayerShares(applications: Array<{ amountMinor: number; expense: Pick<Expense, 'id' | 'amountMinor' | 'payers'> }>) {
+  return derivedExpenseSideShares(applications, 'payers');
 }

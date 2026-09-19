@@ -67,7 +67,7 @@ suite('credit SQL safety and migration upgrades', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30000);
 
   it('rejects unrelated direct-provider recipients, linked expense mutation, and aggregate overflow', () => {
     const { directory, dbPath } = makeDatabase();

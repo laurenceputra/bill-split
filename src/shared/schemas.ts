@@ -50,14 +50,17 @@ export const creditInput = z.object({
   const applicationTotal = value.applications.reduce((sum, item) => sum + BigInt(item.amount_minor), 0n);
   if (value.applications.length > 0 && applicationTotal !== BigInt(value.amount_minor)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Linked applications must total the credit amount' });
   if (value.applications.length === 0 && value.delivery_mode === 'direct_provider_offset') context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Direct-provider credits must link an expense' });
-  if (value.delivery_mode === 'direct_provider_offset' && value.allocations.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Direct-provider allocations are derived from linked expense payers and splits' });
+  if (value.delivery_mode === 'direct_provider_offset' && value.allocations.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Original-payment adjustments derive affected members from the linked expense' });
   if (new Set(value.applications.map((item) => item.expense_id)).size !== value.applications.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Each expense may be linked once' });
   for (const type of ['recipient', 'beneficiary'] as const) {
     const values = value.allocations.filter((item) => item.allocation_type === type);
     if (values.length && values.reduce((sum, item) => sum + BigInt(item.amount_minor), 0n) !== BigInt(value.amount_minor)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: `${type} allocations must total the credit amount` });
     if (new Set(values.map((item) => item.person_id)).size !== values.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Each allocation person may appear once per side' });
   }
-  if (value.applications.length === 0 && value.allocations.length > 0 && (value.allocations.filter((item) => item.allocation_type === 'recipient').length === 0 || value.allocations.filter((item) => item.allocation_type === 'beneficiary').length === 0)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Standalone credits need recipient and beneficiary allocations' });
+  const recipients = value.allocations.filter((item) => item.allocation_type === 'recipient');
+  const beneficiaries = value.allocations.filter((item) => item.allocation_type === 'beneficiary');
+  if (value.applications.length === 0 && (recipients.length === 0 || beneficiaries.length === 0)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Standalone refunds need explicit recipient and affected-member allocations' });
+  if (value.applications.length > 0 && value.delivery_mode === 'member_reimbursement' && (recipients.length === 0 || recipients.reduce((sum, item) => sum + BigInt(item.amount_minor), 0n) !== BigInt(value.amount_minor))) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Linked reimbursements require explicit recipient allocations totalling the refund' });
 });
 export const timezone = z.string().trim().min(1).max(64).refine((value) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(); return true; } catch { return false; }

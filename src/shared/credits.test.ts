@@ -32,4 +32,20 @@ describe('credit input accounting invariants', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('allows a linked member reimbursement to confirm the recipient while deriving affected shares', () => {
+    const result = creditInput.safeParse({
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01',
+      applications: [{ expense_id: expense, amount_minor: 100 }],
+      allocations: [{ person_id: person, allocation_type: 'recipient', amount_minor: 100 }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('requires a linked reimbursement recipient', () => {
+    expect(creditInput.safeParse({
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01',
+      applications: [{ expense_id: expense, amount_minor: 100 }], allocations: [],
+    }).success).toBe(false);
+  });
 });

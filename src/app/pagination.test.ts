@@ -30,6 +30,15 @@ describe('continuation request scopes', () => {
     expect(newRequest.cursor).toBe('cursor-b');
   });
 
+  it('does not append a stale page after the group scope changes', () => {
+    const scope = createPageRequestScope();
+    const oldRequest = scope.begin('group-a', 'cursor-a');
+    scope.reset('group-b');
+    const currentRows = [{ id: 'group-b-existing' }];
+    const appended = scope.isCurrent(oldRequest) ? appendUniquePage(currentRows, [{ id: 'group-a-stale' }], (row) => row.id) : currentRows;
+    expect(appended).toEqual(currentRows);
+  });
+
   it('keeps only the newest request for one scope current', () => {
     const scope = createPageRequestScope();
     const first = scope.begin('group-a:filtered', 'cursor-1');

@@ -34,12 +34,17 @@ describe('getNavigationContext', () => {
     expect(getNavigationContext('/')).toMatchObject({
       route: 'home',
       activeSection: 'groups',
-      addAction: 'new-expense',
-      addLabel: 'Add expense',
-      addPath: '/expense/new',
+      addAction: 'add-transaction',
+      addLabel: 'Add transaction',
+      addPath: '/add',
       primaryPath: '/',
       morePath: '/settings',
     });
+  });
+
+  it('uses the transaction chooser in both global and group contexts', () => {
+    expect(getNavigationContext('/add')).toMatchObject({ route: 'add-transaction', activeSection: 'add', addPath: '/add' });
+    expect(getNavigationContext('/groups/group-123/add')).toMatchObject({ route: 'add-transaction', activeSection: 'add', addPath: '/groups/group-123/add', groupId: 'group-123' });
   });
 
   it('classifies every group destination with explicit context', () => {
@@ -48,11 +53,11 @@ describe('getNavigationContext', () => {
       route: 'activity',
       groupId: 'group-123',
       activeSection: 'activity',
-      addAction: 'new-expense',
-      addLabel: 'Add expense',
+      addAction: 'add-transaction',
+      addLabel: 'Add transaction',
       groupsPath: '/',
       activityPath: '/activity',
-      addPath: '/groups/group-123/expense/new',
+      addPath: '/groups/group-123/add',
       morePath: '/settings',
       primaryPath: '/',
       contextualPath: '/groups/group-123/activity',
@@ -63,7 +68,7 @@ describe('getNavigationContext', () => {
       overviewPath: '/groups/group-123',
       activityPath: '/groups/group-123/activity',
       settlePath: '/groups/group-123/settle',
-      addPath: '/groups/group-123/expense/new',
+      addPath: '/groups/group-123/add',
     });
   });
 
@@ -89,8 +94,13 @@ describe('getNavigationContext', () => {
   it.each([
     ['/groups/group-123', 'group-overview', 'groups'],
     ['/groups/group-123/manage', 'group-manage', 'groups'],
+    ['/groups/group-123/add', 'add-transaction', 'add'],
     ['/groups/group-123/expense/new', 'new-expense', 'add'],
     ['/groups/group-123/scheduled-expense/new', 'new-expense', 'add'],
+    ['/groups/group-123/refund/new', 'refund-create', 'add'],
+    ['/groups/group-123/credit/new', 'refund-create', 'add'],
+    ['/groups/group-123/refund/credit-1/edit', 'refund-edit', 'add'],
+    ['/groups/group-123/credit/credit-1/edit', 'refund-edit', 'add'],
     ['/groups/group-123/expense/expense-1', 'edit-expense', 'add'],
     ['/groups/group-123/expenses/expense-1', 'expense-detail', 'groups'],
     ['/groups/group-123/settle', 'settle', 'settle'],
@@ -103,7 +113,7 @@ describe('getNavigationContext', () => {
       route: 'legacy-expense-detail',
       activeSection: 'groups',
       primaryPath: '/',
-      addPath: '/expense/new',
+      addPath: '/add',
     });
     expect(getNavigationContext('/expenses/expense-1').groupId).toBeUndefined();
   });
