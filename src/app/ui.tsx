@@ -52,7 +52,9 @@ export function AuthLoadingShell() {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className="app-main" id="main-content" tabIndex={-1}>{children}</main><BottomNav /></div>;
+  const nestedMain = isValidElement<{ className?: string; 'aria-labelledby'?: string; children?: ReactNode }>(children) && children.type === 'main' ? children : undefined;
+  const nestedProps = nestedMain?.props;
+  return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className={`app-main${nestedProps?.className ? ` ${nestedProps.className}` : ''}`} id="main-content" tabIndex={-1} aria-labelledby={nestedProps?.['aria-labelledby']}>{nestedMain ? nestedMain.props.children : children}</main><BottomNav /></div>;
 }
 
 export function PublicShell({ children, returnTo = '/', showAuthActions = true }: { children: ReactNode; returnTo?: string; showAuthActions?: boolean }) {
@@ -168,7 +170,7 @@ function DesktopNav() {
   return <nav className="desktop-nav" aria-label="Primary navigation">
     <Link className="desktop-nav__item" to={context.primaryPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}>Groups</Link>
      <Link className="desktop-nav__item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}>History</Link>
-     <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>Add expense</span></Link>
+     <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>Add</span></Link>
     <Link className="desktop-nav__item" to="/settings" aria-current={context.activeSection === 'settings' ? 'page' : undefined}>Settings</Link>
   </nav>;
 }
@@ -180,7 +182,7 @@ export function BottomNav() {
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
       <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>History</span></Link>
-     <Link className="nav-item nav-item--add" to={context.addPath} aria-label="Add expense" aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
+      <Link className="nav-item nav-item--add" to={context.addPath} aria-label="Add transaction" aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
      <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>
   </nav>;
 }

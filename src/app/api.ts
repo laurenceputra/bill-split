@@ -22,6 +22,15 @@ export type AuthLifecycleStatus = 'checking' | 'provisional' | 'restoring' | 're
 export type AuthLifecycle = { status: AuthLifecycleStatus; error?: unknown; privateCacheAvailable?: boolean; privateCacheRouteKey?: string };
 export type ClerkAuthEvidence = { isLoaded: boolean; isSignedIn: boolean | undefined; userId?: string; sessionId?: string };
 export type AuthBootstrapRoute = { pathname: string; search?: string };
+export type ProvisionalAddRoute = { scope: 'global' } | { scope: 'group'; groupId: string };
+
+export const provisionalAddRoute = (pathname: string): ProvisionalAddRoute | undefined => {
+  const normalized = pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
+  if (normalized === '/add') return { scope: 'global' };
+  const match = normalized.match(/^\/groups\/([^/]+)\/add$/);
+  if (!match) return undefined;
+  try { return { scope: 'group', groupId: decodeURIComponent(match[1]) }; } catch { return { scope: 'group', groupId: match[1] }; }
+};
 export type ExpensePage = { expenses: Expense[]; nextCursor?: string };
 export type SettlementPage = { settlements: Settlement[]; nextCursor?: string };
 export type TransactionPage = { transactions: Transaction[]; nextCursor?: string };
@@ -1112,6 +1121,15 @@ async function restoreProvisionalRouteCache(userId: string, authenticatedPersonI
     const detailGroupId = await seedExpenseDetail(decodeRoutePart(detailMatch[1]));
     const cachedGroup = detailGroupId ? await seedGroup(detailGroupId, ['group']) : undefined;
     return Boolean(detailGroupId && cachedGroup?.group && cachedGroup.members && resourceReady(resourceKeys.expenseDetail(userId, decodeRoutePart(detailMatch[1]))) && resourceReady(resourceKeys.group(userId, detailGroupId)));
+  }
+  const addRoute = provisionalAddRoute(pathname);
+  if (addRoute?.scope === 'global') {
+    const cached = await seedHome();
+    return Boolean(cached && resourceReady(resourceKeys.groups(userId)));
+  }
+  if (addRoute?.scope === 'group') {
+    const cached = await seedGroup(addRoute.groupId, ['group']);
+    return Boolean(cached?.group && cached.members && resourceReady(resourceKeys.group(userId, addRoute.groupId)));
   }
   if (pathname.includes('/scheduled-expense/')) {
     await seedHome();

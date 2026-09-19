@@ -315,14 +315,16 @@ named resources, variables, and secrets.
 
 ## Data and API
 
-Confirmed credits are first-class transactions (`refund` or `claim`) delivered
-as member reimbursements or direct-provider offsets. They use integer minor-unit
-amounts, snapshot recipient/beneficiary allocations, and may be standalone or
-fully applied to one or more same-group, same-currency expenses. Applications
-are capped atomically by both the credit amount and each gross expense; linked
-expenses cannot be reduced, re-currencyed, deleted, or restored while an active
-credit applies. Credits are online-only and appear in transaction history,
-JSON export, and the separate `credits.csv` export.
+Refunds/reimbursements are first-class transactions (the persisted `credit`
+enum remains for compatibility). They use integer minor-unit amounts and save
+recipient and affected-member snapshots. A linked reimbursement requires an
+explicit recipient; when affected members are omitted, the server derives them
+from linked expense splits with exact integer rounding and persists the result.
+Original-payment-or-bill adjustments derive both payer and affected sides.
+Standalone records require both sides explicitly. Applications are capped
+atomically by the refund amount and each gross expense, including edit capacity
+after excluding the record being edited. Refunds are online-only and appear in
+transaction history, JSON export, and the existing `credits.csv` export.
 
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points
