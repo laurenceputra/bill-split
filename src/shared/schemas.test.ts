@@ -24,7 +24,8 @@ describe('financial input', () => {
     expect(expenseInput.safeParse({ ...base, currency: 'JPY' }).success).toBe(false);
   });
   it('keeps frontend currency options aligned with the validation source', () => {
-    expect(currencyOptions.map((option) => option.value)).toEqual([...supportedCurrencies]);
+    expect(new Set(currencyOptions.map((option) => option.value))).toEqual(new Set(supportedCurrencies));
+    expect(currencyOptions.map((option) => option.label)).toEqual(['AUD', 'CAD', 'CHF', 'CNY', 'EUR', 'GBP', 'HKD', 'INR', 'NZD', 'SGD', 'USD']);
   });
   it('accepts a client operation ID for retry-safe friend creation', () => {
     expect(friendInput.parse({ name: 'Friend', currency: 'USD', client_operation_id: 'friend-op' }).client_operation_id).toBe('friend-op');

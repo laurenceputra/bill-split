@@ -5,7 +5,7 @@ export { normalizeCategoryDescription } from './category';
 
 export const id = z.string().uuid();
 export const supportedCurrencies = ['USD', 'EUR', 'GBP', 'AUD', 'CAD', 'NZD', 'SGD', 'HKD', 'CHF', 'CNY', 'INR'] as const;
-export const currencyOptions = supportedCurrencies.map((value) => ({ value, label: value }));
+export const currencyOptions = [...supportedCurrencies].sort().map((value) => ({ value, label: value }));
 export const currency = z.enum(supportedCurrencies, { errorMap: () => ({ message: 'Unsupported currency (only two-decimal ISO currencies are supported)' }) });
 export const date = z.string().refine((value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
