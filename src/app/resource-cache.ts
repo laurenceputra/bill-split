@@ -228,7 +228,7 @@ export function evictResourcePrefix(prefix: string, userId = activeUserId || '')
 export function evictGroupResources(groupId: string, userId: string) {
   const exact = [
     resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId),
-    resourceKeys.expenses(userId, groupId), resourceKeys.balances(userId, groupId),
+    resourceKeys.expenses(userId, groupId), resourceKeys.credits(userId, groupId), resourceKeys.balances(userId, groupId),
     resourceKeys.settlements(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId),
     resourceKeys.transactions(userId, groupId),
     resourceKeys.transactions(userId, 'all'),
@@ -238,6 +238,7 @@ export function evictGroupResources(groupId: string, userId: string) {
   ];
   for (const key of exact) evictResource(key, userId);
   evictResourcePrefix(`expenses:${userId}:${groupId}:`, userId);
+  evictResourcePrefix(`credits:${userId}:${groupId}:`, userId);
   evictResourcePrefix(`transactions:${userId}:${groupId}:`, userId);
   evictResourcePrefix(`audit-entity:${userId}:${groupId}:`, userId);
   evictResourcePrefix(`transactions:${userId}:`, userId);
@@ -245,8 +246,8 @@ export function evictGroupResources(groupId: string, userId: string) {
   // whose loaded payload identifies this group, as well as schedule details.
   for (const [key, resource] of entries) {
     if (resource.snapshot.userId !== userId || resource.snapshot.data === undefined) continue;
-    const data = resource.snapshot.data as { expense?: { groupId?: string }; settlement?: { groupId?: string }; scheduledExpense?: { groupId?: string } };
-    if (data.expense?.groupId === groupId || data.settlement?.groupId === groupId || data.scheduledExpense?.groupId === groupId) evictResource(key, userId);
+    const data = resource.snapshot.data as { expense?: { groupId?: string }; settlement?: { groupId?: string }; credit?: { groupId?: string }; scheduledExpense?: { groupId?: string } };
+    if (data.expense?.groupId === groupId || data.settlement?.groupId === groupId || data.credit?.groupId === groupId || data.scheduledExpense?.groupId === groupId) evictResource(key, userId);
   }
   evictResource(resourceKeys.activity(userId, 'all'), userId);
   evictResource(resourceKeys.groups(userId), userId);
@@ -418,6 +419,7 @@ export const resourceKeys = Object.freeze({
   group: (userId: string, groupId: string) => resourceKey('group', `${userId}:${groupId}`),
   members: (userId: string, groupId: string) => resourceKey('members', `${userId}:${groupId}`),
   expenses: (userId: string, groupId: string, filterKey = '') => resourceKey('expenses', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
+  credits: (userId: string, groupId: string, filterKey = '') => resourceKey('credits', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
   transactions: (userId: string, groupId: string, filterKey = '') => resourceKey('transactions', `${userId}:${groupId}${filterKey ? `:${filterKey}` : ''}`),
   balances: (userId: string, groupId: string) => resourceKey('balances', `${userId}:${groupId}`),
   settlements: (userId: string, groupId: string) => resourceKey('settlements', `${userId}:${groupId}`),
@@ -432,6 +434,7 @@ export const resourceKeys = Object.freeze({
   categories: (userId: string) => resourceKey('categories', userId),
   expenseDetail: (userId: string, expenseId: string) => resourceKey('expense-detail', `${userId}:${expenseId}`),
   settlementDetail: (userId: string, settlementId: string) => resourceKey('settlement-detail', `${userId}:${settlementId}`),
+  creditDetail: (userId: string, creditId: string) => resourceKey('credit-detail', `${userId}:${creditId}`),
 });
 export const useCachedResource = useResource;
 export const resourceCache = Object.freeze({
@@ -446,7 +449,7 @@ export const resourceCache = Object.freeze({
   evictPrefix: evictResourcePrefix,
   clear: clearResourceCache,
 });
-const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) => {
+const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; detailsGroupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) => {
   try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
 };
 export const invalidateForMutation = {
@@ -466,15 +469,16 @@ export const invalidateForMutation = {
   groupDeleted: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId, transactions: true, transactionGroupId: groupId }); },
   groupLeft: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId, transactions: true, transactionGroupId: groupId }); },
   groupAccessRevoked: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; evictGroupResources(groupId, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, groups: true, groupId, transactions: true, transactionGroupId: groupId }); },
-  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId), resourceKeys.auditEntity(userId, groupId, 'expense', expenseId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true, transactions: true, transactionGroupId: groupId }); },
-  settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId), resourceKeys.auditEntity(userId, groupId, 'settlement', settlementId)] : [])], userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true, transactions: true, transactionGroupId: groupId }); },
+  expenseChanged: async (groupId: string, expenseId?: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.credits(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.categories(userId), resourceKeys.settlements(userId, groupId), ...(expenseId ? [resourceKeys.expenseDetail(userId, expenseId), resourceKeys.auditEntity(userId, groupId, 'expense', expenseId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`credits:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`credit-detail:${userId}:`, userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, categories: true, transactions: true, detailsGroupId: groupId, transactionGroupId: groupId }); },
+   settlementChanged: async (groupId: string, userId?: string, settlementIdOrGeneration?: string | number, generation?: number) => { if (!userId) return; const settlementId = typeof settlementIdOrGeneration === 'string' ? settlementIdOrGeneration : undefined; const mutationGeneration = typeof settlementIdOrGeneration === 'number' ? settlementIdOrGeneration : generation; invalidateResources([resourceKeys.groups(userId), resourceKeys.settlements(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(settlementId ? [resourceKeys.settlementDetail(userId, settlementId), resourceKeys.auditEntity(userId, groupId, 'settlement', settlementId)] : [])], userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); await invalidatePersistedCaches(userId, mutationGeneration, { activity: true, transactions: true, transactionGroupId: groupId }); },
+  creditChanged: async (groupId: string, userId?: string, creditId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.expenses(userId, groupId), resourceKeys.credits(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.balances(userId, groupId), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), ...(creditId ? [resourceKeys.creditDetail(userId, creditId), resourceKeys.auditEntity(userId, groupId, 'credit', creditId)] : [])], userId); invalidateResourcePrefix(`expenses:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`expense-detail:${userId}:`, userId); invalidateResourcePrefix(`credits:${userId}:${groupId}:`, userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); await invalidatePersistedCaches(userId, generation, { activity: true, transactions: true, detailsGroupId: groupId, transactionGroupId: groupId }); },
   invitationsChanged: async (groupId?: string, userId?: string) => { if (!userId) return; invalidateResources([resourceKeys.invitations(userId), ...(groupId ? [resourceKeys.groupInvitations(userId, groupId)] : [])], userId); },
   scheduledExpenseChanged: async (groupId: string, userId?: string, scheduledExpenseId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.scheduledExpenses(userId, groupId), resourceKeys.categories(userId), ...(scheduledExpenseId ? [resourceKeys.scheduledExpense(userId, scheduledExpenseId)] : [])], userId); await invalidatePersistedCaches(userId, generation, { categories: true, groups: false }); },
   profileChanged: async (userId: string, generation?: number, profile?: { personId: string; name: string; profileRevision?: number; updatedAt?: string }) => {
     if (profile) {
       patchResourceData<{ id: string; name: string; profileRevision?: number; updatedAt?: string }>(resourceKeys.identity(), '', (data) => data.id === userId ? { ...data, name: profile.name, ...(profile.profileRevision === undefined ? {} : { profileRevision: profile.profileRevision }), ...(profile.updatedAt ? { updatedAt: profile.updatedAt } : {}) } : data);
     } else invalidateResource(resourceKeys.identity(), '');
-    for (const prefix of ['groups:', 'group:', 'members:', 'expenses:', 'transactions:', 'balances:', 'settlements:', 'scheduled-expenses:', 'scheduled-expense:', 'activity:', 'insights:', 'audit:', 'audit-entity:', 'expense-detail:', 'settlement-detail:']) invalidateResourcePrefix(prefix, userId);
+      for (const prefix of ['groups:', 'group:', 'members:', 'expenses:', 'credits:', 'transactions:', 'balances:', 'settlements:', 'scheduled-expenses:', 'scheduled-expense:', 'activity:', 'insights:', 'audit:', 'audit-entity:', 'expense-detail:', 'settlement-detail:', 'credit-detail:']) invalidateResourcePrefix(prefix, userId);
     await invalidatePersistedCaches(userId, generation, { groups: true, activity: true, transactions: true });
   },
 };

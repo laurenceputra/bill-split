@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { Repository, assertLikeSearch, decodeLedgerCursor, decodeTransactionCursor, encodeLedgerCursor, encodeTransactionCursor } from './repository';
+import { Repository, assertLikeSearch, decodeLedgerCursor, decodeTransactionCursor, encodeLedgerCursor, encodeTransactionCursor, exactProportionalMinor } from './repository';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import type { ExpenseInput, SettlementInput } from '../shared/schemas';
 import type { Transaction } from '../shared/types';
 
 const IDENTITY_TOMBSTONE_TEST_KEY = 'test-identity-tombstone-key';
+
+describe('credit allocation arithmetic', () => {
+  it('allocates with integer quotient arithmetic at the safe-integer boundary', () => {
+    expect(exactProportionalMinor(Number.MAX_SAFE_INTEGER - 1, 1, 3)).toBe(3002399751580330);
+    expect(exactProportionalMinor(7, 2, 3)).toBe(4);
+  });
+
+  it('rejects unsafe or invalid proportional inputs', () => {
+    expect(() => exactProportionalMinor(Number.MAX_SAFE_INTEGER + 1, 1, 2)).toThrow();
+    expect(() => exactProportionalMinor(1, 1, 0)).toThrow();
+  });
+});
 
 class FakeDb {
   claim: Record<string, unknown> | null = null;
@@ -299,6 +311,20 @@ class StaleMutationStatement {
     return null;
   }
   async all<T>() { return { results: (this.sql.includes('FROM payers') || this.sql.includes('FROM splits') ? [] : []) as T[] }; }
+}
+
+class CreditOverflowDb {
+  readonly credit = { id: 'credit-1', group_id: 'group-1', subtype: 'claim', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', credit_date: '2025-01-01', note: null, created_by: 'user-1', created_at: '', updated_at: '', deleted_at: null, version: 1, client_operation_id: null };
+  readonly deletedCredit = { ...this.credit, deleted_at: new Date().toISOString() };
+  deleted = false;
+  prepare(sql: string) { return new CreditOverflowStatement(this, sql); }
+  async batch() { throw new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW'); }
+}
+class CreditOverflowStatement {
+  constructor(private readonly db: CreditOverflowDb, private readonly sql: string) {}
+  bind(..._args: unknown[]) { return this; }
+  async first<T>() { return this.sql.includes('FROM credits c') ? (this.db.deleted ? this.db.deletedCredit : this.db.credit) as T : null; }
+  async all<T>() { return { results: [] as T[] }; }
 }
 
 class BulkHydrationDb {
@@ -1172,6 +1198,16 @@ describe('repository mutation safety', () => {
     const settlementUpdateDb = new StaleMutationDb(); settlementUpdateDb.failure = new Error('SQLITE_CONSTRAINT: BALANCE_OVERFLOW');
     await expect(new Repository(settlementUpdateDb as never).updateSettlement('settlement-1', 'user-1', settlementInput)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
   });
+
+  it('maps credit update and restore trigger failures to BALANCE_OVERFLOW', async () => {
+    const updateDb = new CreditOverflowDb();
+    await expect(new Repository(updateDb as never).updateCredit('credit-1', 'user-1', {
+      subtype: 'claim', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2025-01-01', applications: [],
+      allocations: [{ person_id: 'person-1', allocation_type: 'recipient', amount_minor: 100 }, { person_id: 'person-2', allocation_type: 'beneficiary', amount_minor: 100 }], version: 1,
+    })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const restoreDb = new CreditOverflowDb(); restoreDb.deleted = true;
+    await expect(new Repository(restoreDb as never).restoreCredit('credit-1', 'user-1', 1)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+  });
 });
 
 describe('repository collaboration lifecycle', () => {
@@ -1410,19 +1446,17 @@ describe('repository transaction pagination', () => {
     expect(db.lastSql).toContain('authorized_group.deleted_at IS NULL');
   });
 
-  it('omits group display names from scoped transaction pages', async () => {
+  it('includes group display names for scoped transaction pages', async () => {
     const rows = transactionRows.map((row) => ({ ...row, group_name: 'Friend' }));
     const groupDb = new TransactionPageDb(rows);
     const groupPage = await new Repository(groupDb as never).transactionPage('group-1', { limit: 2 });
-    expect(groupPage.items.every((item) => !('groupName' in item))).toBe(true);
-    expect(groupDb.lastSql).toContain('NULL AS group_name');
-    expect(groupDb.lastSql).not.toContain('CASE WHEN');
+    expect(groupPage.items.every((item) => item.groupName === 'Friend')).toBe(true);
+    expect(groupDb.lastSql).toContain('g.name AS group_name');
 
     const scopedGlobalDb = new TransactionPageDb(rows);
     const scopedGlobalPage = await new Repository(scopedGlobalDb as never).globalTransactionPage('user-1', 'group-1', { limit: 2 });
-    expect(scopedGlobalPage.items.every((item) => !('groupName' in item))).toBe(true);
-    expect(scopedGlobalDb.lastSql).toContain('NULL AS group_name');
-    expect(scopedGlobalDb.lastSql).not.toContain('CASE WHEN');
+    expect(scopedGlobalPage.items.every((item) => item.groupName === 'Friend')).toBe(true);
+    expect(scopedGlobalDb.lastSql).toContain('CASE WHEN');
   });
 
   it('rejects invalid cursors, dates, and offset pagination', async () => {
@@ -1720,8 +1754,8 @@ describe('repository home balance summaries', () => {
     expect(db.sql).toContain('p.person_id');
     expect(db.sql).toContain('s.person_id');
     expect(db.sql).toContain('gm.user_id=?');
-    expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=e.group_id');
-    expect(db.sql).toContain('JOIN scoped_groups scope ON scope.group_id=s.group_id');
+    expect(db.sql).toContain('FROM authoritative_currencies currencies JOIN authorized_groups member ON member.group_id=currencies.group_id');
+    expect(db.sql).toContain('SELECT scope.group_id,c.currency FROM scoped_groups scope JOIN credits c ON c.group_id=scope.group_id');
     expect(db.sql).toContain('JOIN authorized_groups balance_member');
     expect(db.sql).toContain('e.deleted_at IS NULL');
     expect(db.sql).toContain('s.deleted_at IS NULL');

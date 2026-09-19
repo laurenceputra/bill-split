@@ -14,7 +14,7 @@ describe('transaction filter helpers', () => {
     expect(transactionFilterQuery({ q: '  ' }).toString()).toBe('');
   });
 
-  it('keeps categories with All and clears them only for settlement filters', () => {
+  it('keeps categories with All and clears them for non-expense filters', () => {
     expect(normalizeTransactionFilters({ category: 'Dinner', q: 'paid' })).toEqual({ category: 'Dinner', q: 'paid' });
     expect(readTransactionFilters(new URLSearchParams('category=Dinner'))).toEqual({ category: 'Dinner' });
     expect(transactionFilterQuery({ category: 'Dinner' }).toString()).toBe('category=Dinner');
@@ -25,5 +25,8 @@ describe('transaction filter helpers', () => {
     expect(transactionFilterCount(filters)).toBe(2);
     expect(readTransactionFilters(new URLSearchParams('kind=settlement&category=Dinner'))).toEqual({ kind: 'settlement' });
     expect(writeTransactionFilters(new URLSearchParams('kind=settlement&category=Dinner'), filters).toString()).toBe('kind=settlement&q=paid');
+
+    expect(normalizeTransactionFilters({ kind: 'credit', category: 'Dinner' })).toEqual({ kind: 'credit' });
+    expect(readTransactionFilters(new URLSearchParams('kind=credit&category=Dinner'))).toEqual({ kind: 'credit' });
   });
 });

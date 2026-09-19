@@ -24,10 +24,17 @@ export interface GroupInvitation { id: string; groupId: string; email: string; c
 export interface GroupResponse { group: Group; members: GroupMember[]; historicalParticipants: HistoricalParticipant[]; splitDefault: GroupSplitDefault | null; currentPersonId: string | null }
 export interface Split { personId: string; amountMinor: number; metadata?: Record<string, unknown> }
 export interface Payer { personId: string; amountMinor: number }
+export type CreditSubtype = 'refund' | 'claim';
+export type CreditDeliveryMode = 'member_reimbursement' | 'direct_provider_offset';
+export type CreditAllocationType = 'recipient' | 'beneficiary';
+export interface CreditApplication { expenseId: string; amountMinor: number; expenseDescription?: string; expenseDate?: string }
+export interface CreditAllocation { personId: string; allocationType: CreditAllocationType; amountMinor: number }
+export interface Credit { id: string; groupId: string; subtype: CreditSubtype; deliveryMode: CreditDeliveryMode; amountMinor: number; currency: Currency; date: string; note?: string | null; createdBy: string; createdAt: string; updatedAt: string; deletedAt?: string | null; version: number; clientOperationId?: string | null; applications: CreditApplication[]; allocations: CreditAllocation[] }
+export interface CreditApplicationSummary { creditId: string; subtype: CreditSubtype; amountMinor: number; date: string; deliveryMode: CreditDeliveryMode }
 export interface Expense {
   id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
   date: string; category?: string | null; notes?: string | null; createdBy: string; createdAt: string;
-  updatedAt: string; deletedAt?: string | null; version: number; clientOperationId?: string | null; payers: Payer[]; splits: Split[]
+  updatedAt: string; deletedAt?: string | null; version: number; clientOperationId?: string | null; payers: Payer[]; splits: Split[]; linkedCredits?: CreditApplicationSummary[]; totalCreditsMinor?: number; netCostMinor?: number
 }
 export interface ScheduledExpense {
   id: string; groupId: string; description: string; amountMinor: number; currency: Currency;
@@ -85,17 +92,18 @@ export interface SettlementTransaction {
     kind: 'settlement'; id: string; groupId: string; groupName?: string; amountMinor: number; currency: Currency; date: string;
     note?: string | null; fromPersonId: string; toPersonId: string; fromName: string; toName: string; createdAt: string;
 }
-export type Transaction = ExpenseTransaction | SettlementTransaction;
+export interface CreditTransaction { kind: 'credit'; id: string; groupId: string; groupName?: string; subtype: CreditSubtype; deliveryMode: CreditDeliveryMode; amountMinor: number; currency: Currency; date: string; note?: string | null; createdAt: string }
+export type Transaction = ExpenseTransaction | SettlementTransaction | CreditTransaction;
 export type AuditAction = 'create' | 'update' | 'delete' | 'restore';
-export interface AuditEvent { id: string; groupId: string; entityType: 'expense' | 'settlement'; entityId: string; version: number; action: AuditAction; actorId: string; actorPersonId?: string; actorName: string; occurredAt: string; before?: unknown; after?: unknown }
+export interface AuditEvent { id: string; groupId: string; entityType: 'expense' | 'settlement' | 'credit'; entityId: string; version: number; action: AuditAction; actorId: string; actorPersonId?: string; actorName: string; occurredAt: string; before?: unknown; after?: unknown }
 /** Redacted, entity-scoped audit data intended for transaction detail views. */
-export interface AuditDisclosureEvent { entityType: 'expense' | 'settlement'; version: number; action: AuditAction; actorName: string; occurredAt: string; beforeSummary?: string; afterSummary?: string }
+export interface AuditDisclosureEvent { entityType: 'expense' | 'settlement' | 'credit'; version: number; action: AuditAction; actorName: string; occurredAt: string; beforeSummary?: string; afterSummary?: string }
 export interface CursorPage<T> { items: T[]; nextCursor?: string }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }
 export interface PairwiseBalance { fromPersonId: string; fromName: string; toPersonId: string; toName: string; amountMinor: number; currency: Currency }
 export interface Balances { raw: Balance[]; simplified: PairwiseBalance[] }
 
-export type ActivityType = 'expense' | 'settlement' | 'expense_revision' | 'settlement_revision' | 'expense_deleted' | 'settlement_deleted';
+export type ActivityType = 'expense' | 'settlement' | 'credit' | 'expense_revision' | 'settlement_revision' | 'credit_revision' | 'expense_deleted' | 'settlement_deleted' | 'credit_deleted';
 export interface ActivityBase {
   id: string;
   entityId: string;
@@ -111,4 +119,5 @@ export interface ActivityBase {
 }
 export type Activity =
   | (ActivityBase & { type: 'expense' | 'expense_revision' | 'expense_deleted'; fromName?: null; toName?: null })
-  | (ActivityBase & { type: 'settlement' | 'settlement_revision' | 'settlement_deleted'; fromName: string | null; toName: string | null });
+  | (ActivityBase & { type: 'settlement' | 'settlement_revision' | 'settlement_deleted'; fromName: string | null; toName: string | null })
+  | (ActivityBase & { type: 'credit' | 'credit_revision' | 'credit_deleted'; fromName?: null; toName?: null });

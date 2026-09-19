@@ -315,6 +315,15 @@ named resources, variables, and secrets.
 
 ## Data and API
 
+Confirmed credits are first-class transactions (`refund` or `claim`) delivered
+as member reimbursements or direct-provider offsets. They use integer minor-unit
+amounts, snapshot recipient/beneficiary allocations, and may be standalone or
+fully applied to one or more same-group, same-currency expenses. Applications
+are capped atomically by both the credit amount and each gross expense; linked
+expenses cannot be reduced, re-currencyed, deleted, or restored while an active
+credit applies. Credits are online-only and appear in transaction history,
+JSON export, and the separate `credits.csv` export.
+
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points
 totaling 10,000), or shares (exact is not allowed). Group owners retain admin
@@ -357,6 +366,7 @@ Important endpoints include:
 - `DELETE /api/account` with the exact JSON confirmation `{"confirmation":"DELETE MY ACCOUNT"}`. Deletion is blocked with a structured conflict containing only the active owned-group count. Eligible deletion soft-leaves non-owned memberships, revokes pending invitations, pseudonymizes every invitation history row addressed to the deleted email, removes private category/idempotency data, clears the Clerk linkage, and pseudonymizes the user/person while retaining financial rows and audit actor-name snapshots for referential integrity.
 - `GET/POST /api/groups/:id/expenses`, `GET/PUT/DELETE /api/expenses/:id`
 - `GET/POST /api/groups/:id/settlements`, `GET/PUT/DELETE /api/settlements/:id`, and versioned restore endpoints
+- `GET/POST /api/groups/:id/credits`, `GET/PUT/DELETE /api/credits/:id`, and versioned restore endpoints
 - `GET/POST /api/groups/:id/scheduled-expenses`, `GET/PUT /api/scheduled-expenses/:id`, and pause/resume/cancel actions
 - balances (raw and deterministic simplified debts), activity, versioned JSON export, group JSON/expense CSV/settlement CSV export
 

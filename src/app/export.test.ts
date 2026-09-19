@@ -41,4 +41,11 @@ describe('account export collection', () => {
       : { groups: [{ group: { id: 'group-a' }, splitDefault: { method: 'shares' }, members: [{ personId: 'person-a' }, { personId: 'person-b' }], expenses: [{ id: 'expense-1' }, { id: 'expense-2' }], settlements: [{ id: 'settlement-1' }] }], nextCursor: 'next' }, new AbortController().signal);
     expect(result).toEqual([{ group: { id: 'group-a' }, splitDefault: { method: 'shares' }, members: [{ personId: 'person-a' }, { personId: 'person-b' }], expenses: [{ id: 'expense-1' }, { id: 'expense-2' }], settlements: [{ id: 'settlement-1' }, { id: 'settlement-2' }] }]);
   });
+
+  it('deduplicates credit rows across account-export pages', async () => {
+    const result = await collectPagedAccountExport(async (cursor) => cursor
+      ? { groups: [{ group: { id: 'group-a' }, members: [], expenses: [], settlements: [], credits: [{ id: 'credit-1' }, { id: 'credit-2' }] }] }
+      : { groups: [{ group: { id: 'group-a' }, members: [], expenses: [], settlements: [], credits: [{ id: 'credit-1' }] }], nextCursor: 'next' }, new AbortController().signal);
+    expect((result[0] as { credits?: unknown[] }).credits).toEqual([{ id: 'credit-1' }, { id: 'credit-2' }]);
+  });
 });

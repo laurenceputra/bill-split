@@ -27,7 +27,7 @@ export function readTransactionFilters(params: URLSearchParams): TransactionFilt
 /** Categories are meaningful for all transactions except settlements. */
 export function normalizeTransactionFilters(filters: TransactionFilters): TransactionFilters {
   const normalized = { ...filters };
-  if (normalized.kind === 'settlement') delete normalized.category;
+  if (normalized.kind === 'settlement' || normalized.kind === 'credit') delete normalized.category;
   return normalized;
 }
 

@@ -38,6 +38,27 @@ export const expenseInput = z.object({
   payers: z.array(payerInput).min(1).max(100), splits: z.array(splitInput).min(1).max(100), client_operation_id: z.string().trim().min(1).max(100).optional()
 });
 export const settlementInput = z.object({ from_person_id: id, to_person_id: id, amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency, date, note: z.string().max(500).optional().nullable(), version: z.number().int().positive().optional(), client_operation_id: z.string().trim().min(1).max(100).optional() });
+const creditApplicationInput = z.object({ expense_id: id, amount_minor: z.number().int().positive().refine(Number.isSafeInteger) });
+const creditAllocationInput = z.object({ person_id: id, allocation_type: z.enum(['recipient', 'beneficiary']), amount_minor: z.number().int().positive().refine(Number.isSafeInteger) });
+export const creditInput = z.object({
+  subtype: z.enum(['refund', 'claim']), delivery_mode: z.enum(['member_reimbursement', 'direct_provider_offset']),
+  amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency, date,
+  note: z.string().max(500).optional().nullable(), version: z.number().int().positive().optional(),
+  applications: z.array(creditApplicationInput).max(100).default([]), allocations: z.array(creditAllocationInput).max(200).default([]),
+  client_operation_id: z.string().trim().min(1).max(100).optional(),
+}).superRefine((value, context) => {
+  const applicationTotal = value.applications.reduce((sum, item) => sum + BigInt(item.amount_minor), 0n);
+  if (value.applications.length > 0 && applicationTotal !== BigInt(value.amount_minor)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Linked applications must total the credit amount' });
+  if (value.applications.length === 0 && value.delivery_mode === 'direct_provider_offset') context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Direct-provider credits must link an expense' });
+  if (value.delivery_mode === 'direct_provider_offset' && value.allocations.length > 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Direct-provider allocations are derived from linked expense payers and splits' });
+  if (new Set(value.applications.map((item) => item.expense_id)).size !== value.applications.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['applications'], message: 'Each expense may be linked once' });
+  for (const type of ['recipient', 'beneficiary'] as const) {
+    const values = value.allocations.filter((item) => item.allocation_type === type);
+    if (values.length && values.reduce((sum, item) => sum + BigInt(item.amount_minor), 0n) !== BigInt(value.amount_minor)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: `${type} allocations must total the credit amount` });
+    if (new Set(values.map((item) => item.person_id)).size !== values.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Each allocation person may appear once per side' });
+  }
+  if (value.applications.length === 0 && value.allocations.length > 0 && (value.allocations.filter((item) => item.allocation_type === 'recipient').length === 0 || value.allocations.filter((item) => item.allocation_type === 'beneficiary').length === 0)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['allocations'], message: 'Standalone credits need recipient and beneficiary allocations' });
+});
 export const timezone = z.string().trim().min(1).max(64).refine((value) => {
   try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(); return true; } catch { return false; }
 }, 'Timezone must be a valid IANA timezone');
@@ -75,6 +96,7 @@ export const groupSplitDefaultInput = z.union([
 export type GroupSplitDefaultInput = z.infer<typeof groupSplitDefaultInput>;
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
+export type CreditInput = z.infer<typeof creditInput>;
 export type FriendInput = z.infer<typeof friendInput>;
 export type GroupCreationInput = z.infer<typeof groupCreationInput>;
 export type InvitationInput = z.infer<typeof invitationInput>;

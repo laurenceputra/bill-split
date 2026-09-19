@@ -1,5 +1,5 @@
-import type { Activity, AuditDisclosureEvent, AuditEvent, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
-import type { GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
+import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
+import type { CreditInput, GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
@@ -25,12 +25,13 @@ export type AuthBootstrapRoute = { pathname: string; search?: string };
 export type ExpensePage = { expenses: Expense[]; nextCursor?: string };
 export type SettlementPage = { settlements: Settlement[]; nextCursor?: string };
 export type TransactionPage = { transactions: Transaction[]; nextCursor?: string };
+export type CreditPage = { credits: Credit[]; nextCursor?: string };
 export type ActivityPage = { activity: Activity[]; nextCursor?: string };
 export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
 export type AuditDisclosurePage = { audit: AuditDisclosureEvent[]; nextCursor?: string };
 export type SpendingInsightSummaryOptions = { from?: string; to?: string; currency?: string; comparisonFrom?: string; comparisonTo?: string };
 export type SpendingInsightTrendOptions = { trendFrom: string; trendTo: string; currency?: string };
-export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; nextCursor?: { expenses: string | null; settlements: string | null } };
+export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; credits?: Credit[]; nextCursor?: { expenses: string | null; settlements: string | null; credits?: string | null } };
 export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
 const TRANSACTION_HISTORY_PAGE_LIMIT = 25;
 const isSufficientTransactionHistoryPage = (limit: number | undefined) => typeof limit === 'number' && limit >= TRANSACTION_HISTORY_PAGE_LIMIT;
@@ -2206,6 +2207,15 @@ export async function getSettlementPage(groupId: string, options: { limit?: numb
   try { return (await apiWithMeta<SettlementPage>(`/groups/${groupId}/settlements?${query}`, { signal })).data; }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
+export async function getCreditPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<CreditPage> {
+  const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
+  return (await apiWithMeta<CreditPage>(`/groups/${groupId}/credits?${query}`, { signal })).data;
+}
+export async function getCreditDetails(id: string, signal?: AbortSignal): Promise<{ credit: Credit; history: Array<{ id: string; revision: number; createdAt: string }> }> { return (await apiWithMeta<{ credit: Credit; history: Array<{ id: string; revision: number; createdAt: string }> }>(`/credits/${id}`, { signal })).data; }
+export async function createCredit(groupId: string, input: CreditInput) { return api<{ credit: Credit }>(`/groups/${groupId}/credits`, { method: 'POST', body: JSON.stringify(input) }); }
+export async function updateCredit(id: string, input: CreditInput) { return api<{ credit: Credit }>(`/credits/${id}`, { method: 'PUT', body: JSON.stringify(input) }); }
+export async function deleteCredit(id: string, version: number) { return api<void>(`/credits/${id}?version=${version}`, { method: 'DELETE' }); }
+export async function restoreCredit(id: string, version: number) { return api<{ credit: Credit }>(`/credits/${id}/restore`, { method: 'POST', body: JSON.stringify({ version }) }); }
 
 export type TransactionPageOptions = TransactionFilters & { limit?: number; cursor?: string };
 export async function getTransactionPage(groupId: string, options: TransactionPageOptions = {}, signal?: AbortSignal): Promise<CachedResult<TransactionPage>> {
@@ -2459,7 +2469,7 @@ export async function getAuditPage(groupId: string, options: { limit?: number; c
   try { return (await apiWithMeta<AuditPage>(`/groups/${groupId}/audit?${query}`, { signal })).data; }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export async function getAuditEntityPage(groupId: string, entityType: 'expense' | 'settlement', entityId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<AuditDisclosurePage> {
+export async function getAuditEntityPage(groupId: string, entityType: 'expense' | 'settlement' | 'credit', entityId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<AuditDisclosurePage> {
   const query = pageParams({ limit: options.limit ?? 50, cursor: options.cursor });
   try { return (await apiWithMeta<AuditDisclosurePage>(`/groups/${encodeURIComponent(groupId)}/audit/${entityType}/${encodeURIComponent(entityId)}?${query}`, { signal })).data; }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
@@ -2493,12 +2503,14 @@ export async function getActivity(id?: string, signal?: AbortSignal): Promise<Ca
   }
 }
 
-export async function getGroupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null } = {}, signal?: AbortSignal): Promise<GroupExportPage> {
+export async function getGroupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null; creditCursor?: string | null } = {}, signal?: AbortSignal): Promise<GroupExportPage> {
   const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.expenseCursor === null) params.set('expenseDone', '1');
   else if (options.expenseCursor) params.set('expenseCursor', options.expenseCursor);
   if (options.settlementCursor === null) params.set('settlementDone', '1');
   else if (options.settlementCursor) params.set('settlementCursor', options.settlementCursor);
+  if (options.creditCursor === null) params.set('creditDone', '1');
+  else if (options.creditCursor) params.set('creditCursor', options.creditCursor);
   try { return (await apiWithMeta<GroupExportPage>(`/groups/${groupId}/export.json?${params}`, { signal })).data; }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
@@ -2525,6 +2537,14 @@ export async function getGroupSettlementCsvExportPage(groupId: string, options: 
   if (options.cursor) params.set('cursor', options.cursor);
   try {
     const response = await apiBlobWithMeta(`/groups/${groupId}/settlements.csv?${params}`, { headers: new Headers({ Accept: 'text/csv' }), signal });
+    return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
+  } catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
+}
+
+export async function getGroupCreditCsvExportPage(groupId: string, options: { limit?: number; cursor?: string } = {}, signal?: AbortSignal): Promise<CsvExportPage> {
+  const query = new URLSearchParams(); if (options.limit !== undefined) query.set('limit', String(options.limit)); if (options.cursor) query.set('cursor', options.cursor);
+  try {
+    const response = await apiBlobWithMeta(`/groups/${groupId}/credits.csv?${query}`, { headers: new Headers({ Accept: 'text/csv' }), signal });
     return { blob: response.data, nextCursor: response.headers?.get('X-Next-Cursor') || undefined };
   } catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }

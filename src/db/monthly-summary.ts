@@ -229,10 +229,11 @@ async function discoverMonths(db: D1Database, groupId: string, owner: string, ch
   await db.prepare(`UPDATE ledger_summary_state SET
       expense_discovery_high_water=COALESCE(expense_discovery_high_water,(SELECT id FROM expenses WHERE group_id=? ORDER BY id DESC LIMIT 1)),
       settlement_discovery_high_water=COALESCE(settlement_discovery_high_water,(SELECT id FROM settlements WHERE group_id=? ORDER BY id DESC LIMIT 1)),
-      updated_at=? WHERE group_id=? AND lease_owner=? AND lease_until_ms>?`).bind(groupId, groupId, now(), groupId, owner, epoch()).run();
+      credit_discovery_high_water=COALESCE(credit_discovery_high_water,(SELECT id FROM credits WHERE group_id=? ORDER BY id DESC LIMIT 1)),
+      updated_at=? WHERE group_id=? AND lease_owner=? AND lease_until_ms>?`).bind(groupId, groupId, groupId, now(), groupId, owner, epoch()).run();
   const state = await db.prepare('SELECT * FROM ledger_summary_state WHERE group_id=? AND lease_owner=? AND lease_until_ms>?').bind(groupId, owner, epoch()).first<Row>();
   if (!state) return false;
-  const discover = async (table: 'expenses' | 'settlements', dateColumn: 'expense_date' | 'settlement_date', cursorColumn: string, highColumn: string) => {
+  const discover = async (table: 'expenses' | 'settlements' | 'credits', dateColumn: 'expense_date' | 'settlement_date' | 'credit_date', cursorColumn: string, highColumn: string) => {
     if (!hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner)) return false;
     const cursor = state[cursorColumn] == null ? '' : text(state[cursorColumn]), high = state[highColumn] == null ? null : text(state[highColumn]);
     if (high === null || cursor === high) return true;
@@ -260,12 +261,14 @@ async function discoverMonths(db: D1Database, groupId: string, owner: string, ch
   };
   const expensesDone = await discover('expenses', 'expense_date', 'expense_discovery_cursor', 'expense_discovery_high_water');
   const settlementsDone = await discover('settlements', 'settlement_date', 'settlement_discovery_cursor', 'settlement_discovery_high_water');
-  if (!expensesDone || !settlementsDone || !hasTime(deadlineMs)) return false;
+  const creditsDone = await discover('credits', 'credit_date', 'credit_discovery_cursor', 'credit_discovery_high_water');
+  if (!expensesDone || !settlementsDone || !creditsDone || !hasTime(deadlineMs)) return false;
   const queueTime = epoch();
   await db.prepare(`UPDATE ledger_summary_state SET discovery_complete=1,maintenance_due=1,available_at_ms=?,updated_at=?
     WHERE group_id=? AND lease_owner=? AND lease_until_ms>?
       AND (expense_discovery_high_water IS NULL OR expense_discovery_cursor IS expense_discovery_high_water)
-      AND (settlement_discovery_high_water IS NULL OR settlement_discovery_cursor IS settlement_discovery_high_water)`).bind(queueTime, now(), groupId, owner, epoch()).run();
+      AND (settlement_discovery_high_water IS NULL OR settlement_discovery_cursor IS settlement_discovery_high_water)
+      AND (credit_discovery_high_water IS NULL OR credit_discovery_cursor IS credit_discovery_high_water)`).bind(queueTime, now(), groupId, owner, epoch()).run();
   const completed = await db.prepare('SELECT discovery_complete FROM ledger_summary_state WHERE group_id=? AND lease_owner=? AND lease_until_ms>?').bind(groupId, owner, epoch()).first<Row>();
   return number(completed?.discovery_complete) === 1;
 }
@@ -305,6 +308,7 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
   if (reset) {
     const expenseHigh = await db.prepare(`SELECT expense_date AS date,id FROM expenses WHERE group_id=? AND expense_date>=? AND expense_date<? ORDER BY expense_date DESC,id DESC LIMIT 1`).bind(groupId, month, nextMonth(month)).first<Row>();
     const settlementHigh = await db.prepare(`SELECT settlement_date AS date,id FROM settlements WHERE group_id=? AND settlement_date>=? AND settlement_date<? ORDER BY settlement_date DESC,id DESC LIMIT 1`).bind(groupId, month, nextMonth(month)).first<Row>();
+    const creditHigh = await db.prepare(`SELECT credit_date AS date,id FROM credits WHERE group_id=? AND credit_date>=? AND credit_date<? ORDER BY credit_date DESC,id DESC LIMIT 1`).bind(groupId, month, nextMonth(month)).first<Row>();
     const oldBuild = state.build_id == null ? null : text(state.build_id), activeBuild = state.active_build_id == null ? null : text(state.active_build_id), queueTime = epoch();
     const statements = [];
     if (oldBuild && oldBuild !== activeBuild) statements.push(db.prepare(`INSERT INTO ledger_period_build_gc(group_id,month,build_id,enqueued_at_ms,available_at_ms,updated_at_ms)
@@ -313,9 +317,9 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
         (SELECT 1 FROM ledger_summary_state s WHERE s.group_id=? AND s.lease_owner=? AND s.lease_until_ms>?)
       ON CONFLICT(group_id,month,build_id) DO NOTHING`).bind(oldBuild, queueTime, queueTime, queueTime, groupId, month, oldBuild, groupId, owner, epoch()));
     statements.push(db.prepare(`UPDATE ledger_period_state SET status='backfilling',build_generation=source_generation,build_id=?,
-        expense_cursor=NULL,settlement_cursor=NULL,expense_high_water=?,settlement_high_water=?,lease_owner=?,lease_until_ms=?,retry_at_ms=NULL,last_error=NULL,updated_at=?
+        expense_cursor=NULL,settlement_cursor=NULL,credit_cursor=NULL,expense_high_water=?,settlement_high_water=?,credit_high_water=?,lease_owner=?,lease_until_ms=?,retry_at_ms=NULL,last_error=NULL,updated_at=?
       WHERE group_id=? AND month=? AND source_generation=? AND EXISTS (SELECT 1 FROM ledger_summary_state s WHERE s.group_id=? AND s.lease_owner=? AND s.lease_until_ms>?)`)
-      .bind(build, expenseHigh ? encodeKey(text(expenseHigh.date), text(expenseHigh.id)) : null, settlementHigh ? encodeKey(text(settlementHigh.date), text(settlementHigh.id)) : null, owner, until, now(), groupId, month, source, groupId, owner, epoch()));
+       .bind(build, expenseHigh ? encodeKey(text(expenseHigh.date), text(expenseHigh.id)) : null, settlementHigh ? encodeKey(text(settlementHigh.date), text(settlementHigh.id)) : null, creditHigh ? encodeKey(text(creditHigh.date), text(creditHigh.id)) : null, owner, until, now(), groupId, month, source, groupId, owner, epoch()));
     await db.batch(statements);
   } else {
     await db.prepare(`UPDATE ledger_period_state SET lease_owner=?,lease_until_ms=?,updated_at=?
@@ -327,16 +331,16 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
   state = await db.prepare('SELECT p.*,s.checkpoint_through FROM ledger_period_state p JOIN ledger_summary_state s ON s.group_id=p.group_id WHERE p.group_id=? AND p.month=?').bind(groupId, month).first<Row>();
   if (!state || text(state.build_id) !== build || text(state.lease_owner) !== owner || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: 0, verified: false };
   const buildGeneration = number(state.build_generation), sourceGeneration = number(state.source_generation), expectedCheckpoint = state.checkpoint_through == null ? null : text(state.checkpoint_through);
-  let expenseCursor = decodeKey(state.expense_cursor), settlementCursor = decodeKey(state.settlement_cursor);
-  const expenseHigh = decodeKey(state.expense_high_water), settlementHigh = decodeKey(state.settlement_high_water);
-  const guard = (expenseExpected: string | null, settlementExpected: string | null) => ({
+  let expenseCursor = decodeKey(state.expense_cursor), settlementCursor = decodeKey(state.settlement_cursor), creditCursor = decodeKey(state.credit_cursor);
+  const expenseHigh = decodeKey(state.expense_high_water), settlementHigh = decodeKey(state.settlement_high_water), creditHigh = decodeKey(state.credit_high_water);
+  const guard = (expenseExpected: string | null, settlementExpected: string | null, creditExpected: string | null) => ({
     sql: `EXISTS (SELECT 1 FROM ledger_summary_state s WHERE s.group_id=? AND s.lease_owner=? AND s.lease_until_ms>?)
       AND EXISTS (SELECT 1 FROM ledger_summary_state s2 WHERE s2.group_id=? AND s2.lease_owner=? AND s2.checkpoint_through IS ? AND s2.status='backfilling' AND s2.lease_until_ms>?)
-      AND EXISTS (SELECT 1 FROM ledger_period_state p WHERE p.group_id=? AND p.month=? AND p.status='backfilling' AND p.lease_owner=? AND p.build_id=? AND p.build_generation=? AND p.source_generation=? AND p.expense_cursor IS ? AND p.settlement_cursor IS ? AND p.lease_until_ms>?)`,
-    args: [groupId, owner, epoch(), groupId, owner, expectedCheckpoint, epoch(), groupId, month, owner, build, buildGeneration, sourceGeneration, expenseExpected, settlementExpected, epoch()],
+      AND EXISTS (SELECT 1 FROM ledger_period_state p WHERE p.group_id=? AND p.month=? AND p.status='backfilling' AND p.lease_owner=? AND p.build_id=? AND p.build_generation=? AND p.source_generation=? AND p.expense_cursor IS ? AND p.settlement_cursor IS ? AND p.credit_cursor IS ? AND p.lease_until_ms>?)`,
+    args: [groupId, owner, epoch(), groupId, owner, expectedCheckpoint, epoch(), groupId, month, owner, build, buildGeneration, sourceGeneration, expenseExpected, settlementExpected, creditExpected, epoch()],
   });
   let count = 0;
-  const readChunk = async (table: 'expenses' | 'settlements', dateColumn: 'expense_date' | 'settlement_date', cursor: { date: string; id: string } | null, high: { date: string; id: string } | null) => {
+  const readChunk = async (table: 'expenses' | 'settlements' | 'credits', dateColumn: 'expense_date' | 'settlement_date' | 'credit_date', cursor: { date: string; id: string } | null, high: { date: string; id: string } | null) => {
     if (!high || sameKey(cursor, high)) return [] as Row[];
     if (!hasTime(deadlineMs)) return null;
     const after = cursor ? `((${dateColumn}>?) OR (${dateColumn}=? AND id>?))` : '1=1', before = `(${dateColumn}<? OR (${dateColumn}=? AND id<=?))`, args: unknown[] = [groupId, month, nextMonth(month)];
@@ -348,7 +352,7 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
   if (expenseRows === null) return { chunks: count, verified: false };
   if (expenseRows.length) {
     if (!hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner) || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: count, verified: false };
-    const ids = expenseRows.map((value) => text(value.id)), last = { date: text(expenseRows[expenseRows.length - 1].transaction_date), id: ids[ids.length - 1] }, g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor)), encoded = JSON.stringify(ids);
+    const ids = expenseRows.map((value) => text(value.id)), last = { date: text(expenseRows[expenseRows.length - 1].transaction_date), id: ids[ids.length - 1] }, g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor)), encoded = JSON.stringify(ids);
     await db.batch([
       db.prepare(`INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT e.group_id,?, ?,e.currency,p.person_id,SUM(p.amount_minor),? FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.id IN (SELECT value FROM json_each(?)) AND e.deleted_at IS NULL AND ${g.sql} GROUP BY e.group_id,e.currency,p.person_id ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor`).bind(month, build, now(), encoded, ...g.args),
       db.prepare(`INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT e.group_id,?, ?,e.currency,s.person_id,-SUM(s.amount_minor),? FROM expenses e JOIN splits s ON s.expense_id=e.id WHERE e.id IN (SELECT value FROM json_each(?)) AND e.deleted_at IS NULL AND ${g.sql} GROUP BY e.group_id,e.currency,s.person_id ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor`).bind(month, build, now(), encoded, ...g.args),
@@ -357,7 +361,7 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
     ]);
     expenseCursor = last; state.expense_cursor = encodeKey(last.date, last.id); count += 1;
   } else if (expenseHigh && !sameKey(expenseCursor, expenseHigh)) {
-    const g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor));
+    const g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor));
     const result = await db.prepare(`UPDATE ledger_period_state SET expense_cursor=? WHERE group_id=? AND month=? AND expense_cursor IS ? AND ${g.sql}`).bind(encodeKey(expenseHigh.date, expenseHigh.id), groupId, month, state.expense_cursor == null ? null : text(state.expense_cursor), ...g.args).run();
     if (changed(result, 0) === 0) return { chunks: count, verified: false }; expenseCursor = expenseHigh; state.expense_cursor = encodeKey(expenseHigh.date, expenseHigh.id);
   }
@@ -365,7 +369,7 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
   if (settlementRows === null) return { chunks: count, verified: false };
   if (settlementRows.length) {
     if (!hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner) || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: count, verified: false };
-    const ids = settlementRows.map((value) => text(value.id)), last = { date: text(settlementRows[settlementRows.length - 1].transaction_date), id: ids[ids.length - 1] }, g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor)), encoded = JSON.stringify(ids);
+    const ids = settlementRows.map((value) => text(value.id)), last = { date: text(settlementRows[settlementRows.length - 1].transaction_date), id: ids[ids.length - 1] }, g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor)), encoded = JSON.stringify(ids);
     await db.batch([
       db.prepare(`INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT group_id,?, ?,currency,from_person_id,SUM(amount_minor),? FROM settlements WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND ${g.sql} GROUP BY group_id,currency,from_person_id ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor`).bind(month, build, now(), encoded, ...g.args),
       db.prepare(`INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) SELECT group_id,?, ?,currency,to_person_id,-SUM(amount_minor),? FROM settlements WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL AND ${g.sql} GROUP BY group_id,currency,to_person_id ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor`).bind(month, build, now(), encoded, ...g.args),
@@ -374,12 +378,32 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
     ]);
     settlementCursor = last; state.settlement_cursor = encodeKey(last.date, last.id); count += 1;
   } else if (settlementHigh && !sameKey(settlementCursor, settlementHigh)) {
-    const g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor));
+    const g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor));
     const result = await db.prepare(`UPDATE ledger_period_state SET settlement_cursor=? WHERE group_id=? AND month=? AND settlement_cursor IS ? AND ${g.sql}`).bind(encodeKey(settlementHigh.date, settlementHigh.id), groupId, month, state.settlement_cursor == null ? null : text(state.settlement_cursor), ...g.args).run();
     if (changed(result, 0) === 0) return { chunks: count, verified: false }; settlementCursor = settlementHigh; state.settlement_cursor = encodeKey(settlementHigh.date, settlementHigh.id);
   }
-  if (!sameKey(expenseCursor, expenseHigh) || !sameKey(settlementCursor, settlementHigh) || !hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner) || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: count, verified: false };
-  const expenseCursorText = expenseCursor ? encodeKey(expenseCursor.date, expenseCursor.id) : null, settlementCursorText = settlementCursor ? encodeKey(settlementCursor.date, settlementCursor.id) : null, g = guard(expenseCursorText, settlementCursorText);
+  const creditRows = await readChunk('credits', 'credit_date', creditCursor, creditHigh);
+  if (creditRows === null) return { chunks: count, verified: false };
+  if (creditRows.length) {
+    if (!hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner) || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: count, verified: false };
+    const ids = creditRows.map((value) => text(value.id)), last = { date: text(creditRows[creditRows.length - 1].transaction_date), id: ids[ids.length - 1] }, g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor)), encoded = JSON.stringify(ids);
+    await db.batch([
+      db.prepare(`INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at)
+        SELECT c.group_id,?, ?,c.currency,a.person_id,SUM(CASE WHEN a.allocation_type='recipient' THEN -a.amount_minor ELSE a.amount_minor END),?
+        FROM credits c JOIN credit_allocations a ON a.credit_id=c.id
+        WHERE c.id IN (SELECT value FROM json_each(?)) AND c.deleted_at IS NULL AND ${g.sql}
+        GROUP BY c.group_id,c.currency,a.person_id
+        ON CONFLICT(group_id,month,build_id,currency,person_id) DO UPDATE SET net_minor=ledger_period_balances.net_minor+excluded.net_minor,updated_at=excluded.updated_at`).bind(month, build, now(), encoded, ...g.args),
+      db.prepare(`UPDATE ledger_period_state SET credit_cursor=?,updated_at=? WHERE group_id=? AND month=? AND credit_cursor IS ? AND ${g.sql}`).bind(encodeKey(last.date, last.id), now(), groupId, month, state.credit_cursor == null ? null : text(state.credit_cursor), ...g.args),
+    ]);
+    creditCursor = last; state.credit_cursor = encodeKey(last.date, last.id); count += 1;
+  } else if (creditHigh && !sameKey(creditCursor, creditHigh)) {
+    const g = guard(state.expense_cursor == null ? null : text(state.expense_cursor), state.settlement_cursor == null ? null : text(state.settlement_cursor), state.credit_cursor == null ? null : text(state.credit_cursor));
+    const result = await db.prepare(`UPDATE ledger_period_state SET credit_cursor=? WHERE group_id=? AND month=? AND credit_cursor IS ? AND ${g.sql}`).bind(encodeKey(creditHigh.date, creditHigh.id), groupId, month, state.credit_cursor == null ? null : text(state.credit_cursor), ...g.args).run();
+    if (changed(result, 0) === 0) return { chunks: count, verified: false }; creditCursor = creditHigh; state.credit_cursor = encodeKey(creditHigh.date, creditHigh.id);
+  }
+  if (!sameKey(expenseCursor, expenseHigh) || !sameKey(settlementCursor, settlementHigh) || !sameKey(creditCursor, creditHigh) || !hasTime(deadlineMs) || !await renewGroupLease(db, groupId, owner) || !await renewPeriodLease(db, groupId, month, owner)) return { chunks: count, verified: false };
+  const expenseCursorText = expenseCursor ? encodeKey(expenseCursor.date, expenseCursor.id) : null, settlementCursorText = settlementCursor ? encodeKey(settlementCursor.date, settlementCursor.id) : null, creditCursorText = creditCursor ? encodeKey(creditCursor.date, creditCursor.id) : null, g = guard(expenseCursorText, settlementCursorText, creditCursorText);
   const publicationTime = now(), queueTime = epoch();
   const result = await db.batch([
     db.prepare(`WITH deltas AS (SELECT currency,person_id,net_minor AS delta FROM ledger_period_balances WHERE group_id=? AND month=? AND build_id=? UNION ALL SELECT currency,person_id,-net_minor FROM ledger_period_balances old WHERE old.group_id=? AND old.month=? AND old.build_id=(SELECT active_build_id FROM ledger_period_state WHERE group_id=? AND month=?)), grouped AS (SELECT currency,person_id,SUM(delta) AS delta FROM deltas GROUP BY currency,person_id) UPDATE ledger_checkpoint_balances AS checkpoint SET net_minor=checkpoint.net_minor+(SELECT delta FROM grouped WHERE grouped.currency=checkpoint.currency AND grouped.person_id=checkpoint.person_id),updated_at=? WHERE checkpoint.group_id=? AND EXISTS (SELECT 1 FROM ledger_summary_state s WHERE s.group_id=? AND s.checkpoint_through IS ? AND s.checkpoint_through IS NOT NULL AND s.checkpoint_through>=?) AND EXISTS (SELECT 1 FROM grouped WHERE grouped.currency=checkpoint.currency AND grouped.person_id=checkpoint.person_id AND grouped.delta<>0) AND ${g.sql}`).bind(groupId, month, build, groupId, month, groupId, month, publicationTime, groupId, groupId, expectedCheckpoint, month, ...g.args),
@@ -391,7 +415,7 @@ async function maintainMonthWork(db: D1Database, groupId: string, month: string,
       SELECT p.group_id,p.month,p.active_build_id,?,?,? FROM ledger_period_state p WHERE p.group_id=? AND p.month=?
         AND p.status='backfilling' AND p.build_id=? AND p.source_generation=p.build_generation
         AND p.active_build_id IS NOT NULL AND p.active_build_id<>p.build_id AND ${g.sql}`).bind(queueTime, queueTime, queueTime, groupId, month, build, ...g.args),
-    db.prepare(`UPDATE ledger_period_state SET active_build_id=build_id,status='ready',applied_generation=build_generation,retry_at_ms=NULL,lease_owner=NULL,lease_until_ms=NULL,last_error=NULL,updated_at=? WHERE group_id=? AND month=? AND status='backfilling' AND build_id=? AND source_generation=build_generation AND expense_cursor IS ? AND settlement_cursor IS ? AND ${g.sql}`).bind(publicationTime, groupId, month, build, expenseCursorText, settlementCursorText, ...g.args),
+     db.prepare(`UPDATE ledger_period_state SET active_build_id=build_id,status='ready',applied_generation=build_generation,retry_at_ms=NULL,lease_owner=NULL,lease_until_ms=NULL,last_error=NULL,updated_at=? WHERE group_id=? AND month=? AND status='backfilling' AND build_id=? AND source_generation=build_generation AND expense_cursor IS ? AND settlement_cursor IS ? AND credit_cursor IS ? AND ${g.sql}`).bind(publicationTime, groupId, month, build, expenseCursorText, settlementCursorText, creditCursorText, ...g.args),
   ]);
   return { chunks: count, verified: changed(result[result.length - 1], 0) > 0 };
 }

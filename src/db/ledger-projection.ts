@@ -2,7 +2,7 @@ import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types'
 
 type Contribution = { month: string; currency: string; person_id: string; net_minor: number };
 type GrossContribution = { month: string; currency: string; gross_minor: number };
-type Mutation = { table: 'expenses' | 'settlements'; id: string; groupId: string; marker: string };
+type Mutation = { table: 'expenses' | 'settlements' | 'credits'; id: string; groupId: string; marker: string };
 
 const now = () => new Date().toISOString();
 const buildId = () => crypto.randomUUID();
@@ -17,7 +17,7 @@ const mutationGuard = (mutation?: Mutation) => mutation
 
 const readyPredicate = (stateAlias: string) => `${stateAlias}.status='ready' AND ${stateAlias}.discovery_complete=1
   AND ${stateAlias}.maintenance_due=0
-  AND NOT EXISTS (SELECT 1 FROM ledger_period_state period
+    AND NOT EXISTS (SELECT 1 FROM ledger_period_state period
     WHERE period.group_id=${stateAlias}.group_id
       AND (period.status<>'ready' OR period.source_generation<>period.applied_generation OR period.active_build_id IS NULL))`;
 
@@ -58,13 +58,15 @@ export const balanceProjectionQuery = () => ({
         FROM expenses e JOIN requested_group requested ON requested.group_id=e.group_id JOIN splits s ON s.expense_id=e.id
         WHERE e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_group)
       UNION ALL
-      SELECT s.group_id,s.currency,s.from_person_id,s.amount_minor
+      SELECT s.group_id,s.currency,settlement_side.value,
+        CASE WHEN settlement_side.key=0 THEN s.amount_minor ELSE -s.amount_minor END
         FROM settlements s JOIN requested_group requested ON requested.group_id=s.group_id
+        JOIN json_each(json_array(s.from_person_id,s.to_person_id)) settlement_side
         WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_group)
       UNION ALL
-      SELECT s.group_id,s.currency,s.to_person_id,-s.amount_minor
-        FROM settlements s JOIN requested_group requested ON requested.group_id=s.group_id
-        WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_group)
+      SELECT c.group_id,c.currency,a.person_id,CASE WHEN a.allocation_type='recipient' THEN -a.amount_minor ELSE a.amount_minor END
+        FROM credits c JOIN credit_allocations a ON a.credit_id=c.id JOIN requested_group requested ON requested.group_id=c.group_id
+        WHERE c.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_group)
     ),
     ledger AS (
       SELECT group_id,currency,person_id,net_minor FROM ready_ledger
@@ -217,6 +219,30 @@ export function boundSettlementProjectionDelta(db: D1Database, settlementId: str
   ];
 }
 
+const creditContributions = (month: string, currency: string, allocations: Array<{ personId: string; allocationType: string; amountMinor: number }>): Contribution[] => allocations.map((allocation) => ({
+  month,
+  currency,
+  person_id: allocation.personId,
+  net_minor: allocation.allocationType === 'recipient' ? -allocation.amountMinor : allocation.amountMinor,
+}));
+
+function legacyCreditProjectionDelta(db: D1Database, groupId: string, currency: string, allocations: Array<{ personId: string; allocationType: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, mutation: Mutation) {
+  const guard = mutationGuard(mutation);
+  return [db.prepare(`WITH contributions(person_id,net_minor) AS (SELECT person_id,CASE WHEN allocation_type='recipient' THEN -amount_minor ELSE amount_minor END FROM credit_allocations WHERE credit_id=? )
+    INSERT INTO group_balance_projection(group_id,currency,person_id,net_minor,updated_at)
+    SELECT ?,?,person_id,?*net_minor,? FROM contributions
+    WHERE EXISTS (SELECT 1 FROM projection_state state WHERE state.group_id=? AND state.status='ready') AND ${guard.sql}
+    ON CONFLICT(group_id,currency,person_id) DO UPDATE SET net_minor=group_balance_projection.net_minor+excluded.net_minor,updated_at=excluded.updated_at`).bind(mutation.id, groupId, currency, sign, timestamp, groupId, ...guard.args)];
+}
+
+export function boundCreditProjectionDelta(db: D1Database, creditId: string, groupId: string, currency: string, allocations: Array<{ personId: string; allocationType: string; amountMinor: number }>, sign: 1 | -1, timestamp: string, revisionId?: string, date = '0000-00-00') {
+  const marker = revisionId ?? creditId, mutation = { table: 'credits' as const, id: creditId, groupId, marker };
+  return [
+    ...legacyCreditProjectionDelta(db, groupId, currency, allocations, sign, timestamp, mutation),
+    ...summaryDelta(db, groupId, creditContributions(ledgerMonth(date), currency, allocations), [], sign, timestamp, mutation),
+  ];
+}
+
 /**
  * 0021 Workers read this compact table while the monthly summary is being
  * rolled out.  Keep it exact for a ready legacy group, but touch only the
@@ -276,11 +302,11 @@ function legacySettlementProjectionDelta(
   ];
 }
 
-export function projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement', entityId: string) {
+export function projectionRevisionGuard(revisionId: string, entityType: 'expense' | 'settlement' | 'credit', entityId: string) {
   return { sql: 'EXISTS (SELECT 1 FROM revisions projection_revision WHERE projection_revision.id=? AND projection_revision.entity_type=? AND projection_revision.entity_id=?)', args: [revisionId, entityType, entityId] };
 }
 
-export function projectionMutation(_db: D1Database, _groupId: string, _timestamp: string, entity: 'expenses' | 'settlements', id: string, revisionId?: string) {
+export function projectionMutation(_db: D1Database, _groupId: string, _timestamp: string, entity: 'expenses' | 'settlements' | 'credits', id: string, revisionId?: string) {
   const marker = revisionId ?? id;
   return _db.prepare(`UPDATE ${entity} SET projection_mutation_id=NULL WHERE id=? AND projection_mutation_id=?`).bind(id, marker);
 }
@@ -304,20 +330,22 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
       JOIN ledger_period_state period ON period.group_id=pb.group_id AND period.month=pb.month AND period.active_build_id=pb.build_id
       JOIN ledger_summary_state state ON state.group_id=pb.group_id
       WHERE state.checkpoint_through IS NULL OR pb.month>state.checkpoint_through
+  ), authoritative_currencies AS (
+    SELECT scope.group_id,e.currency FROM scoped_groups scope JOIN expenses e ON e.group_id=scope.group_id WHERE e.deleted_at IS NULL
+    UNION
+    SELECT scope.group_id,s.currency FROM scoped_groups scope JOIN settlements s ON s.group_id=scope.group_id WHERE s.deleted_at IS NULL
+    UNION
+    SELECT scope.group_id,c.currency FROM scoped_groups scope JOIN credits c ON c.group_id=scope.group_id WHERE c.deleted_at IS NULL
   ), ledger AS (
     SELECT ready_ledger.group_id,ready_ledger.currency,ready_ledger.person_id,ready_ledger.net_minor FROM ready_ledger
     UNION ALL
-    SELECT e.group_id,e.currency,p.person_id,p.amount_minor FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN payers p ON p.expense_id=e.id
-      WHERE e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_groups ready WHERE ready.group_id=e.group_id)
-    UNION ALL
-    SELECT e.group_id,e.currency,s.person_id,-s.amount_minor FROM expenses e JOIN scoped_groups scope ON scope.group_id=e.group_id JOIN splits s ON s.expense_id=e.id
-      WHERE e.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_groups ready WHERE ready.group_id=e.group_id)
-    UNION ALL
-    SELECT s.group_id,s.currency,s.from_person_id,s.amount_minor FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
-      WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_groups ready WHERE ready.group_id=s.group_id)
-    UNION ALL
-    SELECT s.group_id,s.currency,s.to_person_id,-s.amount_minor FROM settlements s JOIN scoped_groups scope ON scope.group_id=s.group_id
-      WHERE s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM ready_groups ready WHERE ready.group_id=s.group_id)
+    SELECT currencies.group_id,currencies.currency,member.person_id,
+      COALESCE((SELECT SUM(p.amount_minor) FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.group_id=currencies.group_id AND e.currency=currencies.currency AND e.deleted_at IS NULL AND p.person_id=member.person_id),0)
+      -COALESCE((SELECT SUM(s.amount_minor) FROM expenses e JOIN splits s ON s.expense_id=e.id WHERE e.group_id=currencies.group_id AND e.currency=currencies.currency AND e.deleted_at IS NULL AND s.person_id=member.person_id),0)
+      +COALESCE((SELECT SUM(CASE WHEN settlement.from_person_id=member.person_id THEN settlement.amount_minor WHEN settlement.to_person_id=member.person_id THEN -settlement.amount_minor ELSE 0 END) FROM settlements settlement WHERE settlement.group_id=currencies.group_id AND settlement.currency=currencies.currency AND settlement.deleted_at IS NULL),0)
+      +COALESCE((SELECT SUM(CASE WHEN allocation.allocation_type='recipient' THEN -allocation.amount_minor ELSE allocation.amount_minor END) FROM credits credit JOIN credit_allocations allocation ON allocation.credit_id=credit.id WHERE credit.group_id=currencies.group_id AND credit.currency=currencies.currency AND credit.deleted_at IS NULL AND allocation.person_id=member.person_id),0)
+      FROM authoritative_currencies currencies JOIN authorized_groups member ON member.group_id=currencies.group_id
+      WHERE NOT EXISTS (SELECT 1 FROM ready_groups ready WHERE ready.group_id=currencies.group_id)
   ), group_balances AS (
     SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor FROM ledger
       JOIN authorized_groups balance_member ON balance_member.group_id=ledger.group_id AND balance_member.person_id=ledger.person_id

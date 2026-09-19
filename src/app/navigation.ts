@@ -9,6 +9,7 @@ export type NavigationRoute =
   | 'new-expense'
   | 'edit-expense'
   | 'expense-detail'
+  | 'credit-detail'
   | 'legacy-expense-detail'
   | 'unknown';
 
@@ -55,6 +56,11 @@ export function settlementDetailPath(groupId: unknown, settlementId: unknown): s
   if (!valid(groupId) || !valid(settlementId)) return undefined;
   return `/groups/${encodeURIComponent(groupId.trim())}/settlements/${encodeURIComponent(settlementId.trim())}`;
 }
+export function creditDetailPath(groupId: unknown, creditId: unknown): string | undefined {
+  const valid = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
+  if (!valid(groupId) || !valid(creditId)) return undefined;
+  return `/groups/${encodeURIComponent(groupId.trim())}/credits/${encodeURIComponent(creditId.trim())}`;
+}
 
 /** Link only activity rows whose server/cache payload explicitly proves an active expense. */
 export function activityDetailPath(groupId: unknown, item: { type: string; entityId: unknown; entityActive?: boolean }): string | undefined {
@@ -65,6 +71,7 @@ export function activityDetailPath(groupId: unknown, item: { type: string; entit
 /** Link eligible current and tombstone activity rows to their transaction detail. */
 export function transactionActivityPath(groupId: unknown, item: { type: string; entityId: unknown; entityActive?: boolean }): string | undefined {
   if (item.type.startsWith('settlement')) return settlementDetailPath(groupId, item.entityId);
+  if (item.type.startsWith('credit')) return creditDetailPath(groupId, item.entityId);
   if (!item.type.startsWith('expense') || (item.entityActive !== true && !item.type.endsWith('_deleted'))) return undefined;
   return expenseDetailPath(groupId, item.entityId);
 }
@@ -106,6 +113,7 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   else if (group && ((segments[2] === 'expense' && segments[3] === 'new') || (segments[2] === 'scheduled-expense' && segments[3] === 'new')) && segments.length === 4) route = 'new-expense';
   else if (group && segments[2] === 'expense' && segments[3] && segments.length === 4) route = 'edit-expense';
   else if (group && segments[2] === 'expenses' && segments[3] && segments.length === 4) route = 'expense-detail';
+  else if (group && segments[2] === 'credits' && segments[3] && segments.length === 4) route = 'credit-detail';
   else if (segments[0] === 'expenses' && segments[1] && segments.length === 2) route = 'legacy-expense-detail';
 
   const activeSection: NavigationSection =
@@ -119,7 +127,7 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
     ? route === 'activity' ? group.activityPath
       : route === 'settle' ? group.settlePath
         : route === 'new-expense' || route === 'edit-expense' ? group.addPath
-          : route === 'expense-detail' ? path
+       : route === 'expense-detail' || route === 'credit-detail' ? path
             : group.overviewPath
     : route === 'settings' ? '/settings' : undefined;
 

@@ -137,7 +137,7 @@ export interface CachedExpenseDetails {
 }
 export interface CachedCategories { userId: string; categories: string[]; fetchedAt: string }
 
-const activityTypes = ['expense', 'settlement', 'expense_revision', 'settlement_revision', 'expense_deleted', 'settlement_deleted'] as const;
+const activityTypes = ['expense', 'settlement', 'credit', 'expense_revision', 'settlement_revision', 'credit_revision', 'expense_deleted', 'settlement_deleted', 'credit_deleted'] as const;
 const isActivityType = (value: unknown): value is Activity['type'] => typeof value === 'string' && (activityTypes as readonly string[]).includes(value);
 export const validActivityEntityId = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
 
@@ -168,7 +168,7 @@ export function normalizeActivity(value: unknown): Activity[] {
     const rawCurrency = typeof row.currency === 'string' && (supportedCurrencies as readonly string[]).includes(row.currency) ? row.currency : null;
     const labelValue = row.label ?? row.description ?? row.note;
     const explicitEntityId = row.entityId ?? row.entity_id;
-    const entityId = validActivityEntityId(explicitEntityId) ? explicitEntityId.trim() : row.type === 'expense' ? row.id.trim() : '';
+     const entityId = validActivityEntityId(explicitEntityId) ? explicitEntityId.trim() : (row.type === 'expense' || row.type === 'credit') ? row.id.trim() : '';
     const parsedEntityActive = activityEntityActive(row.entityActive ?? row.entity_active);
     const expenseEntity = row.type === 'expense';
     // A legacy direct expense row already represents the current entity, so its
@@ -462,12 +462,12 @@ export async function updateGroupsSnapshot(userId: string, groupId: string, grou
 }
 
 /** Keep the home snapshot available offline, but make it immediately stale online. */
-export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
+export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; detailsGroupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
   assertSessionGeneration(generation);
   const staleAt = new Date(0).toISOString();
   const db = await open();
   await new Promise<void>((resolve, reject) => {
-    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.transactions ? ['globalTransactions'] : []), ...(options.groupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
+    const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.transactions ? ['globalTransactions'] : []), ...(options.groupId || options.detailsGroupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
     const tx = db.transaction(stores, 'readwrite');
     const generations = tx.objectStore('mutationGenerations');
     const current = generations.get(userId);
@@ -501,6 +501,10 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         freshness.onsuccess = () => { for (const row of freshness.result as ResourceFreshness[]) if (row.userId === userId && row.resourceKey.startsWith(`group:${options.groupId}:`)) tx.objectStore('resourceFreshness').delete([row.userId, row.resourceKey]); };
         const details = tx.objectStore('expenseDetails').getAll();
         details.onsuccess = () => { for (const row of details.result as CachedExpenseDetails[]) if (row.userId === userId && row.expense?.groupId === options.groupId) tx.objectStore('expenseDetails').delete([row.userId, row.expenseId]); };
+      }
+      if (options.detailsGroupId && !options.groupId) {
+        const details = tx.objectStore('expenseDetails').getAll();
+        details.onsuccess = () => { for (const row of details.result as CachedExpenseDetails[]) if (row.userId === userId && row.expense?.groupId === options.detailsGroupId) tx.objectStore('expenseDetails').delete([row.userId, row.expenseId]); };
       }
       if (options.transactions) {
         tx.objectStore('globalTransactions').delete(userId);
@@ -644,7 +648,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         }]));
         const transactions = row.transactions?.map((item) => item.kind === 'settlement'
           ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
-          : { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) });
+          : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
           tx.objectStore('groupSnapshots').put({ ...row, ...(group ? { group } : {}), ...(members ? { members } : {}), ...(historicalParticipants ? { historicalParticipants } : {}), ...(balances ? { balances } : {}), ...(transactions ? { transactions } : {}), ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
       }
       patchGroups();
@@ -655,7 +659,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) return;
        const transactions = row.transactions.map((item) => item.kind === 'settlement'
         ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
-        : { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) });
+        : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
         tx.objectStore('globalTransactions').put({ ...row, transactions, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
     };
     groups.onsuccess = () => {

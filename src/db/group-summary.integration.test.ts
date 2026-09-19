@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { D1PreparedStatement } from '@cloudflare/workers-types';
 import { Repository } from './repository';
 import { all, db, executeSql } from './cloudflare-d1-test';
 
@@ -83,6 +84,37 @@ function databaseWithReadRace(groupId: string) {
   };
 }
 
+function databaseWithCreditDefaultRace(expenseId: string) {
+  let raced = false;
+  return {
+    prepare(sql: string) {
+      const prepared = db.prepare(sql);
+      const wrap = <T extends D1PreparedStatement>(bound: T) => new Proxy(bound, {
+        get(target, property, receiver) {
+          if (property !== 'all') return Reflect.get(target, property, receiver);
+          return async <R>() => {
+            const result = await target.all<R>();
+            if (!raced && sql.includes('FROM expenses e JOIN json_each')) {
+              raced = true;
+              await db.prepare('UPDATE expenses SET amount_minor=?,version=? WHERE id=?').bind(90, 2, expenseId).run();
+              await db.prepare('UPDATE payers SET amount_minor=? WHERE expense_id=?').bind(90, expenseId).run();
+              await db.prepare('UPDATE splits SET amount_minor=? WHERE expense_id=?').bind(90, expenseId).run();
+            }
+            return result;
+          };
+        },
+      });
+      return {
+        bind(...args: unknown[]) {
+          return wrap(prepared.bind(...args));
+        },
+      };
+    },
+    batch: (statements: D1PreparedStatement[]) => db.batch(statements),
+    get raced() { return raced; },
+  };
+}
+
 describe('group summaries with the in-process local D1 binding', () => {
   it('uses authoritative fallback, publishes a ready projection, and selects the branch from one read snapshot', async () => {
     const fixture = await createFixture('fallback');
@@ -111,6 +143,119 @@ describe('group summaries with the in-process local D1 binding', () => {
       { currency: 'USD', personId: fixture.personB, netMinor: -100 },
     ] });
     expect(racedDb.raced).toBe(true);
+  });
+
+  it('includes signed credit allocations in both fallback and ready monthly projections', async () => {
+    const fixture = await createFixture('credit-projection');
+    await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');
+    const repo = new Repository(db);
+    await repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'direct_provider_offset', amount_minor: 40,
+      currency: 'USD', date: '2026-01-02', applications: [{ expense_id: `${fixture.groupId}-expense`, amount_minor: 40 }], allocations: [],
+    });
+    await expect(repo.balanceProjection(fixture.groupId)).resolves.toEqual({ ready: false, rows: [
+      { currency: 'USD', personId: fixture.personA, netMinor: 60 },
+      { currency: 'USD', personId: fixture.personB, netMinor: -60 },
+    ] });
+    await maintainUntilReady(repo, fixture.groupId);
+    await expect(repo.balanceProjection(fixture.groupId)).resolves.toEqual({ ready: true, rows: [
+      { currency: 'USD', personId: fixture.personA, netMinor: 60 },
+      { currency: 'USD', personId: fixture.personB, netMinor: -60 },
+    ] });
+  });
+
+  it('rejects a stale default-allocation snapshot inside the credit write batch', async () => {
+    const fixture = await createFixture('credit-default-conflict');
+    const expenseId = `${fixture.groupId}-expense`;
+    await addExpense(fixture, expenseId, 100, '2026-01-01');
+    const racedDb = databaseWithCreditDefaultRace(expenseId);
+    const input = {
+      subtype: 'refund' as const, delivery_mode: 'direct_provider_offset' as const, amount_minor: 40,
+      currency: 'USD' as const, date: '2026-01-02', applications: [{ expense_id: expenseId, amount_minor: 40 }], allocations: [], client_operation_id: 'credit-race-retry',
+    };
+    const repo = new Repository(racedDb as never);
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, input)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(racedDb.raced).toBe(true);
+    expect(await all('SELECT COUNT(*) AS count FROM credits WHERE group_id=?', fixture.groupId)).toEqual([{ count: 0 }]);
+    expect(await all('SELECT COUNT(*) AS count FROM idempotency_keys WHERE kind=? AND operation_id=?', 'credit.create', input.client_operation_id)).toEqual([{ count: 0 }]);
+    const retry = await repo.createCredit(fixture.groupId, fixture.userA, input);
+    expect(retry.amountMinor).toBe(40);
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, input)).resolves.toMatchObject({ id: retry.id });
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, { ...input, amount_minor: 30, applications: [{ expense_id: expenseId, amount_minor: 30 }] })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it('restricts direct-provider recipients to payers and refreshes defaults only when applications change', async () => {
+    const fixture = await createFixture('credit-recipient-rules');
+    const firstExpense = `${fixture.groupId}-expense-a`, secondExpense = `${fixture.groupId}-expense-b`;
+    await addExpense(fixture, firstExpense, 100, '2026-01-01');
+    await exec(`
+      INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version)
+        VALUES('${secondExpense}','${fixture.groupId}','${secondExpense}',100,'USD','2026-01-02','${fixture.userA}','2026-01-02','2026-01-02',1);
+      INSERT INTO payers(expense_id,person_id,amount_minor) VALUES('${secondExpense}','${fixture.personB}',100);
+      INSERT INTO splits(expense_id,person_id,amount_minor) VALUES('${secondExpense}','${fixture.personA}',100);
+    `);
+    const repo = new Repository(db);
+    const created = await repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'direct_provider_offset', amount_minor: 40, currency: 'USD', date: '2026-01-03',
+      applications: [{ expense_id: firstExpense, amount_minor: 40 }], allocations: [],
+    });
+    expect(created.allocations).toEqual([
+      { personId: fixture.personB, allocationType: 'beneficiary', amountMinor: 40 },
+      { personId: fixture.personA, allocationType: 'recipient', amountMinor: 40 },
+    ]);
+    const noteEdit = await repo.updateCredit(created.id, fixture.userA, {
+      subtype: created.subtype, delivery_mode: created.deliveryMode, amount_minor: created.amountMinor, currency: created.currency, date: '2026-01-04', note: 'Confirmed', version: created.version,
+       applications: [{ expense_id: firstExpense, amount_minor: 40 }], allocations: [],
+    });
+    expect(noteEdit.allocations).toEqual(created.allocations);
+    const refreshed = await repo.updateCredit(noteEdit.id, fixture.userA, {
+      subtype: noteEdit.subtype, delivery_mode: noteEdit.deliveryMode, amount_minor: 40, currency: 'USD', date: noteEdit.date, note: noteEdit.note,
+       version: noteEdit.version, applications: [{ expense_id: secondExpense, amount_minor: 40 }], allocations: [],
+    });
+    expect(refreshed.allocations).toEqual([
+      { personId: fixture.personA, allocationType: 'beneficiary', amountMinor: 40 },
+      { personId: fixture.personB, allocationType: 'recipient', amountMinor: 40 },
+    ]);
+    await expect(repo.updateCredit(refreshed.id, fixture.userA, {
+      subtype: refreshed.subtype, delivery_mode: refreshed.deliveryMode, amount_minor: 40, currency: 'USD', date: refreshed.date, note: refreshed.note,
+      version: refreshed.version, applications: [{ expense_id: secondExpense, amount_minor: 40 }], allocations: [
+        { person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 40 },
+        { person_id: fixture.personB, allocation_type: 'beneficiary', amount_minor: 40 },
+      ],
+    })).rejects.toMatchObject({ code: 'INVALID_CREDIT' });
+  });
+
+  it('derives direct-provider allocations exactly from every linked bill and rejects overrides', async () => {
+    const fixture = await createFixture('credit-exact-proportions');
+    const firstExpense = `${fixture.groupId}-expense-a`, secondExpense = `${fixture.groupId}-expense-b`;
+    await exec(`
+      INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version) VALUES
+        ('${firstExpense}','${fixture.groupId}','First',100,'USD','2026-01-01','${fixture.userA}','2026-01-01','2026-01-01',1),
+        ('${secondExpense}','${fixture.groupId}','Second',80,'USD','2026-01-02','${fixture.userA}','2026-01-02','2026-01-02',1);
+      INSERT INTO payers(expense_id,person_id,amount_minor) VALUES
+        ('${firstExpense}','${fixture.personA}',60),('${firstExpense}','${fixture.personB}',40),('${secondExpense}','${fixture.personB}',80);
+      INSERT INTO splits(expense_id,person_id,amount_minor) VALUES
+        ('${firstExpense}','${fixture.personA}',25),('${firstExpense}','${fixture.personB}',75),('${secondExpense}','${fixture.personA}',40),('${secondExpense}','${fixture.personB}',40);
+    `);
+    const repo = new Repository(db);
+    const applications = [{ expense_id: firstExpense, amount_minor: 40 }, { expense_id: secondExpense, amount_minor: 60 }];
+    await expect(repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'direct_provider_offset', amount_minor: 100, currency: 'USD', date: '2026-01-03', applications,
+      allocations: [{ person_id: fixture.personA, allocation_type: 'recipient', amount_minor: 100 }, { person_id: fixture.personB, allocation_type: 'beneficiary', amount_minor: 100 }],
+    })).rejects.toMatchObject({ code: 'INVALID_CREDIT' });
+    const credit = await repo.createCredit(fixture.groupId, fixture.userA, {
+      subtype: 'refund', delivery_mode: 'direct_provider_offset', amount_minor: 100, currency: 'USD', date: '2026-01-03', applications, allocations: [],
+    });
+    expect(credit.allocations).toEqual([
+      { personId: fixture.personA, allocationType: 'beneficiary', amountMinor: 40 },
+      { personId: fixture.personB, allocationType: 'beneficiary', amountMinor: 60 },
+      { personId: fixture.personA, allocationType: 'recipient', amountMinor: 24 },
+      { personId: fixture.personB, allocationType: 'recipient', amountMinor: 76 },
+    ]);
+    await expect(repo.updateCredit(credit.id, fixture.userA, {
+      subtype: credit.subtype, delivery_mode: credit.deliveryMode, amount_minor: credit.amountMinor, currency: credit.currency, date: credit.date, note: 'Reviewed', version: credit.version,
+      applications, allocations: [],
+    })).resolves.toMatchObject({ allocations: credit.allocations });
   });
 
   it('keeps old-worker projection selectors compatible while mutating expense and settlement summaries', async () => {
@@ -327,12 +472,24 @@ describe('group summaries with the in-process local D1 binding', () => {
   it('round-robins deleted-group cleanup and drains audit metadata before removing parents', async () => {
     const first = await createFixture('purge-first');
     const second = await createFixture('purge-second');
+    const purgeExpenseId = `${first.groupId}-purge-expense`;
+    await addExpense(first, purgeExpenseId, 20, '2026-01-01');
+    const purgeCredit = await new Repository(db).createCredit(first.groupId, first.userA, {
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 10, currency: 'USD', date: '2026-01-02',
+      applications: [{ expense_id: purgeExpenseId, amount_minor: 10 }], allocations: [
+        { person_id: first.personA, allocation_type: 'recipient', amount_minor: 10 },
+        { person_id: first.personB, allocation_type: 'beneficiary', amount_minor: 10 },
+      ],
+    });
     await exec(`
       UPDATE groups SET deleted_at='2026-01-01T00:00:00.000Z' WHERE id IN ('${first.groupId}','${second.groupId}');
         INSERT INTO audit_events(id,group_id,entity_type,entity_id,version,action,actor_id,occurred_at)
         VALUES('${first.groupId}-audit-1','${first.groupId}','expense','${first.groupId}-missing-1',1,'create','${first.userA}','2026-01-01'),
               ('${first.groupId}-audit-2','${first.groupId}','expense','${first.groupId}-missing-2',1,'create','${first.userA}','2026-01-01'),
-              ('${second.groupId}-audit-1','${second.groupId}','expense','${second.groupId}-missing-1',1,'create','${second.userA}','2026-01-01');
+              ('${second.groupId}-audit-1','${second.groupId}','expense','${second.groupId}-missing-1',1,'create','${second.userA}','2026-01-01'),
+              ('${first.groupId}-credit-audit','${first.groupId}','credit','${purgeCredit.id}',2,'update','${first.userA}','2026-01-01');
+        INSERT INTO revisions(id,entity_type,entity_id,revision,snapshot_json,created_by,created_at)
+          VALUES('${first.groupId}-credit-revision','credit','${purgeCredit.id}',1,'{}','${first.userA}','2026-01-01');
     `);
     const repo = new Repository(db);
     const firstPass = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 1, maxGroups: 1 });
@@ -341,13 +498,15 @@ describe('group summaries with the in-process local D1 binding', () => {
     const secondPass = await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 1, maxGroups: 1 });
     expect(secondPass.groupsScanned).toBe(1);
     expect(secondPass.groupsPurged).toBe(0);
-    expect(await all('SELECT COUNT(*) AS count FROM audit_events WHERE group_id=?', first.groupId)).toEqual([{ count: 1 }]);
-    for (let pass = 0; pass < 12; pass += 1) {
+    expect(await all('SELECT COUNT(*) AS count FROM audit_events WHERE group_id=?', first.groupId)).toEqual([{ count: 4 }]);
+    for (let pass = 0; pass < 30; pass += 1) {
       if (!(await all('SELECT id FROM groups WHERE id IN (?,?)', first.groupId, second.groupId)).length) break;
       await repo.purgeExpiredData('2026-03-01T00:00:00.000Z', { maxTransactions: 1, maxGroups: 1 });
     }
     expect(await all('SELECT id FROM groups WHERE id IN (?,?)', first.groupId, second.groupId)).toEqual([]);
     expect(await all('SELECT group_id FROM audit_events WHERE group_id IN (?,?)', first.groupId, second.groupId)).toEqual([]);
     expect(await all('SELECT group_id FROM group_members WHERE group_id IN (?,?)', first.groupId, second.groupId)).toEqual([]);
+    expect(await all('SELECT group_id FROM credits WHERE group_id IN (?,?)', first.groupId, second.groupId)).toEqual([]);
+    expect(await all('SELECT entity_id FROM revisions WHERE entity_type=? AND entity_id=?', 'credit', purgeCredit.id)).toEqual([]);
   });
 });
