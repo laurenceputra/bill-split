@@ -19,14 +19,15 @@ import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewSchedul
 import { categoryOptions } from './categories';
 import { sortOptionsByLabel } from './dropdown-options';
 import { localDateForTimeZone } from '../domain/recurrence';
-import { appendUniquePage, createPageRequestScope } from './pagination';
+import { appendUniquePage, canLoadNextPage, createPageRequestScope } from './pagination';
 import { assembleCsvPages, collectPagedAccountExport, collectPagedExport, collectPagedGroupExport } from './export';
 import { hasTransactionFilters, readTransactionFilters, transactionFilterCount, transactionFilterKey, writeTransactionFilters, type TransactionFilters } from './transaction-filters';
 import { transactionCategory, transactionContext, transactionDate, transactionKey, transactionNote, transactionPeople, transactionTitle, transactionTypeLabel } from './transaction-ui';
 import { groupDisplayName, groupManagementKind } from './group-display';
 import { createSessionActivityScheduler } from './session-activity';
 import { getGroupCreditCsvExportPage } from './api';
-import { validateCreditDraft, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
+import { selectCreditFormRetryKey, validateCreditDraft, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
+import { advanceCreditExpensePage, createCreditExpensePage, creditExpenseOptions } from './credit-expense-pagination';
 import { categoryTrendStatus, effectiveInsightCurrency, insightActivitySpanText, insightCategoryColor, insightComparisonDateRange, insightCurrencies, insightDisplayedTrendMonths, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonthLabel, insightTrendMonths, insightTrendReferenceLabel, insightTrendValue, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -102,12 +103,12 @@ function ConnectionBanner({ detail }: { detail: string }) {
   return <p className={`offline-banner connection-banner connection-banner--${connection.status}`} role={connection.status === 'connection-issue' ? 'alert' : 'status'}>{label} · {detail}</p>;
 }
 function Empty({ children }: { children: ReactNode }) { return <div className="empty">{children}</div>; }
-function retryFor<T>(key: string, userId: string | undefined, identityFailure = false) {
+function retryFor<T>(key: string, userId: string | undefined, identityFailure = false, allowMissingUser = false) {
   return () => {
-    if (identityFailure || key === resourceKeys.identity() || userId === undefined) {
+    if (identityFailure || key === resourceKeys.identity() || (userId === undefined && !allowMissingUser)) {
       void revalidate<T>(resourceKeys.identity(), '', { force: true, reason: 'auth-restored' }).catch(() => undefined);
-    } else if (userId !== undefined) {
-      void revalidate<T>(key, userId, { force: true, reason: 'route' }).catch(() => undefined);
+    } else {
+      void revalidate<T>(key, userId ?? '', { force: true, reason: 'route' }).catch(() => undefined);
     }
   };
 }
@@ -672,50 +673,61 @@ function OneTimeOnlyDetails({ category, notes, customCategories = [], showNotes 
   return <fieldset className="one-time-only-details" aria-describedby="one-time-only-details-help"><legend>Expense details</legend><p id="one-time-only-details-help" className="muted">{showNotes ? 'Categories are saved with expenses. Notes are saved for one-time expenses only. Choose a category to make future entries faster. Categories are private to your account.' : 'Categories are saved with scheduled expenses. Notes are available for one-time expenses only. Categories are private to your account.'}</p>{suggested ? <p className="muted" role="status">Suggested from past expenses.</p> : null}<Field label="Category" className="field--compact"><select value={custom ? 'Other' : category} onChange={(event) => onCategoryChange(event.target.value)}><option value="">Choose a category</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select></Field>{other ? <Field label="Custom category" className="field--compact"><input className="category" required value={custom ? category : ''} onChange={(event) => onCategoryChange(event.target.value)} placeholder="Enter a category" /></Field> : null}{showNotes ? <Field label="Notes (optional)" className="field--compact"><textarea className="notes" rows={3} value={notes} onChange={(event) => onNotesChange(event.target.value)} /></Field> : null}</fieldset>;
 }
 
-function CreditFormLegacy({ initialCredit }: { initialCredit?: Credit } = {}) {
-  const { id = '' } = useParams(); const nav = useNavigate(); const online = useOnlineStatus();
-  const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
-  const groupResource = useResource<GroupResponse>(resourceKeys.group(me.data?.id || 'pending', id || 'missing'), me.data?.id, (signal) => getGroup(id!, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id!) : undefined);
-  const expenseResource = useResource<{ expenses: Expense[] }>(resourceKeys.expenses(me.data?.id || 'pending', id || 'missing'), me.data?.id, (signal) => getExpensePage(id!, { limit: 100 }, signal), RESOURCE_FRESHNESS.expenses);
-  const group = groupResource.data?.group, members = groupResource.data?.members || [], expenses = expenseResource.data?.expenses || [];
-  const [subtype, setSubtype] = useState<'refund' | 'claim'>(initialCredit?.subtype || 'refund'); const [mode, setMode] = useState<'member_reimbursement' | 'direct_provider_offset'>(initialCredit?.deliveryMode || 'member_reimbursement');
-  const [amount, setAmount] = useState(initialCredit ? moneyInput(initialCredit.amountMinor) : ''); const [date, setDate] = useState(initialCredit?.date || today()); const [note, setNote] = useState(initialCredit?.note || ''); const [applications, setApplications] = useState<CreditApplicationDraft[]>(() => (initialCredit?.applications || []).map((item) => ({ id: operationId(), expenseId: item.expenseId, amount: moneyInput(item.amountMinor) }))); const [allocations, setAllocations] = useState<CreditAllocationDraft[]>(() => (initialCredit?.allocations || []).map((item) => ({ id: operationId(), personId: item.personId, allocationType: item.allocationType, amount: moneyInput(item.amountMinor) }))); const [busy, setBusy] = useState(false); const [error, setError] = useState<unknown>(); const [operation] = useState(operationId);
-  const updateApplication = (rowId: string, patch: Partial<CreditApplicationDraft>) => setApplications((current) => current.map((row) => row.id === rowId ? { ...row, ...patch } : row));
-  const updateAllocation = (rowId: string, patch: Partial<CreditAllocationDraft>) => setAllocations((current) => current.map((row) => row.id === rowId ? { ...row, ...patch } : row));
-  const expenseId = applications[0]?.expenseId || '';
-  const applicationAmount = applications[0]?.amount || '';
-  const recipient = allocations.find((item) => item.allocationType === 'recipient')?.personId || '';
-  const beneficiary = allocations.find((item) => item.allocationType === 'beneficiary')?.personId || '';
-  const setExpenseId = (value: string) => { if (applications.length) updateApplication(applications[0].id, { expenseId: value }); else setApplications([{ id: operationId(), expenseId: value, amount }]); };
-  const setApplicationAmount = (value: string) => { if (applications.length) updateApplication(applications[0].id, { amount: value }); };
-  const setRecipient = (value: string) => { const row = allocations.find((item) => item.allocationType === 'recipient'); if (row) updateAllocation(row.id, { personId: value }); else setAllocations((current) => [...current, { id: operationId(), personId: value, allocationType: 'recipient', amount }]); };
-  const setBeneficiary = (value: string) => { const row = allocations.find((item) => item.allocationType === 'beneficiary'); if (row) updateAllocation(row.id, { personId: value }); else setAllocations((current) => [...current, { id: operationId(), personId: value, allocationType: 'beneficiary', amount }]); };
-  const resourceError = me.error || groupResource.error || expenseResource.error;
-  if (resourceError && !group) return <Layout><ErrorBox error={resourceError} onRetry={retryFor(me.error ? resourceKeys.identity() : resourceKeys.group(me.data?.id || 'pending', id || 'missing'), me.data?.id)} id="credit-form-resource-error" /><Link className="back" to={`/groups/${id}`}>← Group</Link></Layout>;
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!online || busy || !group) return; setBusy(true); setError(undefined); try { const amountMinor = parseMoney(amount, group.currency); const input = { subtype, delivery_mode: mode, amount_minor: amountMinor, currency: group.currency, date, note: note || null, applications: applications.filter((row) => row.expenseId).map((row) => ({ expense_id: row.expenseId, amount_minor: parseMoney(row.amount || amount, group.currency) })), allocations: mode === 'direct_provider_offset' ? [] : allocations.filter((row) => row.personId).map((row) => ({ person_id: row.personId, allocation_type: row.allocationType, amount_minor: parseMoney(row.amount || amount, group.currency) })), client_operation_id: operation }; if (initialCredit) await updateCredit(initialCredit.id, { ...input, version: initialCredit.version }); else await createCreditRequest(id, input); await invalidateForMutation.creditChanged(id, me.data?.id, initialCredit?.id, captureSessionGeneration()); nav(`/groups/${id}`); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  if (!group) return <Layout><Loading /></Layout>;
-  return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">Online-only ledger action</p><h1>Record credit</h1></div></div><Surface><p className="muted">A confirmed credit reverses expense accounting. It is never a settlement or a negative expense. Linked applications must use the full credit amount.</p><form onSubmit={submit}><Field label="Type"><select value={subtype} onChange={(event) => setSubtype(event.target.value as typeof subtype)}><option value="refund">Refund</option><option value="claim">Claim</option></select></Field><Field label="Delivery"><select value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="member_reimbursement">Member reimbursement</option><option value="direct_provider_offset">Direct-provider offset</option></select></Field><Field label={`Amount (${group.currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></Field><Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field><Field label="Apply to expense (optional)"><select disabled={mode === 'direct_provider_offset' && !expenses.length} value={expenseId} onChange={(event) => setExpenseId(event.target.value)}><option value="">Standalone credit</option>{expenses.map((expense) => <option key={expense.id} value={expense.id}>{expense.description} · {moneyInput(expense.amountMinor)} {expense.currency}</option>)}</select></Field>{expenseId ? <Field label={`Application amount (${group.currency})`}><input required inputMode="decimal" value={applicationAmount || amount} onChange={(event) => setApplicationAmount(event.target.value)} /><small className="muted">The application must equal the credit amount; expense totals remain gross.</small></Field> : null}{mode === 'member_reimbursement' ? <><Field label="Who received the money"><select required value={recipient} onChange={(event) => setRecipient(event.target.value)}><option value="">Choose recipient</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Beneficiary allocation"><select required value={beneficiary} onChange={(event) => setBeneficiary(event.target.value)}><option value="">Choose beneficiary</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field></> : <p className="cache-status">Direct-provider defaults copy original payer proportions for recipients and expense split proportions for beneficiaries.</p>}<Field label="Note (optional)"><textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} /></Field>{!online ? <p className="offline-banner" role="status">Offline · recording credits requires a connection.</p> : null}{error ? <ErrorBox error={error} id="credit-form-error" /> : null}<Button type="submit" disabled={!online || busy}>{busy ? 'Recording…' : 'Record credit'}</Button></form></Surface></Layout>;
-}
-
-void CreditFormLegacy;
-
 function CreditForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const { id = '' } = useParams();
   const nav = useNavigate();
   const online = useOnlineStatus();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
-  const groupResource = useResource<GroupResponse>(resourceKeys.group(me.data?.id || 'pending', id || 'missing'), me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
-  const expenseResource = useResource<ExpensePage>(resourceKeys.expenses(me.data?.id || 'pending', id || 'missing'), me.data?.id, (signal) => getExpensePage(id, { limit: 100 }, signal), RESOURCE_FRESHNESS.expenses);
+  const groupResourceKey = resourceKeys.group(me.data?.id || 'pending', id || 'missing');
+  const expenseResourceKey = resourceKeys.expenses(me.data?.id || 'pending', id || 'missing');
+  const groupResource = useResource<GroupResponse>(groupResourceKey, me.data?.id, (signal) => getGroup(id, signal), RESOURCE_FRESHNESS.group, me.data?.id ? () => hydrateGroup(me.data!.id, id) : undefined);
+  const expenseResource = useResource<ExpensePage>(expenseResourceKey, me.data?.id, (signal) => getExpensePage(id, { limit: 100 }, signal), RESOURCE_FRESHNESS.expenses);
   const group = groupResource.data?.group;
   const members = groupResource.data?.members || [];
   const expenses = expenseResource.data?.expenses || [];
   const [moreExpenses, setMoreExpenses] = useState<Expense[]>([]);
   const [expenseCursor, setExpenseCursor] = useState<string>();
   const [loadingExpenses, setLoadingExpenses] = useState(false);
-  useEffect(() => { setMoreExpenses([]); setExpenseCursor(expenseResource.data?.nextCursor); }, [expenseResource.data]);
+  const [expensePageError, setExpensePageError] = useState<unknown>();
+  const expenseScopeKey = `${me.data?.id || 'pending'}:${id}`;
+  const expenseScopeKeyRef = useRef(expenseScopeKey);
+  expenseScopeKeyRef.current = expenseScopeKey;
+  const expensePageScope = useRef(createPageRequestScope());
+  const expenseCursorRef = useRef<string>();
+  const loadingExpensesRef = useRef(false);
+  useEffect(() => {
+    expensePageScope.current.reset(expenseScopeKey);
+    expenseCursorRef.current = expenseResource.data?.nextCursor;
+    loadingExpensesRef.current = false;
+    setMoreExpenses([]);
+    setExpenseCursor(expenseResource.data?.nextCursor);
+    setLoadingExpenses(false);
+    setExpensePageError(undefined);
+  }, [expenseResource.data, expenseScopeKey]);
+  useEffect(() => () => expensePageScope.current.dispose(), []);
   const availableExpenses = useMemo(() => [...expenses, ...moreExpenses].filter((expense, index, all) => all.findIndex((candidate) => candidate.id === expense.id) === index), [expenses, moreExpenses]);
-  const loadMoreExpenses = async () => { if (!expenseCursor || loadingExpenses || !online) return; setLoadingExpenses(true); try { const page = await getExpensePage(id, { limit: 100, cursor: expenseCursor }); setMoreExpenses((current) => [...current, ...page.expenses]); setExpenseCursor(page.nextCursor); } catch (cause) { setError(cause); } finally { setLoadingExpenses(false); } };
-  useEffect(() => { if (expenseCursor && online) void loadMoreExpenses(); }, [expenseCursor, online]);
+  const loadMoreExpenses = async () => {
+    if (!canLoadNextPage(expenseCursor, loadingExpensesRef.current, online)) return;
+    const request = expensePageScope.current.begin(expenseScopeKey, expenseCursor);
+    loadingExpensesRef.current = true;
+    setLoadingExpenses(true);
+    setExpensePageError(undefined);
+    try {
+      const page = await getExpensePage(id, { limit: 100, cursor: request.cursor }, request.signal);
+      if (!expensePageScope.current.isCurrent(request) || expenseScopeKeyRef.current !== request.key || expenseCursorRef.current !== request.cursor) return;
+      const nextPage = advanceCreditExpensePage(createCreditExpensePage(moreExpenses, expenseCursor), page);
+      expenseCursorRef.current = nextPage.nextCursor;
+      setMoreExpenses(nextPage.expenses);
+      setExpenseCursor(nextPage.nextCursor);
+    } catch (cause) {
+      if (expensePageScope.current.isCurrent(request) && !(cause instanceof DOMException && cause.name === 'AbortError')) setExpensePageError(cause);
+    } finally {
+      if (expensePageScope.current.isCurrent(request)) {
+        loadingExpensesRef.current = false;
+        setLoadingExpenses(false);
+      }
+    }
+  };
   const [subtype, setSubtype] = useState<'refund' | 'claim'>(initialCredit?.subtype || 'refund');
   const [mode, setMode] = useState<'member_reimbursement' | 'direct_provider_offset'>(initialCredit?.deliveryMode || 'member_reimbursement');
   const [amount, setAmount] = useState(initialCredit ? moneyInput(initialCredit.amountMinor) : '');
@@ -742,10 +754,13 @@ function CreditForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       await invalidateForMutation.creditChanged(id, me.data?.id, initialCredit?.id, captureSessionGeneration()); nav(`/groups/${id}`);
     } catch (cause) { setError(cause); } finally { setBusy(false); }
   };
-  const resourceError = me.error || groupResource.error || expenseResource.error;
-  if (resourceError && !group) return <Layout><ErrorBox error={resourceError} onRetry={retryFor(me.error ? resourceKeys.identity() : resourceKeys.group(me.data?.id || 'pending', id), me.data?.id)} id="credit-form-resource-error" /><Link className="back" to={`/groups/${id}`}>← Group</Link></Layout>;
+  const creditFormRetryKey = selectCreditFormRetryKey({ identity: me.error, group: groupResource.error, expenses: expenseResource.error }, { identity: resourceKeys.identity(), group: groupResourceKey, expenses: expenseResourceKey });
+  const resourceError = creditFormRetryKey === resourceKeys.identity() ? me.error : creditFormRetryKey === expenseResourceKey ? expenseResource.error : groupResource.error;
+  if (resourceError && !group) return <Layout><ErrorBox error={resourceError} onRetry={creditFormRetryKey ? retryFor(creditFormRetryKey, me.data?.id || getVerifiedUserId(), creditFormRetryKey === resourceKeys.identity(), creditFormRetryKey === expenseResourceKey) : undefined} id="credit-form-resource-error" /><Link className="back" to={`/groups/${id}`}>← Group</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
-   const applicationRows = applications.map((row) => <div className="allocation-row" key={row.id}><Field label="Expense"><select required value={row.expenseId} onChange={(event) => updateApplication(row.id, { expenseId: event.target.value })}><option value="">Choose expense</option>{availableExpenses.filter((expense) => expense.currency === group.currency).map((expense) => <option key={expense.id} value={expense.id}>{expense.description} · {moneyInput(expense.amountMinor)} {expense.currency}</option>)}{row.expenseId && !availableExpenses.some((expense) => expense.id === row.expenseId) ? <option value={row.expenseId}>{initialCredit?.applications.find((application) => application.expenseId === row.expenseId)?.expenseDescription || row.expenseId}</option> : null}</select></Field><Field label="Applied amount"><input required inputMode="decimal" value={row.amount} onChange={(event) => updateApplication(row.id, { amount: event.target.value })} /></Field>{applications.length > 1 ? <Button type="button" variant="secondary" onClick={() => setApplications((current) => current.filter((candidate) => candidate.id !== row.id))}>Remove</Button> : null}</div>);
+    const expenseRetry = retryFor(expenseResourceKey, me.data?.id || getVerifiedUserId(), false, true);
+   const expensePickerNotice = expenseResource.data === undefined ? expenseResource.error ? <ErrorBox error={expenseResource.error} onRetry={expenseRetry} id="credit-expense-picker-error" retryLabel="Retry expenses" /> : <Loading /> : expenseResource.error ? <p className="cache-status" role="status">Showing cached expenses; they may be out of date. <button className="inline-action" type="button" onClick={expenseRetry}>Retry expenses</button></p> : null;
+   const applicationRows = <>{applications.map((row) => { const linked = initialCredit?.applications.find((application) => application.expenseId === row.expenseId); const options = creditExpenseOptions(availableExpenses, row.expenseId ? { id: row.expenseId, description: linked?.expenseDescription } : undefined, group.currency); return <div className="allocation-row" key={row.id}><Field label="Expense"><select required disabled={expenseResource.data === undefined} value={row.expenseId} onChange={(event) => updateApplication(row.id, { expenseId: event.target.value })}><option value="">Choose expense</option>{options.map((expense) => <option key={expense.id} value={expense.id}>{expense.description}{expense.amountMinor === undefined ? '' : ` · ${moneyInput(expense.amountMinor)} ${expense.currency}`}</option>)}</select></Field><Field label="Applied amount"><input required inputMode="decimal" value={row.amount} onChange={(event) => updateApplication(row.id, { amount: event.target.value })} /></Field>{applications.length > 1 ? <Button type="button" variant="secondary" onClick={() => setApplications((current) => current.filter((candidate) => candidate.id !== row.id))}>Remove</Button> : null}</div>; })}{expensePickerNotice}{expensePageError ? <ErrorBox error={expensePageError} onRetry={() => void loadMoreExpenses()} id="credit-expense-page-error" retryLabel="Retry loading expenses" /> : null}{expenseCursor ? <Button type="button" variant="secondary" disabled={!online || loadingExpenses} onClick={() => void loadMoreExpenses()}>{loadingExpenses ? 'Loading…' : 'Load more expenses'}</Button> : null}</>;
   const allocationRows = (type: CreditAllocationDraft['allocationType']) => allocations.filter((row) => row.allocationType === type).map((row) => <div className="allocation-row" key={row.id}><Field label="Person"><select required value={row.personId} onChange={(event) => updateAllocation(row.id, { personId: event.target.value })}><option value="">Choose person</option>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}</option>)}</select></Field><Field label="Amount"><input required inputMode="decimal" value={row.amount} onChange={(event) => updateAllocation(row.id, { amount: event.target.value })} /></Field><Button type="button" variant="secondary" onClick={() => setAllocations((current) => current.filter((candidate) => candidate.id !== row.id))}>Remove</Button></div>);
   return <Layout><Link to={`/groups/${id}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">Online-only ledger action</p><h1>{initialCredit ? 'Edit credit' : 'Record credit'}</h1></div></div>{!online ? <ConnectionBanner detail="Credits require a connection and are not queued offline." /> : null}<Surface><p className="muted">A confirmed credit reverses expense accounting. It is never a settlement or a negative expense. Linked applications must use the full credit amount.</p><form onSubmit={submit}><Field label="Type"><select value={subtype} onChange={(event) => setSubtype(event.target.value as typeof subtype)}><option value="refund">Refund</option><option value="claim">Claim</option></select></Field><Field label="Delivery"><select value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="member_reimbursement">Member reimbursement</option><option value="direct_provider_offset">Direct-provider offset</option></select></Field><Field label={`Amount (${group.currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></Field><Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field><fieldset><legend>Apply to expenses</legend>{applicationRows}<Button type="button" variant="secondary" onClick={() => setApplications((current) => [...current, { id: operationId(), expenseId: '', amount }])}>Add expense application</Button></fieldset>{mode === 'member_reimbursement' ? <fieldset><legend>Money flow allocations</legend><h3>Recipients</h3>{allocationRows('recipient')}<Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, { id: operationId(), personId: '', allocationType: 'recipient', amount }])}>Add recipient</Button><h3>Beneficiaries</h3>{allocationRows('beneficiary')}<Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, { id: operationId(), personId: '', allocationType: 'beneficiary', amount }])}>Add beneficiary</Button></fieldset> : <p className="muted">Direct-provider offsets derive payer and split allocations from each linked bill; these allocations cannot be customized.</p>}<Field label="Note (optional)"><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} /></Field>{error ? <ErrorBox error={error} id="credit-form-error" /> : null}<div className="actions"><Button type="submit" disabled={!online || busy}>{busy ? 'Saving…' : initialCredit ? 'Save credit' : 'Record credit'}</Button><Link className="button button--secondary" to={`/groups/${id}`}>Cancel</Link></div></form></Surface></Layout>;
 }
@@ -755,12 +770,6 @@ function CreditEditForm() {
   if (details.error || me.error) return <Layout><ErrorBox error={details.error || me.error} onRetry={retryFor(details.error ? resourceKeys.creditDetail(me.data?.id || 'pending', creditId) : resourceKeys.identity(), me.data?.id)} id="credit-edit-error" /><Link className="back" to="/">← Home</Link></Layout>;
   return details.data?.credit ? <CreditForm initialCredit={details.data.credit} /> : <Layout><Loading /></Layout>;
 }
-
-function CreditDetailLegacy() {
-  const { creditId = '' } = useParams(); const nav = useNavigate(); const online = useOnlineStatus(); const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity); const details = useResource<{ credit: Credit; history: Array<{ id: string; revision: number; createdAt: string }> }>(resourceKeys.creditDetail(me.data?.id || 'pending', creditId), me.data?.id, (signal) => getCreditDetails(creditId, signal), RESOURCE_FRESHNESS.expenseDetail); const credit = details.data?.credit; const [busy, setBusy] = useState(false); const [error, setError] = useState<unknown>(); if (!credit) return <Layout><Loading /></Layout>; const remove = async () => { if (!confirm('Delete this credit?')) return; setBusy(true); try { await deleteCredit(credit.id, credit.version); await invalidateForMutation.creditChanged(credit.groupId, me.data?.id, credit.id, captureSessionGeneration()); nav(`/groups/${credit.groupId}`); } catch (cause) { setError(cause); } finally { setBusy(false); } }; const restore = async () => { setBusy(true); try { await restoreCredit(credit.id, credit.version); await invalidateForMutation.creditChanged(credit.groupId, me.data?.id, credit.id, captureSessionGeneration()); } catch (cause) { setError(cause); } finally { setBusy(false); } }; return <Layout><Link to={`/groups/${credit.groupId}`} className="back">← Group</Link><div className="page-title"><div><p className="eyebrow">{credit.date} · {credit.subtype}</p><h1>{credit.deliveryMode === 'direct_provider_offset' ? 'Direct-provider credit' : 'Member reimbursement'}</h1></div><Money amountMinor={credit.amountMinor} currency={credit.currency} size="large" /></div><Surface><p className="muted">Confirmed credit · version {credit.version}</p><h2>Applications</h2><div className="list">{credit.applications.length ? credit.applications.map((application) => <div className="row" key={application.expenseId}><span>{application.expenseDescription || application.expenseId}</span><Money amountMinor={application.amountMinor} currency={credit.currency} /></div>) : <p className="muted">Standalone credit</p>}</div><h2>Allocation snapshot</h2><div className="list">{credit.allocations.map((allocation) => <div className="row" key={`${allocation.allocationType}-${allocation.personId}`}><span>{allocation.allocationType}</span><Money amountMinor={allocation.amountMinor} currency={credit.currency} /></div>)}</div>{error ? <ErrorBox error={error} id="credit-detail-error" /> : null}<div className="actions">{credit.deletedAt ? <Button disabled={!online || busy} onClick={() => void restore()}>Restore credit</Button> : <><Link className="button" to={`/groups/${credit.groupId}/credit/${credit.id}/edit`}>Edit</Link><Button variant="danger" disabled={!online || busy} onClick={() => void remove()}>Delete</Button></>}</div></Surface></Layout>;
-}
-
-void CreditDetailLegacy;
 
 function CreditDetail() {
   const { creditId = '' } = useParams();

@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { appendUniquePage, createPageRequestScope } from './pagination';
+import { appendUniquePage, canLoadNextPage, createPageRequestScope } from './pagination';
 
 describe('keyset page accumulation', () => {
   it('deduplicates rows when a refreshed page overlaps the prior page', () => {
     expect(appendUniquePage([{ id: 'a' }, { id: 'b' }], [{ id: 'b' }, { id: 'c' }, { id: 'c' }], (row) => row.id)).toEqual([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+  });
+});
+
+describe('continuation controls', () => {
+  it('only enables one online continuation while a cursor remains and no request is active', () => {
+    expect(canLoadNextPage('next', false, true)).toBe(true);
+    expect(canLoadNextPage(undefined, false, true)).toBe(false);
+    expect(canLoadNextPage('next', true, true)).toBe(false);
+    expect(canLoadNextPage('next', false, false)).toBe(false);
   });
 });
 

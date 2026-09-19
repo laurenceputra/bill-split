@@ -9,6 +9,10 @@ export function appendUniquePage<T>(current: T[], page: T[], key: (item: T) => s
   })];
 }
 
+export function canLoadNextPage(cursor: string | undefined, loading: boolean, online: boolean): cursor is string {
+  return Boolean(cursor) && !loading && online;
+}
+
 export type PageRequest = {
   key: string;
   cursor: string;
