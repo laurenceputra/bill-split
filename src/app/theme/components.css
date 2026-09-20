@@ -2197,6 +2197,105 @@ summary {
   letter-spacing: 0;
 }
 
+.refund-form__help {
+  display: block;
+  margin-top: calc(var(--space-2) * -1);
+}
+
+.refund-application-row {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-4);
+}
+
+.refund-application-row + .refund-application-row {
+  padding-top: var(--space-2);
+}
+
+.refund-application-row > :is(.button, button),
+.refund-application-actions :is(.button, button),
+.refund-allocation-actions :is(.button, button),
+.refund-allocation-row__remove {
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.refund-application-actions,
+.refund-allocation-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.refund-application-status {
+  display: block;
+  color: var(--color-ink-muted);
+  font-weight: 800;
+}
+
+.refund-application-status--fully-applied {
+  color: var(--color-mint-ink);
+}
+
+.refund-application-status--overallocated {
+  color: var(--color-coral-ink);
+}
+
+.allocation-row.refund-allocation-row {
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 10rem) auto;
+  grid-template-areas: "person amount remove";
+  align-items: start;
+}
+
+.refund-allocation-row__person {
+  grid-area: person;
+}
+
+.refund-allocation-row__amount {
+  grid-area: amount;
+}
+
+.refund-allocation-row__remove {
+  grid-area: remove;
+  align-self: end;
+}
+
+.refund-preview-person > span {
+  gap: var(--space-1);
+}
+
+.refund-preview-component,
+.refund-preview-net {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.refund-preview-component .money,
+.refund-preview-net .money {
+  flex: 0 0 auto;
+}
+
+.refund-preview-net {
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-1);
+  color: var(--color-ink);
+  font-weight: 800;
+}
+
+.refund-preview-application-status {
+  font-weight: 800;
+}
+
 .amount-field > input.amount-input--very-long {
   font-size: clamp(1.15rem, 5vw, 2rem);
   letter-spacing: 0;
@@ -2885,6 +2984,28 @@ input[inputmode="decimal"] {
 }
 
 @media (max-width: 55.999rem) {
+  .allocation-row.refund-allocation-row {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "person"
+      "amount"
+      "remove";
+  }
+
+  .refund-allocation-row__remove {
+    justify-self: start;
+  }
+
+  .refund-application-actions,
+  .refund-allocation-actions {
+    align-items: stretch;
+  }
+
+  .refund-application-actions :is(.button, button),
+  .refund-allocation-actions :is(.button, button) {
+    flex: 0 1 auto;
+  }
+
   .cache-status > .inline-action {
     display: inline-flex;
     min-width: var(--control-min-height);

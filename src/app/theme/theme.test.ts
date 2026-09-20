@@ -210,6 +210,11 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
   });
 
+  it('stacks refund allocation rows below the 56rem breakpoint with matching specificity', () => {
+    expect(css).toMatch(/\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) minmax\(7rem, 10rem\) auto;/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*grid-template-areas:/);
+  });
+
   it('keeps the public landing separate from the private shell', () => {
     expect(appSource).toContain('<PublicShell returnTo={returnTo}>');
     expect(appSource).toContain("if (auth.status === 'unauthenticated') return <PublicLanding");
