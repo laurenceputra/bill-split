@@ -79,13 +79,92 @@ Color is never the sole indicator: pair it with text, an icon, position, or a st
 
 Build and compose these primitives instead of creating page-specific versions:
 
-`AppShell`, `MobileBottomNav`, `DesktopTopNav`, `PageHeader`, `Card`, `BalanceCard`, `GroupCard`, `TransactionRow`, `SettlementRow`, `PersonRow`, `Avatar`, `AvatarStack`, `StatusPill`, `Notice`, `Button`, `IconButton`, `Input`, `Select`, `AmountInput`, `FormField`, `SectionHeader`, `Disclosure`, `Modal`, `BottomSheet`, `ConfirmationDialog`, `Skeleton`, and `EmptyState`. Foundational `Stack`, `Inline`, `Divider`, `Link`, `Toast`, and `Icon` primitives may support them.
+`AppShell`, `MobileBottomNav`, `DesktopTopNav`, `PageHeader`, `Section`, `Card`, `LedgerList`, `LedgerRow`, `BalanceCard`, `GroupCard`, `TransactionRow`, `SettlementRow`, `PersonRow`, `Avatar`, `AvatarStack`, `StatusPill`, `Notice`, `Button`, `IconButton`, `Input`, `Select`, `AmountInput`, `FormField`, `SectionHeader`, `Disclosure`, `Modal`, `BottomSheet`, `ConfirmationDialog`, `Skeleton`, and `EmptyState`. Foundational `Stack`, `Inline`, `Divider`, `Link`, `Toast`, and `Icon` primitives may support them.
+
+## Page, section, and ledger hierarchy
+
+The visual hierarchy is intentionally lighter than the semantic hierarchy:
+
+```text
+Page (route view)
+└── Section (a semantic landmark and flow group)
+    └── Ledger group (a related set of financial rows)
+        └── Card or ledger row (the painted decision surface, when needed)
+```
+
+Semantic elements are not automatically painted cards. A `section` identifies a
+topic or landmark and supplies grouping and spacing; it does not receive a
+border, fill, radius, or shadow merely because it is a `section`. A `.list` is a
+structural ledger-list container, and a `.row` is a transparent ledger-row
+with dividers and interaction feedback. Use the explicit `Card`/`.card` or
+`.surface` role only when a contained surface helps a user understand one
+decision, one primary financial anchor, or one focused task.
+
+### Surface roles
+
+- **Card**: a contained, scannable unit such as a Home group card, a primary
+  balance anchor, a focused form surface, a modal, an invitation state, or an
+  empty state. It may use the surface token, border, and restrained elevation.
+- **Section**: a semantic topic boundary with structural spacing. It stays
+  borderless and transparent unless it has an explicit route or component
+  surface role.
+- **LedgerList**: the transparent list container for related transactions,
+  balances, activity, schedules, people, or history rows. It uses alignment,
+  spacing, and dividers rather than a nested card treatment.
+- **LedgerRow**: one ledger item. Rows keep amounts tabular and aligned, have
+  a minimum touch target when interactive, and expose hover and visible
+  keyboard focus without requiring a painted parent.
+
+Do not add a wrapper only to supply another border or padding layer. Avoid
+nested painted surfaces; a card may contain a ledger list, but its individual
+rows should normally remain transparent. If a contained surface cannot explain
+what decision, status, or financial anchor it contains, flatten it into the
+nearest section or ledger group.
+
+### Route surface rules
+
+- **Home** keeps group cards as the primary navigation surfaces. The spending
+  snapshot is a borderless section with aligned, divider-separated currency
+  rows; its outer section and metric rows are not cards. Invitations and the
+  no-groups empty state remain contained because they need distinct status and
+  recovery treatment.
+- **Group Overview** uses one primary balances anchor card. Balance entries
+  inside it, recent transactions, schedules, people, tools, and compact
+  spending are borderless sections or ledger rows. The reading order remains
+  balances → transactions → schedules → people → tools on mobile, with the
+  existing desktop two-column arrangement preserved.
+- **History** keeps the group filter, tabs, disclosures, and controls in flow.
+  Transaction and activity results are transparent divider-separated ledger
+  rows; the history page itself is not a card.
+- **Insights** keeps the page and filter controls in flow. Only intentional
+  summary and chart modules may be contained, and they must not introduce
+  painted cards inside painted cards. The exact-value table remains available
+  to assistive technology and the existing loading, cached, offline, empty,
+  and error states remain explicit.
+- **Forms** use one explicit focused form surface when the task benefits from
+  containment. Fieldsets, amount anchors, disclosures, validation messages,
+  and modal/bottom-sheet content may be visually distinct, but generic
+  sections and ledger rows do not become extra cards.
+- **Management and settings** may retain contained administrative sections so
+  destructive, connection-dependent, invitation, export, and account actions
+  do not visually merge. Their member and activity collections still use
+  ledger rows and avoid cards nested inside those sections.
+
+### Card-density review criterion
+
+For every changed route, count visible painted ancestors from the page surface
+to each meaningful content unit. A normal content path should have at most one
+intentional painted container; a primary financial anchor or modal may have a
+second level for its contained rows or focused controls. Any additional border,
+fill, radius, or shadow must be justified by a distinct decision, state, or
+interaction. Review this at 320, 390, 768, 895, 896, and 1440px, including
+loading, cached, offline, empty, error, and disclosure states.
 
 ## Component rules
 
 ### Cards
 
-Cards group one decision or related ledger information. Use surface, border, and restrained elevation; do not stack unnecessary cards inside cards. Put the title and primary amount/action first, supporting metadata second, and tools last. A card must still communicate its state without relying on hover.
+Cards group one decision or related ledger information. Use surface, border, and restrained elevation; do not stack unnecessary cards inside cards. Put the title and primary amount/action first, supporting metadata second, and tools last. A card must still communicate its state without relying on hover. Prefer a section or ledger list when grouping alone is sufficient.
 
 ### Buttons and links
 
@@ -161,4 +240,5 @@ Review in this order:
 4. **Responsive behavior:** verify 320 minimum, 390 mobile, 768/895/896 boundaries, and 1440 desktop; confirm mobile bottom nav and desktop top nav.
 5. **Accessibility:** 44px targets, visible labels, keyboard/focus behavior, contrast, semantics, announcements, and color-plus-text status cues.
 6. **States and recovery:** loading, cached, offline, stale, pending, empty, success, error, modal, and destructive flows are explicit and recoverable.
-7. **System consistency:** semantic tokens only, shared primitives reused, restrained geometry/shadows, no forbidden visual treatments, and no route-specific duplicate components.
+7. **Card density:** semantic sections remain structural, ledger lists use transparent rows, and every painted surface has an explicit role with no unnecessary nested surface.
+8. **System consistency:** semantic tokens only, shared primitives reused, restrained geometry/shadows, no forbidden visual treatments, and no route-specific duplicate components.

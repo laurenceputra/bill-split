@@ -327,21 +327,28 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       if (element.scrollWidth > element.clientWidth + 1 || box.left < -1 || box.right > viewport.width + 1) add('long-text-containment', 'major', `Long text overflows its box (${element.scrollWidth}px content in ${element.clientWidth}px) or viewport bounds`, selector(element));
     }
 
-    for (const element of Array.from(document.querySelectorAll('.surface,section,.card,.empty')).filter(visible)) {
-      if (element.matches('.insight-section,.group-overview-tools .insights-compact')) continue;
+    const surfaceRootSelector = '.surface,.card,.card-surface,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-summary-card,.insight-category-trends,.compact-balances,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"],.route-view--group-management > section,.route-view--group-management > #settings > section,.route-view--settings > section';
+    for (const element of Array.from(document.querySelectorAll(surfaceRootSelector)).filter(visible)) {
       const style = getComputedStyle(element);
       const padding = Math.min(parseFloat(style.paddingTop), parseFloat(style.paddingRight), parseFloat(style.paddingBottom), parseFloat(style.paddingLeft));
       if (padding < 12) add('surface-padding', 'minor', `Flow surface internal padding is ${padding}px; expected at least 12px`, selector(element), padding);
     }
 
-    const surfaceRootSelector = '.surface,section,.card,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-metric,.insight-summary-card,.insight-category-trends,.balance-card,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"]';
-    const paintedSurface = (element: Element) => {
-      if (!element.matches(surfaceRootSelector)) return false;
+    const flatRouteContainerSelector = '.insights-page,.insight-section,.history-panel,.route-view--group-overview > section:not(.compact-balances)';
+    const surfaceCandidate = (element: Element) => element.matches(surfaceRootSelector) || element.matches(flatRouteContainerSelector);
+    const hasPaint = (element: Element) => {
       const style = getComputedStyle(element);
-      const hasBorder = ['Top', 'Right', 'Bottom', 'Left'].some((side) => Number.parseFloat(style[`border${side}Width` as 'borderTopWidth']) > 0 && style[`border${side}Style` as 'borderTopStyle'] !== 'none');
+      const borderSides = ['Top', 'Right', 'Bottom', 'Left'] as const;
+      const hasBorder = borderSides.some((side) => Number.parseFloat(style[`border${side}Width` as 'borderTopWidth']) > 0 && style[`border${side}Style` as 'borderTopStyle'] !== 'none');
+      const radii = ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'] as const;
+      const hasRadius = radii.some((corner) => Number.parseFloat(style[`border${corner}Radius` as 'borderTopLeftRadius']) > 0);
       const hasBackground = style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
-      return hasBorder || hasBackground || style.boxShadow !== 'none';
+      return hasBorder || hasRadius || hasBackground || style.boxShadow !== 'none';
     };
+    for (const element of Array.from(document.querySelectorAll(flatRouteContainerSelector)).filter(visible)) {
+      if (hasPaint(element)) add('flat-route-container-paint', 'major', 'Semantic route container regained a background, border, radius, or shadow; keep the outer flow flat and paint only its intentional child modules', selector(element));
+    }
+    const paintedSurface = (element: Element) => surfaceCandidate(element) && hasPaint(element);
     const cardSurfaceDepth = (root: Element) => {
       const dialogRoot = root.closest('.modal-sheet,[role="dialog"]');
       let depth = 0;
@@ -445,6 +452,31 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
     if (await page.getByRole('heading', { level: 1, name: expected.heading, exact: false }).count() === 0) throw new Error(`Expected heading was not rendered: ${expected.heading}`);
     if (expected.content && !(await page.locator('body').innerText()).includes(expected.content)) throw new Error(`Expected fixture content was not rendered: ${expected.content}`);
     if (await visibleCount(page, '.app-error-boundary') !== 0) throw new Error('Scenario rendered the application error fallback');
+    const flatRouteContainers = scenario.path.startsWith('/activity')
+      ? page.locator('.history-panel,.insights-page,.insight-section')
+      : scenario.name === 'rich-group' || scenario.name === 'large-group'
+        ? page.locator('.route-view--group-overview > section:not(.compact-balances)')
+        : undefined;
+    if (flatRouteContainers) {
+      const painted = await flatRouteContainers.evaluateAll((elements) => elements.filter((element) => {
+        const style = getComputedStyle(element);
+        const borders = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth];
+        const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius];
+        return borders.some((border) => border !== '0px') || radii.some((radius) => radius !== '0px') || (style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)') || style.boxShadow !== 'none';
+      }).map((element) => `${element.tagName.toLowerCase()}.${typeof element.className === 'string' ? element.className : ''}`));
+      if (painted.length) throw new Error(`Flat route containers retained painted surfaces: ${painted.join(', ')}`);
+    }
+    const semanticCollectionSelector = scenario.name === 'rich-group' || scenario.name === 'large-group'
+      ? '.balance-cards'
+      : scenario.path.includes('view=transactions') || scenario.name === 'transaction-history' || scenario.name === 'all-groups-transactions'
+        ? '.transaction-list'
+        : scenario.path.includes('view=changes') || scenario.name === 'activity'
+          ? '.activity-list'
+          : undefined;
+    if (semanticCollectionSelector) {
+      const invalidCollections = await page.locator(semanticCollectionSelector).evaluateAll((elements) => elements.filter((element) => element.tagName !== 'UL' || Array.from(element.children).some((child) => child.tagName !== 'LI')).map((element) => element.className));
+      if (invalidCollections.length) throw new Error(`Flattened collection lost native list semantics: ${invalidCollections.join(', ')}`);
+    }
     if (expected.content === 'Spending insights' && expected.mode === 'normal') {
       const body = await page.locator('body').innerText();
       const populatedInsight = scenario.name === 'global-insights' || scenario.name === 'group-insights';
@@ -556,11 +588,25 @@ async function assertRendered(page: Page, scenario: Scenario, observations: ApiO
         }
       }
     }
-     if (scenario.name === 'populated-home') {
-       const globalCompact = page.locator('.insights-compact').filter({ hasText: 'Spending snapshot' });
-       if (await globalCompact.count() !== 1) throw new Error('Populated home did not render the global compact insights card');
-       if ((await globalCompact.innerText()).includes('You paid')) throw new Error('Global compact insights exposed a paid-but-zero-allocation value');
-     }
+      if (scenario.name === 'populated-home') {
+        const globalCompact = page.locator('.insights-compact').filter({ hasText: 'Spending snapshot' });
+        if (await globalCompact.count() !== 1) throw new Error('Populated home did not render the global spending snapshot');
+        if ((await globalCompact.innerText()).includes('You paid')) throw new Error('Global compact insights exposed a paid-but-zero-allocation value');
+        const compactSurface = await globalCompact.evaluate((element) => {
+          const style = getComputedStyle(element);
+          const borders = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth];
+          const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius];
+          return { borders, radii, background: style.backgroundColor, shadow: style.boxShadow };
+        });
+        if (compactSurface.borders.some((border) => border !== '0px') || compactSurface.radii.some((radius) => radius !== '0px') || compactSurface.background !== 'rgba(0, 0, 0, 0)' || compactSurface.shadow !== 'none') throw new Error('Home spending snapshot retained an unnecessary painted outer surface');
+        if (await globalCompact.locator('.insight-metric').evaluateAll((elements) => elements.some((element) => {
+          const style = getComputedStyle(element);
+          const outerBorders = [style.borderTopWidth, style.borderRightWidth, style.borderLeftWidth];
+          const dividerIsAllowed = style.borderBottomWidth === '0px' || (style.borderBottomStyle === 'solid' && Number.parseFloat(style.borderBottomWidth) <= 1);
+          const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius];
+          return outerBorders.some((border) => border !== '0px') || !dividerIsAllowed || radii.some((radius) => radius !== '0px') || style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.boxShadow !== 'none';
+        }))) throw new Error('Home spending snapshot retained painted metric cards');
+      }
    }
   if (expected.mode === 'normal' || expected.mode === 'offline' || expected.mode === 'modal') {
     if (await visibleCount(page, '.error') !== 0 || await visibleCount(page, '.auth-banner') !== 0) throw new Error('Scenario rendered an unexpected auth/error fallback');

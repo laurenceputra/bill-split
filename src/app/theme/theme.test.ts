@@ -84,15 +84,33 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.generic-invitation-disclosure\[open\]\s*\{[\s\S]*gap: var\(--space-3\);/);
     expect(css).toMatch(/\.transaction-filters-disclosure\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
     expect(css).toMatch(/\.transaction-filters\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;[\s\S]*padding: var\(--surface-padding\);/);
+    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
     expect(css).toMatch(/\.pending-transactions\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(css).toMatch(/\.split-default-choices\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(appSource).toContain('className="transaction-filters-disclosure"');
     expect(appSource).toContain('className="schedule-list-content"');
   });
 
-  it('keeps insight semantic sections presentation-only so modules stop at two visible card levels', () => {
+  it('keeps semantic sections structural and gives insight modules explicit surfaces', () => {
     expect(css).toMatch(/\.insight-section\s*\{[\s\S]*margin: 0;[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
+    expect(css).toMatch(/\.card,\s*\.surface,\s*\.empty\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
+    expect(css).toMatch(/section\s*\{[\s\S]*margin: var\(--space-4\) 0;[\s\S]*padding: 0;/);
+    expect(css).toMatch(/\.list\s*\{[\s\S]*gap: 0;[\s\S]*\}/);
+    expect(css).toMatch(/\.row\s*\{[\s\S]*min-height: 3\.65rem;[\s\S]*border-bottom: 1px solid var\(--color-border\);[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.transaction-list > li:not\(:last-child\) > \.row,[\s\S]*\.activity-list > li:not\(:last-child\) > \.row\s*\{[\s\S]*border-bottom: 1px solid var\(--color-border\);/);
+    expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*background: var\(--color-surface\);/);
+    expect(css).toMatch(/\.insights-compact \.insight-metrics\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
+    expect(css).toMatch(/\.insights-compact \.insight-metric\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*border: 0;[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.route-view--group-overview > \.compact-balances\s*\{[\s\S]*box-shadow: var\(--shadow-soft\);/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
+    expect(css).toMatch(/\.balance-cards\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*gap: 0;/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview \.balance-cards\s*\{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview \.balance-card\s*\{[\s\S]*border-bottom: 0;/);
+    expect(appSource).not.toContain('<Surface className="insights-compact"');
+    expect(appSource).toContain('<ul className="balance-cards">');
+    expect(appSource).toContain('<ul className="list transaction-list">');
+    expect(appSource).toContain('className="list reading-width activity-list"');
     expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-summary-heading/);
     expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-change-heading/);
     expect(appSource).toContain('className="insights-page"');
@@ -102,8 +120,18 @@ describe('responsive navigation layout contract', () => {
 
   it('audits explicit painted surface roots once while treating dialogs as separate roots', () => {
     expect(auditSource).toContain('const surfaceRootSelector =');
-    for (const root of ['.surface', 'section', '.card', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.balance-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
+    for (const root of ['.surface', '.card', '.card-surface', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
+    expect(auditSource).not.toContain('.balance-card,.');
+    expect(auditSource).not.toContain('.insight-metric,.');
     expect(auditSource).toContain('querySelectorAll(surfaceRootSelector)');
+    expect(auditSource).toContain('const flatRouteContainerSelector =');
+    expect(auditSource).toContain('const surfaceCandidate =');
+    expect(auditSource).toContain('const hasPaint =');
+    expect(auditSource).toContain("flat-route-container-paint");
+    expect(auditSource).toContain('.history-panel');
+    expect(auditSource).toContain('.insights-page');
+    expect(auditSource).toContain('.route-view--group-overview > section:not(.compact-balances)');
+    expect(auditSource).not.toMatch(/surfaceRootSelector\s*=\s*['\"][^'\"]*section/);
     expect(auditSource).toContain('.modal-sheet,[role="dialog"]');
     expect(auditSource).toContain("!element.matches('.modal-backdrop')");
     expect(auditSource).toContain('if (depth > 2) add');

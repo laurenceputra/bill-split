@@ -1072,7 +1072,6 @@ button:disabled {
 
 .card,
 .surface,
-section,
 .empty {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
@@ -1166,11 +1165,19 @@ section,
   font-size: var(--text-xs);
 }
 
-section,
 .surface,
 .empty {
   margin: var(--space-4) 0;
   padding: var(--surface-padding);
+}
+
+section {
+  margin: var(--space-4) 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 section,
@@ -1244,15 +1251,21 @@ form > button {
 
 .list {
   display: grid;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .row {
   min-height: 3.65rem;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface);
+  background: transparent;
   padding: var(--space-3) var(--space-4);
   color: var(--color-ink);
   text-decoration: none;
@@ -1262,13 +1275,18 @@ form > button {
   border-bottom: 0;
 }
 
+.transaction-list > li:not(:last-child) > .row,
+.activity-list > li:not(:last-child) > .row {
+  border-bottom: 1px solid var(--color-border);
+}
+
 .row:hover {
   background: var(--color-surface-muted);
 }
 
 .row[href]:focus-visible {
   background: var(--color-surface-muted);
-  /* Keep the focus treatment inside .list, whose overflow clips outer rings. */
+  /* Keep focus visible without depending on a painted list container. */
   box-shadow: inset 0 0 0 3px var(--color-focus);
   outline: 3px solid var(--color-focus);
   outline-offset: -3px;
@@ -1781,6 +1799,16 @@ summary {
   margin: var(--space-4) 0;
 }
 
+/* Compact insights are a spending snapshot, not a card inside its parent
+   route. Keep the currency rows aligned with dividers and no nested paint. */
+.insights-compact {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
 .insight-metrics,
 .insight-summary-grid {
   display: grid;
@@ -1795,6 +1823,46 @@ summary {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-3);
+}
+
+.insights-compact .insight-metrics {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  border-top: 1px solid var(--color-divider);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.insights-compact .insight-metric {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  padding: var(--space-3) 0;
+}
+
+.insights-compact .insight-metric:last-child {
+  border-bottom: 0;
+}
+
+.insights-compact .insight-metric__currency {
+  grid-column: 1;
+}
+
+.insights-compact .insight-metric > strong {
+  min-width: 0;
+  grid-column: 2;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.insights-compact .insight-metric > .muted {
+  grid-column: 1 / -1;
+}
+
+.insights-compact .insight-metric > small {
+  grid-column: 1 / -1;
 }
 
 .insight-metric__currency {
@@ -1871,8 +1939,8 @@ summary {
   min-width: 0;
 }
 
-/* The page is the outer insight surface. These semantic sections preserve
-   landmarks while leaving the summary and trend modules as the visible cards. */
+/* Semantic insight sections preserve landmarks without becoming an outer
+   page card. Summary and chart modules opt into containment individually. */
 .insight-section {
   margin: 0;
   border: 0;
@@ -1880,6 +1948,14 @@ summary {
   background: transparent;
   box-shadow: none;
   padding: 0;
+}
+
+.insight-category-trends {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+  padding: var(--surface-padding);
 }
 
 .insight-chart h3 {
@@ -2023,8 +2099,17 @@ summary {
 
 .balance-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.transaction-list > li,
+.activity-list > li {
+  min-width: 0;
+  list-style: none;
 }
 
 .balance-card {
@@ -2058,7 +2143,7 @@ summary {
   margin: 0;
 }
 
-.balance-cards > :is(.cache-status, .error, .offline-banner, .status),
+.balance-cards > li > :is(.cache-status, .error, .offline-banner, .status),
 .balance-breakdown > :is(.cache-status, .error, .offline-banner, .status),
 .transaction-filters-disclosure > :is(.cache-status, .error, .offline-banner, .status),
 .scheduled-summary > details > :is(.cache-status, .error, .offline-banner, .status),
@@ -2077,15 +2162,6 @@ summary {
 
 .balance-breakdown > p {
   margin: 0;
-}
-
-.balance-breakdown .empty {
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
 }
 
 .transaction-row strong {
@@ -2157,21 +2233,11 @@ summary {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  padding: var(--surface-padding);
+  padding: 0;
 }
 
 .scheduled-summary .schedule-list-content > section > .section-title {
   display: none;
-}
-
-.scheduled-summary .schedule-list-content > .empty,
-.scheduled-summary .schedule-list-content > section > .empty {
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  padding: var(--surface-padding);
 }
 
 .people-summary-compact {
@@ -3311,11 +3377,15 @@ input[inputmode="decimal"] {
     margin-bottom: var(--space-6);
   }
 
-  section,
   .surface,
   .empty {
     margin: var(--space-5) 0;
     padding: var(--surface-padding-wide);
+  }
+
+  section {
+    margin: var(--space-5) 0;
+    padding: 0;
   }
 
   .nav-item {
@@ -3617,9 +3687,29 @@ button[aria-busy="true"] {
 }
 
 /* Route composition: keep the ledger hierarchy consistent without asking
-   individual screens to invent another card or layout vocabulary. */
+   individual screens to invent another card or layout vocabulary. Semantic
+   sections stay structural; these selectors opt specific route surfaces in. */
 .route-view {
   min-width: 0;
+}
+
+.route-view--group-management > section,
+.route-view--group-management > #settings > section,
+.route-view--settings > section {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+  padding: var(--surface-padding);
+}
+
+.route-view--group-management > section section,
+.route-view--settings > section section {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .group-cards {
@@ -3665,8 +3755,12 @@ button[aria-busy="true"] {
 }
 
 .route-view--group-overview > .compact-balances {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
   border-color: var(--color-border-strong);
   background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-soft);
+  padding: var(--surface-padding);
 }
 
 .route-view--group-overview > .compact-balances > h2 {
@@ -3681,8 +3775,16 @@ button[aria-busy="true"] {
   min-height: 6.5rem;
   align-content: center;
   gap: var(--space-2);
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-secondary);
+  border: 0;
+  border-bottom: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding-inline: 0;
+}
+
+.route-view--group-overview .balance-card:last-child {
+  border-bottom: 0;
 }
 
 .route-view--group-overview .balance-card strong {
@@ -3783,12 +3885,14 @@ button[aria-busy="true"] {
 }
 
 .route-view--history .transaction-row,
-.route-view--history .history-panel > .list > .row {
+.route-view--history .history-panel > .list > .row,
+.route-view--history .history-panel > .list > li > .row {
   min-height: 4.25rem;
 }
 
 .route-view--history .transaction-row > .money,
-.route-view--history .history-panel > .list > .row > .money {
+.route-view--history .history-panel > .list > .row > .money,
+.route-view--history .history-panel > .list > li > .row > .money {
   font-size: var(--text-md);
 }
 
@@ -3966,6 +4070,15 @@ button[aria-busy="true"] {
 }
 
 @media (min-width: 56rem) {
+  .route-view--group-overview .balance-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--space-4);
+  }
+
+  .route-view--group-overview .balance-card {
+    border-bottom: 0;
+  }
+
   .route-view--group-overview {
     display: grid;
     grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.75fr);
@@ -4022,5 +4135,13 @@ button[aria-busy="true"] {
   .modal-sheet:has(.payer-list) {
     align-self: center;
     border-radius: var(--radius-lg);
+  }
+}
+
+@media (min-width: 48rem) {
+  .route-view--group-management > section,
+  .route-view--group-management > #settings > section,
+  .route-view--group-overview > .compact-balances {
+    padding: var(--surface-padding-wide);
   }
 }
