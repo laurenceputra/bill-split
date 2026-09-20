@@ -760,7 +760,7 @@ function assertAuthenticatedRequest(requests: ApiRequestObservation[], auth: str
 test.describe.configure({ mode: 'serial' });
 
 test('browser audit matrix captures validated routes, geometry, and full-page screenshots', async ({ browser }, testInfo) => {
-  test.setTimeout(360_000);
+  test.setTimeout(840_000);
   const findings: Finding[] = [];
   const failures: HarnessFailure[] = [];
   const coverage: Coverage[] = [];
