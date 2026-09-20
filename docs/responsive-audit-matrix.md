@@ -20,21 +20,14 @@ expense-first path ahead of advanced standalone/custom allocation controls.
 | Refund detail active/deleted | Member names/You labels, linked expenses, money flow, balance effect, and collapsed audit remain reachable | Restore/conflict feedback is adjacent to the action | Audit is secondary to the plain-language accounting summary |
 | History/filter states | Refund/reimbursement rows use the same filter and keyset list | Refund filter does not expose expense-only category controls | Rows preserve group and detail links |
 
-This matrix is the release checklist, not a claim that screenshots or
-browser-native popup rendering have been visually verified. Current automated
+This matrix is the release checklist. Current automated
 coverage exercises routed loading state, form state
 transitions, picker filtering, defaults, payload construction, Add-route cache
 contracts, and focused split-control route/disabled-option behavior. The
 Playwright audit scenario list represents the refund route across its mobile,
 breakpoint-boundary, and desktop viewport set, including initial and populated
-linked-member, standalone-member, and linked direct-provider states. On pull
-requests, the `PR screenshot audit` job attempts to run that browser audit and,
-when outputs are produced, uploads them in the artifact named
-`pr-<number>-screenshot-audit`. Screenshots are under
-`test-results/audit/normal/screenshots/`, with normal findings JSON and the
-Playwright HTML report included for diagnostics. Setup or audit failure may
-produce only partial outputs or no outputs, with warnings; check the job status
-and artifact in the PR to determine what ran and what was captured.
+linked-member, standalone-member, and linked direct-provider states. The full
+audit is the reference for complete route and viewport coverage.
 Native `<select>` popup menus are browser/OS UI and are not reliably captured by
 full-page screenshots, so their open-popup appearance still requires manual
 visual inspection.
