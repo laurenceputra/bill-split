@@ -188,8 +188,10 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) minmax\(calc\(var\(--control-min-height\) \+ 44px \+ var\(--space-2\)\), 1\.35fr\) minmax\(44px, 1fr\);/);
     expect(css).toMatch(/\.nav-item > span:last-child\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: fit-content;[\s\S]*justify-self: center;/);
-    expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-width: 0;/);
-    expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);/);
+    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule\s*\{[\s\S]*border-radius: var\(--radius-sm\);/);
+    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-width: 0;[\s\S]*border-radius: var\(--radius-sm\) 0 0 var\(--radius-sm\);[\s\S]*padding-inline: var\(--space-2\);/);
+    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);[\s\S]*border-radius: 0 var\(--radius-sm\) var\(--radius-sm\) 0;/);
+    expect(css).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
   });
 
   it('keeps refund helper text in normal flow below its preceding control', () => {

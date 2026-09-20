@@ -699,7 +699,40 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
       const rect = element.getBoundingClientRect();
       return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
     };
-    return { column: box(item), capsule: box(capsule), primary: box(primary), menu: box(menu) };
+    const capsuleStyle = getComputedStyle(capsule);
+    const primaryStyle = getComputedStyle(primary);
+    const menuStyle = getComputedStyle(menu);
+    const rootStyle = getComputedStyle(document.documentElement);
+    const rootFontSize = Number.parseFloat(rootStyle.fontSize);
+    const cssLength = (value: string) => {
+      const normalized = value.trim();
+      if (normalized.endsWith('rem')) return Number.parseFloat(normalized) * rootFontSize;
+      return Number.parseFloat(normalized);
+    };
+    return {
+      column: box(item),
+      capsule: box(capsule),
+      primary: box(primary),
+      menu: box(menu),
+      viewportWidth: window.innerWidth,
+      expected: {
+        controlMinHeight: cssLength(rootStyle.getPropertyValue('--control-min-height')),
+        radius: cssLength(rootStyle.getPropertyValue('--radius-sm')),
+        padding: cssLength(rootStyle.getPropertyValue('--space-2')),
+      },
+      radii: {
+        capsule: cssLength(capsuleStyle.borderTopLeftRadius),
+        primaryTopLeft: cssLength(primaryStyle.borderTopLeftRadius),
+        primaryTopRight: cssLength(primaryStyle.borderTopRightRadius),
+        primaryBottomLeft: cssLength(primaryStyle.borderBottomLeftRadius),
+        primaryBottomRight: cssLength(primaryStyle.borderBottomRightRadius),
+        menuTopLeft: cssLength(menuStyle.borderTopLeftRadius),
+        menuTopRight: cssLength(menuStyle.borderTopRightRadius),
+        menuBottomLeft: cssLength(menuStyle.borderBottomLeftRadius),
+        menuBottomRight: cssLength(menuStyle.borderBottomRightRadius),
+      },
+      padding: { left: cssLength(primaryStyle.paddingLeft), right: cssLength(primaryStyle.paddingRight) },
+    };
   });
   const captureMobileGeometry = async () => {
     const geometries: Array<Awaited<ReturnType<typeof readGeometry>>> = [];
@@ -734,6 +767,23 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
         const capsuleCenter = (geometry.capsule.left + geometry.capsule.right) / 2;
         expect(Math.abs(capsuleCenter - columnCenter), `${mobileWidths[index]}px capsule centering`).toBeLessThanOrEqual(1);
         expect(geometry.capsule.width, `${mobileWidths[index]}px compact capsule`).toBeLessThan(geometry.column.width - 1);
+        expect(geometry.capsule.left, `${mobileWidths[index]}px capsule containment`).toBeGreaterThanOrEqual(0);
+        expect(geometry.capsule.right, `${mobileWidths[index]}px capsule containment`).toBeLessThanOrEqual(geometry.viewportWidth);
+        expect(geometry.capsule.height, `${mobileWidths[index]}px capsule touch target`).toBeGreaterThanOrEqual(44);
+        expect(geometry.primary.height, `${mobileWidths[index]}px primary touch target`).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(geometry.menu.width - geometry.expected.controlMinHeight), `${mobileWidths[index]}px menu width matches control minimum`).toBeLessThanOrEqual(0.5);
+        expect(geometry.menu.height, `${mobileWidths[index]}px menu touch target`).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(geometry.radii.capsule - geometry.expected.radius), `${mobileWidths[index]}px capsule radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.primaryTopLeft - geometry.expected.radius), `${mobileWidths[index]}px primary left radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.primaryBottomLeft - geometry.expected.radius), `${mobileWidths[index]}px primary left radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.primaryTopRight), `${mobileWidths[index]}px primary right radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.primaryBottomRight), `${mobileWidths[index]}px primary right radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuTopLeft), `${mobileWidths[index]}px menu left radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuBottomLeft), `${mobileWidths[index]}px menu left radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuTopRight - geometry.expected.radius), `${mobileWidths[index]}px menu right radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuBottomRight - geometry.expected.radius), `${mobileWidths[index]}px menu right radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.padding.left - geometry.expected.padding), `${mobileWidths[index]}px primary left padding`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.padding.right - geometry.expected.padding), `${mobileWidths[index]}px primary right padding`).toBeLessThanOrEqual(0.5);
       }
     }
 

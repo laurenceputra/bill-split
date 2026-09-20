@@ -2891,15 +2891,20 @@ input[inputmode="decimal"] {
   color: var(--color-on-primary);
 }
 
-.nav-item__capsule .split-transaction-control__primary {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding-right: var(--space-1);
-  padding-left: var(--space-1);
+.bottom-nav .nav-item__capsule {
+  border-radius: var(--radius-sm);
 }
 
-.nav-item__capsule .split-transaction-control__menu {
+.bottom-nav .nav-item__capsule .split-transaction-control__primary {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  padding-inline: var(--space-2);
+}
+
+.bottom-nav .nav-item__capsule .split-transaction-control__menu {
   flex: 0 0 var(--control-min-height);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 .nav-item--add:hover,
