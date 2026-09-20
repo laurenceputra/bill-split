@@ -156,7 +156,7 @@ function AuthBanner() {
   return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 
-export function SplitTransactionControl({ groupId, online, compact = false, className = '', active = false, primaryCurrent = false }: { groupId?: string; online?: boolean; compact?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean }) {
+export function SplitTransactionControl({ groupId, online, compact = false, mobileNav = false, className = '', active = false, primaryCurrent = false }: { groupId?: string; online?: boolean; compact?: boolean; mobileNav?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
   const detectedOnline = useOnlineStatus();
@@ -179,7 +179,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, clas
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <><svg className="nav-add-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span className="nav-add-label">Add</span></> : compact ? 'Add' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
@@ -215,7 +215,7 @@ export function BottomNav() {
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
       <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>History</span></Link>
-      <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
+       <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact mobileNav active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
      <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>
   </nav>;
 }

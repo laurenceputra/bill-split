@@ -5,8 +5,8 @@ expense-first path ahead of advanced standalone/custom allocation controls.
 
 | Split Add control viewport | 320px narrow | 390px mobile | 430px mobile | 768px tablet | 895px tablet | 896px desktop | 1440px desktop |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Group header and contextual navigation | `+ Add expense` stays first; the transaction-type select is joined to it, the compact rounded-rectangle control remains bounded, and wrapped header actions do not overlap | `+ Add expense` stays first; the compact rounded-rectangle control joins the transaction-type select and each segment is at least 44px | Compact labels remain on one row without clipping | Bottom navigation keeps the control ahead of Settings | Bottom navigation remains in use at the pre-desktop breakpoint | Desktop navigation switches on without changing destinations | Desktop control remains expense-first and alternatives open through the select control |
-| Bottom-nav Add control shape and spacing | Rounded rectangle; primary side uses 8px inline padding; both segments remain at least 44px | Rounded rectangle; primary side uses 8px inline padding; both segments remain at least 44px | Rounded rectangle; primary side uses 8px inline padding; both segments remain at least 44px | Rounded rectangle; primary side uses 8px inline padding; both segments remain at least 44px | Rounded rectangle; primary side uses 8px inline padding; both segments remain at least 44px | Desktop pill shape is preserved; the desktop control remains expense-first | Desktop pill shape is preserved; the desktop control remains expense-first |
+| Group header and contextual navigation | `+ Add expense` stays first; the transaction-type select is joined to it, and wrapped header actions do not overlap | `+ Add expense` stays first; the raised bottom-nav tile is contained and each segment is at least 44px | Compact labels remain on one row without clipping | Bottom navigation keeps the raised control ahead of Settings | Bottom navigation remains in use at the pre-desktop breakpoint | Desktop navigation switches on without changing destinations | Desktop control remains expense-first and alternatives open through the select control |
+| Bottom-nav Add control shape and spacing | Raised purple tile fills the center column, extends about 8px above the bar, and reaches through the safe-area bottom via a decorative layer; the icon/label stay in the regular nav content area, lower corners remain square, and both segments are at least 44px | Same raised tile geometry with a stacked decorative plus and Add label; the safe-area extension does not stretch or shift the interactive controls, and inactive/active colors do not change dimensions | Raised tile remains centered and contained without clipping | Raised tile fills the center column and remains ahead of Settings | Raised tile remains in use at the pre-desktop breakpoint | Desktop pill shape is preserved; the desktop control remains expense-first | Desktop pill shape is preserved; the desktop control remains expense-first |
 
 | View/state | 390px mobile | 768px boundary | 1440px desktop |
 | --- | --- | --- | --- |
@@ -31,4 +31,7 @@ linked-member, standalone-member, and linked direct-provider states. The full
 audit is the reference for complete route and viewport coverage.
 Native `<select>` popup menus are browser/OS UI and are not reliably captured by
 full-page screenshots, so their open-popup appearance still requires manual
-visual inspection.
+visual inspection. The mobile Add tile uses a clipped rounded interactive
+capsule with an inset focus treatment; its separate pseudo-element carries the
+purple decoration through `safe-area-inset-bottom` while the controls remain in
+the regular navigation content height.

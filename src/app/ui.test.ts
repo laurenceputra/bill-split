@@ -56,4 +56,14 @@ describe('SplitTransactionControl', () => {
     expect(markup).toContain('title="Refunds and payments require a connection."');
     expect(markup).toMatch(/<select[^>]+disabled/);
   });
+
+  it('keeps the mobile navigation plus decorative and the existing labels accessible', () => {
+    const markup = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/groups/group-1'] }, createElement(SplitTransactionControl, { groupId: 'group-1', online: true, compact: true, mobileNav: true })));
+
+    expect(markup).toContain('class="nav-add-icon"');
+    expect(markup).toContain('aria-hidden="true"');
+    expect(markup).toContain('class="nav-add-label">Add</span>');
+    expect(markup).toContain('aria-label="Add expense"');
+    expect(markup).toContain('aria-label="Choose transaction type"');
+  });
 });

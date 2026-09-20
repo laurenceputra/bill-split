@@ -685,16 +685,17 @@ test('split transaction control keeps expense first, routes alternates, and disa
   }
 });
 
-test('keeps the mobile Add control compact and aligned across inactive and active states', async ({ browser }) => {
+test('keeps the mobile Add tile raised, contained, and dimensionally stable across inactive and active states', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 320, height: 844 });
   const page = await context.newPage();
   const addItem = page.locator('.bottom-nav .nav-item--add').filter({ has: page.locator('.split-transaction-control') });
   const mobileWidths = [320, 390, 895];
   const readGeometry = async () => addItem.evaluate((item) => {
-    const capsule = item.matches('.nav-item__capsule') ? item : item.querySelector<HTMLElement>('.nav-item__capsule');
+    const nav = item.closest<HTMLElement>('.bottom-nav');
+    const capsule = item.querySelector<HTMLElement>('.nav-item__capsule');
     const primary = item.querySelector<HTMLElement>('.split-transaction-control__primary');
     const menu = item.querySelector<HTMLElement>('.split-transaction-control__menu');
-    if (!capsule || !primary || !menu) throw new Error('Mobile Add control geometry is incomplete');
+    if (!nav || !capsule || !primary || !menu) throw new Error('Mobile Add tile geometry is incomplete');
     const box = (element: Element) => {
       const rect = element.getBoundingClientRect();
       return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
@@ -702,6 +703,7 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
     const capsuleStyle = getComputedStyle(capsule);
     const primaryStyle = getComputedStyle(primary);
     const menuStyle = getComputedStyle(menu);
+    const navStyle = getComputedStyle(nav);
     const rootStyle = getComputedStyle(document.documentElement);
     const rootFontSize = Number.parseFloat(rootStyle.fontSize);
     const cssLength = (value: string) => {
@@ -710,18 +712,20 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
       return Number.parseFloat(normalized);
     };
     return {
+      nav: box(nav),
+      navContentBottom: nav.getBoundingClientRect().bottom - Number.parseFloat(navStyle.paddingBottom) - Number.parseFloat(navStyle.borderBottomWidth),
       column: box(item),
-      capsule: box(capsule),
+      tile: box(capsule),
       primary: box(primary),
       menu: box(menu),
       viewportWidth: window.innerWidth,
       expected: {
         controlMinHeight: cssLength(rootStyle.getPropertyValue('--control-min-height')),
-        radius: cssLength(rootStyle.getPropertyValue('--radius-sm')),
-        padding: cssLength(rootStyle.getPropertyValue('--space-2')),
+        largeRadius: cssLength(rootStyle.getPropertyValue('--radius-lg')),
       },
       radii: {
-        capsule: cssLength(capsuleStyle.borderTopLeftRadius),
+        tileTopLeft: cssLength(capsuleStyle.borderTopLeftRadius),
+        tileBottomLeft: cssLength(capsuleStyle.borderBottomLeftRadius),
         primaryTopLeft: cssLength(primaryStyle.borderTopLeftRadius),
         primaryTopRight: cssLength(primaryStyle.borderTopRightRadius),
         primaryBottomLeft: cssLength(primaryStyle.borderBottomLeftRadius),
@@ -731,7 +735,6 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
         menuBottomLeft: cssLength(menuStyle.borderBottomLeftRadius),
         menuBottomRight: cssLength(menuStyle.borderBottomRightRadius),
       },
-      padding: { left: cssLength(primaryStyle.paddingLeft), right: cssLength(primaryStyle.paddingRight) },
     };
   });
   const captureMobileGeometry = async () => {
@@ -748,42 +751,83 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
     await page.goto(`/groups/${richGroupId}`);
     const inactive = addItem;
     await expect(inactive).not.toHaveClass(/nav-item--add--active/);
+    await expect(page.locator('.bottom-nav .nav-add-icon')).toHaveAttribute('aria-hidden', 'true');
+    await expect(page.locator('.bottom-nav .nav-add-label')).toHaveText('Add');
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).toHaveAccessibleName('Add expense');
     const inactiveGeometry = await captureMobileGeometry();
+
+    const inactiveColors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    }));
+    expect(inactiveColors).toEqual([
+      { background: 'rgb(109, 74, 255)', color: 'rgb(255, 255, 255)' },
+      { background: 'rgb(109, 74, 255)', color: 'rgba(0, 0, 0, 0)' },
+    ]);
+    await addItem.hover();
+    const hoverColors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor));
+    expect(hoverColors).toEqual(['rgb(84, 54, 220)', 'rgb(84, 54, 220)']);
+    await page.mouse.move(0, 0);
+
+    const expectFocusIndicator = async (state: string) => {
+      for (const selector of ['.bottom-nav .split-transaction-control__primary', '.bottom-nav .split-transaction-control__menu']) {
+        const control = page.locator(selector);
+        await control.focus();
+        await expect(control, `${state} ${selector} focus`).toBeFocused();
+        const focusStyle = await control.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return { outlineStyle: style.outlineStyle, outlineColor: style.outlineColor, outlineOffset: style.outlineOffset, boxShadow: style.boxShadow };
+        });
+        expect(focusStyle.outlineStyle, `${state} ${selector} outline style`).toBe('solid');
+        expect(focusStyle.outlineColor, `${state} ${selector} outline color`).toBe('rgb(255, 255, 255)');
+        expect(focusStyle.outlineOffset, `${state} ${selector} outline offset`).toBe('-3px');
+        expect(focusStyle.boxShadow, `${state} ${selector} inset focus color`).toContain('rgb(255, 255, 255)');
+      }
+    };
+    await expectFocusIndicator('inactive');
 
     await page.goto(`/groups/${richGroupId}/refund/new`);
     const active = addItem;
     await expect(active).toHaveClass(/nav-item--add--active/);
+    const activeColors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor));
+    expect(activeColors).toEqual(['rgb(84, 54, 220)', 'rgb(84, 54, 220)']);
+    await expectFocusIndicator('active');
     const activeGeometry = await captureMobileGeometry();
 
     for (let index = 0; index < mobileWidths.length; index += 1) {
       const inactiveAtWidth = inactiveGeometry[index];
       const activeAtWidth = activeGeometry[index];
-      for (const part of ['capsule', 'primary', 'menu'] as const) {
+      for (const part of ['tile', 'primary', 'menu'] as const) {
         expect(Math.abs(inactiveAtWidth[part].width - activeAtWidth[part].width), `${mobileWidths[index]}px ${part} width`).toBeLessThanOrEqual(1);
         expect(Math.abs(inactiveAtWidth[part].height - activeAtWidth[part].height), `${mobileWidths[index]}px ${part} height`).toBeLessThanOrEqual(1);
       }
       for (const geometry of [inactiveAtWidth, activeAtWidth]) {
         const columnCenter = (geometry.column.left + geometry.column.right) / 2;
-        const capsuleCenter = (geometry.capsule.left + geometry.capsule.right) / 2;
-        expect(Math.abs(capsuleCenter - columnCenter), `${mobileWidths[index]}px capsule centering`).toBeLessThanOrEqual(1);
-        expect(geometry.capsule.width, `${mobileWidths[index]}px compact capsule`).toBeLessThan(geometry.column.width - 1);
-        expect(geometry.capsule.left, `${mobileWidths[index]}px capsule containment`).toBeGreaterThanOrEqual(0);
-        expect(geometry.capsule.right, `${mobileWidths[index]}px capsule containment`).toBeLessThanOrEqual(geometry.viewportWidth);
-        expect(geometry.capsule.height, `${mobileWidths[index]}px capsule touch target`).toBeGreaterThanOrEqual(44);
+        const tileCenter = (geometry.tile.left + geometry.tile.right) / 2;
+        expect(Math.abs(tileCenter - columnCenter), `${mobileWidths[index]}px tile centering`).toBeLessThanOrEqual(1);
+        expect(Math.abs(geometry.tile.left - geometry.column.left), `${mobileWidths[index]}px tile fills left edge`).toBeLessThanOrEqual(1);
+        expect(Math.abs(geometry.tile.right - geometry.column.right), `${mobileWidths[index]}px tile fills right edge`).toBeLessThanOrEqual(1);
+        expect(geometry.tile.left, `${mobileWidths[index]}px tile containment`).toBeGreaterThanOrEqual(0);
+        expect(geometry.tile.right, `${mobileWidths[index]}px tile containment`).toBeLessThanOrEqual(geometry.viewportWidth);
+        expect(geometry.nav.top - geometry.tile.top, `${mobileWidths[index]}px raised tile`).toBeGreaterThanOrEqual(7);
+        expect(geometry.nav.top - geometry.tile.top, `${mobileWidths[index]}px raised tile`).toBeLessThanOrEqual(10);
+        expect(geometry.tile.bottom, `${mobileWidths[index]}px tile ends at regular nav content bottom`).toBeGreaterThanOrEqual(geometry.navContentBottom - 1);
+        expect(geometry.tile.bottom, `${mobileWidths[index]}px tile ends before safe-area padding`).toBeLessThanOrEqual(geometry.navContentBottom + 1);
+        expect(geometry.tile.height, `${mobileWidths[index]}px tile touch target`).toBeGreaterThanOrEqual(44);
         expect(geometry.primary.height, `${mobileWidths[index]}px primary touch target`).toBeGreaterThanOrEqual(44);
         expect(Math.abs(geometry.menu.width - geometry.expected.controlMinHeight), `${mobileWidths[index]}px menu width matches control minimum`).toBeLessThanOrEqual(0.5);
         expect(geometry.menu.height, `${mobileWidths[index]}px menu touch target`).toBeGreaterThanOrEqual(44);
-        expect(Math.abs(geometry.radii.capsule - geometry.expected.radius), `${mobileWidths[index]}px capsule radius`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.radii.primaryTopLeft - geometry.expected.radius), `${mobileWidths[index]}px primary left radius`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.radii.primaryBottomLeft - geometry.expected.radius), `${mobileWidths[index]}px primary left radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.tileTopLeft - geometry.expected.largeRadius), `${mobileWidths[index]}px tile top radius`).toBeLessThanOrEqual(0.5);
+        expect(geometry.radii.tileBottomLeft, `${mobileWidths[index]}px tile bottom radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.primaryTopLeft - geometry.expected.largeRadius), `${mobileWidths[index]}px primary left radius`).toBeLessThanOrEqual(0.5);
+        expect(geometry.radii.primaryBottomLeft, `${mobileWidths[index]}px primary bottom radius`).toBeLessThanOrEqual(0.5);
         expect(Math.abs(geometry.radii.primaryTopRight), `${mobileWidths[index]}px primary right radius`).toBeLessThanOrEqual(0.5);
         expect(Math.abs(geometry.radii.primaryBottomRight), `${mobileWidths[index]}px primary right radius`).toBeLessThanOrEqual(0.5);
         expect(Math.abs(geometry.radii.menuTopLeft), `${mobileWidths[index]}px menu left radius`).toBeLessThanOrEqual(0.5);
         expect(Math.abs(geometry.radii.menuBottomLeft), `${mobileWidths[index]}px menu left radius`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.radii.menuTopRight - geometry.expected.radius), `${mobileWidths[index]}px menu right radius`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.radii.menuBottomRight - geometry.expected.radius), `${mobileWidths[index]}px menu right radius`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.padding.left - geometry.expected.padding), `${mobileWidths[index]}px primary left padding`).toBeLessThanOrEqual(0.5);
-        expect(Math.abs(geometry.padding.right - geometry.expected.padding), `${mobileWidths[index]}px primary right padding`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuTopRight - geometry.expected.largeRadius), `${mobileWidths[index]}px menu right radius`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(geometry.radii.menuBottomRight), `${mobileWidths[index]}px menu bottom-right radius`).toBeLessThanOrEqual(0.5);
+        expect(geometry.primary.width + geometry.menu.width, `${mobileWidths[index]}px segments contain tile`).toBeLessThanOrEqual(geometry.tile.width + 1);
       }
     }
 
@@ -800,6 +844,7 @@ test('keeps the mobile Add control compact and aligned across inactive and activ
     await page.setViewportSize({ width: 896, height: 900 });
     await expect(page.locator('.bottom-nav')).toBeHidden();
     await expect(page.locator('.desktop-nav')).toBeVisible();
+    await expect(page.locator('.desktop-nav .split-transaction-control__primary')).toHaveText('Add');
   } finally {
     await context.close();
   }

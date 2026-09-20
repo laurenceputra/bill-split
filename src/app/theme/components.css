@@ -2871,71 +2871,145 @@ input[inputmode="decimal"] {
   position: relative;
   isolation: isolate;
   align-self: stretch;
-  align-items: center;
+  min-height: var(--nav-height);
+  align-items: stretch;
   background: transparent;
-  color: var(--color-ink-muted);
+  color: var(--color-on-primary);
+  margin-top: calc(-1 * (var(--space-2) + 4px));
+  /* The control ends at the regular nav content edge. Its decorative layer
+     below extends through the safe area without moving the icon or label. */
+  margin-bottom: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: 0;
+  overflow: visible;
+}
+
+.nav-item--add::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 calc(-1 * (var(--space-1) + var(--safe-bottom))) 0;
+  border-radius: inherit;
+  background: var(--color-primary);
+  box-shadow: var(--shadow-primary);
+  content: '';
+  pointer-events: none;
 }
 
 .nav-item__capsule {
-  display: inline-flex;
+  display: flex;
   min-width: 0;
-  width: fit-content;
-  max-width: 100%;
-  min-height: var(--control-min-height);
-  align-self: center;
-  justify-self: center;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 100%;
+  align-self: stretch;
   align-items: stretch;
-  border-radius: var(--radius-lg);
-  background: transparent;
+  border-radius: inherit;
+  background: var(--color-primary);
   box-shadow: none;
   color: var(--color-on-primary);
+  overflow: hidden;
 }
 
-.bottom-nav .nav-item__capsule {
-  border-radius: var(--radius-sm);
+.bottom-nav .split-transaction-control.nav-item__capsule {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  border-radius: inherit;
+  box-shadow: none;
 }
 
 .bottom-nav .nav-item__capsule .split-transaction-control__primary {
+  display: grid;
   flex: 1 1 auto;
   min-width: 0;
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  padding-inline: var(--space-2);
+  height: 100%;
+  min-height: var(--control-min-height);
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-1);
+  border-color: var(--color-primary);
+  border-radius: var(--radius-lg) 0 0 0;
+  background: var(--color-primary);
+  padding: var(--space-2) var(--space-1);
+  white-space: nowrap;
 }
 
 .bottom-nav .nav-item__capsule .split-transaction-control__menu {
   flex: 0 0 var(--control-min-height);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  width: var(--control-min-height);
+  height: 100%;
+  min-height: var(--control-min-height);
+  border-color: var(--color-primary);
+  border-left-color: rgba(255, 255, 255, 0.45);
+  border-radius: 0 var(--radius-lg) 0 0;
+  background-color: var(--color-primary);
+}
+
+.bottom-nav .split-transaction-control.nav-item__capsule :is(.split-transaction-control__primary, .split-transaction-control__menu):focus-visible {
+  /* The capsule clips its rounded tile, so keep each keyboard indicator
+     inside the focused segment instead of relying on an outer ring. */
+  outline: 3px solid var(--color-on-primary);
+  outline-offset: -3px;
+  box-shadow: inset 0 0 0 3px var(--color-on-primary);
+  position: relative;
+  z-index: 2;
+}
+
+@media (forced-colors: active) {
+  .bottom-nav .split-transaction-control.nav-item__capsule :is(.split-transaction-control__primary, .split-transaction-control__menu):focus-visible {
+    outline-color: Highlight;
+    box-shadow: inset 0 0 0 3px Highlight;
+  }
 }
 
 .nav-item--add:hover,
 .nav-item--add--active {
-  background: transparent;
-  color: var(--color-ink-muted);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
 }
 
 .nav-item--add .nav-item__capsule {
   position: relative;
   z-index: 1;
-  background: transparent;
-  box-shadow: none;
+  background: var(--color-primary);
 }
 
 .nav-item--add--active .nav-item__capsule {
-  position: relative;
-  z-index: 1;
-  background: transparent;
-  box-shadow: none;
+  background: var(--color-primary-strong);
 }
 
-.nav-item--add--active .split-transaction-control__primary,
-.nav-item--add--active .split-transaction-control__menu {
+.bottom-nav .nav-item--add.nav-item--add--active::before {
+  background: var(--color-primary-strong);
+}
+
+.bottom-nav .nav-item--add.nav-item--add--active .split-transaction-control__primary,
+.bottom-nav .nav-item--add.nav-item--add--active .split-transaction-control__menu {
   border-color: var(--color-primary-strong);
   background-color: var(--color-primary-strong);
 }
 
-.nav-item--add:not(.nav-item--add--active):hover .nav-item__capsule {
-  background: var(--color-primary-strong);
-  color: var(--color-on-primary);
+.nav-item--add:not(.nav-item--add--active):hover::before,
+.nav-item--add:not(.nav-item--add--active):hover .split-transaction-control__primary,
+.nav-item--add:not(.nav-item--add--active):hover .split-transaction-control__menu {
+  border-color: var(--color-primary-strong);
+  background-color: var(--color-primary-strong);
+}
+
+.nav-add-icon {
+  width: 1.2rem;
+  height: 1.2rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.nav-add-label {
+  color: inherit;
+  font-size: var(--text-xs);
+  font-weight: 750;
 }
 
 .nav-icon {
@@ -3170,6 +3244,10 @@ input[inputmode="decimal"] {
 
   .nav-item {
     padding-inline: var(--space-3);
+  }
+
+  .nav-item--add {
+    padding-inline: 0;
   }
 
   .nav-icon {
