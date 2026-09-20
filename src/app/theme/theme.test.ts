@@ -166,20 +166,24 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;[\s\S]*background: transparent;[\s\S]*margin-top: calc\(-1 \* \(var\(--space-2\) \+ 4px\)\);[\s\S]*margin-bottom: 0;[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;[\s\S]*overflow: visible;/);
     expect(css).toMatch(/\.nav-item--add::before\s*\{[\s\S]*inset: 0 0 calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\) 0;[\s\S]*background: var\(--color-primary\);/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: 100%;[\s\S]*height: 100%;[\s\S]*align-self: stretch;[\s\S]*overflow: hidden;/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*display: grid;[\s\S]*height: 100%;[\s\S]*border-radius: var\(--radius-lg\) 0 0 0;[\s\S]*background: var\(--color-primary\);/);
+    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*display: flex;[\s\S]*height: 100%;[\s\S]*align-items: flex-end;[\s\S]*border-radius: var\(--radius-lg\) 0 0 0;[\s\S]*background: var\(--color-primary\);/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*height: 100%;[\s\S]*border-left-color: rgba\(255, 255, 255, 0\.45\);[\s\S]*border-radius: 0 var\(--radius-lg\) 0 0;/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__primary,[\s\S]*\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[\s\S]*background-color: var\(--color-primary-strong\);/);
+    expect(css).toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__primary,[\s\S]*\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[\s\S]*border-top-color: var\(--color-primary-strong\);[\s\S]*border-right-color: var\(--color-primary-strong\);[\s\S]*border-bottom-color: var\(--color-primary-strong\);[\s\S]*background-color: var\(--color-primary-strong\);/);
     expect(css).toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active::before\s*\{[\s\S]*background: var\(--color-primary-strong\);/);
+    expect(css).not.toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[^}]*border-color:/);
     expect(css).not.toContain('.nav-item__capsule .split-transaction-control {');
     expect(uiSource).toContain('mobileNav');
     expect(uiSource).toContain('className="nav-add-icon"');
     expect(uiSource).toContain('aria-hidden="true"');
   });
 
-  it('keeps the raised tile focus indicators inset and safe-area extension decorative', () => {
+  it('keeps the raised tile focus indicators segment-specific and safe-area extension decorative', () => {
     expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule\s*\{/);
-    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule :is\(\.split-transaction-control__primary, \.split-transaction-control__menu\):focus-visible\s*\{[\s\S]*outline: 3px solid var\(--color-on-primary\);[\s\S]*outline-offset: -3px;[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-on-primary\);/);
-    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule :is\(\.split-transaction-control__primary, \.split-transaction-control__menu\):focus-visible\s*\{[\s\S]*outline-color: Highlight;[\s\S]*box-shadow: inset 0 0 0 3px Highlight;/);
+    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible,[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*outline: none;[\s\S]*outline-offset: 0;/);
+    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible\s*\{[\s\S]*box-shadow:\s*inset 0 3px 0 var\(--color-on-primary\),[\s\S]*inset 0 -3px 0 var\(--color-on-primary\),[\s\S]*inset 3px 0 0 var\(--color-on-primary\);/);
+    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*border-left: 1px solid rgba\(255, 255, 255, 0\.45\);[\s\S]*box-shadow:\s*inset 0 3px 0 var\(--color-on-primary\),[\s\S]*inset 0 -3px 0 var\(--color-on-primary\),[\s\S]*inset -3px 0 0 var\(--color-on-primary\);/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible\s*\{[\s\S]*box-shadow:\s*inset 0 3px 0 Highlight,[\s\S]*inset 0 -3px 0 Highlight,[\s\S]*inset 3px 0 0 Highlight;/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*border-left: 1px solid ButtonText;[\s\S]*box-shadow:\s*inset 0 3px 0 Highlight,[\s\S]*inset 0 -3px 0 Highlight,[\s\S]*inset -3px 0 0 Highlight;/);
     expect(css).toMatch(/\.nav-item--add::before\s*\{[\s\S]*pointer-events: none;/);
     expect(css).not.toMatch(/\.nav-item--add\s*\{[^}]*margin-bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\) \+ 1px\)\)/);
   });
@@ -198,11 +202,14 @@ describe('responsive navigation layout contract', () => {
   });
 
   it('keeps the mobile add tile full-width in the center navigation column', () => {
-    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) minmax\(calc\(var\(--control-min-height\) \+ 44px \+ var\(--space-2\)\), 1\.35fr\) minmax\(44px, 1fr\);/);
+    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) clamp\(100px, 25vw, 112px\) minmax\(44px, 1fr\);/);
     expect(css).toMatch(/\.nav-item > span:last-child\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*overflow: hidden;/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);[\s\S]*width: var\(--control-min-height\);/);
+    expect(css).toMatch(/\.nav-add-icon\s*\{[\s\S]*width: 1rem;[\s\S]*height: 1rem;/);
+    expect(css).toMatch(/\.nav-add-inline\s*\{[\s\S]*display: inline-flex;[\s\S]*align-items: baseline;[\s\S]*gap: var\(--space-1\);/);
+    expect(css).toMatch(/\.nav-add-label\s*\{[\s\S]*font-size: var\(--text-xs\);/);
     expect(css).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
   });
 

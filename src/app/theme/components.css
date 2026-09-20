@@ -2788,7 +2788,7 @@ input[inputmode="decimal"] {
   width: 100%;
   max-width: none;
   margin: 0;
-  grid-template-columns: minmax(44px, 1fr) minmax(44px, 1fr) minmax(calc(var(--control-min-height) + 44px + var(--space-2)), 1.35fr) minmax(44px, 1fr);
+  grid-template-columns: minmax(44px, 1fr) minmax(44px, 1fr) clamp(100px, 25vw, 112px) minmax(44px, 1fr);
   align-items: end;
   border: 1px solid var(--color-border);
   border-bottom: 0;
@@ -2920,18 +2920,20 @@ input[inputmode="decimal"] {
 }
 
 .bottom-nav .nav-item__capsule .split-transaction-control__primary {
-  display: grid;
+  display: flex;
   flex: 1 1 auto;
   min-width: 0;
   height: 100%;
   min-height: var(--control-min-height);
-  align-content: center;
-  justify-items: center;
+  align-items: flex-end;
+  justify-content: center;
   gap: var(--space-1);
   border-color: var(--color-primary);
   border-radius: var(--radius-lg) 0 0 0;
   background: var(--color-primary);
-  padding: var(--space-2) var(--space-1);
+  /* The raised tile is taller than the neighboring nav cells; keep the
+     inline label on their text line instead of centering it in the tile. */
+  padding: 0 var(--space-1) calc(var(--space-2) + 1px);
   white-space: nowrap;
 }
 
@@ -2946,20 +2948,49 @@ input[inputmode="decimal"] {
   background-color: var(--color-primary);
 }
 
-.bottom-nav .split-transaction-control.nav-item__capsule :is(.split-transaction-control__primary, .split-transaction-control__menu):focus-visible {
-  /* The capsule clips its rounded tile, so keep each keyboard indicator
-     inside the focused segment instead of relying on an outer ring. */
-  outline: 3px solid var(--color-on-primary);
-  outline-offset: -3px;
-  box-shadow: inset 0 0 0 3px var(--color-on-primary);
+.bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__primary:focus-visible,
+.bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__menu:focus-visible {
+  /* The capsule clips an outer ring. Keep the indicator inside each segment
+     and leave the 1px shared divider on the menu's left edge untouched. */
+  outline: none;
+  outline-offset: 0;
   position: relative;
   z-index: 2;
 }
 
+.bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__primary:focus-visible {
+  box-shadow:
+    inset 0 3px 0 var(--color-on-primary),
+    inset 0 -3px 0 var(--color-on-primary),
+    inset 3px 0 0 var(--color-on-primary);
+}
+
+.bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__menu:focus-visible {
+  border-left: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow:
+    inset 0 3px 0 var(--color-on-primary),
+    inset 0 -3px 0 var(--color-on-primary),
+    inset -3px 0 0 var(--color-on-primary);
+}
+
 @media (forced-colors: active) {
-  .bottom-nav .split-transaction-control.nav-item__capsule :is(.split-transaction-control__primary, .split-transaction-control__menu):focus-visible {
-    outline-color: Highlight;
-    box-shadow: inset 0 0 0 3px Highlight;
+  .bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__menu {
+    border-left-color: ButtonText;
+  }
+
+  .bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__primary:focus-visible {
+    box-shadow:
+      inset 0 3px 0 Highlight,
+      inset 0 -3px 0 Highlight,
+      inset 3px 0 0 Highlight;
+  }
+
+  .bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__menu:focus-visible {
+    border-left: 1px solid ButtonText;
+    box-shadow:
+      inset 0 3px 0 Highlight,
+      inset 0 -3px 0 Highlight,
+      inset -3px 0 0 Highlight;
   }
 }
 
@@ -2985,25 +3016,35 @@ input[inputmode="decimal"] {
 
 .bottom-nav .nav-item--add.nav-item--add--active .split-transaction-control__primary,
 .bottom-nav .nav-item--add.nav-item--add--active .split-transaction-control__menu {
-  border-color: var(--color-primary-strong);
+  border-top-color: var(--color-primary-strong);
+  border-right-color: var(--color-primary-strong);
+  border-bottom-color: var(--color-primary-strong);
   background-color: var(--color-primary-strong);
 }
 
 .nav-item--add:not(.nav-item--add--active):hover::before,
 .nav-item--add:not(.nav-item--add--active):hover .split-transaction-control__primary,
 .nav-item--add:not(.nav-item--add--active):hover .split-transaction-control__menu {
-  border-color: var(--color-primary-strong);
+  border-top-color: var(--color-primary-strong);
+  border-right-color: var(--color-primary-strong);
+  border-bottom-color: var(--color-primary-strong);
   background-color: var(--color-primary-strong);
 }
 
 .nav-add-icon {
-  width: 1.2rem;
-  height: 1.2rem;
+  width: 1rem;
+  height: 1rem;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2;
+}
+
+.nav-add-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
 }
 
 .nav-add-label {

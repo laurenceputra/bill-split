@@ -62,7 +62,7 @@ describe('SplitTransactionControl', () => {
 
     expect(markup).toContain('class="nav-add-icon"');
     expect(markup).toContain('aria-hidden="true"');
-    expect(markup).toContain('class="nav-add-label">Add</span>');
+    expect(markup).toMatch(/class="nav-add-icon"[\s\S]*class="nav-add-label">Add<\/span>/);
     expect(markup).toContain('aria-label="Add expense"');
     expect(markup).toContain('aria-label="Choose transaction type"');
   });
