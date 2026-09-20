@@ -685,6 +685,76 @@ test('split transaction control keeps expense first, routes alternates, and disa
   }
 });
 
+test('keeps the mobile Add control compact and aligned across inactive and active states', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 320, height: 844 });
+  const page = await context.newPage();
+  const addItem = page.locator('.bottom-nav .nav-item--add').filter({ has: page.locator('.split-transaction-control') });
+  const mobileWidths = [320, 390, 895];
+  const readGeometry = async () => addItem.evaluate((item) => {
+    const capsule = item.matches('.nav-item__capsule') ? item : item.querySelector<HTMLElement>('.nav-item__capsule');
+    const primary = item.querySelector<HTMLElement>('.split-transaction-control__primary');
+    const menu = item.querySelector<HTMLElement>('.split-transaction-control__menu');
+    if (!capsule || !primary || !menu) throw new Error('Mobile Add control geometry is incomplete');
+    const box = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    };
+    return { column: box(item), capsule: box(capsule), primary: box(primary), menu: box(menu) };
+  });
+  const captureMobileGeometry = async () => {
+    const geometries: Array<Awaited<ReturnType<typeof readGeometry>>> = [];
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.locator('.bottom-nav')).toBeVisible();
+      await expect(page.locator('.desktop-nav')).toBeHidden();
+      geometries.push(await readGeometry());
+    }
+    return geometries;
+  };
+  try {
+    await page.goto(`/groups/${richGroupId}`);
+    const inactive = addItem;
+    await expect(inactive).not.toHaveClass(/nav-item--add--active/);
+    const inactiveGeometry = await captureMobileGeometry();
+
+    await page.goto(`/groups/${richGroupId}/refund/new`);
+    const active = addItem;
+    await expect(active).toHaveClass(/nav-item--add--active/);
+    const activeGeometry = await captureMobileGeometry();
+
+    for (let index = 0; index < mobileWidths.length; index += 1) {
+      const inactiveAtWidth = inactiveGeometry[index];
+      const activeAtWidth = activeGeometry[index];
+      for (const part of ['capsule', 'primary', 'menu'] as const) {
+        expect(Math.abs(inactiveAtWidth[part].width - activeAtWidth[part].width), `${mobileWidths[index]}px ${part} width`).toBeLessThanOrEqual(1);
+        expect(Math.abs(inactiveAtWidth[part].height - activeAtWidth[part].height), `${mobileWidths[index]}px ${part} height`).toBeLessThanOrEqual(1);
+      }
+      for (const geometry of [inactiveAtWidth, activeAtWidth]) {
+        const columnCenter = (geometry.column.left + geometry.column.right) / 2;
+        const capsuleCenter = (geometry.capsule.left + geometry.capsule.right) / 2;
+        expect(Math.abs(capsuleCenter - columnCenter), `${mobileWidths[index]}px capsule centering`).toBeLessThanOrEqual(1);
+        expect(geometry.capsule.width, `${mobileWidths[index]}px compact capsule`).toBeLessThan(geometry.column.width - 1);
+      }
+    }
+
+    await expect(page.locator('#refund-source-help')).toBeVisible();
+    await expect(page.locator('#refund-mode-help')).toBeVisible();
+    const helpers = await page.locator('#refund-source-help, #refund-mode-help').evaluateAll((elements) => elements.map((helper) => {
+      const control = helper.previousElementSibling?.querySelector('select');
+      if (!control) throw new Error('Refund helper is missing its preceding select');
+      return { helperTop: helper.getBoundingClientRect().top, controlBottom: control.getBoundingClientRect().bottom };
+    }));
+    expect(helpers).toHaveLength(2);
+    for (const helper of helpers) expect(helper.helperTop).toBeGreaterThanOrEqual(helper.controlBottom - 1);
+
+    await page.setViewportSize({ width: 896, height: 900 });
+    await expect(page.locator('.bottom-nav')).toBeHidden();
+    await expect(page.locator('.desktop-nav')).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test('member manage route renders an online retryable error without cached group data', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, REGISTERED_EMAIL);
   const page = await context.newPage();

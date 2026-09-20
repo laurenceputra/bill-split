@@ -162,9 +162,11 @@ describe('responsive navigation layout contract', () => {
     expect(css).not.toContain('font-size: 0.6rem;');
   });
 
-  it('extends the active add highlight through the safe-area while keeping content in the nav item', () => {
-    expect(css).toMatch(/\.nav-item--add--active::before\s*\{[\s\S]*top: calc\(-1 \* var\(--space-1\)\);[\s\S]*bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\);[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;/);
-    expect(css).toMatch(/\.nav-item--add--active \.nav-item__capsule\s*\{[\s\S]*z-index: 1;[\s\S]*background: transparent;/);
+  it('confines the active add state to the compact capsule', () => {
+    expect(css).not.toContain('.nav-item--add--active::before');
+    expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: center;/);
+    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: fit-content;[\s\S]*max-width: 100%;[\s\S]*align-self: center;[\s\S]*justify-self: center;/);
+    expect(css).toMatch(/\.nav-item--add--active \.split-transaction-control__primary,[\s\S]*\.nav-item--add--active \.split-transaction-control__menu\s*\{[\s\S]*background-color: var\(--color-primary-strong\);/);
     expect(css).toMatch(/\.nav-item--add:not\(\.nav-item--add--active\):hover \.nav-item__capsule\s*\{/);
     expect(uiSource).toContain('nav-item nav-item--add');
   });
@@ -182,11 +184,17 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.split-transaction-control__menu option,[\s\S]*\.split-transaction-control__menu option:disabled\s*\{[\s\S]*background-color: Canvas;[\s\S]*color: CanvasText;[\s\S]*font: 1rem\/1\.4 var\(--font-body\);[\s\S]*text-indent: 0;/);
   });
 
-  it('reserves a full-width split control column in the mobile navigation', () => {
+  it('keeps the mobile add control compact and centered in its navigation column', () => {
     expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) minmax\(calc\(var\(--control-min-height\) \+ 44px \+ var\(--space-2\)\), 1\.35fr\) minmax\(44px, 1fr\);/);
     expect(css).toMatch(/\.nav-item > span:last-child\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: fit-content;[\s\S]*justify-self: center;/);
     expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-width: 0;/);
     expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);/);
+  });
+
+  it('keeps refund helper text in normal flow below its preceding control', () => {
+    expect(css).toMatch(/\.refund-form__help\s*\{[\s\S]*display: block;[\s\S]*margin: var\(--space-2\) 0;/);
+    expect(css).not.toMatch(/\.refund-form__help\s*\{[^}]*margin-top:\s*calc\([^}]*-1/);
   });
 
   it('keeps the activity filter separated from the result list at every responsive size', () => {

@@ -2300,7 +2300,7 @@ summary {
 
 .refund-form__help {
   display: block;
-  margin-top: calc(var(--space-2) * -1);
+  margin: var(--space-2) 0;
 }
 
 .refund-application-row {
@@ -2871,7 +2871,7 @@ input[inputmode="decimal"] {
   position: relative;
   isolation: isolate;
   align-self: stretch;
-  align-items: stretch;
+  align-items: center;
   background: transparent;
   color: var(--color-ink-muted);
 }
@@ -2879,9 +2879,11 @@ input[inputmode="decimal"] {
 .nav-item__capsule {
   display: inline-flex;
   min-width: 0;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: var(--control-min-height);
-  align-self: stretch;
+  align-self: center;
+  justify-self: center;
   align-items: stretch;
   border-radius: var(--radius-lg);
   background: transparent;
@@ -2904,18 +2906,6 @@ input[inputmode="decimal"] {
 .nav-item--add--active {
   background: transparent;
   color: var(--color-ink-muted);
-}
-
-.nav-item--add--active::before {
-  position: absolute;
-  z-index: 0;
-  top: calc(-1 * var(--space-1));
-  right: calc(-1 * var(--space-1));
-  bottom: calc(-1 * (var(--space-1) + var(--safe-bottom)));
-  left: calc(-1 * var(--space-1));
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  background: var(--color-primary-strong);
-  content: '';
 }
 
 .nav-item--add .nav-item__capsule {
