@@ -42,6 +42,25 @@ describe('credit input accounting invariants', () => {
     expect(result.success).toBe(true);
   });
 
+  it('keeps duplicate-person rejection scoped to each allocation side', () => {
+    const duplicateRecipient = creditInput.safeParse({
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01', applications: [],
+      allocations: [
+        { person_id: person, allocation_type: 'recipient', amount_minor: 50 },
+        { person_id: person, allocation_type: 'recipient', amount_minor: 50 },
+        { person_id: person, allocation_type: 'beneficiary', amount_minor: 100 },
+      ],
+    });
+    expect(duplicateRecipient.success).toBe(false);
+    expect(creditInput.safeParse({
+      subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01', applications: [],
+      allocations: [
+        { person_id: person, allocation_type: 'recipient', amount_minor: 100 },
+        { person_id: person, allocation_type: 'beneficiary', amount_minor: 100 },
+      ],
+    }).success).toBe(true);
+  });
+
   it('requires a linked reimbursement recipient', () => {
     expect(creditInput.safeParse({
       subtype: 'refund', delivery_mode: 'member_reimbursement', amount_minor: 100, currency: 'USD', date: '2026-01-01',

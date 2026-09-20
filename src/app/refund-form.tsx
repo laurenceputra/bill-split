@@ -14,6 +14,18 @@ type Application = CreditApplicationDraft;
 type Allocation = CreditAllocationDraft & { touched?: boolean };
 type AllocationType = Allocation['allocationType'];
 
+export const refundSourceOptions = [
+  { value: 'refund', label: 'Merchant refund' },
+  { value: 'claim', label: 'Reimbursement or claim' },
+] as const;
+
+export function refundModeOptions(linked: boolean) {
+  return [
+    { value: 'member_reimbursement' as const, label: 'A group member received the money', disabled: false },
+    { value: 'direct_provider_offset' as const, label: 'Original payment or bill was adjusted', disabled: !linked },
+  ];
+}
+
 const id = () => crypto.randomUUID();
 const money = (minor: number) => (minor / 100).toFixed(2);
 export const refundErrorText = (error: unknown) => error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'Something went wrong. Retry when the connection is available.';
@@ -38,6 +50,75 @@ export function removeRefundAllocation(rows: Allocation[], rowId: string, minimu
   return rows.length <= minimumRows ? rows : rows.filter((row) => row.id !== rowId);
 }
 
+export function duplicateRefundAllocationTypes(rows: Array<Pick<Allocation, 'personId' | 'allocationType'>>): AllocationType[] {
+  return (['recipient', 'beneficiary'] as const).filter((allocationType) => {
+    const people = rows.filter((row) => row.allocationType === allocationType && row.personId).map((row) => row.personId);
+    return new Set(people).size !== people.length;
+  });
+}
+
+export function refundAllocationDuplicateError(rows: Array<Pick<Allocation, 'personId' | 'allocationType'>>) {
+  const duplicateTypes = duplicateRefundAllocationTypes(rows);
+  if (!duplicateTypes.length) return undefined;
+  if (duplicateTypes.length === 1) {
+    return duplicateTypes[0] === 'recipient'
+      ? 'Choose each person only once within recipient allocations.'
+      : 'Choose each person only once within affected-member allocations.';
+  }
+  return 'Choose each person only once within recipient allocations and within affected-member allocations. The same person may be selected once on each side.';
+}
+
+export function refundAllocationRowsForValidation(rows: Allocation[], mode: CreditInput['delivery_mode'], linked: boolean, adjustBenefits: boolean) {
+  if (mode === 'direct_provider_offset') return [];
+  return rows.filter((row) => adjustBenefits || !linked || row.allocationType === 'recipient');
+}
+
+export function refundApplicationFillAmount(rows: Array<Pick<Application, 'id' | 'amount'>>, rowId: string, totalMinor: number, capacityMinor: number, currency: Currency) {
+  if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) return Math.max(0, capacityMinor);
+  const appliedElsewhere = rows.reduce((sum, row) => {
+    if (row.id === rowId) return sum;
+    try { return sum + parseMoney(row.amount, currency); } catch { return sum; }
+  }, 0);
+  return Math.min(Math.max(0, capacityMinor), Math.max(0, totalMinor - appliedElsewhere));
+}
+
+export function refundApplicationStatus(totalMinor: number, appliedMinor: number, currency: Currency) {
+  const remainingMinor = totalMinor - appliedMinor;
+  if (remainingMinor === 0) return { kind: 'fully-applied' as const, label: 'Fully applied', remainingMinor, currency };
+  if (remainingMinor > 0) return { kind: 'remaining' as const, label: `Remaining to apply: ${money(remainingMinor)} ${currency}`, remainingMinor, currency };
+  return { kind: 'overallocated' as const, label: `Overallocated by ${money(Math.abs(remainingMinor))} ${currency}`, remainingMinor, currency };
+}
+
+export function refundApplicationRowsHavePositiveAmounts(rows: Array<Pick<Application, 'amount'>>, currency: Currency) {
+  return rows.every((row) => {
+    try { return parseMoney(row.amount, currency) > 0; } catch { return false; }
+  });
+}
+
+export type RefundPreviewRow = { personId: string; amountMinor: number; label: string };
+export type RefundPreviewPerson = { personId: string; components: Array<{ label: string; amountMinor: number }>; netMinor: number };
+
+export function groupRefundPreviewRows(rows: RefundPreviewRow[]): RefundPreviewPerson[] {
+  const grouped = new Map<string, RefundPreviewPerson>();
+  for (const row of rows) {
+    if (!row.personId.trim()) continue;
+    const person = grouped.get(row.personId) || { personId: row.personId, components: [], netMinor: 0 };
+    person.components.push({ label: row.label, amountMinor: row.amountMinor });
+    person.netMinor += row.amountMinor;
+    grouped.set(row.personId, person);
+  }
+  return [...grouped.values()];
+}
+
+export function refundPreviewRows(mode: Credit['deliveryMode'], recipientRows: Allocation[], derivedPayers: Array<{ personId: string; amountMinor: number }>, derivedBeneficiaries: Array<{ personId: string; amountMinor: number }>, derivedDisplay: Array<{ personId: string; amountMinor: number }>, currency: Currency): RefundPreviewRow[] {
+  const amount = (row: Allocation) => {
+    try { return parseMoney(row.amount, currency); } catch { return 0; }
+  };
+  return mode === 'direct_provider_offset'
+    ? [...derivedPayers.map((row) => ({ ...row, amountMinor: -row.amountMinor, label: 'Payment reduction' })), ...derivedBeneficiaries.map((row) => ({ ...row, label: 'Cost reduction' }))]
+    : [...recipientRows.map((row) => ({ personId: row.personId, amountMinor: -amount(row), label: 'Received' })), ...derivedDisplay.map((row) => ({ ...row, label: 'Cost reduction' }))];
+}
+
 export function buildRefundInput({ subtype, mode, amountMinor, currency, date, note, applications, allocations, linked, adjustBenefits }: {
   subtype: CreditInput['subtype'];
   mode: CreditInput['delivery_mode'];
@@ -50,7 +131,7 @@ export function buildRefundInput({ subtype, mode, amountMinor, currency, date, n
   linked: boolean;
   adjustBenefits: boolean;
 }): CreditInput {
-  const submittedAllocations = allocations.filter((allocation) => allocation.personId && (adjustBenefits || !linked || allocation.allocationType === 'recipient'));
+  const submittedAllocations = refundAllocationRowsForValidation(allocations, mode, linked, adjustBenefits).filter((allocation) => allocation.personId);
   return {
     subtype, delivery_mode: mode, amount_minor: amountMinor, currency, date, note: note || null,
     applications: linked ? applications.map((application) => ({ expense_id: application.expenseId, amount_minor: application.amountMinor })) : [],
@@ -78,9 +159,20 @@ export function beneficiaryRowsComplete(rows: Allocation[], amountMinor: number,
   let total = 0;
   for (const row of rows) {
     if (!row.personId || !row.amount.trim()) return false;
-    try { total += parseMoney(row.amount, currency); } catch { return false; }
+    try {
+      const amount = parseMoney(row.amount, currency);
+      if (amount <= 0) return false;
+      total += amount;
+    } catch { return false; }
   }
   return total === amountMinor;
+}
+
+export function refundAllocationRowsHavePositiveAmounts(rows: Allocation[], currency: Currency) {
+  return rows.every((row) => {
+    if (!row.personId) return false;
+    try { return parseMoney(row.amount, currency) > 0; } catch { return false; }
+  });
 }
 
 function expenseCapacity(expense: Expense, editingCreditId?: string) {
@@ -146,17 +238,17 @@ export function AllocationRows({ rows, label, currency, people, currentPersonId,
   error?: string;
 }) {
   return <>
-    {rows.map((row) => <div className="allocation-row" key={row.id}>
-      <Field label={label}>
-        <select required value={row.personId} onChange={(event) => onChange(row.id, { personId: event.target.value, touched: true })}>
+    {rows.map((row, index) => <div className="allocation-row refund-allocation-row" key={row.id}>
+      <Field className="refund-allocation-row__person" label={label}>
+        <select required aria-label={`${label} ${index + 1}`} name={`allocation-${row.allocationType}-${index + 1}-person`} value={row.personId} onChange={(event) => onChange(row.id, { personId: event.target.value, touched: true })}>
           <option value="">Choose a person</option>
-          {people.map((person) => <option key={person.personId} value={person.personId}>{personName(people, person.personId, currentPersonId)}</option>)}
+          {people.filter((person) => person.personId === row.personId || !rows.some((candidate) => candidate.id !== row.id && candidate.personId === person.personId)).map((person) => <option key={person.personId} value={person.personId}>{personName(people, person.personId, currentPersonId)}</option>)}
         </select>
       </Field>
-      <Field label={`Amount (${currency})`}>
-        <input required inputMode="decimal" value={row.amount} onChange={(event) => onChange(row.id, { amount: event.target.value, touched: true })} />
+      <Field className="refund-allocation-row__amount" label={`Amount (${currency})`}>
+        <input required aria-label={`${label} amount ${index + 1} (${currency})`} name={`allocation-${row.allocationType}-${index + 1}-amount`} inputMode="decimal" value={row.amount} onChange={(event) => onChange(row.id, { amount: event.target.value, touched: true })} />
       </Field>
-      {rows.length > minimumRows ? <Button type="button" variant="secondary" onClick={() => onRemove(row.id)}>Remove</Button> : null}
+      {rows.length > minimumRows ? <Button className="refund-allocation-row__remove" type="button" variant="secondary" aria-label={`Remove ${label.toLowerCase()} allocation ${index + 1}`} onClick={() => onRemove(row.id)}>Remove</Button> : null}
     </div>)}
     {showErrors && error ? <p role="alert" className="field-error">{error}</p> : null}
   </>;
@@ -352,10 +444,15 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     setAllocations(linked ? [emptyAllocation('recipient')] : mode === 'member_reimbursement' ? [emptyAllocation('recipient'), emptyAllocation('beneficiary')] : []);
   }, [initializing, linked, mode]);
 
+  useEffect(() => {
+    if (!linked && mode === 'direct_provider_offset') setMode('member_reimbursement');
+  }, [linked, mode]);
+
   const parsedApplications = applications.map((application) => {
     try { return { ...application, amountMinor: parseMoney(application.amount, currency) }; } catch { return { ...application, amountMinor: -1 }; }
   });
   const appliedMinor = parsedApplications.reduce((sum, application) => sum + Math.max(0, application.amountMinor), 0);
+  const applicationStatus = refundApplicationStatus(amountMinor, appliedMinor, currency);
   const capacityErrors = parsedApplications.map((application) => {
     const expense = expenses.find((candidate) => candidate.id === application.expenseId);
     if (!expense || application.amountMinor < 0) return expense ? `Enter a valid amount for ${expense.description}.` : 'Choose an expense.';
@@ -363,6 +460,8 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   });
   const recipientRows = allocations.filter((allocation) => allocation.allocationType === 'recipient');
   const affectedRows = allocations.filter((allocation) => allocation.allocationType === 'beneficiary');
+  const validationAllocationRows = refundAllocationRowsForValidation(allocations, mode, linked, adjustBenefits);
+  const duplicateAllocationError = refundAllocationDuplicateError(validationAllocationRows);
   const sumRows = (rows: Allocation[]) => rows.reduce((sum, row) => { try { return sum + parseMoney(row.amount, currency); } catch { return sum; } }, 0);
   const recipientsMinor = sumRows(recipientRows);
   const affectedMinor = sumRows(affectedRows);
@@ -377,7 +476,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     if (!beneficiarySnapshotMatches(affectedRows, derivedBeneficiaries, currency)) setAdjustBenefits(true);
   }, [adjustBenefits, affectedRows, currency, derivedBeneficiaries, linked, loadedCredit, mode]);
   const affectedNeedsTotals = mode === 'member_reimbursement' && linked && adjustBenefits;
-  const localError = !date ? 'Choose a date.' : amountMinor <= 0 ? 'Enter an amount greater than zero.' : mode === 'direct_provider_offset' && !linked ? 'Original payment or bill adjustments must link an expense.' : linked && applications.some((application) => !application.expenseId) ? 'Choose an expense for every row.' : linked && appliedMinor !== amountMinor ? `Applied ${money(appliedMinor)} of ${money(amountMinor)} ${currency}.` : capacityErrors.find(Boolean) || (!linked && mode === 'member_reimbursement' && (recipientsMinor !== amountMinor || affectedMinor !== amountMinor) ? 'Recipient and affected-member amounts must each total the refund.' : mode === 'member_reimbursement' && linked && recipientsMinor !== amountMinor ? 'Confirm who received the money for the full refund amount.' : affectedNeedsTotals && !beneficiaryRowsComplete(affectedRows, amountMinor, currency) ? 'Affected-member amounts must total the full refund amount.' : undefined);
+  const localError = !date ? 'Choose a date.' : amountMinor <= 0 ? 'Enter an amount greater than zero.' : mode === 'direct_provider_offset' && !linked ? 'Original payment or bill adjustments must link an expense.' : duplicateAllocationError || (linked && applications.some((application) => !application.expenseId) ? 'Choose an expense for every row.' : linked && !refundApplicationRowsHavePositiveAmounts(applications, currency) ? 'Remove unused expense rows and enter an amount greater than zero for each expense.' : mode === 'member_reimbursement' && !refundAllocationRowsHavePositiveAmounts(validationAllocationRows, currency) ? 'Remove unused allocation rows and enter an amount greater than zero for each recipient or affected member.' : linked && appliedMinor !== amountMinor ? `Applied ${money(appliedMinor)} of ${money(amountMinor)} ${currency}.` : capacityErrors.find(Boolean) || (!linked && mode === 'member_reimbursement' && (recipientsMinor !== amountMinor || affectedMinor !== amountMinor) ? 'Recipient and affected-member amounts must each total the refund.' : mode === 'member_reimbursement' && linked && recipientsMinor !== amountMinor ? 'Confirm who received the money for the full refund amount.' : affectedNeedsTotals && !beneficiaryRowsComplete(affectedRows, amountMinor, currency) ? 'Affected-member amounts must total the full refund amount.' : undefined));
   const submitDisabled = !online || busy || !group || Boolean(localError) || (mode === 'member_reimbursement' && !recipientRows.length);
   const showValidation = submitAttempted;
 
@@ -386,8 +485,10 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const useFullRemaining = (application: Application) => {
     const expense = expenses.find((candidate) => candidate.id === application.expenseId);
     if (!expense) return;
-    updateApplication(application.id, { amount: money(expenseCapacity(expense, loadedCredit?.id)), touched: true, provenance: 'user' });
-    if (!amountTouched) { setAmount(money(expenseCapacity(expense, loadedCredit?.id))); setAmountTouched(true); setAmountProvenance('user'); }
+    const capacity = expenseCapacity(expense, loadedCredit?.id);
+    const fillAmount = refundApplicationFillAmount(applications, application.id, amountMinor, capacity, currency);
+    updateApplication(application.id, { amount: money(fillAmount), touched: true, provenance: 'user' });
+    if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) { setAmount(money(capacity)); setAmountTouched(true); setAmountProvenance('user'); }
   };
 
   const submit = async (event: FormEvent) => {
@@ -415,9 +516,8 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const memberLabel = (personId: string) => personName(people, personId, currentPersonId);
   const statusReason = !online ? 'Reconnect to record a refund or reimbursement.' : !group ? 'Group details are still loading.' : localError || 'Complete the required fields to record this refund or reimbursement.';
   const derivedDisplay = mode === 'member_reimbursement' ? refundBeneficiaryPreviewRows(affectedRows, derivedBeneficiaries, linked, adjustBenefits, currency) : affectedRows.map((allocation) => ({ personId: allocation.personId, amountMinor: (() => { try { return parseMoney(allocation.amount, currency); } catch { return 0; } })() }));
-  const sideRows = mode === 'direct_provider_offset'
-    ? [...derivedPayers.map((row) => ({ ...row, label: 'Payer-side reduction' })), ...derivedBeneficiaries.map((row) => ({ ...row, label: 'Affected cost reduction' }))]
-    : [...recipientRows.map((row) => ({ personId: row.personId, amountMinor: (() => { try { return parseMoney(row.amount, currency); } catch { return 0; } })(), label: 'Recipient' })), ...derivedDisplay.map((row) => ({ ...row, label: 'Affected cost reduction' }))];
+  const sideRows = refundPreviewRows(mode, recipientRows, derivedPayers, derivedBeneficiaries, derivedDisplay, currency);
+  const previewPeople = groupRefundPreviewRows(sideRows);
 
   return <Layout>
     <main className="refund-form" aria-labelledby="refund-form-title">
@@ -427,9 +527,11 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       <form onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
         <p id="refund-form-help" className="muted">Start with an expense when possible. The original payment or bill adjustment derives payer and affected shares; a member reimbursement requires a confirmed recipient.</p>
         <Surface><fieldset><legend>How should this money be recorded?</legend>
-          <Field label="Path"><select value={linked ? 'linked' : 'standalone'} onChange={(event) => setApplications(refundApplicationsForPath(event.target.value as 'linked' | 'standalone', applications))}><option value="linked">Apply to an expense</option><option value="standalone">Standalone (advanced)</option></select></Field>
-          <Field label="Refund type"><select value={subtype} onChange={(event) => setSubtype(event.target.value as typeof subtype)}><option value="refund">Refund</option><option value="claim">Reimbursement</option></select></Field>
-          <Field label="What happened to the money?"><select value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="member_reimbursement">A group member received the money</option><option value="direct_provider_offset">Original payment or bill was adjusted</option></select></Field>
+           <Field label="Apply this to"><select value={linked ? 'linked' : 'standalone'} onChange={(event) => { const nextPath = event.target.value as 'linked' | 'standalone'; setApplications(refundApplicationsForPath(nextPath, applications)); if (nextPath === 'standalone' && mode === 'direct_provider_offset') setMode('member_reimbursement'); }}><option value="linked">One or more expenses</option><option value="standalone">No specific expense</option></select></Field>
+           <Field label="Source"><select aria-describedby="refund-source-help" value={subtype} onChange={(event) => setSubtype(event.target.value as typeof subtype)}>{refundSourceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
+           <small id="refund-source-help" className="refund-form__help">This source controls how the transaction is labeled in the ledger and exports.</small>
+           <Field label="How was it handled?"><select aria-describedby="refund-mode-help" value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}>{refundModeOptions(linked).map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select></Field>
+           <small id="refund-mode-help" className="refund-form__help">The original payment or bill option is available only with linked expenses and derives payer and cost-reduction shares. If a group member received the money, select the recipient below.</small>
           {!linked ? <Field label="Currency"><select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)}>{currencyOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field> : <p className="muted">Currency: {currency} · locked to the first expense</p>}
           <Field label={`How much? (${currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => { setAmount(event.target.value); setAmountTouched(true); setAmountProvenance('user'); }} aria-invalid={Boolean(showValidation && amountMinor <= 0)} /><small>Credit total: {amountMinor > 0 ? money(amountMinor) : '—'} {currency} · {amountProvenance === 'default' ? 'Suggested and editable' : 'Entered total'}</small></Field>
           <Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field>
@@ -439,16 +541,16 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
         <Surface><fieldset><legend>{linked ? 'Which expenses should this reduce?' : 'Advanced standalone details'}</legend>
           {linked ? <>
             <Field label="Search eligible expenses"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by description or date" /></Field>
-            {applications.map((application, index) => { const expense = expenses.find((candidate) => candidate.id === application.expenseId); const capacity = expense ? expenseCapacity(expense, loadedCredit?.id) : 0; return <div className="refund-application-row" key={application.id}>
-              <Field label={`Expense ${index + 1}`}><select required value={application.expenseId} onChange={(event) => chooseExpense(application, event.target.value)}><option value="">Choose an expense</option><RefundExpensePickerOptions expenses={expenses} rows={applications} rowId={application.id} editingCreditId={loadedCredit?.id} search={search} /></select></Field>
-              {expense ? <p className="muted">{expense.date} · Gross {money(expense.amountMinor)} {expense.currency} · Already refunded {money(expense.amountMinor - capacity)} · Remaining {money(capacity)} {expense.currency}</p> : null}
-              <Field label={`Applied amount (${currency})`}><input required inputMode="decimal" value={application.amount} onChange={(event) => updateApplication(application.id, { amount: event.target.value, touched: true, provenance: 'user' })} /><small>Capacity: {money(capacity)} {currency}</small></Field>
-              {expense ? <Button type="button" variant="secondary" onClick={() => useFullRemaining(application)}>Use full remaining ({money(capacity)} {expense.currency})</Button> : null}
-              {showValidation && capacityErrors[index] ? <p role="alert" className="field-error">{capacityErrors[index]}</p> : null}
-              {applications.length > 1 ? <Button type="button" variant="secondary" onClick={() => setApplications((current) => current.filter((candidate) => candidate.id !== application.id))}>Remove expense</Button> : null}
-            </div>; })}
-            <Button type="button" variant="secondary" onClick={() => setApplications((current) => [...current, emptyApplication()])}>Apply to another expense</Button>
-            {cursor ? <Button type="button" variant="secondary" disabled={!online || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading expenses…' : 'Load more expenses'}</Button> : null}
+             {applications.map((application, index) => { const expense = expenses.find((candidate) => candidate.id === application.expenseId); const capacity = expense ? expenseCapacity(expense, loadedCredit?.id) : 0; const fillAmount = refundApplicationFillAmount(applications, application.id, amountMinor, capacity, currency); return <div className="refund-application-row" key={application.id}>
+               <Field label={`Expense ${index + 1}`}><select required value={application.expenseId} onChange={(event) => chooseExpense(application, event.target.value)}><option value="">Choose an expense</option><RefundExpensePickerOptions expenses={expenses} rows={applications} rowId={application.id} editingCreditId={loadedCredit?.id} search={search} /></select></Field>
+               {expense ? <p className="muted">{expense.date} · Gross {money(expense.amountMinor)} {expense.currency} · Already refunded {money(expense.amountMinor - capacity)} · Remaining {money(capacity)} {expense.currency}</p> : null}
+               <Field label={`Applied amount (${currency})`}><input required aria-label={`Applied amount for expense ${index + 1} (${currency})`} name={`application-${index + 1}-amount`} inputMode="decimal" value={application.amount} onChange={(event) => updateApplication(application.id, { amount: event.target.value, touched: true, provenance: 'user' })} /><small>Expense capacity: {money(capacity)} {expense?.currency || currency}</small></Field>
+               {expense ? <Button type="button" variant="secondary" disabled={fillAmount === 0} aria-label={fillAmount === 0 ? `No remaining refund for expense ${index + 1}` : `Apply remaining refund to expense ${index + 1}`} onClick={() => useFullRemaining(application)}>{fillAmount === 0 ? 'No remaining refund to apply' : `Apply remaining refund (${money(fillAmount)} ${expense.currency})`}</Button> : null}
+               {showValidation && capacityErrors[index] ? <p role="alert" className="field-error">{capacityErrors[index]}</p> : null}
+               {applications.length > 1 ? <Button type="button" variant="secondary" aria-label={`Remove expense ${index + 1}`} onClick={() => setApplications((current) => current.filter((candidate) => candidate.id !== application.id))}>Remove expense</Button> : null}
+             </div>; })}
+             {amountMinor > 0 ? <output className={`refund-application-status refund-application-status--${applicationStatus.kind}`} aria-live="polite">{applicationStatus.label}</output> : <output className="refund-application-status" aria-live="polite">Enter a refund total to see what remains to apply.</output>}
+             <div className="refund-application-actions"><Button type="button" variant="secondary" onClick={() => setApplications((current) => [...current, emptyApplication()])}>Apply to another expense</Button>{cursor ? <Button type="button" variant="secondary" disabled={!online || loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Loading expenses…' : 'Load more expenses'}</Button> : null}</div>
             {expenseError ? <p role="alert">{refundErrorText(expenseError)} <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense details</Button></p> : null}
             {expenseResource.error ? <p className="cache-status" role="status">Showing cached eligible expenses; they may be out of date. <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense list</Button></p> : null}
            </> : <p className="muted">Standalone records do not change an expense. Explicitly identify who received the money and whose costs this should reduce.</p>}
@@ -458,14 +560,14 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
           {mode === 'member_reimbursement' ? <>
             <h2>Who received the money?</h2>
             <AllocationRows rows={recipientRows} label="Recipient" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'recipient')} minimumRows={1} showErrors={showValidation} error={showValidation && recipientsMinor !== amountMinor ? 'Recipient amounts must total the refund.' : undefined} />
-            <Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, emptyAllocation('recipient')])}>Add recipient</Button>
+             <div className="refund-allocation-actions"><Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, emptyAllocation('recipient')])}>Add recipient</Button></div>
             <h2>Whose costs should this reduce?</h2>
-            {linked && !adjustBenefits ? <><p className="muted">Affected shares follow the original expense split and are read-only until adjusted.</p><div className="list">{derivedDisplay.map((allocation) => <div className="row" key={allocation.personId}><span>{memberLabel(allocation.personId)} · original split</span><Money amountMinor={allocation.amountMinor} currency={currency} /></div>)}</div><Button type="button" variant="secondary" onClick={() => setAdjustBenefits(true)}>Adjust who benefits</Button></> : <><AllocationRows rows={affectedRows} label="Affected member" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'beneficiary')} minimumRows={!linked ? 1 : 0} showErrors={showValidation} error={showValidation && affectedRows.length > 0 && affectedMinor !== amountMinor ? 'Affected-member amounts must total the refund.' : undefined} /><Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, emptyAllocation('beneficiary')])}>Add affected member</Button></>}
+             {linked && !adjustBenefits ? <><p className="muted">Affected shares follow the original expense split and are read-only until adjusted.</p><div className="list">{derivedDisplay.map((allocation) => <div className="row" key={allocation.personId}><span>{memberLabel(allocation.personId)} · original split</span><Money amountMinor={allocation.amountMinor} currency={currency} /></div>)}</div><div className="refund-allocation-actions"><Button type="button" variant="secondary" onClick={() => setAdjustBenefits(true)}>Adjust who benefits</Button></div></> : <><AllocationRows rows={affectedRows} label="Affected member" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'beneficiary')} minimumRows={!linked ? 1 : 0} showErrors={showValidation} error={showValidation && affectedRows.length > 0 && affectedMinor !== amountMinor ? 'Affected-member amounts must total the refund.' : undefined} /><div className="refund-allocation-actions"><Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, emptyAllocation('beneficiary')])}>Add affected member</Button></div></>}
           </> : <p className="muted">Both payer and affected shares are derived from linked expenses.</p>}
           {!linked && mode === 'member_reimbursement' ? <p className="muted">Standalone mode requires explicit recipient and affected-member allocations.</p> : null}
         </fieldset></Surface>
 
-        <Surface><h2>Preview</h2><p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} /> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · Remaining: <Money amountMinor={Math.max(0, amountMinor - appliedMinor)} currency={currency} />{appliedMinor > amountMinor ? ' · Overallocated' : ''}</p><div className="list">{sideRows.map((row) => <div className="row" key={`${row.label}-${row.personId}`}><span>{memberLabel(row.personId)}<small>{row.label}</small></span><Money amountMinor={row.amountMinor} currency={currency} /></div>)}</div><p className="muted">Amounts use integer cents with the same stable remainder rule as the server. {mode === 'direct_provider_offset' ? 'The payer side and affected cost side both reduce the group balance.' : 'The recipient receives the money and affected members receive the cost reduction.'}</p></Surface>
+         <Surface><h2>Preview</h2><p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} />{linked ? <> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></> : null}</p><div className="list refund-preview-list">{previewPeople.map((person) => <div className="row refund-preview-person" key={person.personId}><span><strong>{memberLabel(person.personId)}</strong>{person.components.map((component) => <small className="refund-preview-component" key={`${person.personId}-${component.label}`}>{component.label}: <Money amountMinor={component.amountMinor} currency={currency} /></small>)}<small className="refund-preview-net">Net balance effect: <Money amountMinor={person.netMinor} currency={currency} tone={person.netMinor > 0 ? 'positive' : person.netMinor < 0 ? 'debt' : undefined} /></small></span></div>)}</div><p className="muted">Amounts use integer cents with the same stable remainder rule as the server. {mode === 'direct_provider_offset' ? 'The payment and cost reductions both reduce the group balance.' : 'Received money is a negative ledger effect; a cost reduction is positive.'}</p></Surface>
         {showValidation || error ? <p id="refund-form-status" role="alert" className="error">{refundErrorText(error || new Error(localError || 'Invalid form'))}</p> : <p id="refund-form-status" className={submitDisabled ? 'cache-status' : 'sr-only'} role="status" aria-live="polite">{submitDisabled ? statusReason : 'Refund form is ready. Submit is available.'}</p>}
         <div className="actions"><Button type="submit" disabled={submitDisabled}>{busy ? 'Saving…' : loadedCredit ? 'Save refund/reimbursement' : 'Record money back'}</Button><Link className="button button--secondary" to={`/groups/${groupId}`}>Cancel</Link></div>
       </form>

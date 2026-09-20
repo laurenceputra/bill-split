@@ -106,7 +106,7 @@ test('active auth banner stays clear of tablet navigation controls', async ({ br
     await expect(nav.getByRole('link')).toHaveCount(4);
     await expect(nav.getByRole('link', { name: 'Groups' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'History' })).toBeVisible();
-    await expect(nav.getByRole('link', { name: 'Add expense' })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Add transaction' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Settings' })).toBeVisible();
     await expect(banner).toContainText('Connection issue');
     const geometry = await page.evaluate(() => {
@@ -117,11 +117,17 @@ test('active auth banner stays clear of tablet navigation controls', async ({ br
         const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
         return { visible: box.width > 0 && box.height > 0, accessible: hit === element || element.contains(hit), top: box.top, bottom: box.bottom };
       });
-      return { bannerBottom: banner?.bottom || 0, navTop: nav?.top || 0, controls };
+      const select = document.querySelector<HTMLSelectElement>('.bottom-nav[aria-label="Primary navigation"] select');
+      const selectBox = select?.getBoundingClientRect();
+      const selectHit = select && selectBox ? document.elementFromPoint(selectBox.left + selectBox.width / 2, selectBox.top + selectBox.height / 2) : null;
+      return { bannerBottom: banner?.bottom || 0, navTop: nav?.top || 0, controls, select: { visible: Boolean(selectBox && selectBox.width > 0 && selectBox.height > 0), accessible: Boolean(select && selectHit && (selectHit === select || select.contains(selectHit))), bottom: selectBox?.bottom || 0 } };
     });
     expect(geometry.bannerBottom).toBeLessThanOrEqual(geometry.navTop - 4);
     expect(geometry.controls).toHaveLength(4);
     expect(geometry.controls.filter((control) => control.visible && control.accessible && control.bottom <= 1024)).toHaveLength(4);
+    expect(geometry.select.visible).toBe(true);
+    expect(geometry.select.accessible).toBe(true);
+    expect(geometry.select.bottom).toBeLessThanOrEqual(1024);
   } finally {
     await context.close();
   }
@@ -543,6 +549,137 @@ test('group navigation keeps History and Add expense scoped to the group', async
     await page.setViewportSize({ width: 1024, height: 768 });
     await expect(page.locator('.desktop-nav').getByRole('link', { name: 'History' })).toHaveAttribute('href', expectedHistory);
     await expect(page.locator('.desktop-nav').getByRole('link', { name: 'Add expense' })).toHaveAttribute('href', expectedAdd);
+  } finally {
+    await context.close();
+  }
+});
+
+test('split transaction control keeps expense first, routes alternates, and disables them offline', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const page = await context.newPage();
+  try {
+    await page.goto(`/groups/${richGroupId}`);
+    const mobileControl = page.locator('.bottom-nav .split-transaction-control');
+    await expect(mobileControl.getByRole('link', { name: 'Add expense' })).toHaveAttribute('href', `/groups/${richGroupId}/expense/new`);
+    await expect(mobileControl.getByRole('link', { name: 'Add expense' })).not.toHaveAttribute('aria-current');
+    const menu = mobileControl.getByRole('combobox', { name: 'Choose transaction type' });
+    await expect(menu.locator('option')).toHaveText(['More transaction types', 'Refund/reimbursement', 'Payment between members']);
+    await menu.selectOption('refund');
+    await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}/refund/new$`));
+
+    await page.goto(`/groups/${richGroupId}`);
+    await page.locator('.bottom-nav .split-transaction-control select').selectOption('payment');
+    await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}/settle$`));
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).not.toHaveAttribute('aria-current');
+
+    await page.goto(`/groups/${richGroupId}`);
+    await expect(page.getByRole('link', { name: 'Settle up', exact: true })).toBeVisible();
+    await expect(page.locator('main').getByRole('link', { name: 'Add transaction', exact: true })).toHaveCount(0);
+    await expect(page.locator('.expense-heading__actions .split-transaction-control')).toBeVisible();
+
+    await page.goto('/');
+    const globalControl = page.locator('.bottom-nav .split-transaction-control');
+    await expect(globalControl.getByRole('link', { name: 'Add transaction' })).toHaveAttribute('href', '/add');
+    const globalMenu = globalControl.getByRole('combobox', { name: /More transaction types unavailable/ });
+    await expect(globalMenu).toBeDisabled();
+    await expect(globalMenu).toHaveAttribute('title', /Choose a group first/);
+    await expect(globalMenu.locator('option').nth(1)).toBeDisabled();
+
+    await page.goto(`/activity?group=${richGroupId}&view=transactions`);
+    await expect(page.locator('.bottom-nav .split-transaction-control a')).toHaveAttribute('href', '/add');
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).not.toHaveAttribute('aria-current');
+
+    await page.goto(`/groups/${richGroupId}/expense/new`);
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).toHaveAttribute('aria-current', 'page');
+    await page.goto(`/groups/${richGroupId}/refund/new`);
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).not.toHaveAttribute('aria-current');
+    await page.goto(`/groups/${richGroupId}/add`);
+    await expect(page.locator('.bottom-nav .split-transaction-control__primary')).not.toHaveAttribute('aria-current');
+    await page.goto(`/groups/${richGroupId}/settle`);
+    const settleMenu = page.locator('.bottom-nav .split-transaction-control select');
+    await settleMenu.selectOption('payment');
+    await expect(settleMenu).toHaveValue('');
+
+    await page.goto(`/groups/${richGroupId}`);
+
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false);
+    await expect(mobileControl.getByRole('link', { name: 'Add expense' })).toBeVisible();
+    await expect(menu).toBeDisabled();
+    await expect(menu).toHaveAttribute('title', /require a connection/);
+    await expect(menu.locator('option').nth(1)).toBeDisabled();
+    await expect(menu.locator('option').nth(1)).toContainText('online only');
+    await expect(menu.locator('option').nth(2)).toBeDisabled();
+    await expect(menu.locator('option').nth(2)).toContainText('online only');
+
+    for (const width of [320, 390, 430, 768, 895, 896, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      const control = page.locator(`${width >= 896 ? '.desktop-nav' : '.bottom-nav'} .split-transaction-control`).first();
+      await expect(control).toBeVisible();
+      const geometry = await control.evaluate((element) => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, primary: element.querySelector('a')?.getBoundingClientRect().toJSON(), menu: element.querySelector('select')?.getBoundingClientRect().toJSON(), viewport: { width: window.innerWidth, height: window.innerHeight } }));
+      expect(geometry.width).toBeLessThanOrEqual(width);
+      expect(geometry.primary?.left || 0).toBeGreaterThanOrEqual(0);
+      expect(geometry.primary?.right || 0).toBeLessThanOrEqual((geometry.menu?.left || 0) + 1);
+      expect(geometry.menu?.right || 0).toBeLessThanOrEqual(geometry.viewport.width);
+      expect(geometry.height).toBeGreaterThanOrEqual(44);
+      expect(geometry.primary?.height || 0).toBeGreaterThanOrEqual(44);
+      expect(geometry.menu?.width || 0).toBeGreaterThanOrEqual(44);
+      expect(geometry.menu?.height || 0).toBeGreaterThanOrEqual(44);
+      if (width === 320) {
+        const bottomNavGeometry = await page.locator('.bottom-nav').evaluate((nav) => {
+          const rect = nav.getBoundingClientRect();
+          const items = [...nav.children].map((item) => item.getBoundingClientRect());
+          const control = nav.querySelector('.split-transaction-control')?.getBoundingClientRect();
+          const primary = nav.querySelector('.split-transaction-control__primary')?.getBoundingClientRect();
+          const menu = nav.querySelector('.split-transaction-control__menu')?.getBoundingClientRect();
+          const labels = [...nav.querySelectorAll<HTMLElement>('.nav-item > span:last-child, .split-transaction-control__primary')].map((label) => {
+            const labelRect = label.getBoundingClientRect();
+            const range = document.createRange();
+            range.selectNodeContents(label);
+            const textRect = range.getBoundingClientRect();
+            return { contained: textRect.left >= labelRect.left - 1 && textRect.right <= labelRect.right + 1, width: labelRect.width, textWidth: textRect.width };
+          });
+          const noOverlap = items.every((left, index) => items.slice(index + 1).every((right) => left.right <= right.left + 1 || right.right <= left.left + 1 || left.bottom <= right.top + 1 || right.bottom <= left.top + 1));
+          return {
+            rect: { left: rect.left, right: rect.right },
+            itemWidths: items.map((item) => item.width),
+            control: control ? { left: control.left, right: control.right } : null,
+            primary: primary ? { width: primary.width } : null,
+            menu: menu ? { width: menu.width } : null,
+            labels,
+            noOverlap,
+            documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+            viewportWidth: window.innerWidth,
+          };
+        });
+        expect(bottomNavGeometry.itemWidths).toHaveLength(4);
+        expect(bottomNavGeometry.itemWidths.every((itemWidth) => itemWidth >= 44)).toBe(true);
+        expect(bottomNavGeometry.primary?.width || 0).toBeGreaterThanOrEqual(44);
+        expect(bottomNavGeometry.menu?.width || 0).toBeGreaterThanOrEqual(44);
+        expect(bottomNavGeometry.rect.left).toBeGreaterThanOrEqual(0);
+        expect(bottomNavGeometry.rect.right).toBeLessThanOrEqual(bottomNavGeometry.viewportWidth);
+        expect(bottomNavGeometry.control?.left || 0).toBeGreaterThanOrEqual(0);
+        expect(bottomNavGeometry.control?.right || 0).toBeLessThanOrEqual(bottomNavGeometry.viewportWidth);
+        expect(bottomNavGeometry.noOverlap).toBe(true);
+        expect(bottomNavGeometry.labels.every((label) => label.contained)).toBe(true);
+        expect(bottomNavGeometry.documentWidth).toBeLessThanOrEqual(bottomNavGeometry.viewportWidth + 1);
+      }
+      const pageHeaderGeometry = await page.evaluate(() => {
+        const actions = document.querySelector('.expense-heading__actions');
+        const actionRects = actions ? [...actions.children].map((child) => child.getBoundingClientRect()) : [];
+        const split = document.querySelector('.expense-heading__actions .split-transaction-control')?.getBoundingClientRect();
+        const primary = document.querySelector('.expense-heading__actions .split-transaction-control__primary')?.getBoundingClientRect();
+        const menu = document.querySelector('.expense-heading__actions .split-transaction-control__menu')?.getBoundingClientRect();
+        const noOverlap = actionRects.every((left, index) => actionRects.slice(index + 1).every((right) => left.right <= right.left + 1 || right.right <= left.left + 1 || left.bottom <= right.top + 1 || right.bottom <= left.top + 1));
+        return { split, primary, menu, noOverlap, viewportWidth: window.innerWidth };
+      });
+      expect(pageHeaderGeometry.noOverlap).toBe(true);
+      expect(pageHeaderGeometry.split?.left || 0).toBeGreaterThanOrEqual(0);
+      expect(pageHeaderGeometry.primary?.right || 0).toBeLessThanOrEqual((pageHeaderGeometry.menu?.left || 0) + 1);
+      expect(pageHeaderGeometry.menu?.right || 0).toBeLessThanOrEqual(pageHeaderGeometry.viewportWidth);
+    }
+
   } finally {
     await context.close();
   }

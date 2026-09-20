@@ -1,19 +1,18 @@
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
 import { SignInButton, SignUpButton } from '@clerk/react';
-import { getNavigationContext } from './navigation';
+import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 
-type IconName = 'groups' | 'activity' | 'add' | 'more';
+type IconName = 'groups' | 'activity' | 'more';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
 let modalScrollLocks = 0;
 let modalPreviousOverflow = '';
 
 function Icon({ name }: { name: IconName }) {
-  if (name === 'add') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>;
   if (name === 'activity') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
   if (name === 'more') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
   return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
@@ -157,6 +156,38 @@ function AuthBanner() {
   return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 
+export function SplitTransactionControl({ groupId, online, compact = false, className = '', active = false, primaryCurrent = false }: { groupId?: string; online?: boolean; compact?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const detectedOnline = useOnlineStatus();
+  const navigation = getTransactionNavigation(groupId, online ?? detectedOnline);
+  const [selection, setSelection] = useState('');
+  const selectId = useId();
+  const alternativesAvailable = navigation.options.some((option) => !option.disabled && option.path);
+  const menuDisabled = !alternativesAvailable;
+  const unavailableReason = navigation.options.some((option) => option.label.includes('(online only)'))
+    ? 'Refunds and payments require a connection.'
+    : 'Choose a group first to record a refund or payment.';
+  const menuLabel = menuDisabled ? `More transaction types unavailable: ${unavailableReason}` : 'Choose transaction type';
+  const menuTitle = menuDisabled ? unavailableReason : 'Choose transaction type';
+  const descriptionId = `${selectId}-description`;
+  const chooseTransaction = (value: string) => {
+    const option = navigation.options.find((candidate) => candidate.value === value);
+    setSelection('');
+    if (!option || option.disabled || !option.path) return;
+    navigate(option.path);
+  };
+  useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
+  return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
+    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{compact ? 'Add' : navigation.primaryLabel}</Link>
+    <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
+      <option value="">More transaction types</option>
+      {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+    </select>
+    {menuDisabled ? <span id={descriptionId} className="sr-only">{unavailableReason}</span> : null}
+  </div>;
+}
+
 export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();
@@ -166,23 +197,25 @@ export function TopBar() {
 
 function DesktopNav() {
   const location = useLocation();
+  const online = useOnlineStatus();
   const context = getNavigationContext(location.pathname, location.search);
   return <nav className="desktop-nav" aria-label="Primary navigation">
     <Link className="desktop-nav__item" to={context.primaryPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}>Groups</Link>
      <Link className="desktop-nav__item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}>History</Link>
-     <Link className="desktop-nav__item desktop-nav__add" to={context.addPath} aria-current={context.activeSection === 'add' ? 'page' : undefined}><Icon name="add" /><span>Add</span></Link>
-    <Link className="desktop-nav__item" to="/settings" aria-current={context.activeSection === 'settings' ? 'page' : undefined}>Settings</Link>
+     <SplitTransactionControl className="desktop-nav__add" groupId={context.groupContext?.id} online={online} compact active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} />
+     <Link className="desktop-nav__item" to="/settings" aria-current={context.activeSection === 'settings' ? 'page' : undefined}>Settings</Link>
   </nav>;
 }
 
 export function BottomNav() {
   const location = useLocation();
+  const online = useOnlineStatus();
   const context = getNavigationContext(location.pathname, location.search);
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
       <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>History</span></Link>
-      <Link className="nav-item nav-item--add" to={context.addPath} aria-label="Add transaction" aria-current={context.activeSection === 'add' ? 'page' : undefined}><span className="nav-item__capsule"><Icon name="add" /><span>Add</span></span></Link>
+      <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
      <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>
   </nav>;
 }

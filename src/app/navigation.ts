@@ -18,6 +18,20 @@ export type NavigationRoute =
 
 export type NavigationSection = 'groups' | 'activity' | 'add' | 'settle' | 'settings';
 
+export type TransactionNavigationOption = {
+  value: 'refund' | 'payment';
+  label: string;
+  path?: string;
+  disabled: boolean;
+};
+
+export type TransactionNavigation = {
+  primaryPath: string;
+  primaryLabel: '+ Add expense' | 'Add transaction';
+  primaryAriaLabel: 'Add expense' | 'Add transaction';
+  options: TransactionNavigationOption[];
+};
+
 export type GroupNavigationContext = {
   id: string;
   overviewPath: string;
@@ -36,6 +50,8 @@ export type NavigationContext = {
   addLabel: 'Add friend' | 'Add expense' | 'Add transaction';
   /** The primary destination for this navigation context. */
   primaryPath: string;
+  /** Whether the Add expense link points at the exact current expense-new route. */
+  primaryIsCurrent: boolean;
   /** The route-specific destination, when one exists. */
   contextualPath?: string;
   groupsPath: string;
@@ -79,6 +95,29 @@ export function transactionActivityPath(groupId: unknown, item: { type: string; 
   return expenseDetailPath(groupId, item.entityId);
 }
 
+/**
+ * Supplies the expense-first transaction destinations used by both the split
+ * control and the full chooser. Global navigation intentionally keeps the
+ * chooser as its primary destination because the other transaction types need
+ * a group first.
+ */
+export function getTransactionNavigation(groupId?: unknown, online = true): TransactionNavigation {
+  const validGroupId = typeof groupId === 'string' && groupId.trim().length > 0 && !['undefined', 'null'].includes(groupId.trim().toLowerCase())
+    ? encodeURIComponent(groupId.trim())
+    : undefined;
+  const scoped = Boolean(validGroupId);
+  const unavailableReason = !scoped ? ' (choose a group first)' : !online ? ' (online only)' : '';
+  return {
+    primaryPath: scoped ? `/groups/${validGroupId}/expense/new` : '/add',
+    primaryLabel: scoped ? '+ Add expense' : 'Add transaction',
+    primaryAriaLabel: scoped ? 'Add expense' : 'Add transaction',
+    options: [
+      { value: 'refund', label: `Refund/reimbursement${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/refund/new` : undefined, disabled: !scoped || !online },
+      { value: 'payment', label: `Payment between members${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/settle` : undefined, disabled: !scoped || !online },
+    ],
+  };
+}
+
 function decodeSegment(segment: string) {
   try {
     return decodeURIComponent(segment);
@@ -92,7 +131,8 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   const path = pathname.split(/[?#]/, 1)[0].replace(/\/{2,}/g, '/').replace(/\/+$/, '') || HOME_PATH;
   const segments = path.split('/').filter(Boolean).map(decodeSegment);
   const queryGroupId = path === '/activity' ? new URLSearchParams(search).get('group') || undefined : undefined;
-  const groupId = segments[0] === 'groups' && segments[1] ? segments[1] : queryGroupId;
+  const routeGroupId = segments[0] === 'groups' && segments[1] ? segments[1] : undefined;
+  const groupId = routeGroupId || queryGroupId;
   const group = groupId
     ? {
         id: groupId,
@@ -137,20 +177,23 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
        : route === 'expense-detail' || route === 'credit-detail' ? path
             : group.overviewPath
     : route === 'settings' ? '/settings' : undefined;
+  const groupContext = routeGroupId ? group : undefined;
+  const primaryIsCurrent = Boolean(groupContext && route === 'new-expense' && segments[2] === 'expense' && segments[3] === 'new');
 
   return {
     route,
     ...(groupId ? { groupId, group } : {}),
     activeSection,
-    ...(group ? { groupContext: group } : {}),
-    addAction: 'add-transaction',
-    addLabel: 'Add transaction',
+    ...(groupContext ? { groupContext } : {}),
+    addAction: groupContext ? 'new-expense' : 'add-transaction',
+    addLabel: groupContext ? 'Add expense' : 'Add transaction',
     primaryPath: HOME_PATH,
+    primaryIsCurrent,
     contextualPath,
     groupsPath: HOME_PATH,
     activityPath: '/activity',
     historyPath: canonicalActivityPath,
-    addPath: group?.addPath || '/add',
+    addPath: groupContext?.addPath || '/add',
     morePath: '/settings',
   };
 }

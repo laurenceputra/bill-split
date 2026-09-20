@@ -159,6 +159,7 @@ const scenarios: Scenario[] = [
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] }, expandedAudit: { entityType: 'expense', entityId: ids.dinner, content: 'Updated expense' } },
+  { name: 'refund-form', path: `/groups/${ids.rich}/refund/new`, auth: DEV_EMAIL, context: 'RefundForm / linked expense-first refund state and responsive money-flow controls', expected: { mode: 'normal', heading: 'Record money back', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
   { name: 'settlement-detail-history', path: `/groups/${ids.rich}/settlements/00000000-0000-4000-8000-000000005001`, auth: DEV_EMAIL, context: 'SettlementDetail / edited payment with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'paid', content: 'View audit history', apiPaths: [apiPaths.me, apiPaths.settlement('00000000-0000-4000-8000-000000005001'), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] }, expandedAudit: { entityType: 'settlement', entityId: '00000000-0000-4000-8000-000000005001', content: 'Updated settlement' } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'History changes / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'History', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.activity(ids.rich)] } },
@@ -612,6 +613,50 @@ async function assertCustomInsightAccessibility(page: Page, invalidFromUrl: bool
   expect(new Set(finalIds).size).toBe(finalIds.length);
 }
 
+async function populateRefundAuditState(page: Page) {
+  await page.getByLabel('Expense 1', { exact: true }).selectOption(ids.dinner);
+  await expect(page.getByLabel('Expense 1', { exact: true })).toHaveValue(ids.dinner);
+  await page.getByLabel('How much? (USD)', { exact: true }).fill('42.00');
+  await expect(page.getByLabel('Applied amount for expense 1 (USD)', { exact: true })).toHaveValue('42.00');
+  await page.getByLabel('Recipient 1', { exact: true }).selectOption('00000000-0000-4000-8000-000000002003');
+  await page.getByLabel('Recipient amount 1 (USD)', { exact: true }).fill('42.00');
+  await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
+  await expect(page.locator('.refund-preview-person')).toHaveCount(3);
+  await expect(page.locator('.refund-preview-list')).toContainText('Received');
+  await expect(page.locator('.refund-preview-list')).toContainText('Cost reduction');
+  await expect(page.locator('.refund-preview-list')).toContainText('Net balance effect');
+}
+
+async function populateStandaloneRefundAuditState(page: Page) {
+  const pathSelect = page.getByLabel('Apply this to', { exact: true });
+  await pathSelect.selectOption('standalone');
+  await expect(pathSelect).toHaveValue('standalone');
+  await expect(page.getByText('Standalone records do not change an expense.', { exact: true })).toBeVisible();
+  const modeSelect = page.getByLabel('How was it handled?', { exact: true });
+  await expect(modeSelect.locator('option[value="direct_provider_offset"]')).toBeDisabled();
+  await expect(page.getByLabel('Affected member 1', { exact: true })).toBeVisible();
+  await page.getByLabel('Affected member 1', { exact: true }).selectOption('00000000-0000-4000-8000-000000002004');
+  await page.getByLabel('Affected member amount 1 (USD)', { exact: true }).fill('42.00');
+  await expect(page.getByLabel('Affected member amount 1 (USD)', { exact: true })).toHaveValue('42.00');
+  await expect(page.getByText('Standalone mode requires explicit recipient and affected-member allocations.', { exact: true })).toBeVisible();
+}
+
+async function populateLinkedDirectProviderRefundAuditState(page: Page) {
+  const pathSelect = page.getByLabel('Apply this to', { exact: true });
+  await pathSelect.selectOption('linked');
+  await expect(pathSelect).toHaveValue('linked');
+  await page.getByLabel('Expense 1', { exact: true }).selectOption(ids.dinner);
+  await expect(page.getByLabel('Expense 1', { exact: true })).toHaveValue(ids.dinner);
+  await page.getByLabel('How much? (USD)', { exact: true }).fill('42.00');
+  await page.getByLabel('Applied amount for expense 1 (USD)', { exact: true }).fill('42.00');
+  const modeSelect = page.getByLabel('How was it handled?', { exact: true });
+  await modeSelect.selectOption('direct_provider_offset');
+  await expect(modeSelect).toHaveValue('direct_provider_offset');
+  await expect(page.locator('.refund-preview-list')).toContainText('Payment reduction');
+  await expect(page.locator('.refund-preview-list')).toContainText('Cost reduction');
+  await expect(page.getByText('Both payer and affected shares are derived from linked expenses.', { exact: true })).toBeVisible();
+}
+
 async function saveScreenshot(page: Page, artifactDirectory: string, name: string, failures: HarnessFailure[], scenario: Scenario, route: string, viewport: Viewport) {
   const directory = path.join(artifactDirectory, 'screenshots');
   await mkdir(directory, { recursive: true });
@@ -630,6 +675,19 @@ async function reportForPage(page: Page, scenario: Scenario, route: string, view
     failures.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route, viewport, detail: `Geometry audit failed: ${error instanceof Error ? error.message : String(error)}` });
   }
   await saveScreenshot(page, artifactDirectory, `${scenario.name}-${route.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '')}`, failures, scenario, route, viewport);
+}
+
+async function captureRefundAuditState(page: Page, scenario: Scenario, state: { name: string; routeSuffix: string; context: string; content: string; populate: (page: Page) => Promise<void> }, observations: ApiObservation[], viewport: Viewport, artifactDirectory: string, findings: Finding[], failures: HarnessFailure[], coverage: Coverage[]) {
+  const route = `${scenario.path} ${state.routeSuffix}`;
+  try {
+    await state.populate(page);
+    const stateScenario: Scenario = { ...scenario, name: state.name, context: state.context, expected: { ...scenario.expected, content: state.content } };
+    await assertRendered(page, stateScenario, observations, viewport);
+    coverage.push({ scenarioName: stateScenario.name, authState: authState(stateScenario.auth), route, viewport, context: stateScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+    await reportForPage(page, stateScenario, route, viewport, artifactDirectory, findings, failures);
+  } catch (error) {
+    failures.push({ scenarioName: state.name, authState: authState(scenario.auth), route, viewport, detail: `Refund state could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+  }
 }
 
 function dedupeFindings(findings: Finding[]) {
@@ -737,9 +795,34 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
            if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=summary'))) throw new Error('Invalid or incomplete custom insight range made a selected-period summary request');
           await assertCustomInsightAccessibility(page, scenario.name === 'invalid-custom-insights');
         }
-         coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
-         await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
-         if (scenario.name === 'group-creation') {
+          coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+          await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+          if (scenario.name === 'refund-form') {
+            try {
+              await populateRefundAuditState(page);
+              const populatedScenario: Scenario = { ...scenario, name: 'refund-form-populated', context: 'RefundForm / selected expense, recipient, running application status, and grouped money-flow preview', expected: { ...scenario.expected, content: 'Fully applied' } };
+              await assertRendered(page, populatedScenario, observations, viewport);
+              coverage.push({ scenarioName: populatedScenario.name, authState: authState(populatedScenario.auth), route: `${scenario.path} [populated]`, viewport, context: populatedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+              await reportForPage(page, populatedScenario, `${scenario.path} [populated]`, viewport, artifactDirectory, findings, failures);
+            } catch (error) {
+              failures.push({ scenarioName: 'refund-form-populated', authState: authState(scenario.auth), route: `${scenario.path} [populated]`, viewport, detail: `Populated refund state could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+            }
+            await captureRefundAuditState(page, scenario, {
+              name: 'refund-form-standalone-member',
+              routeSuffix: '[standalone member]',
+              context: 'RefundForm / standalone member reimbursement with provider adjustment unavailable',
+              content: 'Standalone records do not change an expense.',
+              populate: populateStandaloneRefundAuditState,
+            }, observations, viewport, artifactDirectory, findings, failures, coverage);
+            await captureRefundAuditState(page, scenario, {
+              name: 'refund-form-linked-direct-provider',
+              routeSuffix: '[linked direct provider]',
+              context: 'RefundForm / linked direct-provider adjustment with derived payer and cost reductions',
+              content: 'Payment reduction',
+              populate: populateLinkedDirectProviderRefundAuditState,
+            }, observations, viewport, artifactDirectory, findings, failures, coverage);
+          }
+          if (scenario.name === 'group-creation') {
            try {
              await page.getByRole('button', { name: 'Add another person' }).click();
              await page.getByLabel('Name').nth(0).fill('Taylor Reed');

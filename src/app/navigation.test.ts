@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityDetailPath, expenseDetailPath, getNavigationContext } from './navigation';
+import { activityDetailPath, expenseDetailPath, getNavigationContext, getTransactionNavigation } from './navigation';
 
 describe('expenseDetailPath', () => {
   it('requires both IDs and encodes each path segment', () => {
@@ -47,14 +47,31 @@ describe('getNavigationContext', () => {
     expect(getNavigationContext('/groups/group-123/add')).toMatchObject({ route: 'add-transaction', activeSection: 'add', addPath: '/groups/group-123/add', groupId: 'group-123' });
   });
 
+  it('builds expense-first scoped destinations and preserves a global chooser fallback', () => {
+    expect(getTransactionNavigation('group/123')).toEqual({
+      primaryPath: '/groups/group%2F123/expense/new',
+      primaryLabel: '+ Add expense',
+      primaryAriaLabel: 'Add expense',
+      options: [
+        { value: 'refund', label: 'Refund/reimbursement', path: '/groups/group%2F123/refund/new', disabled: false },
+        { value: 'payment', label: 'Payment between members', path: '/groups/group%2F123/settle', disabled: false },
+      ],
+    });
+    const global = getTransactionNavigation();
+    expect(global.primaryPath).toBe('/add');
+    expect(global.primaryAriaLabel).toBe('Add transaction');
+    expect(global.options.every((option) => option.disabled && option.path === undefined)).toBe(true);
+    expect(getTransactionNavigation('group-123', false).options.every((option) => option.disabled && option.label.includes('(online only)'))).toBe(true);
+  });
+
   it('classifies every group destination with explicit context', () => {
     const context = getNavigationContext('/groups/group-123/activity');
     expect(context).toMatchObject({
       route: 'activity',
       groupId: 'group-123',
       activeSection: 'activity',
-      addAction: 'add-transaction',
-      addLabel: 'Add transaction',
+      addAction: 'new-expense',
+      addLabel: 'Add expense',
       groupsPath: '/',
       activityPath: '/activity',
       addPath: '/groups/group-123/add',
@@ -89,6 +106,25 @@ describe('getNavigationContext', () => {
       historyPath: '/activity?group=group-123&view=insights&period=all&currency=EUR',
       contextualPath: '/groups/group-123/activity',
     });
+  });
+
+  it('only marks the exact scoped expense-new destination as the primary current page', () => {
+    expect(getNavigationContext('/groups/group-123/expense/new')).toMatchObject({ primaryIsCurrent: true, addPath: '/groups/group-123/add' });
+    for (const path of ['/groups/group-123/refund/new', '/groups/group-123/refund/credit-1/edit', '/groups/group-123/expense/expense-1', '/groups/group-123/add', '/groups/group-123/settle']) {
+      expect(getNavigationContext(path).primaryIsCurrent).toBe(false);
+    }
+  });
+
+  it('does not promote a query-only History group into a scoped Add destination', () => {
+    const context = getNavigationContext('/activity', '?group=group-123&view=transactions');
+    expect(context).toMatchObject({
+      groupId: 'group-123',
+      addAction: 'add-transaction',
+      addLabel: 'Add transaction',
+      addPath: '/add',
+      historyPath: '/activity?group=group-123&view=transactions',
+    });
+    expect(context.groupContext).toBeUndefined();
   });
 
   it.each([

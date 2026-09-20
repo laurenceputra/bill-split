@@ -163,10 +163,30 @@ describe('responsive navigation layout contract', () => {
   });
 
   it('extends the active add highlight through the safe-area while keeping content in the nav item', () => {
-    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\]::before\s*\{[\s\S]*top: calc\(-1 \* var\(--space-1\)\);[\s\S]*bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\);[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;/);
-    expect(css).toMatch(/\.nav-item--add\[aria-current="page"\] \.nav-item__capsule\s*\{[\s\S]*z-index: 1;[\s\S]*background: transparent;/);
-    expect(css).toMatch(/\.nav-item--add:not\(\[aria-current="page"\]\):hover \.nav-item__capsule\s*\{/);
-    expect(uiSource).toContain('className="nav-item nav-item--add"');
+    expect(css).toMatch(/\.nav-item--add--active::before\s*\{[\s\S]*top: calc\(-1 \* var\(--space-1\)\);[\s\S]*bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\);[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;/);
+    expect(css).toMatch(/\.nav-item--add--active \.nav-item__capsule\s*\{[\s\S]*z-index: 1;[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.nav-item--add:not\(\.nav-item--add--active\):hover \.nav-item__capsule\s*\{/);
+    expect(uiSource).toContain('nav-item nav-item--add');
+  });
+
+  it('keeps split-select popup options readable and usable in forced colors', () => {
+    const selectRule = css.match(/\.split-transaction-control__menu\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+    expect(selectRule).toContain('font-size: max(16px, 1rem);');
+    expect(selectRule).toContain('overflow: hidden;');
+    expect(selectRule).toContain('text-indent: -9999px;');
+    expect(selectRule).not.toMatch(/font-size:\s*0(?:px)?\s*;/);
+    expect(css).toMatch(/\.split-transaction-control__menu\s*\{[\s\S]*-webkit-appearance:\s*none;[\s\S]*appearance:\s*none;[\s\S]*background-repeat:\s*no-repeat;/);
+    expect(css).toMatch(/\.split-transaction-control__menu option\s*\{[\s\S]*background-color: var\(--color-surface\);[\s\S]*color: var\(--color-ink\);[\s\S]*font: 1rem\/1\.4 var\(--font-body\);[\s\S]*text-indent: 0;/);
+    expect(css).toMatch(/\.split-transaction-control__menu option:disabled\s*\{[\s\S]*background-color: var\(--color-surface-muted\);[\s\S]*color: var\(--color-ink-muted\);/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.split-transaction-control__menu\s*\{[\s\S]*-webkit-appearance:\s*menulist;[\s\S]*appearance:\s*auto;[\s\S]*background-image: none;[\s\S]*color: ButtonText;[\s\S]*overflow: visible;[\s\S]*text-indent: 0;/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.split-transaction-control__menu option,[\s\S]*\.split-transaction-control__menu option:disabled\s*\{[\s\S]*background-color: Canvas;[\s\S]*color: CanvasText;[\s\S]*font: 1rem\/1\.4 var\(--font-body\);[\s\S]*text-indent: 0;/);
+  });
+
+  it('reserves a full-width split control column in the mobile navigation', () => {
+    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) minmax\(calc\(var\(--control-min-height\) \+ 44px \+ var\(--space-2\)\), 1\.35fr\) minmax\(44px, 1fr\);/);
+    expect(css).toMatch(/\.nav-item > span:last-child\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-width: 0;/);
+    expect(css).toMatch(/\.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);/);
   });
 
   it('keeps the activity filter separated from the result list at every responsive size', () => {
@@ -208,6 +228,11 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
+  });
+
+  it('stacks refund allocation rows below the 56rem breakpoint with matching specificity', () => {
+    expect(css).toMatch(/\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) minmax\(7rem, 10rem\) auto;/);
+    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*grid-template-areas:/);
   });
 
   it('keeps the public landing separate from the private shell', () => {
