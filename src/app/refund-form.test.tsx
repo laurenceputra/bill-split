@@ -183,7 +183,7 @@ describe('refund expense picker behavior', () => {
     expect(refundModeOptions(true).find((option) => option.value === 'direct_provider_offset')?.disabled).toBe(false);
   });
 
-  it('filters duplicate people per allocation side while allowing the same person across sides', () => {
+  it('uses exact user-facing duplicate messages for each allocation side', () => {
     expect(duplicateRefundAllocationTypes([
       { personId: 'one', allocationType: 'recipient' },
       { personId: 'one', allocationType: 'recipient' },
@@ -193,7 +193,21 @@ describe('refund expense picker behavior', () => {
     expect(refundAllocationDuplicateError([
       { personId: 'one', allocationType: 'recipient' },
       { personId: 'one', allocationType: 'recipient' },
-    ])).toContain('Choose each person only once');
+    ])).toBe('Choose each person only once within recipient allocations.');
+    expect(refundAllocationDuplicateError([
+      { personId: 'one', allocationType: 'beneficiary' },
+      { personId: 'one', allocationType: 'beneficiary' },
+    ])).toBe('Choose each person only once within affected-member allocations.');
+    expect(refundAllocationDuplicateError([
+      { personId: 'one', allocationType: 'recipient' },
+      { personId: 'one', allocationType: 'recipient' },
+      { personId: 'two', allocationType: 'beneficiary' },
+      { personId: 'two', allocationType: 'beneficiary' },
+    ])).toBe('Choose each person only once within recipient allocations and within affected-member allocations. The same person may be selected once on each side.');
+    expect(refundAllocationDuplicateError([
+      { personId: 'one', allocationType: 'recipient' },
+      { personId: 'one', allocationType: 'beneficiary' },
+    ])).toBeUndefined();
     const markup = renderToStaticMarkup(<AllocationRows
       rows={[{ id: 'recipient-1', personId: 'one', allocationType: 'recipient', amount: '1.00' }, { id: 'recipient-2', personId: '', allocationType: 'recipient', amount: '' }]}
       label="Recipient" currency="USD" people={[{ personId: 'one', name: 'One' }, { personId: 'two', name: 'Two' }]}

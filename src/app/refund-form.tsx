@@ -59,7 +59,13 @@ export function duplicateRefundAllocationTypes(rows: Array<Pick<Allocation, 'per
 
 export function refundAllocationDuplicateError(rows: Array<Pick<Allocation, 'personId' | 'allocationType'>>) {
   const duplicateTypes = duplicateRefundAllocationTypes(rows);
-  return duplicateTypes.length ? `Choose each person only once within the ${duplicateTypes.join(' and ')} allocations.` : undefined;
+  if (!duplicateTypes.length) return undefined;
+  if (duplicateTypes.length === 1) {
+    return duplicateTypes[0] === 'recipient'
+      ? 'Choose each person only once within recipient allocations.'
+      : 'Choose each person only once within affected-member allocations.';
+  }
+  return 'Choose each person only once within recipient allocations and within affected-member allocations. The same person may be selected once on each side.';
 }
 
 export function refundAllocationRowsForValidation(rows: Allocation[], mode: CreditInput['delivery_mode'], linked: boolean, adjustBenefits: boolean) {

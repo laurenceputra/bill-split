@@ -33,3 +33,41 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:integration
+
+  screenshot-audit:
+    if: github.event_name == 'pull_request'
+    name: PR screenshot audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run screenshot-producing audit matrix
+        run: npx playwright test tests/e2e/audit.spec.ts --grep "browser audit matrix captures validated routes, geometry, and full-page screenshots"
+      - name: Check screenshot audit outputs
+        if: always()
+        shell: bash
+        run: |
+          for path in test-results/audit/normal/screenshots test-results/audit/normal/audit-findings.json playwright-report; do
+            if [[ -e "$path" ]]; then
+              echo "Audit output found: $path"
+            else
+              echo "::warning::Expected audit output is absent: $path"
+            fi
+          done
+      - name: Upload PR screenshot audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-${{ github.event.pull_request.number }}-screenshot-audit
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            test-results/audit/normal/screenshots/**
+            test-results/audit/normal/audit-findings.json
+            playwright-report/**

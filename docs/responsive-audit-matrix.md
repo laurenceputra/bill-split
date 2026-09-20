@@ -27,6 +27,14 @@ transitions, picker filtering, defaults, payload construction, Add-route cache
 contracts, and focused split-control route/disabled-option behavior. The
 Playwright audit scenario list represents the refund route across its mobile,
 breakpoint-boundary, and desktop viewport set, including initial and populated
-linked-member, standalone-member, and linked direct-provider states. This branch
-has not run that browser audit; screenshots and responsive findings therefore
-remain pending.
+linked-member, standalone-member, and linked direct-provider states. On pull
+requests, the `PR screenshot audit` job attempts to run that browser audit and,
+when outputs are produced, uploads them in the artifact named
+`pr-<number>-screenshot-audit`. Screenshots are under
+`test-results/audit/normal/screenshots/`, with normal findings JSON and the
+Playwright HTML report included for diagnostics. Setup or audit failure may
+produce only partial outputs or no outputs, with warnings; check the job status
+and artifact in the PR to determine what ran and what was captured.
+Native `<select>` popup menus are browser/OS UI and are not reliably captured by
+full-page screenshots, so their open-popup appearance still requires manual
+visual inspection.
