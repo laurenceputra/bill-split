@@ -208,7 +208,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);[\s\S]*width: var\(--control-min-height\);/);
     expect(css).toMatch(/\.nav-add-icon\s*\{[\s\S]*width: 1rem;[\s\S]*height: 1rem;/);
-    expect(css).toMatch(/\.nav-add-inline\s*\{[\s\S]*display: inline-flex;[\s\S]*align-items: baseline;[\s\S]*gap: var\(--space-1\);/);
+    expect(css).toMatch(/\.nav-add-stack\s*\{[\s\S]*display: inline-flex;[\s\S]*flex-direction: column;[\s\S]*align-items: center;[\s\S]*gap: 4px;[\s\S]*line-height: 1\.5;/);
     expect(css).toMatch(/\.nav-add-label\s*\{[\s\S]*font-size: var\(--text-xs\);/);
     expect(css).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
   });
@@ -254,6 +254,7 @@ describe('responsive navigation layout contract', () => {
   it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
     expect(768).toBeGreaterThanOrEqual(48 * 16);
     expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);
+    expect(css).toMatch(/@media \(min-width: 30\.0625rem\) and \(max-width: 47\.999rem\)[\s\S]*\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*padding-bottom: calc\(var\(--space-2\) \+ 1px\);/);
     expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);

@@ -179,7 +179,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-add-inline"><svg className="nav-add-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span className="nav-add-label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-add-stack"><svg className="nav-add-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span className="nav-add-label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}

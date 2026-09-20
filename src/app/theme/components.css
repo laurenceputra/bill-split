@@ -2931,9 +2931,9 @@ input[inputmode="decimal"] {
   border-color: var(--color-primary);
   border-radius: var(--radius-lg) 0 0 0;
   background: var(--color-primary);
-  /* The raised tile is taller than the neighboring nav cells; keep the
-     inline label on their text line instead of centering it in the tile. */
-  padding: 0 var(--space-1) calc(var(--space-2) + 1px);
+  /* The raised tile is taller than the neighboring nav cells; anchor the
+     stacked label to their text line instead of centering the stack. */
+  padding: 0 var(--space-1) calc(var(--space-2) - 2px);
   white-space: nowrap;
 }
 
@@ -2946,6 +2946,20 @@ input[inputmode="decimal"] {
   border-left-color: rgba(255, 255, 255, 0.45);
   border-radius: 0 var(--radius-lg) 0 0;
   background-color: var(--color-primary);
+}
+
+@media (min-width: 48rem) and (max-width: 55.999rem) {
+  .bottom-nav .nav-item__capsule .split-transaction-control__primary {
+    /* The tablet nav uses the larger label metrics and a taller bar. */
+    padding-bottom: calc(var(--space-2) + 1px);
+  }
+}
+
+@media (min-width: 30.0625rem) and (max-width: 47.999rem) {
+  .bottom-nav .nav-item__capsule .split-transaction-control__primary {
+    /* Match the larger label metrics introduced above the narrow-mobile range. */
+    padding-bottom: calc(var(--space-2) + 1px);
+  }
 }
 
 .bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__primary:focus-visible,
@@ -3041,10 +3055,12 @@ input[inputmode="decimal"] {
   stroke-width: 2;
 }
 
-.nav-add-inline {
+.nav-add-stack {
   display: inline-flex;
-  align-items: baseline;
-  gap: var(--space-1);
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.5;
 }
 
 .nav-add-label {
