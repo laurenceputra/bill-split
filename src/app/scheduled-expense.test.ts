@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleSummary, timezoneLabel, timezoneOffsetLabel, timezoneOptions, timezoneSelectValue, timezoneValueFromSelection } from './scheduled-expense';
+import { browserTimezone, formatScheduleDate, otherTimezoneValue, previewScheduleDates, scheduleContinuationText, scheduleOverviewMetadata, scheduleSummary, timezoneLabel, timezoneOffsetLabel, timezoneOptions, timezoneSelectValue, timezoneValueFromSelection } from './scheduled-expense';
 
 describe('scheduled expense UI helpers', () => {
   it('previews weekly dates using the selected weekdays', () => {
@@ -28,6 +28,14 @@ describe('scheduled expense UI helpers', () => {
     expect(scheduleContinuationText(null, ['2026-01-05'])).toBe('It continues until you pause or cancel it.');
     expect(scheduleContinuationText('2026-02-01', ['2026-01-05'])).toMatch(/^It continues through /);
     expect(scheduleContinuationText('2026-01-05', ['2026-01-05'])).toMatch(/^It ends on /);
+  });
+
+  it('labels paginated schedule metadata as partial', () => {
+    expect(scheduleOverviewMetadata(2, '2026-01-05', true)).toBe('2 active shown · Next shown Jan 5, 2026');
+  });
+
+  it('keeps concise global wording when schedules are unpaginated', () => {
+    expect(scheduleOverviewMetadata(2, '2026-01-05', false)).toBe('2 active · Next Jan 5, 2026');
   });
 
   it('keeps IANA timezone IDs while showing fractional UTC offsets', () => {

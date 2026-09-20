@@ -144,7 +144,7 @@ function displayedFixtureTrend(fixture: ReturnType<typeof populatedInsightFixtur
 }
 
 const privateHomeApis = [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights];
-const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id), apiPaths.spendingInsights];
+const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id)];
 const groupManagementApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.invitations(id)];
 const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
@@ -327,7 +327,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       if (element.scrollWidth > element.clientWidth + 1 || box.left < -1 || box.right > viewport.width + 1) add('long-text-containment', 'major', `Long text overflows its box (${element.scrollWidth}px content in ${element.clientWidth}px) or viewport bounds`, selector(element));
     }
 
-    const surfaceRootSelector = '.surface,.card,.card-surface,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-summary-card,.insight-category-trends,.compact-balances,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"],.route-view--group-management > section,.route-view--group-management > #settings > section,.route-view--settings > section';
+    const surfaceRootSelector = '.surface,.card,.card-surface,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-summary-card,.insight-category-trends,.compact-balances,.group-overview-card,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"],.route-view--group-management > section,.route-view--group-management > #settings > section,.route-view--settings > section';
     for (const element of Array.from(document.querySelectorAll(surfaceRootSelector)).filter(visible)) {
       const style = getComputedStyle(element);
       const padding = Math.min(parseFloat(style.paddingTop), parseFloat(style.paddingRight), parseFloat(style.paddingBottom), parseFloat(style.paddingLeft));
@@ -950,6 +950,132 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The audit must not contain critical or major geometry findings').toEqual([]);
   expect(failures, 'The audit matrix should complete without harness failures').toEqual([]);
+});
+
+test('group overview keeps storyboard modules flat, ordered, and responsive', async ({ authenticatedPage: page }) => {
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto(`${BASE_URL}/groups/${ids.rich}`);
+    await expect(page.locator('.group-overview-card')).toHaveCount(4);
+    await expect(page.locator('.group-overview-card--schedules .schedule-overview-list')).toBeVisible();
+    await expect(page.locator('.group-overview-card--schedules .schedule-overview-row')).toHaveCount(1);
+    await expect(page.getByRole('list', { name: 'People in this group' })).toBeVisible();
+    expect(await page.locator('.transaction-row--overview').count()).toBeGreaterThan(0);
+    await expect(page.locator('.group-overview-tools')).toHaveJSProperty('open', false);
+
+    const structure = await page.locator('.group-overview-columns').evaluate((element) => {
+      const order = Array.from(element.querySelectorAll(':scope .group-overview-card')).map((card) => card.className);
+      const columns = Array.from(element.children).map((column) => ({ className: column.className, cards: Array.from(column.querySelectorAll(':scope > .group-overview-card')).map((card) => card.className) }));
+      const paintedDescendants = Array.from(element.querySelectorAll('.group-overview-card .card-surface,.group-overview-card .surface,.group-overview-card .card,.group-overview-card .group-overview-card')).length;
+      return { order, columns, paintedDescendants, display: getComputedStyle(element).gridTemplateColumns };
+    });
+    expect(structure.order.map((name) => name.includes('balances') ? 'balances' : name.includes('transactions') ? 'transactions' : name.includes('schedules') ? 'schedules' : 'people')).toEqual(['balances', 'transactions', 'schedules', 'people']);
+    expect(structure.paintedDescendants).toBe(0);
+    if (viewport.width < 896) {
+      expect(structure.columns).toHaveLength(2);
+      expect(structure.display.split(' ').filter(Boolean)).toHaveLength(1);
+    } else {
+      expect(structure.columns[0].cards.map((name) => name.includes('balances') ? 'balances' : name.includes('transactions') ? 'transactions' : name)).toEqual(['balances', 'transactions']);
+      expect(structure.columns[1].cards.map((name) => name.includes('schedules') ? 'schedules' : name.includes('people') ? 'people' : name)).toEqual(['schedules', 'people']);
+      expect(structure.display.split(' ').filter(Boolean)).toHaveLength(2);
+    }
+
+    const geometry = await page.locator('.route-view--group-overview').evaluate((route) => {
+      const visible = (element: Element) => {
+        const style = getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+      };
+      const box = (element: Element) => {
+        const value = element.getBoundingClientRect();
+        return { left: value.left, right: value.right, top: value.top, bottom: value.bottom, width: value.width, height: value.height };
+      };
+      const cards = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card'));
+      const header = route.querySelector<HTMLElement>('.group-overview-header');
+      const grid = route.querySelector<HTMLElement>('.group-overview-columns');
+      const tools = route.querySelector<HTMLElement>('.group-overview-tools');
+      const actions = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-header .button')).filter(visible).map(box);
+      const cardsWithStyles = cards.map((card) => {
+        const style = getComputedStyle(card);
+        return { ...box(card), radius: parseFloat(style.borderTopLeftRadius), padding: parseFloat(style.paddingTop), border: parseFloat(style.borderTopWidth), background: style.backgroundColor, shadow: style.boxShadow };
+      });
+      const balanceAmounts = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card--balances .balance-card .money')).map((element) => ({ fontSize: parseFloat(getComputedStyle(element).fontSize), background: getComputedStyle(element.parentElement || element).backgroundColor }));
+      const balanceStates = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card--balances .balance-card--positive,.group-overview-card--balances .balance-card--debt')).map((element) => ({ background: getComputedStyle(element).backgroundColor, amountFontSize: parseFloat(getComputedStyle(element.querySelector('.money') || element).fontSize) }));
+      const transactions = Array.from(route.querySelectorAll<HTMLElement>('.transaction-row--overview'));
+      const transactionTexts = transactions.map((transaction) => transaction.textContent || '');
+      const peoplePreview = route.querySelector<HTMLElement>('.people-preview-list');
+      const peopleRows = Array.from(peoplePreview?.querySelectorAll<HTMLElement>('.people-preview-row') || []).filter(visible).map((row) => row.textContent || '');
+      const peopleOverflowElement = peoplePreview?.querySelector<HTMLElement>('.people-preview-overflow');
+      const peopleOverflow = peopleOverflowElement && visible(peopleOverflowElement) ? peopleOverflowElement.textContent || '' : '';
+      const categoryStyles = transactions.flatMap((transaction) => Array.from(transaction.querySelectorAll<HTMLElement>('.transaction-row__category')).filter(visible).map((category) => {
+        const style = getComputedStyle(category);
+        return { background: style.backgroundColor, radius: parseFloat(style.borderTopLeftRadius), fontSize: parseFloat(style.fontSize) };
+      }));
+      const overviewLinks = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card a,.group-overview-card summary,.group-overview-tools summary')).filter(visible);
+      const firstCard = cards[0];
+      const firstAction = route.querySelector<HTMLElement>('.group-overview-header .button');
+      return {
+        titleFontSize: parseFloat(getComputedStyle(route.querySelector('h1')!).fontSize),
+        metaFontSize: parseFloat(getComputedStyle(route.querySelector('.group-overview-meta')!).fontSize),
+        headerToGrid: header && grid ? grid.getBoundingClientRect().top - header.getBoundingClientRect().bottom : 0,
+        gridToTools: grid && tools ? tools.getBoundingClientRect().top - grid.getBoundingClientRect().bottom : 0,
+        columns: getComputedStyle(grid!).gridTemplateColumns.split(' ').filter(Boolean).length,
+        cards: cardsWithStyles,
+        balanceAmounts,
+        balanceStates,
+        actionSizes: actions,
+        actionGroupWithinHeader: Boolean(route.querySelector('.group-overview-header .expense-heading__actions')),
+        actionPlacementValid: Boolean(header && actions.every((action) => action.left >= route.getBoundingClientRect().left - 1 && action.right <= route.getBoundingClientRect().right + 1 && action.bottom <= header.getBoundingClientRect().bottom + 1)),
+        transactionTexts,
+        categoryStyles,
+        scheduleText: route.querySelector('.schedule-overview-list')?.textContent || '',
+        peopleRows,
+        peopleOverflow,
+        nestedPaint: cards.reduce((count, card) => count + Array.from(card.querySelectorAll('.card,.surface,.card-surface,.group-overview-card')).length, 0),
+        firstActionBeforeCard: Boolean(firstAction && firstCard && firstAction.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING),
+        toolsAfterCards: Boolean(tools && cards.at(-1) && cards.at(-1)!.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING),
+        focusableOrder: overviewLinks.map((element) => element.matches('.group-overview-tools summary') ? 'tools' : element.closest('.group-overview-card')?.className.includes('balances') ? 'balances' : element.closest('.group-overview-card')?.className.includes('transactions') ? 'transactions' : element.closest('.group-overview-card')?.className.includes('schedules') ? 'schedules' : element.closest('.group-overview-card')?.className.includes('people') ? 'people' : 'other'),
+      };
+    });
+    expect(geometry.titleFontSize).toBeGreaterThanOrEqual(28);
+    expect(geometry.titleFontSize).toBeLessThanOrEqual(34);
+    expect(geometry.metaFontSize).toBeGreaterThanOrEqual(12);
+    expect(geometry.metaFontSize).toBeLessThanOrEqual(16);
+    expect(geometry.headerToGrid).toBeGreaterThanOrEqual(8);
+    expect(geometry.headerToGrid).toBeLessThanOrEqual(40);
+    expect(geometry.gridToTools).toBeGreaterThanOrEqual(8);
+    expect(geometry.gridToTools).toBeLessThanOrEqual(40);
+    expect(geometry.cards.every((card) => card.radius >= 8 && card.radius <= 16 && card.padding >= 12 && card.padding <= 24 && card.border >= 1 && card.background !== 'rgba(0, 0, 0, 0)' && card.shadow === 'none')).toBe(true);
+    expect(geometry.actionSizes.every((action) => action.height >= 44)).toBe(true);
+    expect(geometry.actionGroupWithinHeader).toBe(true);
+    expect(geometry.actionPlacementValid).toBe(true);
+    expect(geometry.balanceAmounts.every((amount) => amount.fontSize >= 28 && amount.fontSize <= 36)).toBe(true);
+    expect(geometry.balanceStates.every((state) => state.background !== 'transparent' && state.background !== 'rgba(0, 0, 0, 0)' && state.amountFontSize >= 28)).toBe(true);
+    expect(geometry.transactionTexts.some((text) => text.includes('Dinner by the canal (edited)'))).toBe(true);
+    expect(geometry.categoryStyles.some((style) => style.background !== 'transparent' && style.background !== 'rgba(0, 0, 0, 0)' && style.radius > 0 && style.fontSize <= 14)).toBe(true);
+    expect(geometry.scheduleText).toContain('Monthly apartment rent');
+    expect(geometry.scheduleText).toContain('Next occurrence');
+    expect(geometry.peopleRows).toHaveLength(4);
+    expect(geometry.peopleRows.some((text) => text.includes('You'))).toBe(true);
+    expect(geometry.peopleRows.some((text) => text.includes('Mateo Silva'))).toBe(true);
+    expect(geometry.peopleRows.some((text) => text.includes('Priya Shah'))).toBe(true);
+    expect(geometry.peopleOverflow).toMatch(/^\+\d+ more people$/);
+    expect(geometry.nestedPaint).toBe(0);
+    expect(geometry.firstActionBeforeCard).toBe(true);
+    expect(geometry.toolsAfterCards).toBe(true);
+    expect(geometry.focusableOrder.at(-1)).toBe('tools');
+    expect([...new Set(geometry.focusableOrder)]).toEqual(['balances', 'transactions', 'schedules', 'people', 'tools']);
+    expect(geometry.focusableOrder.filter((value) => value === 'balances').length).toBeGreaterThan(0);
+    expect(geometry.focusableOrder.filter((value) => value === 'transactions').length).toBeGreaterThan(0);
+    if (viewport.width < 896) expect(geometry.columns).toBe(1);
+    else expect(geometry.columns).toBe(2);
+
+    await page.locator('.group-overview-tools summary').click();
+    await expect(page.getByRole('link', { name: 'View spending insights' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Record credit' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Group history' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Group settings' })).toBeVisible();
+  }
 });
 
 test('currency insight deep links restore the selected tab without filtering API data', async ({ browser }) => {

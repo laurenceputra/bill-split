@@ -70,6 +70,12 @@ export function formatScheduleDate(value: string, locale?: string, timeZone = 'U
   }
 }
 
+export function scheduleOverviewMetadata(activeCount: number, nextDate: string | undefined, hasMore: boolean) {
+  const count = hasMore ? `${activeCount} active shown` : `${activeCount} active`;
+  const next = nextDate ? ` · ${hasMore ? 'Next shown' : 'Next'} ${formatScheduleDate(nextDate)}` : '';
+  return `${count}${next}`;
+}
+
 export function scheduleContinuationText(endDate: string | null | undefined, shownDates: string[], locale?: string) {
   if (!shownDates.length) return '';
   if (!endDate) return 'It continues until you pause or cancel it.';

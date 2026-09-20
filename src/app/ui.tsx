@@ -200,7 +200,7 @@ function AuthBanner() {
   return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
 }
 
-export function SplitTransactionControl({ groupId, online, compact = false, mobileNav = false, className = '', active = false, primaryCurrent = false }: { groupId?: string; online?: boolean; compact?: boolean; mobileNav?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean }) {
+export function SplitTransactionControl({ groupId, online, compact = false, mobileNav = false, className = '', active = false, primaryCurrent = false, primaryAriaLabel }: { groupId?: string; online?: boolean; compact?: boolean; mobileNav?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean; primaryAriaLabel?: string }) {
   const navigate = useNavigate();
   const location = useLocation();
   const detectedOnline = useOnlineStatus();
@@ -223,7 +223,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={primaryAriaLabel ?? navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}

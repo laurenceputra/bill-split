@@ -128,11 +128,16 @@ nearest section or ledger group.
   rows; its outer section and metric rows are not cards. Invitations and the
   no-groups empty state remain contained because they need distinct status and
   recovery treatment.
-- **Group Overview** uses one primary balances anchor card. Balance entries
-  inside it, recent transactions, schedules, people, tools, and compact
-  spending are borderless sections or ledger rows. The reading order remains
-  balances → transactions → schedules → people → tools on mobile, with the
-  existing desktop two-column arrangement preserved.
+- **Group Overview** uses four compact macro-cards: balances, recent
+  transactions, scheduled expenses, and people. Each macro-card has one white
+  elevated surface, a thin lavender border, approximately 12px radius, and
+  compact 16px padding; its internal entries are transparent ledger rows with
+  dividers rather than nested painted cards. The reading order remains
+  balances → transactions → schedules → people → tools on mobile. At 896px and
+  above, transparent structural columns place balances and transactions in the
+  main column and schedules and people in the context column. Secondary actions
+  (including insights, credits, history, and settings) stay collapsed after all
+  four macro-cards.
 - **History** keeps the group filter, tabs, disclosures, and controls in flow.
   Transaction and activity results are transparent divider-separated ledger
   rows; the history page itself is not a card.
@@ -158,7 +163,13 @@ intentional painted container; a primary financial anchor or modal may have a
 second level for its contained rows or focused controls. Any additional border,
 fill, radius, or shadow must be justified by a distinct decision, state, or
 interaction. Review this at 320, 390, 768, 895, 896, and 1440px, including
-loading, cached, offline, empty, error, and disclosure states.
+  loading, cached, offline, empty, error, and disclosure states.
+
+For Group Overview, compact density means aligning section headings and amount
+columns on a shared rhythm, using 12–16px gaps, and keeping metadata to one
+concise line wherever the storyboard calls for an overview. Do not trade the
+four macro-card anchors for a collection of borderless top-level modules, and
+do not paint individual balance, transaction, schedule, or person rows.
 
 ## Component rules
 

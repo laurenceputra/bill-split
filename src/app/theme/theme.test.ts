@@ -91,7 +91,7 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('className="schedule-list-content"');
   });
 
-  it('keeps semantic sections structural and gives insight modules explicit surfaces', () => {
+  it('keeps overview macro-cards explicit while flattening their internal rows', () => {
     expect(css).toMatch(/\.insight-section\s*\{[\s\S]*margin: 0;[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
     expect(css).toMatch(/\.card,\s*\.surface,\s*\.empty\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
     expect(css).toMatch(/section\s*\{[\s\S]*margin: var\(--space-4\) 0;[\s\S]*padding: 0;/);
@@ -101,13 +101,21 @@ describe('responsive navigation layout contract', () => {
     expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*background: var\(--color-surface\);/);
     expect(css).toMatch(/\.insights-compact \.insight-metrics\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
     expect(css).toMatch(/\.insights-compact \.insight-metric\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*border: 0;[\s\S]*background: transparent;/);
-    expect(css).toMatch(/\.route-view--group-overview > \.compact-balances\s*\{[\s\S]*box-shadow: var\(--shadow-soft\);/);
+    expect(css).toMatch(/\.group-overview-card\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*border-radius: 0\.75rem;[\s\S]*box-shadow: none;[\s\S]*padding: var\(--space-4\);/);
+    expect(css).toMatch(/\.group-overview-columns,[\s\S]*\.group-overview-main,[\s\S]*\.group-overview-context\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-4\);/);
     expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;/);
     expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
     expect(css).toMatch(/\.balance-cards\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*gap: 0;/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview \.balance-cards\s*\{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview \.balance-card\s*\{[\s\S]*border-bottom: 0;/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card--positive\s*\{[\s\S]*background: var\(--color-positive-subtle\);/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card--debt\s*\{[\s\S]*background: var\(--color-debt-subtle\);/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card \.money\s*\{[\s\S]*font-size: clamp\(1\.875rem, 4vw, 2rem\);/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.group-overview-columns\s*\{[\s\S]*grid-template-columns: minmax\(0, 1\.2fr\) minmax\(18rem, 0\.8fr\);/);
+    expect(css).toMatch(/\.transaction-row--overview\s*\{[\s\S]*min-height: 4\.25rem;/);
+    expect(css).toMatch(/\.group-overview-tools\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card:last-child\s*\{[\s\S]*border-bottom: 0;/);
     expect(appSource).not.toContain('<Surface className="insights-compact"');
+    expect(appSource).not.toContain('LegacyGroupOverview');
+    expect(appSource).not.toContain('Legacy Group Overview');
     expect(appSource).toContain('<ul className="balance-cards">');
     expect(appSource).toContain('<ul className="list transaction-list">');
     expect(appSource).toContain('className="list reading-width activity-list"');
@@ -116,11 +124,27 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('className="insights-page"');
     expect(appSource).toContain('className="insight-summary-card"');
     expect(appSource).toContain('className="insight-chart insight-category-trends"');
+    for (const module of ['group-overview-card--balances', 'group-overview-card--transactions', 'group-overview-card--schedules', 'group-overview-card--people']) expect(appSource).toContain(module);
+    expect(appSource).toContain('className="group-overview-columns"');
+    expect(appSource).toContain('className="people-preview-list"');
+    expect(appSource).toContain('className="group-overview-tools"');
+    expect(appSource).toContain('More group actions');
+    expect(appSource).toContain('overview = false');
+    expect(appSource).toContain('balance.raw.map((item) => <li className="row"');
+    expect(appSource).toContain('balance.suggestions.map((suggestion) => <li className="row"');
+    expect(appSource).toContain('schedules.map((schedule) => <li className="row schedule-row"');
+    expect(appSource).not.toContain('balance.raw.map((item) => <div className="row"');
+    expect(appSource).not.toContain('schedules.map((schedule) => <div className="row schedule-row"');
+    expect(appSource).toContain('props.resource.data !== undefined ? <details>');
+    for (const staleSelector of ['.group-overview-grid', '.group-ledger', '.route-view--group-overview > .page-title', '.route-view--group-overview > .compact-balances', '.route-view--group-overview > .group-overview-tools', '.group-overview-tools > .group-overview-actions']) expect(css).not.toContain(staleSelector);
+    expect(css).toMatch(/\.group-overview-card\s*\{[\s\S]*background: var\(--color-surface-elevated\);[\s\S]*padding: var\(--space-4\);/);
+    expect(css).toMatch(/\.group-overview-columns,[\s\S]*\.group-overview-context\s*\{[\s\S]*gap: var\(--space-4\);/);
+    expect(css).toMatch(/\.group-overview-tools\s*\{[\s\S]*margin: var\(--space-4\) 0 0;[\s\S]*padding-top: var\(--space-2\);/);
   });
 
   it('audits explicit painted surface roots once while treating dialogs as separate roots', () => {
     expect(auditSource).toContain('const surfaceRootSelector =');
-    for (const root of ['.surface', '.card', '.card-surface', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
+    for (const root of ['.surface', '.card', '.card-surface', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.group-overview-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
     expect(auditSource).not.toContain('.balance-card,.');
     expect(auditSource).not.toContain('.insight-metric,.');
     expect(auditSource).toContain('querySelectorAll(surfaceRootSelector)');
@@ -380,9 +404,9 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('className="card group-card"');
     expect(appSource).toContain('<AvatarStack people={people} />');
     expect(appSource).toContain('className="group-overview-tools"');
-    expect(appSource).toContain('className="group-overview-actions actions"');
+    expect(appSource).not.toContain('className="group-overview-actions actions"');
     expect(uiSource).toContain('className={`route-view route-view--${routeClass}`}');
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.route-view--group-overview\s*\{[\s\S]*grid-template-columns:/);
+    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.group-overview-columns\s*\{[\s\S]*grid-template-columns: minmax\(0, 1\.2fr\) minmax\(18rem, 0\.8fr\);/);
     expect(css).toMatch(/\.route-view--expense \.amount-field\s*\{[\s\S]*min-height:/);
     expect(css).toMatch(/\.modal-sheet:has\(\.payer-list\)\s*\{[\s\S]*align-self: center;/);
   });
