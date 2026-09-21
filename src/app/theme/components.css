@@ -124,8 +124,13 @@
   height: 0.65rem;
 }
 
+.auth-loading-shell .nav-item__content {
+  align-self: flex-end;
+}
+
 .auth-loading-shell .nav-item__capsule {
-  padding: var(--space-1);
+  align-items: flex-end;
+  padding: 0 var(--space-1) var(--nav-content-inset);
 }
 
 .route-loading {
@@ -2779,6 +2784,10 @@ input[inputmode="decimal"] {
 }
 
 .bottom-nav {
+  --nav-content-gap: 4px;
+  --nav-content-inset: var(--space-2);
+  --nav-icon-size: 20px;
+  --nav-label-line-height: 1.5;
   position: fixed;
   z-index: 10;
   right: 0;
@@ -2834,26 +2843,48 @@ input[inputmode="decimal"] {
 }
 
 .nav-item {
-  display: grid;
+  display: flex;
   min-width: 0;
   min-height: var(--nav-height);
-  place-items: center;
-  gap: var(--space-1);
+  align-items: flex-end;
+  justify-content: center;
   border: 0;
   background: transparent;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
   font-weight: 750;
-  padding: var(--space-1);
+  padding: 0 var(--space-1) var(--nav-content-inset);
   white-space: nowrap;
   text-decoration: none;
 }
 
-.nav-item > span:last-child {
+.nav-item__content {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  grid-template-rows: var(--nav-icon-size) auto;
+  align-items: start;
+  justify-items: center;
+  gap: var(--nav-content-gap);
+  line-height: var(--nav-label-line-height);
+}
+
+.nav-item__icon {
+  display: grid;
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
+  flex: 0 0 var(--nav-icon-size);
+  place-items: center;
+}
+
+.nav-item__label {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  font-weight: 750;
+  line-height: var(--nav-label-line-height);
 }
 
 .nav-item:hover,
@@ -2927,13 +2958,11 @@ input[inputmode="decimal"] {
   min-height: var(--control-min-height);
   align-items: flex-end;
   justify-content: center;
-  gap: var(--space-1);
   border-color: var(--color-primary);
+  border-bottom: 0;
   border-radius: var(--radius-lg) 0 0 0;
   background: var(--color-primary);
-  /* The raised tile is taller than the neighboring nav cells; anchor the
-     stacked label to their text line instead of centering the stack. */
-  padding: 0 var(--space-1) calc(var(--space-2) - 2px);
+  padding: 0 var(--space-1) var(--nav-content-inset);
   white-space: nowrap;
 }
 
@@ -2946,20 +2975,6 @@ input[inputmode="decimal"] {
   border-left-color: rgba(255, 255, 255, 0.45);
   border-radius: 0 var(--radius-lg) 0 0;
   background-color: var(--color-primary);
-}
-
-@media (min-width: 48rem) and (max-width: 55.999rem) {
-  .bottom-nav .nav-item__capsule .split-transaction-control__primary {
-    /* The tablet nav uses the larger label metrics and a taller bar. */
-    padding-bottom: calc(var(--space-2) + 1px);
-  }
-}
-
-@media (min-width: 30.0625rem) and (max-width: 47.999rem) {
-  .bottom-nav .nav-item__capsule .split-transaction-control__primary {
-    /* Match the larger label metrics introduced above the narrow-mobile range. */
-    padding-bottom: calc(var(--space-2) + 1px);
-  }
 }
 
 .bottom-nav .split-transaction-control.nav-item__capsule .split-transaction-control__primary:focus-visible,
@@ -3045,38 +3060,20 @@ input[inputmode="decimal"] {
   background-color: var(--color-primary-strong);
 }
 
-.nav-add-icon {
-  width: 1rem;
-  height: 1rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 2;
-}
-
-.nav-add-stack {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  line-height: 1.5;
-}
-
-.nav-add-label {
-  color: inherit;
-  font-size: var(--text-xs);
-  font-weight: 750;
-}
-
-.nav-icon {
-  width: 1.15rem;
-  height: 1.15rem;
+.nav-item__glyph {
+  display: block;
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.8;
+}
+
+.nav-item__glyph--add {
+  width: var(--nav-icon-size);
+  height: var(--nav-icon-size);
 }
 
 .row {
@@ -3305,11 +3302,6 @@ input[inputmode="decimal"] {
 
   .nav-item--add {
     padding-inline: 0;
-  }
-
-  .nav-icon {
-    width: 1.25rem;
-    height: 1.25rem;
   }
 
   .cards {

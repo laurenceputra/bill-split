@@ -633,7 +633,7 @@ test('split transaction control keeps expense first, routes alternates, and disa
           const control = nav.querySelector('.split-transaction-control')?.getBoundingClientRect();
           const primary = nav.querySelector('.split-transaction-control__primary')?.getBoundingClientRect();
           const menu = nav.querySelector('.split-transaction-control__menu')?.getBoundingClientRect();
-          const labels = [...nav.querySelectorAll<HTMLElement>('.nav-item > span:last-child, .split-transaction-control__primary')].map((label) => {
+          const labels = [...nav.querySelectorAll<HTMLElement>('.nav-item__label')].map((label) => {
             const labelRect = label.getBoundingClientRect();
             const range = document.createRange();
             range.selectNodeContents(label);
@@ -703,9 +703,6 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
     const capsuleStyle = getComputedStyle(capsule);
     const primaryStyle = getComputedStyle(primary);
     const menuStyle = getComputedStyle(menu);
-    const stack = item.querySelector<HTMLElement>('.nav-add-stack');
-    const plus = item.querySelector<HTMLElement>('.nav-add-icon');
-    const addLabelElement = item.querySelector<HTMLElement>('.nav-add-label');
     const navStyle = getComputedStyle(nav);
     const rootStyle = getComputedStyle(document.documentElement);
     const rootFontSize = Number.parseFloat(rootStyle.fontSize);
@@ -722,18 +719,19 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
     };
     const itemRects = [...nav.children].map(box);
     const neighboringItems = [...nav.children].filter((item) => !item.classList.contains('nav-item--add')).map(box);
-    const labels = [...nav.querySelectorAll<HTMLElement>('.nav-item > span:last-child, .nav-add-label')].map((label) => {
+    const labels = [...nav.querySelectorAll<HTMLElement>('.nav-item__label')].map((label) => {
       const labelBox = box(label);
       const textBox = textRect(label);
       return { contained: textBox.left >= labelBox.left - 1 && textBox.right <= labelBox.right + 1, bottom: textBox.bottom };
     });
+    const icons = [...nav.querySelectorAll<HTMLElement>('.nav-item__icon')].map((icon) => {
+      const iconBox = box(icon);
+      return { width: iconBox.width, height: iconBox.height, center: iconBox.top + iconBox.height / 2 };
+    });
     const noOverlap = itemRects.every((left, index) => itemRects.slice(index + 1).every((right) => left.right <= right.left + 1 || right.right <= left.left + 1 || left.bottom <= right.top + 1 || right.bottom <= left.top + 1));
-    const referenceLabels = [...nav.querySelectorAll<HTMLElement>(':scope > .nav-item:not(.nav-item--add) > span:last-child')].map(textRect);
-    const addLabel = nav.querySelector<HTMLElement>('.nav-add-label');
-    if (!stack || !plus || !addLabelElement || !addLabel) throw new Error('Mobile Add stack geometry is incomplete');
-    const stackStyle = getComputedStyle(stack);
-    const plusBox = box(plus);
-    const addLabelBox = box(addLabelElement);
+    const referenceLabels = [...nav.querySelectorAll<HTMLElement>('.nav-item__label')].filter((label) => !label.closest('.nav-item--add')).map(textRect);
+    const addLabel = item.querySelector<HTMLElement>('.nav-item__label');
+    if (!addLabel) throw new Error('Mobile Add content track is incomplete');
     return {
       nav: box(nav),
       navContentBottom: nav.getBoundingClientRect().bottom - Number.parseFloat(navStyle.paddingBottom) - Number.parseFloat(navStyle.borderBottomWidth),
@@ -747,16 +745,14 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
       labels,
       noOverlap,
       documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
-      baseline: addLabel ? { add: textRect(addLabel), references: referenceLabels } : null,
-      addStack: {
-        display: stackStyle.display,
-        flexDirection: stackStyle.flexDirection,
-        gap: cssLength(stackStyle.gap),
-        plus: plusBox,
-        label: addLabelBox,
-        horizontalCenterDelta: Math.abs((plusBox.left + plusBox.right) / 2 - (addLabelBox.left + addLabelBox.right) / 2),
-        measuredGap: addLabelBox.top - plusBox.bottom,
-      },
+      baseline: { add: textRect(addLabel), references: referenceLabels },
+      icons,
+      contentBottoms: [...nav.querySelectorAll<HTMLElement>('.nav-item__content')].map((content) => box(content).bottom),
+      iconLabelGaps: [...nav.querySelectorAll<HTMLElement>('.nav-item__content')].map((content) => {
+        const icon = content.querySelector<HTMLElement>('.nav-item__icon');
+        const label = content.querySelector<HTMLElement>('.nav-item__label');
+        return icon && label ? box(label).top - box(icon).bottom : NaN;
+      }),
       expected: {
         controlMinHeight: cssLength(rootStyle.getPropertyValue('--control-min-height')),
         largeRadius: cssLength(rootStyle.getPropertyValue('--radius-lg')),
@@ -832,13 +828,13 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
       for (const reference of geometry.baseline?.references || []) {
         expect(Math.abs((geometry.baseline?.add.bottom || 0) - reference.bottom), `${state} ${width}px Add label baseline`).toBeLessThanOrEqual(2);
       }
-      expect(geometry.addStack.display, `${state} ${width}px Add stack display`).toBe('flex');
-      expect(geometry.addStack.flexDirection, `${state} ${width}px Add stack direction`).toBe('column');
-      expect(geometry.addStack.gap, `${state} ${width}px plus-to-label CSS gap`).toBe(4);
-      expect(geometry.addStack.plus.width, `${state} ${width}px plus width`).toBe(16);
-      expect(geometry.addStack.plus.height, `${state} ${width}px plus height`).toBe(16);
-      expect(geometry.addStack.measuredGap, `${state} ${width}px measured plus-to-label gap`).toBeCloseTo(4, 0);
-      expect(geometry.addStack.horizontalCenterDelta, `${state} ${width}px stacked center alignment`).toBeLessThanOrEqual(0.5);
+      expect(geometry.icons, `${state} ${width}px icon canvas`).toHaveLength(4);
+      expect(geometry.icons.every(({ width: iconWidth, height: iconHeight }) => Math.abs(iconWidth - 20) <= 0.5 && Math.abs(iconHeight - 20) <= 0.5), `${state} ${width}px shared icon canvas`).toBe(true);
+      const iconCenter = geometry.icons[0]?.center || 0;
+      expect(geometry.icons.every(({ center }) => Math.abs(center - iconCenter) <= 0.5), `${state} ${width}px icon centerline`).toBe(true);
+      expect(geometry.iconLabelGaps.every((gap) => Math.abs(gap - 4) <= 0.5), `${state} ${width}px icon-label gap`).toBe(true);
+      const contentBottom = geometry.contentBottoms[0] || 0;
+      expect(geometry.contentBottoms.every((bottom) => Math.abs(bottom - contentBottom) <= 0.5), `${state} ${width}px shared content anchor`).toBe(true);
 
       const colors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => {
         const style = getComputedStyle(element);
@@ -867,8 +863,8 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
     await page.goto(`/groups/${richGroupId}`);
     const inactive = addItem;
     await expect(inactive).not.toHaveClass(/nav-item--add--active/);
-    await expect(page.locator('.bottom-nav .nav-add-icon')).toHaveAttribute('aria-hidden', 'true');
-    await expect(page.locator('.bottom-nav .nav-add-label')).toHaveText('Add');
+    await expect(page.locator('.bottom-nav .nav-item__glyph--add')).toHaveAttribute('aria-hidden', 'true');
+    await expect(page.locator('.bottom-nav .nav-item--add .nav-item__label')).toHaveText('Add');
     await expect(page.locator('.bottom-nav .split-transaction-control__primary')).toHaveAccessibleName('Add expense');
     const inactiveGeometry = await captureMobileGeometry('inactive');
 

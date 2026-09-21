@@ -162,7 +162,7 @@ describe('responsive navigation layout contract', () => {
     expect(css).not.toContain('font-size: 0.6rem;');
   });
 
-  it('raises the mobile add tile while preserving its interactive semantics', () => {
+  it('raises the mobile add tile while preserving the shared content track', () => {
     expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;[\s\S]*background: transparent;[\s\S]*margin-top: calc\(-1 \* \(var\(--space-2\) \+ 4px\)\);[\s\S]*margin-bottom: 0;[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;[\s\S]*overflow: visible;/);
     expect(css).toMatch(/\.nav-item--add::before\s*\{[\s\S]*inset: 0 0 calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\) 0;[\s\S]*background: var\(--color-primary\);/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: 100%;[\s\S]*height: 100%;[\s\S]*align-self: stretch;[\s\S]*overflow: hidden;/);
@@ -173,7 +173,12 @@ describe('responsive navigation layout contract', () => {
     expect(css).not.toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[^}]*border-color:/);
     expect(css).not.toContain('.nav-item__capsule .split-transaction-control {');
     expect(uiSource).toContain('mobileNav');
-    expect(uiSource).toContain('className="nav-add-icon"');
+    expect(uiSource).toContain('className="nav-item__content"');
+    expect(uiSource).toContain('className="nav-item__icon"');
+    expect(uiSource).toContain('className="nav-item__glyph nav-item__glyph--add"');
+    expect(uiSource).toContain('className="nav-item__label"');
+    expect(uiSource).not.toContain('nav-add-stack');
+    expect(uiSource).not.toContain('nav-add-icon');
     expect(uiSource).toContain('aria-hidden="true"');
   });
 
@@ -203,13 +208,17 @@ describe('responsive navigation layout contract', () => {
 
   it('keeps the mobile add tile full-width in the center navigation column', () => {
     expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) clamp\(100px, 25vw, 112px\) minmax\(44px, 1fr\);/);
-    expect(css).toMatch(/\.nav-item > span:last-child\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.nav-item__content\s*\{[\s\S]*grid-template-rows: var\(--nav-icon-size\) auto;[\s\S]*gap: var\(--nav-content-gap\);/);
+    expect(css).toMatch(/\.nav-item__icon\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);/);
+    expect(css).toMatch(/\.nav-item__label\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;[\s\S]*line-height: var\(--nav-label-line-height\);/);
     expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*overflow: hidden;/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
     expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);[\s\S]*width: var\(--control-min-height\);/);
-    expect(css).toMatch(/\.nav-add-icon\s*\{[\s\S]*width: 1rem;[\s\S]*height: 1rem;/);
-    expect(css).toMatch(/\.nav-add-stack\s*\{[\s\S]*display: inline-flex;[\s\S]*flex-direction: column;[\s\S]*align-items: center;[\s\S]*gap: 4px;[\s\S]*line-height: 1\.5;/);
-    expect(css).toMatch(/\.nav-add-label\s*\{[\s\S]*font-size: var\(--text-xs\);/);
+    expect(css).toMatch(/\.nav-item__glyph\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);[\s\S]*stroke-width: 1\.8;/);
+    expect(css).toMatch(/\.nav-item__glyph--add\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);/);
+    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*--nav-content-gap: 4px;[\s\S]*--nav-content-inset: var\(--space-2\);/);
+    expect(css).not.toContain('.nav-add-stack');
+    expect(css).not.toContain('.nav-add-label');
     expect(css).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
   });
 
@@ -254,7 +263,7 @@ describe('responsive navigation layout contract', () => {
   it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
     expect(768).toBeGreaterThanOrEqual(48 * 16);
     expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);
-    expect(css).toMatch(/@media \(min-width: 30\.0625rem\) and \(max-width: 47\.999rem\)[\s\S]*\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*padding-bottom: calc\(var\(--space-2\) \+ 1px\);/);
+    expect(css).not.toMatch(/@media \(min-width: 30\.0625rem\) and \(max-width: 47\.999rem\)[\s\S]*\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary/);
     expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
     expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
@@ -277,6 +286,9 @@ describe('responsive navigation layout contract', () => {
     expect(uiSource).toContain('export function AuthLoadingShell()');
     expect(uiSource).toContain('aria-live="polite">Loading…</p>');
     expect(appSource).toContain('return <AuthLoadingShell />;');
+    expect(uiSource.match(/className="nav-item__content"/g)).toHaveLength(8);
+    expect(css).toMatch(/\.auth-loading-shell \.nav-item__content\s*\{[\s\S]*align-self: flex-end;/);
+    expect(css).toMatch(/\.auth-loading-shell \.nav-item__capsule\s*\{[\s\S]*align-items: flex-end;[\s\S]*padding: 0 var\(--space-1\) var\(--nav-content-inset\);/);
     expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*position: fixed;[\s\S]*max-height:/);
     expect(baseCss).toContain('scrollbar-gutter: stable;');
   });

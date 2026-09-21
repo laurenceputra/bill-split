@@ -13,9 +13,9 @@ let modalScrollLocks = 0;
 let modalPreviousOverflow = '';
 
 function Icon({ name }: { name: IconName }) {
-  if (name === 'activity') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
-  if (name === 'more') return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
-  return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
+  if (name === 'activity') return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
+  if (name === 'more') return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
+  return <svg className="nav-item__glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
 }
 
 export function Button({ children, variant = 'primary', className = '', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' }) {
@@ -46,7 +46,7 @@ export function AuthLoadingShell() {
         <p className="auth-loading-status" role="status" aria-live="polite">Loading…</p>
       </div>
     </main>
-    <nav className="bottom-nav" aria-hidden="true"><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span><span className="nav-item nav-item--add"><span className="nav-item__capsule"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span></span><span className="nav-item"><Skeleton className="skeleton--nav-icon" /><Skeleton className="skeleton--nav-label" /></span></nav>
+    <nav className="bottom-nav" aria-hidden="true"><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item nav-item--add"><span className="nav-item__capsule"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></nav>
   </div>;
 }
 
@@ -179,7 +179,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-add-stack"><svg className="nav-add-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg><span className="nav-add-label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
@@ -213,10 +213,10 @@ export function BottomNav() {
   const context = getNavigationContext(location.pathname, location.search);
 
   return <nav className="bottom-nav" aria-label="Primary navigation">
-    <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><Icon name="groups" /><span>Groups</span></Link>
-      <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><Icon name="activity" /><span>History</span></Link>
-       <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact mobileNav active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
-     <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><Icon name="more" /><span>Settings</span></Link>
+    <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="groups" /></span><span className="nav-item__label">Groups</span></span></Link>
+    <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="activity" /></span><span className="nav-item__label">History</span></span></Link>
+    <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact mobileNav active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
+    <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="more" /></span><span className="nav-item__label">Settings</span></span></Link>
   </nav>;
 }
 
