@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { Field, SplitTransactionControl } from './ui';
+import { AuthLoadingShell, Field, SplitTransactionControl } from './ui';
 
 describe('Field', () => {
   it('de-duplicates an error ID already present in aria-describedby', () => {
@@ -55,5 +55,34 @@ describe('SplitTransactionControl', () => {
     expect(markup).toContain('Payment between members (online only)');
     expect(markup).toContain('title="Refunds and payments require a connection."');
     expect(markup).toMatch(/<select[^>]+disabled/);
+  });
+
+  it('keeps the mobile navigation plus decorative and uses the shared content track', () => {
+    const markup = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/groups/group-1'] }, createElement(SplitTransactionControl, { groupId: 'group-1', online: true, compact: true, mobileNav: true })));
+
+    expect(markup).toContain('class="nav-item__content"');
+    expect(markup).toContain('class="nav-item__icon"');
+    expect(markup).toContain('class="nav-item__glyph nav-item__glyph--add"');
+    expect(markup).toContain('class="nav-item__label">Add</span>');
+    expect(markup).toContain('aria-hidden="true"');
+    expect(markup).not.toContain('nav-add-stack');
+    expect(markup).not.toContain('nav-add-icon');
+    expect(markup).toContain('aria-label="Add expense"');
+    expect(markup).toContain('aria-label="Choose transaction type"');
+  });
+});
+
+describe('AuthLoadingShell', () => {
+  it('keeps every loading nav placeholder on the shared two-row track', () => {
+    const markup = renderToStaticMarkup(createElement(AuthLoadingShell));
+
+    expect(markup.match(/class="nav-item__content"/g)).toHaveLength(4);
+    expect(markup.match(/class="nav-item__icon"/g)).toHaveLength(4);
+    expect(markup.match(/class="nav-item__label"/g)).toHaveLength(4);
+    expect(markup.match(/skeleton--nav-icon/g)).toHaveLength(4);
+    expect(markup.match(/skeleton--nav-label/g)).toHaveLength(4);
+    expect(markup).toContain('class="nav-item nav-item--add"');
+    expect(markup).toContain('class="nav-item__capsule"');
+    expect(markup).toContain('aria-hidden="true"');
   });
 });
