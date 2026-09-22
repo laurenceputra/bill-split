@@ -1,0 +1,42 @@
+/* Shared layout vocabulary. Route composition should use these names instead
+   of introducing another container, flow, or breakpoint scale. */
+:root {
+  --container-page: var(--content-max);
+  --container-reading: var(--reading-max);
+  --container-form: var(--reading-max);
+  --space-control-inline: var(--space-3);
+  --space-surface-inline: var(--surface-padding);
+  --radius-control: var(--radius-sm);
+  --radius-surface: var(--radius-md);
+  --radius-sheet: var(--radius-lg);
+  --shadow-surface: var(--shadow-soft);
+  --shadow-overlay: var(--shadow-raised);
+  --breakpoint-tablet: 48rem;
+  --breakpoint-desktop: 56rem;
+  --breakpoint-desktop-px: 896px;
+}
+
+.ui-container {
+  width: min(100%, var(--container-page));
+  margin-inline: auto;
+}
+
+.ui-reading {
+  width: min(100%, var(--container-reading));
+}
+
+.ui-stack {
+  display: grid;
+  gap: var(--flow-content);
+}
+
+.ui-stack--section {
+  gap: var(--flow-section);
+}
+
+.ui-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}

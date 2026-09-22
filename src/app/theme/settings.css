@@ -1,0 +1,21 @@
+.route-view--settings {
+  max-width: var(--reading-max);
+}
+
+.settings-section {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.settings-section h2 {
+  margin-bottom: 0;
+  font-size: var(--text-md);
+}
+
+.settings-section--danger {
+  border-color: var(--color-debt-fg);
+  background: var(--color-debt-subtle);
+}

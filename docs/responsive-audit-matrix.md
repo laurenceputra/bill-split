@@ -8,6 +8,31 @@ The refund/reimbursement matrix below remains the release checklist for the
 dedicated online-only refund flow. The Warm Ledger states cover the newer
 credit and shell surfaces without replacing those refund-specific checks.
 
+## Automated route coverage
+
+`tests/e2e/audit.spec.ts` runs normal route scenarios at **320, 390, 768,
+895, 896, and 1440px**. Redirects are recorded by their final canonical URL;
+the routes below are the concrete fixture-backed paths, not placeholders.
+
+| Surface | Exact route(s) | Normal state covered |
+| --- | --- | --- |
+| Public and private shells | `/`; `/` as `dev@example.com`; `/` as `empty@example.com` | Signed-out landing, populated groups, empty groups |
+| Creation and add chooser | `/friends/new`; `/groups/new`; `/add`; `/groups/00000000-0000-4000-8000-000000003002/add` | Friend/group forms, global and group-scoped transaction choices; expanded people and offline group creation are focused states |
+| Group and management | `/groups/00000000-0000-4000-8000-000000003002`; `/groups/00000000-0000-4000-8000-000000003002/manage` as `dev@example.com` and `registered@example.com` | Populated multi-currency overview, owner/member management, people email and generic invitation disclosures |
+| Expense and schedule | `/groups/00000000-0000-4000-8000-000000003002/expense/new`; `/groups/00000000-0000-4000-8000-000000003002/expense/00000000-0000-4000-8000-000000004001`; `/groups/00000000-0000-4000-8000-000000003002/scheduled-expense/00000000-0000-4000-8000-000000007001` | New, edited, and recurring-edited forms; payer modal is captured at every canonical width |
+| Refund/credit | `/groups/00000000-0000-4000-8000-000000003002/refund/new`; `/groups/00000000-0000-4000-8000-000000003002/refund/00000000-0000-4000-8000-000000008001/edit`; `/groups/00000000-0000-4000-8000-000000003002/credit/00000000-0000-4000-8000-000000008001/edit`; `/groups/00000000-0000-4000-8000-000000003002/credits/00000000-0000-4000-8000-000000008001`; `/groups/00000000-0000-4000-8000-000000003002/credits/00000000-0000-4000-8000-000000008002` | Record-money-back create, dedicated edit, credit edit alias, linked/standalone/direct-provider allocation states, active and deleted detail |
+| Expense/settlement detail | `/groups/00000000-0000-4000-8000-000000003002/expenses/00000000-0000-4000-8000-000000004001`; `/groups/00000000-0000-4000-8000-000000003002/expenses/00000000-0000-4000-8000-000000004004`; `/groups/00000000-0000-4000-8000-000000003002/settle`; `/groups/00000000-0000-4000-8000-000000003002/settlements/00000000-0000-4000-8000-000000005001`; `/groups/00000000-0000-4000-8000-000000003002/settlements/00000000-0000-4000-8000-000000005002` | Active detail, edit/detail history, create form, and deleted/restore tombstones |
+| History and settings | `/activity?group=00000000-0000-4000-8000-000000003002`; `/activity?group=00000000-0000-4000-8000-000000003002&view=transactions`; `/activity?view=transactions`; insight variants; `/settings` | Changes, transaction filters, insights (including custom/empty/error/loading/offline fixtures), profile/device/admin settings |
+
+The focused behavior tests cover restore controls, an offline-disabled valid
+refund submission, offline-disabled refund detail mutations, the typed
+account-deletion gate and action ordering, the management invitation
+disclosure, and transaction filter semantics at **390, 895, 896, and 1440px**.
+Representative frequent/admin flow ordering, the loaded chooser's truthful
+offline state, and client-side scroll/hash navigation run at **320, 895, 896,
+and 1440px**. The development Clerk fixture intentionally has no destructive
+account identity, so the account-deletion test does not submit that mutation.
+
 ## Refund/reimbursement states
 
 Refunds are online-only ledger actions. Mobile DOM order keeps the common
@@ -57,7 +82,7 @@ captures are distinct group-overview, refund-form, and focused-helper states.
 
 | View/state | 320px narrow | 390px mobile | 768px tablet | 895px boundary | 896px desktop | 1440px desktop |
 | --- | --- | --- | --- | --- | --- | --- |
-| Record credit, loaded | Controls stack with the amount hero visible; no horizontal scroll | Form controls remain in DOM order: type, delivery, amount, application, allocations, note, submit | Verify select/field wrapping and no horizontal overflow | Verify disclosure and validation spacing at the breakpoint | Primary submit remains before secondary navigation | Primary submit remains before secondary navigation |
+| Record money back / credit, loaded | Controls stack with the amount hero visible; no horizontal scroll | Form controls remain in DOM order: source, handling, amount, applications, allocations, note, submit | Verify select/field wrapping and no horizontal overflow | Verify disclosure and validation spacing at the breakpoint | Primary submit remains before secondary navigation | Primary submit remains before secondary navigation |
 | Record credit, loading/error/offline | Loading status and inline error are announced; submit is disabled offline | Error text remains adjacent to the form | Error text remains adjacent to the form | Error text remains adjacent to the form | Error and retry remain content-sized | Error and retry remain content-sized |
 | Credit detail, active | Applications and allocations stack; amount remains dominant | Application and allocation snapshots stack as rows; edit/delete follow detail | Verify rows wrap long IDs/notes | Verify deleted labels and restore affordance | Actions remain below the accounting explanation | Actions remain below the accounting explanation |
 | Credit detail, deleted/restore | Restore is the only available mutation and is disabled offline | Tombstone copy remains visible | Tombstone copy remains visible | Restore remains a clear recovery action | Restore and error states remain readable without modal-only context | Restore and error states remain readable without modal-only context |
@@ -72,15 +97,31 @@ captures are distinct group-overview, refund-form, and focused-helper states.
 | Expense and schedule forms | Amount hero, split controls, and payer sheet fit without zoom | Payer sheet is bottom anchored and targets remain 44px | Verify form grouping and recurring preview | Verify 895/896 transition without focus loss | Payer dialog is centered; amount remains first | Payer dialog and schedule preview remain readable |
 | History and insights | Segmented tabs and filter disclosure stay in flow; transaction/activity results use divider-separated ledger rows; history and insight outer containers remain flat | Transaction amounts align at row end without painted list containers | Chart/table fallback remains accessible; semantic insight sections remain structural | Verify boundary tab, search behavior, and no painted history/insights ancestor | Desktop rows align like a ledger; filters remain in flow; summary/chart modules are the intentional painted surfaces | Desktop rows align like a ledger; filters remain in flow; summary/chart modules are the intentional painted surfaces |
 | Management/settings | Dense contained administrative sections remain single-column; deletion is last | People/invitations/defaults precede exports and destructive actions; member rows remain ledger-like | Verify long names and disabled states | Verify boundary spacing and contained form/admin surfaces | Compact administrative sections preserve explicit surfaces | Compact administrative sections preserve explicit surfaces |
+| Friend/group creation | Focused form surface is one column; add/remove people and cancel remain reachable | Inputs stay at least 16px and action targets stay 44px | Participant rows wrap without reordering | Verify the 895/896 transition does not move submit before fields | Reading-width form stays focused while navigation changes | Long names and invitation copy remain readable |
+| Expense edit/schedule edit | Amount, payer, split, recurrence, and submit follow DOM order; payer disclosure stays usable | Recurrence preview and allocation fields do not require horizontal scrolling | Payer controls and weekday choices wrap as groups | Verify focus and dirty/conflict recovery across the desktop boundary | Form surface remains constrained and submit is primary | Schedule metadata and conflict recovery remain adjacent to the form |
+| Settlement create/detail and tombstones | Balance rows precede the online-only form; deleted records expose restore only | Amount and from/to controls remain touch-safe | Long participant names wrap in ledger rows | Verify cached balance and connection states remain explicit | Detail actions remain after the accounting summary | History and restore affordances remain secondary to money flow |
+| Settings/recovery/public exceptional states | Loading, offline, pending, export, logout, deletion, and recovery copy remain readable in one column | Destructive actions stay last and require explicit confirmation | Cached/offline notices do not block the primary recovery action | Verify banners do not cover focused controls | Administrative surfaces remain distinct without nested cards | Public sign-in, verification unavailable, and private-cache unavailable states retain a clear next action |
 
 Credit flows are online-only and preserve the existing mobile-first form shell.
-The record-credit audit scenario uses the existing populated group fixture;
-active and deleted credit detail states remain covered by focused unit and
-integration fixtures until a browser fixture includes a persisted credit.
+The browser fixture now includes one active and one deleted persisted credit,
+so create, both edit aliases, active detail, deleted detail, and restore
+affordances are audited at all six canonical widths. The focused behavior test
+checks that a loaded deleted detail disables its restore mutation after an
+offline transition; it does not perform the restore.
 
 Group Overview state fixtures are intentionally representative rather than
 full-width: schedule loading, API-error, empty, and uncached-offline states are
 exercised at 390px, while balance loading, API-error, and uncached-offline
 states are exercised at 320px, 390px, and 896px. The fully cached offline
-reload runs at 320px, while populated overview geometry and the expanded
-schedule management disclosure run at all six canonical widths.
+reload runs at 320px. Populated overview geometry runs at all six canonical
+widths; More group actions and View all schedules screenshots/disclosure
+geometry run at **320, 895, 896, and 1440px**.
+
+The chooser is loaded online first and then switched offline at **320, 895,
+896, and 1440px**. Its Expense action remains enabled from the loaded group
+context, while Refund/reimbursement and Payment between members are disabled
+and explicitly labeled “online only”; no offline mutation is attempted.
+Targeted email, generic invitation, Add friend, and party default split
+editor disclosures are screenshot-audited for the owner fixture at **320, 895,
+896, and 1440px**. The registered member fixture remains covered in its
+collapsed management state and is not claimed to have owner-only editors.

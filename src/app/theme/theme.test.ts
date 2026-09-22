@@ -4,7 +4,22 @@ import { describe, expect, it } from 'vitest';
 // @ts-expect-error Node types are not shipped to the browser build.
 import { readFileSync } from 'node:fs';
 
-const css = readFileSync(new URL('./components.css', import.meta.url), 'utf8');
+const compositionCss = readFileSync(new URL('./composition.css', import.meta.url), 'utf8');
+const screenCss = [
+  'home-creation.css',
+  'group-management.css',
+  'group-overview.css',
+  'transaction-forms.css',
+  'history-insights.css',
+  'settings.css',
+  'responsive.css',
+].map((file) => readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')).join('\n');
+const css = `${readFileSync(new URL('./shell.css', import.meta.url), 'utf8')}\n${readFileSync(new URL('./primitives.css', import.meta.url), 'utf8')}\n${screenCss}`;
+const responsiveCss = readFileSync(new URL('./responsive.css', import.meta.url), 'utf8');
+const foundationsCss = readFileSync(new URL('./foundations.css', import.meta.url), 'utf8');
+const shellCss = readFileSync(new URL('./shell.css', import.meta.url), 'utf8');
+const primitivesCss = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
+const themeCss = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
 const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
 const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
@@ -23,6 +38,38 @@ const contrastRatio = (foreground: string, background: string) => {
 };
 
 describe('responsive navigation layout contract', () => {
+  it('loads the authored layers in foundation, shell, primitive, composition order', () => {
+    expect(themeCss).toContain("@import './tokens.css';");
+    expect(themeCss).toContain("@import './foundations.css';");
+    expect(themeCss).toContain("@import './shell.css';");
+    expect(themeCss).toContain("@import './primitives.css';");
+    for (const file of ['home-creation.css', 'group-management.css', 'group-overview.css', 'transaction-forms.css', 'history-insights.css', 'settings.css', 'responsive.css']) {
+      expect(themeCss).toContain(`@import './${file}';`);
+    }
+    expect(foundationsCss).toContain('--breakpoint-desktop-px: 896px;');
+    expect(shellCss).toContain('.shell-frame');
+    expect(primitivesCss).toContain('.ui-ledger-list');
+    expect(primitivesCss).toContain('.ui-form-surface');
+  });
+
+  it('keeps screen ownership split and the former composition entrypoint empty', () => {
+    expect(compositionCss.split('\n').length).toBeLessThan(20);
+    expect(compositionCss).not.toMatch(/\.route-view|\.card span|(^|\n)section\s*\{/);
+    expect(screenCss).not.toMatch(/(^|\n)\.route-view\s+section|\.card\s+span/);
+    for (const file of ['home-creation.css', 'group-management.css', 'group-overview.css', 'transaction-forms.css', 'history-insights.css', 'settings.css']) {
+      const authored = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+      expect(authored.match(/@media\s*\([^)]*(?:min|max)-width:\s*(?:48|56)rem\)/g) || []).toHaveLength(0);
+    }
+    expect(screenCss).not.toContain('.section-title');
+    expect(screenCss).not.toContain('.invitations-panel > .list');
+  });
+
+  it('uses one authored block for each shared responsive boundary', () => {
+    const mediaCount = (query: string) => (responsiveCss.match(new RegExp(`@media \\(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g')) || []).length;
+    for (const query of ['max-width: 30rem', 'max-width: 55.999rem', 'min-width: 48rem', 'min-width: 56rem', 'forced-colors: active', 'prefers-reduced-motion: reduce']) expect(mediaCount(query)).toBe(1);
+    expect(responsiveCss).not.toMatch(/\.route-view\s+section|\.card\s+span|\.section-title|\.invitations-panel\s*>\s*\.list/);
+  });
+
   it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
     expect(css).toContain('padding-right: max(var(--space-1), var(--safe-right));');
     expect(css).toContain('padding-left: max(var(--space-1), var(--safe-left));');
@@ -65,10 +112,10 @@ describe('responsive navigation layout contract', () => {
   it('uses explicit action gaps and a predictable single-column mobile layout', () => {
     expect(css).toMatch(/\.home-actions\s*\{[\s\S]*display: grid;[\s\S]*column-gap: var\(--space-3\);[\s\S]*row-gap: var\(--space-2\);/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
-    expect(css).toMatch(/\.section-title\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
-    expect(css).toMatch(/\.section-title > h2\s*\{[\s\S]*min-width: 0;/);
-    expect(css).toMatch(/\.section-title \+ \.member-list\s*\{[\s\S]*margin-top: 0;/);
-    expect(css).toMatch(/:where\(\.section-title\) \+ p\s*\{[\s\S]*margin-top: 0;/);
+    expect(css).toMatch(/\.ui-section-header\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
+    expect(css).toMatch(/\.ui-section-header > :first-child > :is\(h2, h3, h4\)\s*\{[\s\S]*min-width: 0;/);
+    expect(css).toMatch(/\.ui-section-header \+ \.member-list\s*\{[\s\S]*margin-top: 0;/);
+    expect(css).toMatch(/:where\(\.ui-section-header\) \+ p\s*\{[\s\S]*margin-top: 0;/);
   });
 
   it('keeps adjacent insight summary cards at least twelve pixels apart on narrow screens', () => {
@@ -77,14 +124,14 @@ describe('responsive navigation layout contract', () => {
 
   it('normalizes disclosure flow and nested surfaces without changing semantic sections', () => {
     expect(tokensCss).toContain('--control-min-height: 2.75rem;');
-    expect(css).toMatch(/\.section-title\s*>\s*h2\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/section\s*>\s*form,[\s\S]*?\.surface\s*>\s*form,[\s\S]*?section\s*>\s*\.cache-status,[\s\S]*?\.surface\s*>\s*\.cache-status,[\s\S]*?\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/details\s*>\s*:is\(p, form, \.cache-status, \.error, \.offline-banner, \.empty, \.status\)\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.ui-section-header\s*>\s*:first-child\s*>\s*:is\(h2, h3, h4\)\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/\.ui-surface\s*>\s*form,[\s\S]*?\.ui-form-surface\s*>\s*form\s*\{[\s\S]*margin: 0;/);
+    expect(css).toMatch(/details\s*>\s*:is\(p, form, \.cache-status, \.error, \.offline-banner, \.ui-empty-state, \.status\)\s*\{[\s\S]*margin: 0;/);
     expect(css).toMatch(/\.balance-breakdown\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
     expect(css).toMatch(/\.generic-invitation-disclosure\[open\]\s*\{[\s\S]*gap: var\(--space-3\);/);
     expect(css).toMatch(/\.transaction-filters-disclosure\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
     expect(css).toMatch(/\.transaction-filters\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.scheduled-summary \.schedule-list-content > section\s*\{[\s\S]*border: 0;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
+    expect(css).toMatch(/\.schedule-list-content\s*\{[\s\S]*display: grid;/);
     expect(css).toMatch(/\.pending-transactions\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(css).toMatch(/\.split-default-choices\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
     expect(appSource).toContain('className="transaction-filters-disclosure"');
@@ -93,11 +140,11 @@ describe('responsive navigation layout contract', () => {
 
   it('keeps overview macro-cards explicit while flattening their internal rows', () => {
     expect(css).toMatch(/\.insight-section\s*\{[\s\S]*margin: 0;[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
-    expect(css).toMatch(/\.card,\s*\.surface,\s*\.empty\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
-    expect(css).toMatch(/section\s*\{[\s\S]*margin: var\(--space-4\) 0;[\s\S]*padding: 0;/);
-    expect(css).toMatch(/\.list\s*\{[\s\S]*gap: 0;[\s\S]*\}/);
-    expect(css).toMatch(/\.row\s*\{[\s\S]*min-height: 3\.65rem;[\s\S]*border-bottom: 1px solid var\(--color-border\);[\s\S]*background: transparent;/);
-    expect(css).toMatch(/\.transaction-list > li:not\(:last-child\) > \.row,[\s\S]*\.activity-list > li:not\(:last-child\) > \.row\s*\{[\s\S]*border-bottom: 1px solid var\(--color-border\);/);
+    expect(css).toMatch(/\.ui-card-surface,[\s\S]*\.ui-surface,[\s\S]*\.ui-form-surface,[\s\S]*\.ui-empty-state\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
+    expect(css).not.toMatch(/\.route-view section,[\s\S]*\.refund-form section\s*\{/);
+    expect(css).toMatch(/\.ui-ledger-list\s*\{[\s\S]*gap: 0;[\s\S]*\}/);
+    expect(css).toMatch(/\.ui-ledger-row\s*\{[\s\S]*min-height: 3\.65rem;[\s\S]*border-bottom: 1px solid var\(--color-border\);[\s\S]*background: transparent;/);
+    expect(css).toMatch(/\.transaction-list > li:not\(:last-child\) > \.ui-ledger-row,[\s\S]*\.activity-list > li:not\(:last-child\) > \.ui-ledger-row\s*\{[\s\S]*border-bottom: 1px solid var\(--color-border\);/);
     expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*background: var\(--color-surface\);/);
     expect(css).toMatch(/\.insights-compact \.insight-metrics\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
     expect(css).toMatch(/\.insights-compact \.insight-metric\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*border: 0;[\s\S]*background: transparent;/);
@@ -117,8 +164,8 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).not.toContain('LegacyGroupOverview');
     expect(appSource).not.toContain('Legacy Group Overview');
     expect(appSource).toContain('<ul className="balance-cards">');
-    expect(appSource).toContain('<ul className="list transaction-list">');
-    expect(appSource).toContain('className="list reading-width activity-list"');
+     expect(appSource).toContain('<LedgerList className="transaction-list"');
+     expect(appSource).toContain('<LedgerList className="reading-width activity-list"');
     expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-summary-heading/);
     expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-change-heading/);
     expect(appSource).toContain('className="insights-page"');
@@ -130,12 +177,12 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('className="group-overview-tools"');
     expect(appSource).toContain('More group actions');
     expect(appSource).toContain('overview = false');
-    expect(appSource).toContain('balance.raw.map((item) => <li className="row"');
-    expect(appSource).toContain('balance.suggestions.map((suggestion) => <li className="row"');
-    expect(appSource).toContain('schedules.map((schedule) => <li className="row schedule-row"');
+     expect(appSource).toContain('balance.raw.map((item) => <LedgerRow');
+     expect(appSource).toContain('balance.suggestions.map((suggestion) => <LedgerRow');
+     expect(appSource).toContain('schedules.map((schedule) => <LedgerRow as="li" className="schedule-row"');
     expect(appSource).not.toContain('balance.raw.map((item) => <div className="row"');
     expect(appSource).not.toContain('schedules.map((schedule) => <div className="row schedule-row"');
-    expect(appSource).toContain('props.resource.data !== undefined ? <details>');
+    expect(appSource).toContain('props.resource.data !== undefined ? <Disclosure');
     for (const staleSelector of ['.group-overview-grid', '.group-ledger', '.route-view--group-overview > .page-title', '.route-view--group-overview > .compact-balances', '.route-view--group-overview > .group-overview-tools', '.group-overview-tools > .group-overview-actions']) expect(css).not.toContain(staleSelector);
     expect(css).toMatch(/\.group-overview-card\s*\{[\s\S]*background: var\(--color-surface-elevated\);[\s\S]*padding: var\(--space-4\);/);
     expect(css).toMatch(/\.group-overview-columns,[\s\S]*\.group-overview-context\s*\{[\s\S]*gap: var\(--space-4\);/);
@@ -144,7 +191,7 @@ describe('responsive navigation layout contract', () => {
 
   it('audits explicit painted surface roots once while treating dialogs as separate roots', () => {
     expect(auditSource).toContain('const surfaceRootSelector =');
-    for (const root of ['.surface', '.card', '.card-surface', '.empty', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.group-overview-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
+     for (const root of ['.ui-surface', '.ui-card-surface', '.ui-form-surface', '.ui-empty-state', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.group-overview-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
     expect(auditSource).not.toContain('.balance-card,.');
     expect(auditSource).not.toContain('.insight-metric,.');
     expect(auditSource).toContain('querySelectorAll(surfaceRootSelector)');
@@ -177,13 +224,13 @@ describe('responsive navigation layout contract', () => {
   });
 
   it('keeps standalone section actions content-sized without shrinking grouped controls', () => {
-    expect(css).toMatch(/section\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\),[\s\S]*?\.surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\)\s*\{[\s\S]*?justify-self:\s*start;/);
+    expect(css).toMatch(/\.ui-surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\),[\s\S]*?\.ui-form-surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\)\s*\{[\s\S]*?justify-self:\s*start;/);
     expect(css).toMatch(/\.full-width-button\s*\{[\s\S]*width:\s*100%;/);
     expect(css).toMatch(/\.home-actions\s*>\s*button\s*\{[\s\S]*width:\s*100%;/);
     expect(css).toMatch(/\.member-email-control form\s*>\s*button\s*\{[\s\S]*justify-self:\s*stretch;/);
     expect(css).toMatch(/\.actions\s*\{[\s\S]*display:\s*flex;/);
     expect(css).toMatch(/form\s*\{[\s\S]*display:\s*grid;/);
-    expect(css).toMatch(/\.list\s*\{[\s\S]*display:\s*grid;/);
+    expect(css).toMatch(/\.ui-ledger-list\s*\{[\s\S]*display:\s*grid;/);
     expect(appSource).toContain('Load more audit events');
     expect(appSource).toContain('Clear cached data');
     expect(appSource).toContain('>Manage people</Link>');
@@ -225,7 +272,7 @@ describe('responsive navigation layout contract', () => {
   });
 
   it('keeps activity row focus visible inside clipped lists', () => {
-    expect(css).toMatch(/\.row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
+    expect(css).toMatch(/\.ui-ledger-row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
   });
 
   it('keeps every editable control at the 16px floor without shrinking the main amount', () => {
@@ -415,7 +462,7 @@ describe('responsive navigation layout contract', () => {
     expect(auditSource).toContain("if (scenario.name === 'expense-form') {");
     expect(auditSource).not.toContain("if (scenario.name === 'expense-form' && viewport.width <= 768)");
     expect(auditSource).toContain('full canonical responsive coverage');
-    expect(auditSource).toContain('test.setTimeout(480_000);');
+     expect(auditSource).toContain('test.setTimeout(900_000);');
     for (const width of [320, 390, 768, 895, 896, 1440]) expect(auditSource).toContain(`{ width: ${width},`);
   });
 
@@ -463,12 +510,12 @@ describe('responsive navigation layout contract', () => {
     expect(appSource).toContain('function OwnerGroupManagement');
     expect(appSource).toContain('getOwnerInvitations(groupId, signal)');
     expect(appSource).toContain('invitationsResource?.data !== undefined ? <TargetedInvitationControl');
-    expect(appSource).toContain('summary>Add email</summary>');
+    expect(appSource).toContain('summary>Invite a new member</summary>');
     expect(appSource).toContain('filter((invitation) => invitation.targetPersonId == null)');
     expect(appSource).toContain('currentPersonId={currentPersonId}');
     expect(appSource).toContain('personLabel(payer.personId)');
     expect(appSource).toContain('entityType="expense" userId={me.data?.id}');
-    expect(appSource).toContain('summary>View audit history</summary>');
+    expect(appSource).toContain('summary="View audit history"');
     expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
     expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.member-email-control form\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
   });

@@ -85,6 +85,7 @@ test('group page keeps primary actions, balances, and transactions before manage
 
 test('group overview keeps transaction loading, error, and cached states truthful', async ({ browser }) => {
   const transactionsPath = `${BASE_URL}/api/groups/${richGroupId}/transactions**`;
+  const cachedTransactionsPath = new RegExp(`/api/groups/${richGroupId}/transactions(?:\\?.*)?$`);
 
   const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
   const loadingPage = await loadingContext.newPage();
@@ -115,11 +116,17 @@ test('group overview keeps transaction loading, error, and cached states truthfu
     await errorContext.close();
   }
 
-  const cachedContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  // The cached-state assertion must observe the actual 503 response. A
+  // previously registered production worker can otherwise keep Playwright's
+  // route handler out of the request path, making this check race the worker
+  // rather than the application transport.
+  const cachedContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block' });
   const cachedPage = await cachedContext.newPage();
   try {
     await cachedPage.goto(`/groups/${richGroupId}`);
     await expect(cachedPage.locator('.transaction-row--overview').filter({ hasText: 'Dinner by the canal (edited)' })).toBeVisible();
+    await cachedPage.waitForLoadState('networkidle');
+    await seedOfflineTrust(cachedPage);
     await cachedPage.evaluate(({ dbName, dbVersion, groupId }) => new Promise<void>((resolve, reject) => {
       const request = indexedDB.open(dbName, dbVersion);
       request.onerror = () => reject(request.error);
@@ -134,13 +141,18 @@ test('group overview keeps transaction loading, error, and cached states truthfu
           transaction.objectStore('groupSnapshots').put(snapshot);
         };
         transaction.oncomplete = () => { db.close(); resolve(); };
-        transaction.onerror = () => { db.close(); reject(transaction.error); };
-      };
-    }), { dbName: DB_NAME, dbVersion: DB_VERSION, groupId: richGroupId });
-    await cachedPage.route(transactionsPath, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'TRANSACTIONS_REFRESH_FAILED', message: 'Transaction refresh failed' } }) }));
+         transaction.onerror = () => { db.close(); reject(transaction.error); };
+         };
+       }), { dbName: DB_NAME, dbVersion: DB_VERSION, groupId: richGroupId });
+    let refreshFailures = 0;
+    await cachedPage.route(cachedTransactionsPath, (route) => {
+      refreshFailures += 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'TRANSACTIONS_REFRESH_FAILED', message: 'Transaction refresh failed' } }) });
+    });
     await cachedPage.reload({ waitUntil: 'domcontentloaded' });
     const card = cachedPage.locator('.group-overview-card--transactions');
     await expect(card).toContainText('Dinner by the canal (edited)');
+    await expect.poll(() => refreshFailures).toBeGreaterThan(0);
     await expect(card).toContainText('Showing cached transactions; it may be out of date.');
     await expect(card.locator('.error')).toHaveCount(0);
   } finally {
@@ -226,7 +238,7 @@ test('group overview renders PairwiseBalance names with participant precedence a
 
   const scheduleCard = page.locator('.group-overview-card--schedules');
   const expectedDate = await page.evaluate(() => new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }).format(new Date('2025-09-01T00:00:00Z')));
-  await expect(scheduleCard.locator('.section-title .muted')).toHaveText(`3 active · Next ${expectedDate}`);
+  await expect(scheduleCard.locator('.ui-section-header .muted')).toHaveText(`3 active · Next ${expectedDate}`);
   const previewRows = scheduleCard.locator('.schedule-overview-row');
   await expect(previewRows).toHaveCount(2);
   await expect(previewRows.nth(0)).toContainText('First tie schedule');
@@ -320,7 +332,7 @@ test('group route cold loading keeps mobile anchors stable and actions horizonta
         const rect = element?.getBoundingClientRect();
         return rect ? { top: rect.top, height: rect.height } : undefined;
       };
-      return { back: box('.route-loading--group .skeleton--back'), title: box('.route-loading--group .page-title'), actions: box('.route-loading--group .route-loading__actions'), direction: getComputedStyle(document.querySelector('.route-loading--group .route-loading__actions')!).flexDirection };
+      return { back: box('.route-loading--group .skeleton--back'), title: box('.route-loading--group .ui-page-header .skeleton--title'), actions: box('.route-loading--group .route-loading__actions'), direction: getComputedStyle(document.querySelector('.route-loading--group .route-loading__actions')!).flexDirection };
     });
     expect(loading.back?.height).toBeGreaterThanOrEqual(44);
     expect(loading.actions?.height).toBeGreaterThanOrEqual(44);
@@ -333,7 +345,7 @@ test('group route cold loading keeps mobile anchors stable and actions horizonta
         const rect = element?.getBoundingClientRect();
         return rect ? { top: rect.top, height: rect.height } : undefined;
       };
-      return { back: box('.back'), title: box('.page-title'), actions: box('.expense-heading__actions'), direction: getComputedStyle(document.querySelector('.expense-heading__actions')!).flexDirection, layoutShift: (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift?.() || 0 };
+      return { back: box('.back'), title: box('.ui-page-header h1'), actions: box('.expense-heading__actions'), direction: getComputedStyle(document.querySelector('.expense-heading__actions')!).flexDirection, layoutShift: (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift?.() || 0 };
     });
     expect(rendered.direction).toBe('row');
     expect(Math.abs((rendered.back?.top || 0) - (loading.back?.top || 0))).toBeLessThanOrEqual(8);
@@ -379,7 +391,7 @@ test('completed transaction searches preserve cached results on narrow and deskt
       const observations: Observation[] = [];
       const read = (): Observation => ({
         loading: [...panel.querySelectorAll('[role="status"]')].some((element) => element.textContent?.trim() === 'Loading…'),
-        empty: panel.querySelector('.empty') !== null,
+        empty: panel.querySelector('.ui-empty-state') !== null,
         dinner: panel.textContent?.includes('Dinner by the canal (edited)') === true,
         removedDinner: false,
       });
@@ -448,7 +460,7 @@ test('normalizes disclosure spacing and nested surfaces across responsive bounda
     await expect(balance).toBeVisible();
     await balance.locator('summary').click();
     await expect(balance).toHaveJSProperty('open', true);
-    await expect(balance.locator('.list, .empty, .cache-status').first()).toBeVisible();
+    await expect(balance.locator('.ui-ledger-list, .ui-empty-state, .cache-status').first()).toBeVisible();
     const balanceGeometry = await balance.evaluate((element) => {
       const summary = element.querySelector(':scope > summary')?.getBoundingClientRect();
       const firstContent = Array.from(element.children).find((child) => child.tagName !== 'SUMMARY')?.getBoundingClientRect();
@@ -519,12 +531,12 @@ test('direct section and surface forms own their flow spacing', async ({ authent
 
   await page.goto('/');
   await page.getByRole('link', { name: '+ Add friend' }).click();
-  await expect(page.locator('.surface form')).toBeVisible();
-  expect(await marginOf(page.locator('.surface form'))).toBe('0px');
+  await expect(page.locator('.ui-form-surface form')).toBeVisible();
+  expect(await marginOf(page.locator('.ui-form-surface form'))).toBe('0px');
 
   await page.goto('/groups/new');
   await expect(page.getByRole('heading', { name: 'New group' })).toBeVisible();
-  await expect(page.locator('.surface form')).toBeVisible();
+  await expect(page.locator('.ui-form-surface form')).toBeVisible();
   await page.getByRole('button', { name: 'Add another person' }).click();
   await expect(page.locator('.creation-person')).toHaveCount(2);
 
@@ -574,7 +586,7 @@ test('standalone section actions stay content-sized across responsive boundaries
     const manageGeometry = await actionGeometry(managePeople);
     expect(manageGeometry.justifySelf).toBe('start');
     expect(manageGeometry.width).toBeLessThan(manageGeometry.parentContentWidth);
-    const recentList = page.locator('section[aria-labelledby="recent-transactions-heading"] > .list');
+    const recentList = page.locator('section[aria-labelledby="recent-transactions-heading"] > .ui-ledger-list');
     await expect(recentList).toBeVisible();
     const listGeometry = await actionGeometry(recentList);
     expect(Math.abs(listGeometry.width - listGeometry.parentContentWidth)).toBeLessThanOrEqual(1);
@@ -723,7 +735,7 @@ test('group overview balance states keep unknown counts out of the visible card'
       await loadingPage.goto(`/groups/${richGroupId}`);
       const card = loadingPage.locator('.group-overview-card--balances');
       await expect(card).toBeVisible();
-      await expect(card.locator('.section-title .muted')).toHaveCount(0);
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
       await expect(card).toContainText('Balances are unavailable until this group’s balance data is loaded.');
     } finally {
       releaseLoading();
@@ -737,7 +749,7 @@ test('group overview balance states keep unknown counts out of the visible card'
       await errorPage.goto(`/groups/${richGroupId}`);
       const card = errorPage.locator('.group-overview-card--balances');
       await expect(card).toBeVisible();
-      await expect(card.locator('.section-title .muted')).toHaveCount(0);
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
       await expect(card.locator('.error')).toContainText('Balance fixture outage');
     } finally {
       await errorContext.close();
@@ -755,7 +767,7 @@ test('group overview balance states keep unknown counts out of the visible card'
       await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
       const card = offlinePage.locator('.group-overview-card--balances');
       await expect(card).toBeVisible();
-      await expect(card.locator('.section-title .muted')).toHaveCount(0);
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
       await expect(card).toContainText('Balances are unavailable until this group’s balance data is loaded.');
     } finally {
       releaseOffline();

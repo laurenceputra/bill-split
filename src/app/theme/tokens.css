@@ -35,6 +35,15 @@
   --color-neutral-bg: #F1EEF4;
   --color-neutral-fg: #746A84;
 
+  /* Control and layer semantics. Components should use these names rather
+     than deriving a new color from the palette. */
+  --color-control-bg: var(--color-surface);
+  --color-control-border: var(--color-border-strong);
+  --color-control-placeholder: var(--color-text-tertiary);
+  --color-control-invalid-bg: var(--color-debt-subtle);
+  --color-control-invalid-border: var(--color-debt-fg);
+  --color-scrim: rgb(47 37 64 / 48%);
+
   /* Compatibility aliases for existing route styles. */
   --color-canvas: var(--color-page);
   --color-surface-muted: var(--color-surface-secondary);
@@ -93,6 +102,8 @@
   --text-xl: clamp(1.5rem, 7vw, 2rem);
   --text-amount: clamp(2.25rem, 11vw, 3rem);
   --line-height-tight: 1;
+  --line-height-body: 1.5;
+  --line-height-label: 1.25;
 }
 
 @media (min-width: 48rem) {

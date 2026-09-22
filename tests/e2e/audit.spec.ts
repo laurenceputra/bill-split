@@ -1,6 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { test, newAuthenticatedContext, BASE_URL, DEV_EMAIL, EMPTY_EMAIL, expect } from './fixtures';
+import { test, newAuthenticatedContext, BASE_URL, DEV_EMAIL, EMPTY_EMAIL, REGISTERED_EMAIL, expect, seedOfflineTrust } from './fixtures';
 import type { Browser, BrowserContext, Page, TestInfo } from '@playwright/test';
 
 type Viewport = { width: number; height: number };
@@ -19,6 +19,7 @@ type Finding = {
   actual?: number;
 };
 type HarnessFailure = {
+  category?: 'scenario' | 'setup' | 'environment';
   scenarioName: string;
   authState: AuthState;
   route: string;
@@ -69,12 +70,20 @@ const viewports: Viewport[] = [
   { width: 896, height: 900 },
   { width: 1440, height: 900 },
 ];
+const disclosureAuditWidths = new Set([320, 895, 896, 1440]);
+const expandedManagementWidths = new Set([320, 895, 896, 1440]);
 const insightViewports: Viewport[] = viewports;
 
 const ids = {
   rich: '00000000-0000-4000-8000-000000003002',
   large: '00000000-0000-4000-8000-000000003003',
   dinner: '00000000-0000-4000-8000-000000004001',
+  deletedExpense: '00000000-0000-4000-8000-000000004004',
+  settlement: '00000000-0000-4000-8000-000000005001',
+  deletedSettlement: '00000000-0000-4000-8000-000000005002',
+  refund: '00000000-0000-4000-8000-000000008001',
+  deletedRefund: '00000000-0000-4000-8000-000000008002',
+  schedule: '00000000-0000-4000-8000-000000007001',
 };
 
 const apiPaths = {
@@ -91,6 +100,8 @@ const apiPaths = {
   invitations: (id: string) => `/api/groups/${id}/invitations`,
   expense: (id: string) => `/api/expenses/${id}`,
   settlement: (id: string) => `/api/settlements/${id}`,
+  scheduledExpense: (id: string) => `/api/scheduled-expenses/${id}`,
+  credit: (id: string) => `/api/credits/${id}`,
   auditEntity: (groupId: string, entityType: 'expense' | 'settlement', entityId: string) => `/api/groups/${groupId}/audit/${entityType}/${entityId}`,
   activity: (_id: string) => '/api/activity',
   spendingInsights: '/api/spending-insights',
@@ -146,6 +157,7 @@ function displayedFixtureTrend(fixture: ReturnType<typeof populatedInsightFixtur
 const privateHomeApis = [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights];
 const groupApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.transactions(id), apiPaths.balances(id), apiPaths.scheduledExpenses(id)];
 const groupManagementApis = (id: string) => [apiPaths.me, apiPaths.group(id), apiPaths.invitations(id)];
+const memberManagementApis = (id: string) => [apiPaths.me, apiPaths.group(id)];
 const scenarios: Scenario[] = [
   { name: 'public-landing', path: '/', auth: undefined, context: 'PublicLanding / signed-out marketing shell', expected: { mode: 'normal', heading: 'Know who paid. Know what is still owed.', content: 'Private, even when offline' } },
   { name: 'populated-home', path: '/', auth: DEV_EMAIL, context: 'Home / populated groups fixture', expected: { mode: 'normal', heading: 'Friends & groups', content: 'Europe trip · USD + EUR', apiPaths: privateHomeApis } },
@@ -154,14 +166,25 @@ const scenarios: Scenario[] = [
   { name: 'group-creation', path: '/groups/new', auth: DEV_EMAIL, context: 'GroupCreation / owner and participant form', expected: { mode: 'normal', heading: 'New group', content: 'Group name', apiPaths: [apiPaths.me] } },
   { name: 'rich-group', path: `/groups/${ids.rich}`, auth: DEV_EMAIL, context: 'GroupPage / rich multi-currency fixture', expected: { mode: 'normal', heading: 'Europe trip · USD + EUR', content: 'Scheduled expenses', apiPaths: groupApis(ids.rich) } },
   { name: 'group-management', path: `/groups/${ids.rich}/manage`, auth: DEV_EMAIL, context: 'GroupManagement / owner people, invitations, split-default, and named-group relationship controls', expected: { mode: 'normal', heading: 'Manage group', content: 'Relationship type', apiPaths: groupManagementApis(ids.rich) } },
+  { name: 'member-management', path: `/groups/${ids.rich}/manage`, auth: REGISTERED_EMAIL, context: 'GroupManagement / member people and shared split-default controls', expected: { mode: 'normal', heading: 'Manage group', content: 'People', apiPaths: memberManagementApis(ids.rich) } },
+  { name: 'global-add-chooser', path: '/add', auth: DEV_EMAIL, context: 'TransactionChooser / global add flow across cached groups', expected: { mode: 'normal', heading: 'Add transaction', content: 'Choose what happened', apiPaths: [apiPaths.me, apiPaths.groups] } },
+  { name: 'group-add-chooser', path: `/groups/${ids.rich}/add`, auth: DEV_EMAIL, context: 'TransactionChooser / group-scoped add flow', expected: { mode: 'normal', heading: 'Add transaction', content: 'Europe trip · USD + EUR', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.group(ids.rich)] } },
   { name: 'transaction-history', path: `/groups/${ids.rich}/transactions`, finalPath: `/activity?group=${ids.rich}&view=transactions`, auth: DEV_EMAIL, context: 'Legacy transaction route / canonical History transactions tab fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.group(ids.rich), apiPaths.globalTransactions, apiPaths.categories] } },
   { name: 'large-group', path: `/groups/${ids.large}`, auth: DEV_EMAIL, context: 'Group overview / long-member-label fixture', expected: { mode: 'normal', heading: 'Very large group with a name that should remain contained at narrow widths', content: 'Recent transactions', apiPaths: groupApis(ids.large) } },
   { name: 'expense-form', path: `/groups/${ids.rich}/expense/new`, auth: DEV_EMAIL, context: 'ExpenseForm / new expense fixture', expected: { mode: 'normal', heading: 'Add expense', content: 'Split between', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
+  { name: 'expense-edit', path: `/groups/${ids.rich}/expense/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseForm / canonical expense edit fixture', expected: { mode: 'normal', heading: 'Edit expense', content: 'Dinner by the canal (edited)', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expense(ids.dinner), apiPaths.categories] } },
+  { name: 'scheduled-expense-edit', path: `/groups/${ids.rich}/scheduled-expense/${ids.schedule}`, auth: DEV_EMAIL, context: 'ExpenseForm / canonical scheduled expense edit fixture', expected: { mode: 'normal', heading: 'Edit recurring expense', content: 'Monthly apartment rent', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.scheduledExpense(ids.schedule)] } },
   { name: 'scheduled-expense-form', path: `/groups/${ids.rich}/expense/new?recurrence=1`, auth: DEV_EMAIL, context: 'Legacy recurring route / redirected new expense fixture', expected: { mode: 'normal', heading: 'Schedule an expense', content: 'Repeat this expense', apiPaths: [apiPaths.me, apiPaths.group(ids.rich)] } },
-  { name: 'record-credit', path: `/groups/${ids.rich}/credit/new`, auth: DEV_EMAIL, context: 'CreditForm / refund and claim accounting entry', expected: { mode: 'normal', heading: 'Record credit', content: 'Apply to expenses', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
+  { name: 'record-credit', path: `/groups/${ids.rich}/credit/new`, auth: DEV_EMAIL, context: 'RefundForm / credit route alias for recording money back', expected: { mode: 'normal', heading: 'Record money back', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
   { name: 'expense-detail-history', path: `/groups/${ids.rich}/expenses/${ids.dinner}`, auth: DEV_EMAIL, context: 'ExpenseDetail / edited dinner with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'Dinner by the canal (edited)', content: 'History', apiPaths: [apiPaths.me, apiPaths.expense(ids.dinner), apiPaths.group(ids.rich)] }, expandedAudit: { entityType: 'expense', entityId: ids.dinner, content: 'Updated expense' } },
   { name: 'refund-form', path: `/groups/${ids.rich}/refund/new`, auth: DEV_EMAIL, context: 'RefundForm / linked expense-first refund state and responsive money-flow controls', expected: { mode: 'normal', heading: 'Record money back', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.expenses(ids.rich)] } },
-  { name: 'settlement-detail-history', path: `/groups/${ids.rich}/settlements/00000000-0000-4000-8000-000000005001`, auth: DEV_EMAIL, context: 'SettlementDetail / edited payment with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'paid', content: 'View audit history', apiPaths: [apiPaths.me, apiPaths.settlement('00000000-0000-4000-8000-000000005001'), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] }, expandedAudit: { entityType: 'settlement', entityId: '00000000-0000-4000-8000-000000005001', content: 'Updated settlement' } },
+  { name: 'refund-edit', path: `/groups/${ids.rich}/refund/${ids.refund}/edit`, auth: DEV_EMAIL, context: 'RefundForm / canonical dedicated refund edit fixture', expected: { mode: 'normal', heading: 'Edit refund or reimbursement', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.credit(ids.refund), apiPaths.expenses(ids.rich)] } },
+  { name: 'credit-edit-alias', path: `/groups/${ids.rich}/credit/${ids.refund}/edit`, auth: DEV_EMAIL, context: 'RefundForm / canonical credit edit alias fixture', expected: { mode: 'normal', heading: 'Edit refund or reimbursement', content: 'Apply this to', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.credit(ids.refund), apiPaths.expenses(ids.rich)] } },
+  { name: 'refund-detail', path: `/groups/${ids.rich}/credits/${ids.refund}`, auth: DEV_EMAIL, context: 'CreditDetail / active dedicated refund detail fixture', expected: { mode: 'normal', heading: 'A group member received the money', content: 'Linked expenses', apiPaths: [apiPaths.me, apiPaths.credit(ids.refund), apiPaths.group(ids.rich)] } },
+  { name: 'refund-detail-deleted', path: `/groups/${ids.rich}/credits/${ids.deletedRefund}`, auth: DEV_EMAIL, context: 'CreditDetail / deleted refund tombstone and restore control', expected: { mode: 'normal', heading: 'A group member received the money', content: 'Deleted refund/reimbursement', apiPaths: [apiPaths.me, apiPaths.credit(ids.deletedRefund), apiPaths.group(ids.rich)] } },
+  { name: 'settlement-detail-history', path: `/groups/${ids.rich}/settlements/${ids.settlement}`, auth: DEV_EMAIL, context: 'SettlementDetail / edited payment with closed and expanded audit disclosure states', expected: { mode: 'normal', heading: 'paid', content: 'View audit history', apiPaths: [apiPaths.me, apiPaths.settlement(ids.settlement), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] }, expandedAudit: { entityType: 'settlement', entityId: ids.settlement, content: 'Updated settlement' } },
+  { name: 'expense-detail-deleted', path: `/groups/${ids.rich}/expenses/${ids.deletedExpense}`, auth: DEV_EMAIL, context: 'ExpenseDetail / deleted expense tombstone and restore control', expected: { mode: 'normal', heading: 'Deleted museum tickets', content: 'Deleted expense', apiPaths: [apiPaths.me, apiPaths.expense(ids.deletedExpense), apiPaths.group(ids.rich)] } },
+  { name: 'settlement-detail-deleted', path: `/groups/${ids.rich}/settlements/${ids.deletedSettlement}`, auth: DEV_EMAIL, context: 'SettlementDetail / deleted settlement tombstone and restore control', expected: { mode: 'normal', heading: 'paid', content: 'Deleted settlement', apiPaths: [apiPaths.me, apiPaths.settlement(ids.deletedSettlement), apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'settlement', path: `/groups/${ids.rich}/settle`, auth: DEV_EMAIL, context: 'Settle / multi-currency balance fixture', expected: { mode: 'normal', heading: 'Settle up', content: 'Record a payment', apiPaths: [apiPaths.me, apiPaths.group(ids.rich), apiPaths.balances(ids.rich)] } },
   { name: 'activity', path: `/activity?group=${ids.rich}`, auth: DEV_EMAIL, context: 'History changes / filtered expense and settlement history fixture', expected: { mode: 'normal', heading: 'History', content: 'Dinner by the canal', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.activity(ids.rich)] } },
   { name: 'all-groups-transactions', path: '/activity?view=transactions', auth: DEV_EMAIL, context: 'History transactions / all authorized groups fixture', expected: { mode: 'normal', heading: 'History', content: 'Search and filters', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.globalTransactions, apiPaths.categories] } },
@@ -221,6 +244,10 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       return `${element.tagName.toLowerCase()}${id}${classes}${text ? `[text="${text.replaceAll('"', '\\"')}"]` : ''}`;
     };
     const contentWidth = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
+    // Geometry is measured from the top of the document. Sticky shell
+    // controls must not be compared with content left underneath them after a
+    // preceding interaction or a full-page screenshot.
+    window.scrollTo(0, 0);
     if (contentWidth > viewport.width + 1) add('horizontal-overflow', 'major', `Document scroll width ${contentWidth}px exceeds viewport width ${viewport.width}px`, 'html/body', contentWidth - viewport.width);
     const internalOverflowDescendant = (element: Element) => {
       for (let parent = element.parentElement; parent; parent = parent.parentElement) {
@@ -236,7 +263,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
 
     const modal = document.querySelector('.modal-sheet');
     const modalIsVisible = Boolean(modal && visible(modal));
-    const auditTarget = (element: Element) => visible(element) && !element.matches('.skip-link') && !(modalIsVisible && !modal?.contains(element));
+    const auditTarget = (element: Element) => visible(element) && !element.matches('.skip-link') && !element.closest('.shell-header,.shell-nav') && !(modalIsVisible && !modal?.contains(element));
     if (touchViewport) {
       const tapTargets = Array.from(document.querySelectorAll('a,button,input,select,textarea,summary,[role="button"]')).filter(auditTarget).filter((element) => {
         // The native checkbox/radio is intentionally smaller than its label.
@@ -259,6 +286,28 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
           const second = tapTargets[secondIndex];
           if (first.contains(second) || second.contains(first)) continue;
           if (first.closest('.bottom-nav') || second.closest('.bottom-nav')) continue;
+          const a = boxOf(first); const b = boxOf(second);
+          const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          if (overlapWidth > 1 && overlapHeight > 1) add('interactive-overlap', 'major', `Interactive bounds overlap by ${Math.round(overlapWidth)}×${Math.round(overlapHeight)}px`, `${selector(first)} / ${selector(second)}`);
+        }
+      }
+      for (const element of Array.from(document.querySelectorAll('input,select,textarea')).filter(auditTarget)) {
+        const fontSize = Number.parseFloat(getComputedStyle(element).fontSize);
+        if (fontSize < 16) add('mobile-input-font-size', 'major', `Mobile form control uses ${fontSize}px text; expected at least 16px to avoid viewport zoom`, selector(element), fontSize);
+      }
+    }
+
+    // Touch widths use the same check above; keep the desktop assertion here
+    // so overlap remains a generic invariant instead of a mobile-only rule.
+    if (!touchViewport) {
+      const desktopTargets = Array.from(document.querySelectorAll('a,button,select,[role="button"],summary')).filter(auditTarget);
+      for (let firstIndex = 0; firstIndex < desktopTargets.length; firstIndex += 1) {
+        for (let secondIndex = firstIndex + 1; secondIndex < desktopTargets.length; secondIndex += 1) {
+          const first = desktopTargets[firstIndex];
+          const second = desktopTargets[secondIndex];
+          if (first.contains(second) || second.contains(first)) continue;
+          if (first.closest('.bottom-nav,.desktop-nav') || second.closest('.bottom-nav,.desktop-nav')) continue;
           const a = boxOf(first); const b = boxOf(second);
           const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
           const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
@@ -298,7 +347,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       }
 
       window.scrollTo(0, document.documentElement.scrollHeight);
-      const content = Array.from(main.querySelectorAll('h1,h2,h3,h4,p,a,button,input,select,textarea,fieldset,form,li,.card,.list,.row,.empty,.error,.offline-banner,.chip,.actions,.form-row,.field,.section-title,.page-title'))
+      const content = Array.from(main.querySelectorAll('h1,h2,h3,h4,p,a,button,input,select,textarea,fieldset,form,li,.ui-card-surface,.ui-ledger-list,.ui-ledger-row,.ui-empty-state,.error,.offline-banner,.ui-action-group,.form-row,.field,.ui-section-header,.ui-page-header'))
         .filter((element) => visible(element) && !element.closest('.bottom-nav,.modal-backdrop'));
       const finalContent = content.reduce<Element | undefined>((last, element) => {
         if (!last) return element;
@@ -327,7 +376,7 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       if (element.scrollWidth > element.clientWidth + 1 || box.left < -1 || box.right > viewport.width + 1) add('long-text-containment', 'major', `Long text overflows its box (${element.scrollWidth}px content in ${element.clientWidth}px) or viewport bounds`, selector(element));
     }
 
-    const surfaceRootSelector = '.surface,.card,.card-surface,.empty,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-summary-card,.insight-category-trends,.compact-balances,.group-overview-card,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"],.route-view--group-management > section,.route-view--group-management > #settings > section,.route-view--settings > section';
+    const surfaceRootSelector = '.ui-surface,.ui-card-surface,.ui-form-surface,.ui-empty-state,.error,.offline-banner,.schedule-preview,.recurrence-toggle,.summary-row,.participant-row,.method-row,.member-row,.insight-summary-card,.insight-category-trends,.compact-balances,.group-overview-card,.route-loading__card,.app-error-boundary__card,.ledger-preview,.modal-sheet,[role="dialog"],.route-view--group-management > section,.route-view--group-management > #settings > section,.route-view--settings > section';
     for (const element of Array.from(document.querySelectorAll(surfaceRootSelector)).filter(visible)) {
       const style = getComputedStyle(element);
       const padding = Math.min(parseFloat(style.paddingTop), parseFloat(style.paddingRight), parseFloat(style.paddingBottom), parseFloat(style.paddingLeft));
@@ -363,15 +412,38 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       if (depth > 2) add('card-surface-hierarchy-depth', 'major', `Visible painted card/surface ancestor depth is ${depth}; project maximum is two`, selector(root), depth);
     }
 
-    const flowSurface = (element: Element) => element.matches('.surface,section,.card,.empty,.offline-banner,.error,.list,.secondary-fields,.landing-note,.landing-proof > div');
-    const meaningfulFlowContent = (element: Element) => flowSurface(element) || element.matches('h1,h2,h3,h4,p,form,fieldset,ul,ol,dl,table,article,header,aside,nav,.page-title,.section-title,.chips,.actions,.form-row,.field,.notes,.category,.title,.cluster,.notice,[class*="title"],[class*="cluster"],[class*="notice"]');
-    const flowContainer = (element: Element) => meaningfulFlowContent(element) || element.matches('div') && Array.from(element.children).some((child) => child.matches('h1,h2,h3,h4,.list,.chips,form,fieldset,.error,.offline-banner,.empty,[class*="title"],[class*="cluster"]'));
+    for (const list of Array.from(document.querySelectorAll('.ui-ledger-list')).filter(visible)) {
+      if (list.tagName === 'UL' && Array.from(list.children).some((child) => child.tagName !== 'LI')) add('semantic-list-structure', 'major', 'A semantic ledger list contains a non-LI direct child', selector(list));
+      if (list.querySelector('[tabindex]:not([tabindex="-1"])')) add('semantic-focus-order', 'minor', 'A ledger collection contains a positive or unmanaged tabindex; preserve native focus order', selector(list));
+    }
+
+    // Only regions that opt into this audit are compared. A broad button
+    // heuristic mistakes unrelated management actions (for example removing a
+    // person) for the page's primary task (for example saving settings).
+    const primaryRegions = Array.from(document.querySelectorAll('[data-flow-region="frequent"]')).filter(auditTarget);
+    const adminRegions = Array.from(document.querySelectorAll('[data-flow-region="admin"]')).filter(auditTarget);
+    for (const primaryRegion of primaryRegions) {
+      const primaryAction = primaryRegion.querySelector('[data-primary-action="true"],button[type="submit"],a.button:not(.button--secondary):not(.button--danger)');
+      if (!primaryAction || !visible(primaryAction)) add('missing-primary-action', 'major', 'A frequent-action region is marked for ordering but contains no visible primary action', selector(primaryRegion));
+    }
+    for (const primary of primaryRegions) {
+      for (const admin of adminRegions) {
+        if (primary === admin || primary.contains(admin) || admin.contains(primary)) continue;
+        if (primary.compareDocumentPosition(admin) & Node.DOCUMENT_POSITION_FOLLOWING) continue;
+        add('primary-before-admin', 'major', 'An administrative region appears before an independent frequent-action region', `${selector(admin)} → ${selector(primary)}`);
+        break;
+      }
+    }
+
+    const flowSurface = (element: Element) => element.matches('.ui-form-surface,.ui-card-surface,.ui-surface,section,.ui-empty-state,.offline-banner,.error,.ui-ledger-list,.secondary-fields,.landing-note,.landing-proof > div');
+    const meaningfulFlowContent = (element: Element) => flowSurface(element) || element.matches('h1,h2,h3,h4,p,form,fieldset,ul,ol,dl,table,article,header,aside,nav,.ui-page-header,.ui-section-header,.ui-action-group,.form-row,.field,.notes,.category,.title,.cluster,.notice,[class*="title"],[class*="cluster"],[class*="notice"]');
+    const flowContainer = (element: Element) => meaningfulFlowContent(element) || element.matches('div') && Array.from(element.children).some((child) => child.matches('h1,h2,h3,h4,.ui-ledger-list,.ui-action-group,form,fieldset,.error,.offline-banner,.ui-empty-state,[class*="title"],[class*="cluster"]'));
     const hasBorder = (style: CSSStyleDeclaration, side: 'top' | 'bottom') => ['solid', 'dashed', 'dotted', 'double'].includes(side === 'top' ? style.borderTopStyle : style.borderBottomStyle);
     const intentionallyConnected = (element: Element, next: Element, parent: Element) => {
       if (!parent || parent !== next.parentElement) return false;
-      if (element.matches('.row,.participant-row,.allocation-row,.payer-row') && next.matches('.row,.participant-row,.allocation-row,.payer-row')) return true;
-      if (parent.matches('.list,.participant-list,.allocation-list,.payer-list,.bottom-nav,.desktop-nav,[role="group"]')) return true;
-      if (parent.matches('.section-title,.page-title,.top-bar__actions,.home-actions,.landing-actions,.actions,.form-row,.field,.chips')) return true;
+      if (element.matches('.ui-ledger-row,.participant-row,.allocation-row,.payer-row') && next.matches('.ui-ledger-row,.participant-row,.allocation-row,.payer-row')) return true;
+      if (parent.matches('.ui-ledger-list,.participant-list,.allocation-list,.payer-list,.bottom-nav,.desktop-nav,[role="group"]')) return true;
+      if (parent.matches('.ui-section-header,.ui-page-header,.top-bar__actions,.home-actions,.landing-actions,.ui-action-group,.form-row,.field,.chips')) return true;
       return false;
     };
     const boundaryNode = (element: Element, direction: 'first' | 'last') => {
@@ -425,6 +497,60 @@ async function visibleCount(page: Page, selector: string) {
     const box = element.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
   }).length);
+}
+
+const routeReadySelectors: Record<string, string> = {
+  'populated-home': '.cards',
+  'empty-home': '.ui-empty-state',
+  'friend-creation': '#friend-name',
+  'group-creation': '#group-name',
+  'rich-group': '.group-overview-card--transactions .transaction-row--overview',
+  'large-group': '.group-overview-card--transactions .transaction-row--overview',
+  'group-management': '.management-sections',
+  'member-management': '.management-sections',
+  'global-add-chooser': '.chooser-groups > section',
+  'group-add-chooser': '.chooser-options',
+  'transaction-history': '.transaction-list .transaction-row',
+  'activity': '.activity-list > li',
+  'all-groups-transactions': '.transaction-list .transaction-row',
+  'group-insights': '.insights-page',
+  'global-insights': '.insights-page',
+  'empty-global-insights': '.insights-page',
+  'custom-insights': '.insights-page',
+  'invalid-custom-insights': '.insights-page',
+  'settings': '.settings-section',
+  'expense-form': '.expense-form',
+  'expense-edit': '.expense-form',
+  'scheduled-expense-edit': '.expense-form',
+  'scheduled-expense-form': '.expense-form',
+  'record-credit': '.refund-form',
+  'refund-form': '.refund-form',
+  'refund-edit': '.refund-form',
+  'credit-edit-alias': '.refund-form',
+  'expense-detail-history': '.expense-detail-surface',
+  'expense-detail-deleted': '.expense-detail-tombstone',
+  'refund-detail': '.credit-detail-surface',
+  'refund-detail-deleted': '.credit-detail-tombstone',
+  'settlement-detail-history': '.settlement-detail-surface',
+  'settlement-detail-deleted': '.settlement-detail-tombstone',
+  'settlement': '.settlement-form-surface',
+};
+
+async function waitForScenarioReady(page: Page, scenario: Scenario) {
+  if (!scenario.auth) {
+    await expect(page.locator('.public-main')).toBeVisible();
+    if (scenario.expected.content) await expect(page.locator('.public-main')).toContainText(scenario.expected.content);
+    return;
+  }
+  if (scenario.expected.mode === 'loading' || scenario.expected.mode === 'insights-loading') {
+    await expect(page.getByRole('status').filter({ hasText: 'Loading' }).first()).toBeVisible();
+    return;
+  }
+  const selector = routeReadySelectors[scenario.name];
+  if (selector) await expect(page.locator(selector).first()).toBeVisible({ timeout: 15_000 });
+  else if (scenario.expected.content) await expect(page.locator('main')).toContainText(scenario.expected.content, { timeout: 15_000 });
+  else await expect(page.locator('main')).toBeVisible({ timeout: 15_000 });
+  if (scenario.expected.content) await expect(page.locator('main')).toContainText(scenario.expected.content, { timeout: 15_000 });
 }
 
 async function assertRendered(page: Page, scenario: Scenario, observations: ApiObservation[], viewport: Viewport) {
@@ -663,12 +789,16 @@ async function assertCustomInsightAccessibility(page: Page, invalidFromUrl: bool
 }
 
 async function populateRefundAuditState(page: Page) {
-  await page.getByLabel('Expense 1', { exact: true }).selectOption(ids.dinner);
-  await expect(page.getByLabel('Expense 1', { exact: true })).toHaveValue(ids.dinner);
-  await page.getByLabel('How much? (USD)', { exact: true }).fill('42.00');
-  await expect(page.getByLabel('Applied amount for expense 1 (USD)', { exact: true })).toHaveValue('42.00');
-  await page.getByLabel('Recipient 1', { exact: true }).selectOption('00000000-0000-4000-8000-000000002003');
-  await page.getByLabel('Recipient amount 1 (USD)', { exact: true }).fill('42.00');
+  const expenseSelect = page.locator('.refund-application-row select').first();
+  await expect(expenseSelect).toBeVisible();
+  await expenseSelect.selectOption(ids.dinner);
+  await expect(expenseSelect).toHaveValue(ids.dinner);
+  const amountInput = page.locator('input[inputmode="decimal"]').first();
+  const appliedAmountInput = page.locator('input[name="application-1-amount"]');
+  await amountInput.fill('42.00');
+  await expect(appliedAmountInput).toHaveValue('42.00');
+  await page.locator('select[name="allocation-recipient-1-person"]').selectOption('00000000-0000-4000-8000-000000002003');
+  await page.locator('input[name="allocation-recipient-1-amount"]').fill('42.00');
   await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
   await expect(page.locator('.refund-preview-person')).toHaveCount(3);
   await expect(page.locator('.refund-preview-list')).toContainText('Received');
@@ -719,6 +849,7 @@ async function saveScreenshot(page: Page, artifactDirectory: string, name: strin
 
 async function reportForPage(page: Page, scenario: Scenario, route: string, viewport: Viewport, artifactDirectory: string, findings: Finding[], failures: HarnessFailure[]) {
   try {
+    await page.evaluate(() => window.scrollTo(0, 0));
     findings.push(...await auditGeometry(page, scenario, route, viewport));
   } catch (error) {
     failures.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route, viewport, detail: `Geometry audit failed: ${error instanceof Error ? error.message : String(error)}` });
@@ -769,15 +900,36 @@ function groupedFindings(findings: Finding[]): FindingGroup[] {
 async function writeAuditAttachment(testInfo: TestInfo, artifactDirectory: string, name: string, findings: Finding[], failures: HarnessFailure[], coverage: Coverage[], limitations: string[]) {
   const severityRank: Record<Severity, number> = { critical: 0, major: 1, minor: 2, info: 3 };
   const orderedFindings = dedupeFindings(findings).sort((first, second) => severityRank[first.severity] - severityRank[second.severity] || first.route.localeCompare(second.route) || first.scenarioName.localeCompare(second.scenarioName) || first.authState.localeCompare(second.authState) || first.viewport.width - second.viewport.width || first.viewport.height - second.viewport.height || first.kind.localeCompare(second.kind));
-  const report = { generatedAt: new Date().toISOString(), findings: orderedFindings, groupedFindings: groupedFindings(orderedFindings), coverage, limitations, harnessFailures: failures };
+  const setupFailures = failures.filter((failure) => failure.category === 'setup');
+  const environmentFailures = failures.filter((failure) => failure.category === 'environment');
+  const harnessFailures = failures.filter((failure) => failure.category !== 'environment' && failure.category !== 'setup');
+  const report = { generatedAt: new Date().toISOString(), findings: orderedFindings, groupedFindings: groupedFindings(orderedFindings), coverage, limitations, harnessFailures, setupFailures, environmentFailures };
   await mkdir(artifactDirectory, { recursive: true });
   const reportPath = path.join(artifactDirectory, name);
   await writeFile(reportPath, JSON.stringify(report, null, 2));
   await testInfo.attach(name, { path: reportPath, contentType: 'application/json' });
-  console.log(`\n${name}: ${orderedFindings.length} product findings in ${report.groupedFindings.length} component patterns, ${failures.length} harness failures`);
+  console.log(`\n${name}: ${orderedFindings.length} product findings in ${report.groupedFindings.length} component patterns, ${harnessFailures.length} harness failures, ${setupFailures.length} setup/code failures, ${environmentFailures.length} environment failures`);
   for (const finding of report.groupedFindings) console.log(`[${finding.severity}] ${finding.kind} ${finding.componentPattern} — ${finding.detail} — affected: ${finding.affected.map((entry) => `${entry.route} @ ${entry.viewport.width}x${entry.viewport.height}`).join(', ')}`);
-  for (const failure of failures) console.log(`[HARNESS] ${failure.scenarioName} ${failure.authState} ${failure.route} @ ${failure.viewport.width}x${failure.viewport.height} — ${failure.detail}`);
+  for (const failure of harnessFailures) console.log(`[HARNESS] ${failure.scenarioName} ${failure.authState} ${failure.route} @ ${failure.viewport.width}x${failure.viewport.height} — ${failure.detail}`);
+  for (const failure of setupFailures) console.log(`[SETUP/CODE] ${failure.scenarioName} ${failure.route} — ${failure.detail}`);
+  for (const failure of report.environmentFailures) console.log(`[ENVIRONMENT] ${failure.scenarioName} ${failure.route} — ${failure.detail}`);
   return report;
+}
+
+function isEnvironmentFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ERR_CONNECTION_REFUSED|ERR_CONNECTION_RESET|ERR_EMPTY_RESPONSE|Target page, context or browser has been closed|browser has been closed|Wrangler/i.test(message);
+}
+
+async function readServerFailure(): Promise<HarnessFailure | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(path.join(process.cwd(), 'test-results', 'e2e-environment-failure.json'), 'utf8')) as { category?: string; type?: string; detail?: string };
+    const category = raw.category === 'setup/code' ? 'setup' : 'environment';
+    const type = raw.type ? ` (${raw.type})` : '';
+    return { category, scenarioName: 'e2e-server', authState: 'public', route: '[web server]', viewport: { width: 0, height: 0 }, detail: `${category === 'setup' ? 'Setup/code' : 'Runtime/environment'} failure${type}: ${raw.detail || 'The E2E web server failed.'}` };
+  } catch {
+    return undefined;
+  }
 }
 
 async function openContext(browser: Browser, auth: string | undefined, viewport: Viewport): Promise<BrowserContext> {
@@ -833,9 +985,8 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
           const scope = scenario.name === 'group-insights' ? 'group' : 'global';
            await page.route('**/api/spending-insights*', (route) => { const fixture = populatedInsightFixture(scope, scenario.name === 'empty-global-insights'); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }); });
         }
-        await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-        await page.waitForTimeout(scenario.auth ? 900 : 250);
-        await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => undefined);
+          await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+          await waitForScenarioReady(page, scenario);
         if (scenario.auth && !apiHeaders.some((request) => request.path === apiPaths.me && request.headers['x-dev-email'] === scenario.auth)) throw new Error(`Authenticated context did not send X-Dev-Email: ${scenario.auth}`);
         if (!scenario.auth && apiHeaders.some((request) => request.headers['x-dev-email'])) throw new Error('Public landing context sent X-Dev-Email');
         await assertRendered(page, scenario, observations, viewport);
@@ -844,9 +995,33 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
            if (apiHeaders.some((request) => request.path === apiPaths.spendingInsights && request.search.includes('view=summary'))) throw new Error('Invalid or incomplete custom insight range made a selected-period summary request');
           await assertCustomInsightAccessibility(page, scenario.name === 'invalid-custom-insights');
         }
-          coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
-          await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
-          if (scenario.name === 'refund-form') {
+           coverage.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, context: scenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+           await reportForPage(page, scenario, scenario.path, viewport, artifactDirectory, findings, failures);
+           if (scenario.name === 'rich-group' && disclosureAuditWidths.has(viewport.width)) {
+             try {
+               const tools = page.locator('.group-overview-tools');
+               await tools.locator('summary').click();
+               await expect(tools).toHaveJSProperty('open', true);
+               for (const linkName of ['View spending insights', 'Record credit', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
+               const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-open', context: 'GroupOverview / More group actions disclosure open', expected: { ...scenario.expected, content: 'View spending insights' } };
+               await assertRendered(page, toolsScenario, observations, viewport);
+               coverage.push({ scenarioName: toolsScenario.name, authState: authState(toolsScenario.auth), route: `${scenario.path} [More group actions open]`, viewport, context: toolsScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+               await reportForPage(page, toolsScenario, `${scenario.path} [More group actions open]`, viewport, artifactDirectory, findings, failures);
+
+               const schedules = page.locator('.group-overview-card--schedules');
+               const scheduleDisclosure = schedules.locator('details');
+               await scheduleDisclosure.locator('summary').click();
+               await expect(scheduleDisclosure).toHaveJSProperty('open', true);
+               await expect(schedules.locator('.schedule-list-content')).toBeVisible();
+               const schedulesScenario: Scenario = { ...scenario, name: 'group-overview-all-schedules-open', context: 'GroupOverview / View all schedules disclosure open', expected: { ...scenario.expected, content: 'Monthly apartment rent' } };
+               await assertRendered(page, schedulesScenario, observations, viewport);
+               coverage.push({ scenarioName: schedulesScenario.name, authState: authState(schedulesScenario.auth), route: `${scenario.path} [View all schedules open]`, viewport, context: schedulesScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+               await reportForPage(page, schedulesScenario, `${scenario.path} [View all schedules open]`, viewport, artifactDirectory, findings, failures);
+             } catch (error) {
+               failures.push({ scenarioName: 'group-overview-disclosures', authState: authState(scenario.auth), route: scenario.path, viewport, detail: `Group overview disclosures could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+             }
+           }
+           if (scenario.name === 'refund-form') {
             try {
               await populateRefundAuditState(page);
               const populatedScenario: Scenario = { ...scenario, name: 'refund-form-populated', context: 'RefundForm / selected expense, recipient, running application status, and grouped money-flow preview', expected: { ...scenario.expected, content: 'Fully applied' } };
@@ -908,7 +1083,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             failures.push({ scenarioName: `${scenario.name}-audit-open`, authState: authState(scenario.auth), route: `${scenario.path} [audit open]`, viewport, detail: `Audit disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
           }
         }
-        if (scenario.name === 'group-management') {
+         if (scenario.name === 'group-management' && expandedManagementWidths.has(viewport.width)) {
           try {
             const mateo = page.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Mateo Silva' });
             await expect(mateo.locator('summary')).toHaveText('Add email');
@@ -919,9 +1094,43 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [add email]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
             await reportForPage(page, expandedScenario, `${scenario.path} [add email]`, viewport, artifactDirectory, findings, failures);
           } catch (error) {
-            failures.push({ scenarioName: 'group-management-add-email', authState: authState(scenario.auth), route: `${scenario.path} [add email]`, viewport, detail: `Add-email disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+             failures.push({ scenarioName: 'group-management-add-email', authState: authState(scenario.auth), route: `${scenario.path} [add email]`, viewport, detail: `Add-email disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+           }
+           try {
+             const invitation = page.locator('details.generic-invitation-disclosure');
+             await expect(invitation).toBeVisible();
+             await invitation.locator('summary').click();
+             await expect(invitation.getByLabel('Invite by email')).toBeVisible();
+             const expandedScenario: Scenario = { ...scenario, name: 'group-management-invitation', context: 'GroupManagement / generic invitation disclosure open', expected: { ...scenario.expected, content: 'Invite by email' } };
+             await assertRendered(page, expandedScenario, observations, viewport);
+             coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [invitation open]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+             await reportForPage(page, expandedScenario, `${scenario.path} [invitation open]`, viewport, artifactDirectory, findings, failures);
+            } catch (error) {
+              failures.push({ scenarioName: 'group-management-invitation', authState: authState(scenario.auth), route: `${scenario.path} [invitation open]`, viewport, detail: `Invitation disclosure could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+            }
+            try {
+              const addFriend = page.locator('section[aria-labelledby="add-friend-heading"]');
+              await addFriend.getByRole('button', { name: 'Add friend', exact: true }).click();
+              await expect(addFriend.getByLabel('Friend name')).toBeVisible();
+              const expandedScenario: Scenario = { ...scenario, name: 'group-management-add-friend', context: 'GroupManagement / Add friend editor open', expected: { ...scenario.expected, content: 'Friend name' } };
+              await assertRendered(page, expandedScenario, observations, viewport);
+              coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [Add friend open]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+              await reportForPage(page, expandedScenario, `${scenario.path} [Add friend open]`, viewport, artifactDirectory, findings, failures);
+            } catch (error) {
+              failures.push({ scenarioName: 'group-management-add-friend', authState: authState(scenario.auth), route: `${scenario.path} [Add friend open]`, viewport, detail: `Add-friend editor could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+            }
+            try {
+              const splitDefault = page.locator('section.split-default-settings');
+              await splitDefault.getByRole('button', { name: /^(Customize|Edit)$/ }).click();
+              await expect(splitDefault.locator(':scope > form')).toBeVisible();
+              const expandedScenario: Scenario = { ...scenario, name: 'group-management-split-default', context: 'GroupManagement / party default split editor open', expected: { ...scenario.expected, content: 'Split new entries' } };
+              await assertRendered(page, expandedScenario, observations, viewport);
+              coverage.push({ scenarioName: expandedScenario.name, authState: authState(expandedScenario.auth), route: `${scenario.path} [split default open]`, viewport, context: expandedScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+              await reportForPage(page, expandedScenario, `${scenario.path} [split default open]`, viewport, artifactDirectory, findings, failures);
+            } catch (error) {
+              failures.push({ scenarioName: 'group-management-split-default', authState: authState(scenario.auth), route: `${scenario.path} [split default open]`, viewport, detail: `Split-default editor could not be validated: ${error instanceof Error ? error.message : String(error)}` });
+            }
           }
-        }
         if (scenario.name === 'expense-form') {
           try {
             await page.locator('.summary-row').click();
@@ -935,13 +1144,15 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
           }
         }
       } catch (error) {
-        failures.push({ scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, detail: `Scenario validation/navigation failed before audit: ${error instanceof Error ? error.message : String(error)}` });
+        failures.push({ category: isEnvironmentFailure(error) ? 'environment' : 'scenario', scenarioName: scenario.name, authState: authState(scenario.auth), route: scenario.path, viewport, detail: `Scenario validation/navigation failed before audit: ${error instanceof Error ? error.message : String(error)}` });
         await saveScreenshot(page, artifactDirectory, scenario.name, failures, scenario, scenario.path, viewport);
       } finally {
         await context.close();
       }
     }
   }
+  const serverFailure = await readServerFailure();
+  if (serverFailure && !failures.some((failure) => failure.category === serverFailure.category && failure.detail === serverFailure.detail)) failures.push(serverFailure);
   const report = await writeAuditAttachment(testInfo, artifactDirectory, 'audit-findings.json', findings, failures, coverage, [
     'The 44×44 policy is the project touch-target policy and is audited only at touch/mobile/tablet widths (<896px), not as a universal standards failure.',
     'Playwright cannot reliably inject CSS env(safe-area-inset-*) values into Chromium; source assertions cover the safe-area contracts, while real-device inset behavior remains to be checked on notched iOS/Android hardware.',
@@ -950,6 +1161,130 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   ]);
   expect(report.findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'major'), 'The audit must not contain critical or major geometry findings').toEqual([]);
   expect(failures, 'The audit matrix should complete without harness failures').toEqual([]);
+});
+
+const highRiskViewports = [{ width: 390, height: 844 }, { width: 895, height: 900 }, { width: 896, height: 900 }, { width: 1440, height: 900 }];
+
+async function withHighRiskPage(browser: Browser, viewport: Viewport, run: (page: Page, context: BrowserContext) => Promise<void>) {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+  const page = await context.newPage();
+  try {
+    await run(page, context);
+  } finally {
+    // Close the page before its context so an interrupted assertion cannot leave
+    // a pending page operation blocking context disposal.
+    await page.close({ runBeforeUnload: false }).catch(() => undefined);
+    await context.close().catch(() => undefined);
+  }
+}
+
+async function openHighRiskRoute(page: Page, context: BrowserContext, route: string) {
+   await context.setOffline(false);
+   await page.goto(`${BASE_URL}${route}`, { waitUntil: 'domcontentloaded' });
+   await expect(page.locator('main')).toBeVisible();
+}
+
+async function setHighRiskOnline(page: Page, context: BrowserContext) {
+  await context.setOffline(false);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    window.dispatchEvent(new Event('online'));
+  });
+}
+
+async function setHighRiskOffline(page: Page, context: BrowserContext) {
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    window.dispatchEvent(new Event('offline'));
+  });
+  await context.setOffline(true);
+}
+
+test('deleted records preserve restore recovery and offline controls', async ({ browser }) => {
+  for (const viewport of highRiskViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      for (const [route, label] of [
+        [`/groups/${ids.rich}/expenses/${ids.deletedExpense}`, 'Restore expense'],
+        [`/groups/${ids.rich}/settlements/${ids.deletedSettlement}`, 'Restore settlement'],
+        [`/groups/${ids.rich}/credits/${ids.deletedRefund}`, 'Restore refund/reimbursement'],
+      ] as const) {
+        await setHighRiskOnline(page, context);
+        await openHighRiskRoute(page, context, route);
+        const restore = page.getByRole('button', { name: label, exact: true });
+        await expect(restore).toBeVisible();
+        await expect(restore).toBeEnabled();
+        await seedOfflineTrust(page);
+        await setHighRiskOffline(page, context);
+        await expect(restore).toBeDisabled();
+      }
+    });
+  }
+});
+
+test('settings keeps account deletion guarded and ordered after primary actions', async ({ browser }) => {
+  for (const viewport of highRiskViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      await openHighRiskRoute(page, context, '/settings');
+      const danger = page.locator('.settings-section--danger');
+      await expect(danger).toBeVisible();
+      await expect(page.getByLabel('Typed confirmation')).toHaveAttribute('aria-describedby', 'account-deletion-help');
+      const deleteAccount = danger.getByRole('button', { name: 'Delete BillSplit account', exact: true });
+      await expect(deleteAccount).toBeDisabled();
+      await page.getByLabel('Typed confirmation').fill('DELETE MY ACCOUNT');
+      // The local development Clerk fixture has no destructive account identity;
+      // exact text alone must never make this action executable.
+      await expect(deleteAccount).toBeDisabled();
+      const settingsOrder = await page.locator('main').evaluate((main) => {
+        const sections = Array.from(main.querySelectorAll('section'));
+        return { dangerIndex: sections.findIndex((section) => section.classList.contains('settings-section--danger')), primaryIndex: sections.findIndex((section) => Boolean(section.querySelector('button:not(.button--secondary):not(.button--danger)'))) };
+      });
+      expect(settingsOrder.dangerIndex).toBeGreaterThan(settingsOrder.primaryIndex);
+    });
+  }
+});
+
+test('management invitation disclosure stays actionable', async ({ browser }) => {
+  for (const viewport of highRiskViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      await openHighRiskRoute(page, context, `/groups/${ids.rich}/manage`);
+      const invitation = page.locator('.generic-invitation-disclosure');
+      await invitation.locator('summary').click();
+      await expect(invitation.getByLabel('Invite by email')).toBeVisible();
+      await expect(invitation.getByRole('button', { name: 'Invite', exact: true })).toBeEnabled();
+    });
+  }
+});
+
+test('refund submission remains enabled online and disabled offline', async ({ browser }) => {
+  for (const viewport of highRiskViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      await openHighRiskRoute(page, context, `/groups/${ids.rich}/refund/new`);
+      await populateRefundAuditState(page);
+      const refundSubmit = page.getByRole('button', { name: 'Record money back', exact: true });
+      await expect(refundSubmit).toBeEnabled();
+      await setHighRiskOffline(page, context);
+      await expect(refundSubmit).toBeDisabled();
+    });
+  }
+});
+
+test('history filters preserve credit selection and transaction results', async ({ browser }) => {
+  for (const viewport of highRiskViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      await openHighRiskRoute(page, context, `/activity?group=${ids.rich}&view=transactions`);
+      const filterDisclosure = page.locator('.transaction-filters-disclosure');
+      await filterDisclosure.locator('summary').click();
+      await expect(filterDisclosure.locator('form')).toBeVisible();
+      await page.locator('.history-kind-shortcut select').selectOption('credit');
+      await expect(filterDisclosure.locator('label').filter({ hasText: 'Category' }).locator('select')).toBeDisabled();
+      await filterDisclosure.locator('form').evaluate((form) => form.requestSubmit());
+      await expect.poll(() => new URL(page.url()).searchParams.get('kind')).toBe('credit');
+      await expect.poll(() => new URL(page.url()).searchParams.get('view')).toBe('transactions');
+      await expect(page.locator('.transaction-list')).toBeVisible();
+      await expect(page.locator('.transaction-list .transaction-row')).not.toHaveCount(0);
+      expect(await page.locator('.transaction-list .transaction-row').evaluateAll((rows) => rows.every((row) => row.getAttribute('data-transaction-kind') === 'credit'))).toBe(true);
+    });
+  }
 });
 
 test('group overview keeps storyboard modules flat, ordered, and responsive', async ({ authenticatedPage: page }) => {
@@ -966,7 +1301,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     const structure = await page.locator('.group-overview-columns').evaluate((element) => {
       const order = Array.from(element.querySelectorAll(':scope .group-overview-card')).map((card) => card.className);
       const columns = Array.from(element.children).map((column) => ({ className: column.className, cards: Array.from(column.querySelectorAll(':scope > .group-overview-card')).map((card) => card.className) }));
-      const paintedDescendants = Array.from(element.querySelectorAll('.group-overview-card .card-surface,.group-overview-card .surface,.group-overview-card .card,.group-overview-card .group-overview-card')).length;
+       const paintedDescendants = Array.from(element.querySelectorAll('.group-overview-card .ui-card-surface,.group-overview-card .ui-surface,.group-overview-card .ui-form-surface,.group-overview-card .group-overview-card')).length;
       return { order, columns, paintedDescendants, display: getComputedStyle(element).gridTemplateColumns };
     });
     expect(structure.order.map((name) => name.includes('balances') ? 'balances' : name.includes('transactions') ? 'transactions' : name.includes('schedules') ? 'schedules' : 'people')).toEqual(['balances', 'transactions', 'schedules', 'people']);
@@ -1031,7 +1366,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
         scheduleText: route.querySelector('.schedule-overview-list')?.textContent || '',
         peopleRows,
         peopleOverflow,
-        nestedPaint: cards.reduce((count, card) => count + Array.from(card.querySelectorAll('.card,.surface,.card-surface,.group-overview-card')).length, 0),
+      nestedPaint: cards.reduce((count, card) => count + Array.from(card.querySelectorAll('.ui-card-surface,.ui-surface,.ui-form-surface,.group-overview-card')).length, 0),
         firstActionBeforeCard: Boolean(firstAction && firstCard && firstAction.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING),
         toolsAfterCards: Boolean(tools && cards.at(-1) && cards.at(-1)!.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING),
         focusableOrder: overviewLinks.map((element) => element.matches('.group-overview-tools summary') ? 'tools' : element.closest('.group-overview-card')?.className.includes('balances') ? 'balances' : element.closest('.group-overview-card')?.className.includes('transactions') ? 'transactions' : element.closest('.group-overview-card')?.className.includes('schedules') ? 'schedules' : element.closest('.group-overview-card')?.className.includes('people') ? 'people' : 'other'),
@@ -1078,6 +1413,84 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
   }
 });
 
+test('representative frequent/admin flow regions keep a primary action and a non-overlapping order', async ({ browser }) => {
+  const representativeViewports = [{ width: 320, height: 844 }, { width: 895, height: 900 }, { width: 896, height: 900 }, { width: 1440, height: 900 }];
+  const routes = [
+    { path: `/groups/${ids.rich}`, name: 'group overview', frequent: '.expense-heading__actions', admin: '.group-overview-tools' },
+    { path: `/groups/${ids.rich}/add`, name: 'chooser', frequent: '.chooser-options', admin: undefined },
+    { path: `/groups/${ids.rich}/manage`, name: 'management', frequent: 'section[aria-labelledby="add-friend-heading"]', admin: '#people,.invitations-panel,.split-default-settings,.export-controls,#settings' },
+  ];
+  for (const viewport of representativeViewports) {
+    for (const route of routes) {
+      await withHighRiskPage(browser, viewport, async (page, context) => {
+        await openHighRiskRoute(page, context, route.path);
+        if (route.name === 'group overview') await expect(page.locator('.group-overview-card')).toHaveCount(4);
+        if (route.name === 'chooser') await expect(page.locator('.chooser-options')).toBeVisible();
+        if (route.name === 'management') await expect(page.locator('#people')).toBeVisible();
+        const flow = await page.evaluate(({ frequentSelector, adminSelector }) => {
+          const visible = (element: Element) => {
+            const style = getComputedStyle(element);
+            const box = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+          };
+          const regions = (selector: string) => Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(visible).map((element) => ({ element, top: element.getBoundingClientRect().top, bottom: element.getBoundingClientRect().bottom }));
+          const frequent = regions('[data-flow-region="frequent"]');
+          const admin = regions('[data-flow-region="admin"]');
+          const primary = frequent.filter(({ element }) => element.querySelector('[data-primary-action="true"],button[type="submit"],a.button:not(.button--secondary):not(.button--danger)'));
+          const all = [...frequent.map((region) => ({ ...region, kind: 'frequent' })), ...admin.map((region) => ({ ...region, kind: 'admin' }))].sort((first, second) => first.element.compareDocumentPosition(second.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+          const gaps = all.slice(1).map((region, index) => region.top - all[index].bottom);
+          return { frequentCount: frequent.length, adminCount: admin.length, primaryCount: primary.length, invalidOrder: all.some((region, index) => region.kind === 'admin' && all.slice(index + 1).some((next) => next.kind === 'frequent')), gaps, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), viewportWidth: window.innerWidth, requiredFrequent: frequentSelector, requiredAdmin: adminSelector };
+        }, { frequentSelector: route.frequent, adminSelector: route.admin });
+        expect(flow.frequentCount, `${route.name} @ ${viewport.width}px frequent regions`).toBeGreaterThan(0);
+        expect(flow.primaryCount, `${route.name} @ ${viewport.width}px primary actions`).toBeGreaterThan(0);
+        expect(flow.invalidOrder, `${route.name} @ ${viewport.width}px primary/admin order`).toBe(false);
+        expect(flow.gaps.every((gap) => gap >= -1), `${route.name} @ ${viewport.width}px overlapping flow regions`).toBe(true);
+        expect(flow.documentWidth, `${route.name} @ ${viewport.width}px document overflow`).toBeLessThanOrEqual(flow.viewportWidth + 1);
+      });
+    }
+  }
+});
+
+test('chooser states are truthful when a loaded chooser loses its connection', async ({ browser }) => {
+  const chooserViewports = [{ width: 320, height: 844 }, { width: 895, height: 900 }, { width: 896, height: 900 }, { width: 1440, height: 900 }];
+  for (const viewport of chooserViewports) {
+    await withHighRiskPage(browser, viewport, async (page, context) => {
+      await openHighRiskRoute(page, context, `/groups/${ids.rich}/add`);
+      await expect(page.locator('.chooser-options')).toHaveCount(1);
+      await setHighRiskOffline(page, context);
+      await expect(page.getByRole('status').filter({ hasText: 'Refunds and payments are online-only' })).toBeVisible();
+      await expect(page.locator('.chooser-options [data-primary-action="true"]')).toBeEnabled();
+      const unavailable = page.locator('.chooser-options button:disabled');
+      await expect(unavailable).toHaveCount(2);
+      await expect(unavailable.nth(0)).toContainText('(online only)');
+      await expect(unavailable.nth(1)).toContainText('(online only)');
+    });
+  }
+});
+
+test('client-side route changes restore scroll while hash links focus their targets', async ({ authenticatedPage: page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.goto(`${BASE_URL}/groups/${ids.rich}`);
+  await expect(page.locator('.transaction-row--overview').first()).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await page.locator('.bottom-nav').getByRole('link', { name: 'History', exact: true }).click();
+  await expect(page).toHaveURL(/\/activity/);
+  await expect(page.locator('.activity-list')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+
+  await page.locator('.bottom-nav').getByRole('link', { name: 'Groups', exact: true }).click();
+  await expect(page).toHaveURL(`${BASE_URL}/`);
+  await page.locator('.group-card').first().click();
+  await expect(page).toHaveURL(/\/groups\/[0-9a-f-]+$/);
+  await expect(page.getByRole('link', { name: 'Manage people', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Manage people', exact: true }).click();
+  await expect(page).toHaveURL(/\/manage#people$/);
+  await expect(page.locator('#people')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('people');
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+});
+
 test('currency insight deep links restore the selected tab without filtering API data', async ({ browser }) => {
   for (const viewport of [{ width: 320, height: 844 }, { width: 1440, height: 900 }]) {
     const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
@@ -1093,7 +1506,6 @@ test('currency insight deep links restore the selected tab without filtering API
     });
     try {
       await page.goto(`${BASE_URL}/activity?view=insights&period=month&currency=USD`, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(900);
       const selectedTab = page.locator('.insight-currency-tab[aria-selected="true"]');
       const panel = page.locator('.insight-currency-panel');
       await expect(selectedTab).toHaveText('USD');
@@ -1136,7 +1548,6 @@ test('currency insight deep links restore the selected tab without filtering API
       await expect(panel.locator('.insight-summary-card')).toContainText('EUR');
       await expect(panel.locator('.insight-category-trends')).toContainText('EUR');
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(900);
       await expect(page.locator('.insight-currency-tab[aria-selected="true"]')).toHaveText('EUR');
       expect(new URL(page.url()).searchParams.get('currency')).toBe('EUR');
       await expect(panel.locator('.insight-summary-card')).toContainText('EUR');
@@ -1193,10 +1604,10 @@ test('intercepted loading, API error, offline, and modal states render their int
     await observeResponses(errorPage, errorObservations);
     const errorRequests: ApiRequestObservation[] = [];
     observeRequests(errorPage, errorRequests);
-    await errorPage.route('**/api/groups*', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Fixture outage' } }) }));
+      await errorPage.route('**/api/groups*', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'AUDIT_SERVICE_UNAVAILABLE', message: 'Fixture outage' } }) }));
     try {
       await errorPage.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
-      await errorPage.waitForTimeout(900);
+      await expect(errorPage.locator('#groups-error')).toBeVisible();
       assertAuthenticatedRequest(errorRequests, DEV_EMAIL);
       await assertRendered(errorPage, errorScenario, errorObservations, viewport);
       coverage.push({ scenarioName: errorScenario.name, authState: authState(errorScenario.auth), route: errorScenario.path, viewport, context: errorScenario.context, rendered: true, apiSuccesses: errorObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -1215,9 +1626,10 @@ test('intercepted loading, API error, offline, and modal states render their int
     const insightsErrorRequests: ApiRequestObservation[] = [];
     observeRequests(insightsErrorPage, insightsErrorRequests);
      await insightsErrorPage.route('**/api/spending-insights*', (route) => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INVALID_FILTER', message: 'Insights fixture rejected' } }) }));
-    try {
-      await insightsErrorPage.goto(`${BASE_URL}${insightsErrorScenario.path}`, { waitUntil: 'domcontentloaded' });
-      await insightsErrorPage.waitForTimeout(900);
+     try {
+       await insightsErrorPage.goto(`${BASE_URL}${insightsErrorScenario.path}`, { waitUntil: 'domcontentloaded' });
+       await expect(insightsErrorPage.locator('#insights-summary-error')).toBeVisible();
+       await expect(insightsErrorPage.locator('#insights-trends-error')).toBeVisible();
       assertAuthenticatedRequest(insightsErrorRequests, DEV_EMAIL);
       await assertRendered(insightsErrorPage, insightsErrorScenario, insightsErrorObservations, viewport);
       coverage.push({ scenarioName: insightsErrorScenario.name, authState: authState(insightsErrorScenario.auth), route: insightsErrorScenario.path, viewport, context: insightsErrorScenario.context, rendered: true, apiSuccesses: insightsErrorObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -1245,9 +1657,9 @@ test('intercepted loading, API error, offline, and modal states render their int
          const fixture = populatedInsightFixture('global');
          return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) });
        });
-       try {
-         await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded' });
-         await page.waitForTimeout(900);
+        try {
+          await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded' });
+          await expect(page.locator(`#${independent.errorId}`)).toContainText(independent.message);
          assertAuthenticatedRequest(requests, DEV_EMAIL);
           await assertRendered(page, scenario, observations, viewport);
          if (independent.failedView === 'trends') {
@@ -1272,9 +1684,9 @@ test('intercepted loading, API error, offline, and modal states render their int
     const loadingRequests: ApiRequestObservation[] = [];
     observeRequests(loadingPage, loadingRequests);
     await loadingPage.route('**/api/spending-insights*', async (route) => { await new Promise((resolve) => setTimeout(resolve, 1_000)); await route.continue(); });
-    try {
-      await loadingPage.goto(`${BASE_URL}${loadingScenario.path}`, { waitUntil: 'domcontentloaded' });
-      await loadingPage.waitForTimeout(500);
+     try {
+       await loadingPage.goto(`${BASE_URL}${loadingScenario.path}`, { waitUntil: 'domcontentloaded' });
+       await expect(loadingPage.getByRole('status').filter({ hasText: 'Loading' }).first()).toBeVisible();
       assertAuthenticatedRequest(loadingRequests, DEV_EMAIL);
       await assertRendered(loadingPage, loadingScenario, loadingObservations, viewport);
       coverage.push({ scenarioName: loadingScenario.name, authState: authState(loadingScenario.auth), route: loadingScenario.path, viewport, context: loadingScenario.context, rendered: true, apiSuccesses: loadingObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -1293,14 +1705,14 @@ test('intercepted loading, API error, offline, and modal states render their int
      const offlineRequests: ApiRequestObservation[] = [];
      observeRequests(offlinePage, offlineRequests);
      await offlinePage.route('**/api/spending-insights*', (route) => { const fixture = populatedInsightFixture('global'); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }); });
-    try {
-      await offlinePage.goto(`${BASE_URL}${offlineScenario.path}`, { waitUntil: 'domcontentloaded' });
-      await offlinePage.waitForTimeout(900);
+     try {
+       await offlinePage.goto(`${BASE_URL}${offlineScenario.path}`, { waitUntil: 'domcontentloaded' });
+       await expect(offlinePage.locator('.category-trend-figure')).toBeVisible();
       assertAuthenticatedRequest(offlineRequests, DEV_EMAIL);
        await assertRendered(offlinePage, { ...offlineScenario, expected: { ...offlineScenario.expected, mode: 'normal', content: 'Spending insights' } }, offlineObservations, viewport);
-      await offlineContext.setOffline(true);
+       await offlineContext.setOffline(true);
        await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
-       await offlinePage.waitForTimeout(150);
+       await expect(offlinePage.locator('.offline-banner')).toBeVisible();
         await assertRendered(offlinePage, offlineScenario, offlineObservations, viewport);
         expect(await offlinePage.locator('.category-trend-figure').count()).toBeGreaterThan(0);
       coverage.push({ scenarioName: offlineScenario.name, authState: authState(offlineScenario.auth), route: offlineScenario.path, viewport, context: offlineScenario.context, rendered: true, apiSuccesses: offlineObservations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -1318,13 +1730,13 @@ test('intercepted loading, API error, offline, and modal states render their int
      await observeResponses(coldOfflinePage, coldOfflineObservations);
      const coldOfflineRequests: ApiRequestObservation[] = [];
      observeRequests(coldOfflinePage, coldOfflineRequests);
-     try {
-       await coldOfflinePage.goto(`${BASE_URL}/activity?view=changes`, { waitUntil: 'domcontentloaded' });
-       await coldOfflinePage.waitForTimeout(900);
+      try {
+        await coldOfflinePage.goto(`${BASE_URL}/activity?view=changes`, { waitUntil: 'domcontentloaded' });
+        await expect(coldOfflinePage.locator('main')).toContainText('History');
        await coldOfflineContext.setOffline(true);
-       await coldOfflinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
-       await coldOfflinePage.getByRole('link', { name: 'Insights', exact: true }).click();
-       await coldOfflinePage.waitForTimeout(250);
+        await coldOfflinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
+        await coldOfflinePage.getByRole('link', { name: 'Insights', exact: true }).click();
+        await expect(coldOfflinePage.locator('main')).toContainText('Selected-period summary is unavailable offline');
        assertAuthenticatedRequest(coldOfflineRequests, DEV_EMAIL);
         await assertRendered(coldOfflinePage, coldOfflineScenario, coldOfflineObservations, viewport);
         expect(await coldOfflinePage.getByText('Category trends are unavailable offline; no cached data is available.', { exact: true }).count()).toBe(1);
@@ -1365,7 +1777,6 @@ test('auth refresh keeps private shell geometry stable while identity and groups
     });
     try {
       await page.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(100);
       await expect(page.locator('.auth-loading-shell')).toBeVisible();
       await page.evaluate(() => {
         let value = 0;
@@ -1388,7 +1799,6 @@ test('auth refresh keeps private shell geometry stable while identity and groups
       await expect(homePlaceholder).toBeVisible({ timeout: 15_000 });
       await expect(homePlaceholder).toBeHidden({ timeout: 15_000 });
       await expect(page.locator('.cards')).toBeVisible({ timeout: 15_000 });
-      await page.waitForTimeout(100);
       const result = await page.evaluate(() => {
         const topbar = document.querySelector('.top-bar')?.getBoundingClientRect();
         const main = document.querySelector('.app-main')?.getBoundingClientRect();
@@ -1405,7 +1815,6 @@ test('auth refresh keeps private shell geometry stable while identity and groups
       const refreshedPlaceholder = page.locator('.route-loading--home');
       await expect(refreshedPlaceholder).toBeHidden({ timeout: 15_000 });
       await expect(page.locator('.cards')).toBeVisible({ timeout: 15_000 });
-      await page.waitForTimeout(100);
       const refreshed = await page.evaluate(() => {
         const topbar = document.querySelector('.top-bar')?.getBoundingClientRect();
         const main = document.querySelector('.app-main')?.getBoundingClientRect();

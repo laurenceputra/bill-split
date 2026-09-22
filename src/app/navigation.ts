@@ -131,7 +131,9 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   const path = pathname.split(/[?#]/, 1)[0].replace(/\/{2,}/g, '/').replace(/\/+$/, '') || HOME_PATH;
   const segments = path.split('/').filter(Boolean).map(decodeSegment);
   const queryGroupId = path === '/activity' ? new URLSearchParams(search).get('group') || undefined : undefined;
-  const routeGroupId = segments[0] === 'groups' && segments[1] ? segments[1] : undefined;
+  // `new` is a route keyword, not a group identifier. Keeping it out of the
+  // context also prevents `/groups/new/add` from becoming a scoped chooser.
+  const routeGroupId = segments[0] === 'groups' && segments[1] && segments[1].toLowerCase() !== 'new' ? segments[1] : undefined;
   const groupId = routeGroupId || queryGroupId;
   const group = groupId
     ? {

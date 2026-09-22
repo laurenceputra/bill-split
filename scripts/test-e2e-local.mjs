@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -58,7 +59,15 @@ try {
     args: [playwrightCli, 'test', '--config', localConfig, ...process.argv.slice(2)],
     options: { env: childEnv, stdio: 'inherit' },
   });
-  process.exitCode = result.signal ? signalExitCode(result.signal) : result.code ?? 1;
+  let exitCode = result.signal ? signalExitCode(result.signal) : result.code ?? 1;
+  try {
+    const marker = JSON.parse(await readFile(new URL('../test-results/e2e-environment-failure.json', import.meta.url), 'utf8'));
+    const category = marker.category || (marker.type === 'setup-failure' ? 'setup/code' : 'runtime/environment');
+    const type = marker.type ? ` (${marker.type})` : '';
+    console.error(`[test:e2e:local] ${category} failure${type}: ${marker.detail || 'E2E web-server startup failed.'}`);
+    if (exitCode === 0) exitCode = 1;
+  } catch { /* No environment marker means Playwright owns the result. */ }
+  process.exitCode = exitCode;
 } catch (error) {
   console.error(`[test:e2e:local] Could not start Playwright: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

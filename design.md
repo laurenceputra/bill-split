@@ -59,6 +59,36 @@ Use these names in theme variables and component APIs. Do not invent near-duplic
 
 Color is never the sole indicator: pair it with text, an icon, position, or a status label.
 
+## Theme architecture
+
+The authored theme is layered in one direction from `theme.css`:
+
+1. `tokens.css` is the semantic vocabulary for color, type, spacing, radii,
+   shadows, controls, containers, safe areas, and responsive boundaries.
+2. `base.css` owns reset, readable defaults, focus treatment, and native form
+   control behavior.
+3. `foundations.css` owns shared container and flow hooks.
+4. `shell.css` owns the public/private frame hooks and shell layout contract.
+5. `primitives.css` owns reusable page/section headers, macro sections, ledger
+   lists and rows, disclosures, form surfaces, action groups, and resource
+   states.
+6. Screen composition is split by family: `home-creation.css`,
+   `group-management.css`, `group-overview.css`, `transaction-forms.css`,
+    `history-insights.css`, and `settings.css`. `responsive.css` owns the
+    layout and interaction breakpoint layer; `tokens.css` retains only its
+    width-dependent type-scale token, while `base.css` retains the forced-colors
+    form reset. The retained `composition.css` entrypoint is intentionally empty
+    so legacy monolith rules cannot return.
+
+The desktop transition is **896px** (`56rem`). The 768px tablet boundary is
+still useful for type and spacing adjustments, but desktop navigation and the
+Group Overview columns do not start before 896px. Route composition now uses
+the shared hooks for page headers, focused form surfaces, macro modules,
+disclosures, action groups, resource states, and the dedicated refund preview.
+Behavior-specific selectors remain only for financial rows, responsive
+navigation, and interaction contracts that cannot be expressed by a generic
+primitive without changing API or focus order.
+
 ## Typography
 
 - Use **Inter** for all interface text and numeric content, with a system sans-serif fallback. Load the needed weights rather than substituting a display face.
@@ -80,6 +110,14 @@ Color is never the sole indicator: pair it with text, an icon, position, or a st
 Build and compose these primitives instead of creating page-specific versions:
 
 `AppShell`, `MobileBottomNav`, `DesktopTopNav`, `PageHeader`, `Section`, `Card`, `LedgerList`, `LedgerRow`, `BalanceCard`, `GroupCard`, `TransactionRow`, `SettlementRow`, `PersonRow`, `Avatar`, `AvatarStack`, `StatusPill`, `Notice`, `Button`, `IconButton`, `Input`, `Select`, `AmountInput`, `FormField`, `SectionHeader`, `Disclosure`, `Modal`, `BottomSheet`, `ConfirmationDialog`, `Skeleton`, and `EmptyState`. Foundational `Stack`, `Inline`, `Divider`, `Link`, `Toast`, and `Icon` primitives may support them.
+
+The current shared implementation exposes the foundation-sized subset needed
+for this pass: `PageHeader`, `SectionHeader`, `MacroSection`, `Card`,
+`LedgerList`, `LedgerRow`, `Disclosure`, `FormSurface`, `ActionGroup`,
+`ResourceState`, `Notice`, `Button`, `Field`, `Status`, `Modal`, `Skeleton`,
+and `EmptyState`. Route-specific transaction rows remain compositions until
+their behavior contracts can be migrated without changing refund or offline
+semantics.
 
 ## Page, section, and ledger hierarchy
 

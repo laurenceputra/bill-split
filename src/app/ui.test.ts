@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { AuthLoadingShell, AvatarStack, Field, SplitTransactionControl } from './ui';
+import { AuthLoadingShell, AvatarStack, Disclosure, Field, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
 
 describe('Field', () => {
   it('de-duplicates an error ID already present in aria-describedby', () => {
@@ -15,6 +15,14 @@ describe('Field', () => {
 
     expect(markup).toContain('aria-describedby="help-text start-date-error"');
     expect(markup.match(/start-date-error/g)).toHaveLength(2);
+  });
+});
+
+describe('PageHeader', () => {
+  it('supports an explicit heading ID and labels its header landmark', () => {
+    const markup = renderToStaticMarkup(createElement(PageHeader, { headingId: 'refund-form-title', title: 'Record money back' }));
+    expect(markup).toContain('aria-labelledby="refund-form-title"');
+    expect(markup).toContain('<h1 id="refund-form-title">Record money back</h1>');
   });
 });
 
@@ -93,5 +101,26 @@ describe('AvatarStack', () => {
 
     expect(markup).toContain('aria-label="1 person"');
     expect(markup).not.toContain('aria-label="1 people"');
+  });
+});
+
+describe('ledger primitives', () => {
+  it('keeps list rows semantic and disclosure content progressive', () => {
+    const markup = renderToStaticMarkup(createElement(LedgerList, { label: 'Recent activity' }, createElement(LedgerRow, null, createElement('span', null, 'Dinner'), createElement('strong', null, '$24.00'))));
+    expect(markup).toContain('<ul class="ui-ledger-list" aria-label="Recent activity"><li class="ui-ledger-row">');
+    const disclosure = renderToStaticMarkup(createElement(Disclosure, { summary: 'More details' }, createElement('p', null, 'Details')));
+    expect(disclosure).toContain('<details class="ui-disclosure"><summary>More details</summary><p>Details</p></details>');
+  });
+
+  it('preserves list semantics for div variants', () => {
+    const markup = renderToStaticMarkup(createElement(LedgerList, { as: 'div', label: 'Pending transactions' }, createElement(LedgerRow, { as: 'div' }, 'Pending')));
+    expect(markup).toContain('<div class="ui-ledger-list" aria-label="Pending transactions" role="list"><div class="ui-ledger-row" role="listitem">Pending</div></div>');
+  });
+
+  it('gives resource states a truthful status and recovery composition', () => {
+    const markup = renderToStaticMarkup(createElement(ResourceState, { state: 'cached', label: 'groups', action: createElement('button', null, 'Retry') }));
+    expect(markup).toContain('class="ui-resource-state ui-resource-state--cached"');
+    expect(markup).toContain('Showing cached groups; it may be out of date.');
+    expect(markup).toContain('>Retry</button>');
   });
 });

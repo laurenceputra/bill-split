@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
+import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 import { SignInButton, SignUpButton, useUser } from '@clerk/react';
 import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
@@ -32,7 +32,7 @@ function Brand({ link = false }: { link?: boolean }) {
 }
 
 export function Button({ children, variant = 'primary', loading = false, className = '', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'quiet'; loading?: boolean }) {
-  return <button {...props} className={`${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} aria-busy={loading || undefined} disabled={loading || props.disabled}>{loading ? <span className="button__loading" aria-hidden="true" /> : null}{children}</button>;
+  return <button {...props} className={`ui-button ${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} aria-busy={loading || undefined} disabled={loading || props.disabled}>{loading ? <span className="button__loading" aria-hidden="true" /> : null}{children}</button>;
 }
 
 export function Avatar({ name, src, size = 'md' }: { name: string; src?: string; size?: 'sm' | 'md' | 'lg' }) {
@@ -47,23 +47,59 @@ export function AvatarStack({ people, max = 4 }: { people: Array<{ name: string;
 }
 
 export function Notice({ children, tone = 'neutral', role = 'status', className = '' }: { children: ReactNode; tone?: 'positive' | 'debt' | 'warning' | 'neutral'; role?: 'status' | 'alert'; className?: string }) {
-  return <div className={`notice notice--${tone} ${className}`.trim()} role={role}>{children}</div>;
+  return <div className={`notice ui-notice notice--${tone} ${className}`.trim()} role={role}>{children}</div>;
 }
 
 export function Card({ children, className = '', as: Component = 'article' }: { children: ReactNode; className?: string; as?: 'article' | 'div' | 'section' }) {
-  return <Component className={`card-surface ${className}`.trim()}>{children}</Component>;
+  return <Component className={`card-surface ui-card-surface ${className}`.trim()}>{children}</Component>;
 }
 
-export function PageHeader({ eyebrow, title, actions }: { eyebrow?: ReactNode; title: ReactNode; actions?: ReactNode }) {
-  return <header className="page-header"><div>{eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}<h1>{title}</h1></div>{actions ? <div className="page-header__actions">{actions}</div> : null}</header>;
+export function PageHeader({ eyebrow, title, description, actions, className = '', headingId }: { eyebrow?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode; className?: string; headingId?: string }) {
+  const generatedHeadingId = useId();
+  const resolvedHeadingId = headingId || generatedHeadingId;
+  const composedClassName = className.split(/\s+/).filter((token) => token && token !== 'page-title').join(' ');
+  return <header className={`page-header ui-page-header ${composedClassName}`.trim()} aria-labelledby={resolvedHeadingId}><div>{eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}<h1 id={resolvedHeadingId}>{title}</h1>{description ? <p className="page-header__description">{description}</p> : null}</div>{actions ? <div className="page-header__actions ui-page-header__actions">{actions}</div> : null}</header>;
 }
 
-export function SectionHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
-  return <div className="section-header"><div><h2>{title}</h2>{description ? <p className="muted">{description}</p> : null}</div>{actions ? <div className="section-header__actions">{actions}</div> : null}</div>;
+export function SectionHeader({ title, description, actions, className = '', level = 2 }: { title: ReactNode; description?: ReactNode; actions?: ReactNode; className?: string; level?: 2 | 3 | 4 }) {
+  const Heading = `h${level}` as 'h2' | 'h3' | 'h4';
+  return <div className={`section-header ui-section-header ${className}`.trim()}><div><Heading>{title}</Heading>{description ? <p className="muted">{description}</p> : null}</div>{actions ? <div className="section-header__actions ui-section-header__actions">{actions}</div> : null}</div>;
 }
 
-export function EmptyState({ children, title }: { children?: ReactNode; title?: ReactNode }) {
-  return <div className="empty empty-state" role="status">{title ? <h2>{title}</h2> : null}{children}</div>;
+/** A titled macro surface. The section remains the semantic boundary and the
+ * caller decides whether its body is a list, state, or route composition. */
+export function MacroSection({ title, description, actions, children, className = '', region }: { title: ReactNode; description?: ReactNode; actions?: ReactNode; children?: ReactNode; className?: string; region?: 'frequent' | 'admin' }) {
+  const headingId = useId();
+  return <section className={`ui-macro-section ${className}`.trim()} data-flow-region={region} aria-labelledby={headingId}><div className="ui-macro-section__header"><h2 id={headingId} className="ui-macro-section__heading">{title}</h2>{description ? <p className="ui-macro-section__description">{description}</p> : null}{actions ? <div className="ui-section-header__actions">{actions}</div> : null}</div><div className="ui-macro-section__body">{children}</div></section>;
+}
+
+export function LedgerList({ children, className = '', label, as: Component = 'ul' }: { children?: ReactNode; className?: string; label?: string; as?: 'ul' | 'div' }) {
+  return <Component className={`ui-ledger-list ${className.split(/\s+/).filter((token) => token && token !== 'list').join(' ')}`.trim()} aria-label={label} role={Component === 'div' ? 'list' : undefined}>{children}</Component>;
+}
+
+export function LedgerRow({ children, className = '', as: Component = 'li' }: { children?: ReactNode; className?: string; as?: 'div' | 'li' | 'article' }) {
+  return <Component className={`ui-ledger-row ${className.split(/\s+/).filter((token) => token && token !== 'row').join(' ')}`.trim()} role={Component === 'div' || Component === 'article' ? 'listitem' : undefined}>{children}</Component>;
+}
+
+export function Disclosure({ summary, children, className = '', open, onToggle, region }: { summary: ReactNode; children?: ReactNode; className?: string; open?: boolean; onToggle?: (event: SyntheticEvent<HTMLDetailsElement>) => void; region?: 'frequent' | 'admin' }) {
+  return <details className={`ui-disclosure ${className}`.trim()} data-flow-region={region} open={open} onToggle={onToggle}><summary>{summary}</summary>{children}</details>;
+}
+
+export function FormSurface({ children, className = '', as: Component = 'section' }: { children?: ReactNode; className?: string; as?: 'section' | 'div' | 'article' }) {
+  return <Component className={`ui-form-surface ${className.split(/\s+/).filter((token) => token && token !== 'surface').join(' ')}`.trim()}>{children}</Component>;
+}
+
+export function ActionGroup({ children, className = '', region }: { children: ReactNode; className?: string; region?: 'frequent' | 'admin' }) {
+  return <div className={`ui-action-group ${className}`.trim()} data-flow-region={region}>{children}</div>;
+}
+
+export function ResourceState({ state, children, label, action, className = '' }: { state: 'loading' | 'cached' | 'offline' | 'empty' | 'error'; children?: ReactNode; label?: string; action?: ReactNode; className?: string }) {
+  const message = state === 'loading' ? `Loading${label ? ` ${label}` : ''}…` : state === 'cached' ? `Showing cached${label ? ` ${label}` : ''}; it may be out of date.` : state === 'offline' ? `${label || 'This resource'} is unavailable offline.` : state === 'empty' ? `No ${label || 'items'} yet.` : `Could not load${label ? ` ${label}` : ''}.`;
+  return <div className={`ui-resource-state ui-resource-state--${state} ${className}`.trim()} role={state === 'error' ? 'alert' : 'status'} aria-live="polite"><span>{children || message}</span>{action ? <span className="ui-action-group">{action}</span> : null}</div>;
+}
+
+export function EmptyState({ children, title, className = '' }: { children?: ReactNode; title?: ReactNode; className?: string }) {
+  return <div className={`empty-state ui-empty-state ${className}`.trim()} role="status">{title ? <h2>{title}</h2> : null}{children}</div>;
 }
 
 export function Skeleton({ className = '' }: { className?: string }) {
@@ -77,32 +113,32 @@ export function Skeleton({ className = '' }: { className?: string }) {
  * state is still being verified.
  */
 export function AuthLoadingShell() {
-  return <div className="app-shell auth-loading-shell">
+  return <div className="app-shell shell-frame shell-frame--app auth-loading-shell">
     <a className="skip-link" href="#main-content">Skip to main content</a>
-    <header className="top-bar"><div className="top-bar__inner">
+    <header className="top-bar shell-header"><div className="top-bar__inner">
       <span aria-hidden="true"><Brand /></span>
       <div className="auth-loading-nav" aria-hidden="true"><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-link" /><Skeleton className="skeleton--nav-add" /><Skeleton className="skeleton--nav-link" /></div>
       <div className="auth-loading-actions" aria-hidden="true"><Skeleton className="skeleton--status" /><Skeleton className="skeleton--install" /></div>
     </div></header>
-    <main className="app-main" id="main-content" tabIndex={-1} aria-busy="true">
+    <main className="app-main shell-main" id="main-content" tabIndex={-1} aria-busy="true">
       <div className="auth-loading-content">
         <div className="auth-loading-visual" aria-hidden="true"><Skeleton className="skeleton--eyebrow" /><Skeleton className="skeleton--title" /><Skeleton className="skeleton--paragraph" /><div className="skeleton--surface"><Skeleton className="skeleton--section-title" /><Skeleton className="skeleton--row" /><Skeleton className="skeleton--row" /></div></div>
         <p className="auth-loading-status" role="status" aria-live="polite">Loading…</p>
       </div>
     </main>
-    <nav className="bottom-nav" aria-hidden="true"><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item nav-item--add"><span className="nav-item__capsule"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></nav>
+     <nav className="bottom-nav shell-nav" aria-hidden="true"><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span><span className="nav-item nav-item--add"><span className="nav-item__capsule"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></span><span className="nav-item"><span className="nav-item__content"><span className="nav-item__icon"><Skeleton className="skeleton--nav-icon" /></span><span className="nav-item__label"><Skeleton className="skeleton--nav-label" /></span></span></span></nav>
   </div>;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
   const nestedMain = isValidElement<{ className?: string; 'aria-labelledby'?: string; children?: ReactNode }>(children) && children.type === 'main' ? children : undefined;
   const nestedProps = nestedMain?.props;
-  return <div className="app-shell"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className={`app-main${nestedProps?.className ? ` ${nestedProps.className}` : ''}`} id="main-content" tabIndex={-1} aria-labelledby={nestedProps?.['aria-labelledby']}>{nestedMain ? nestedMain.props.children : children}</main><BottomNav /></div>;
+  return <div className="app-shell shell-frame shell-frame--app"><a className="skip-link" href="#main-content">Skip to main content</a><TopBar /><AuthBanner /><main className={`app-main shell-main${nestedProps?.className ? ` ${nestedProps.className}` : ''}`} id="main-content" tabIndex={-1} aria-labelledby={nestedProps?.['aria-labelledby']}>{nestedMain ? nestedMain.props.children : children}</main><BottomNav /></div>;
 }
 
 export function PublicShell({ children, returnTo = '/', showAuthActions = true }: { children: ReactNode; returnTo?: string; showAuthActions?: boolean }) {
   const safeReturnTo = sanitizeReturnTo(returnTo);
-  return <div className="public-shell"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header"><Brand link />{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
+  return <div className="public-shell shell-frame shell-frame--public"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header shell-header"><Brand link />{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main shell-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useConnectionState(): ConnectionState {
@@ -143,6 +179,18 @@ function useOutbox() {
 
 function useServiceWorkerUpdate() {
   return useSyncExternalStore(subscribeServiceWorkerUpdate, getServiceWorkerUpdateState, () => ({ updateReady: false, applying: false, blocked: false }));
+}
+
+// Keep the shell renderable in isolated/static states (for example, a route
+// placeholder rendered before the Clerk provider is mounted). The application
+// normally always has the provider, but the navigation does not need to make
+// the cached/loading surface impossible to render without it.
+function useOptionalUser() {
+  try {
+    return useUser().user;
+  } catch {
+    return undefined;
+  }
 }
 
 export function ServiceWorkerUpdate() {
@@ -223,7 +271,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" to={navigation.primaryPath} aria-label={primaryAriaLabel ?? navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" data-primary-action="true" to={navigation.primaryPath} aria-label={primaryAriaLabel ?? navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
@@ -235,10 +283,10 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
 export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();
-  const { user } = useUser();
+  const user = useOptionalUser();
   const unsynced = outbox.length;
   const identityName = user?.fullName || user?.firstName || user?.primaryEmailAddress?.emailAddress || 'Signed-in user';
-  return <header className="top-bar"><div className="top-bar__inner"><Brand link /><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div><span className="desktop-user-avatar"><Avatar name={identityName} src={user?.imageUrl} size="sm" /></span>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  return <header className="top-bar shell-header"><div className="top-bar__inner"><Brand link /><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div><span className="desktop-user-avatar"><Avatar name={identityName} src={user?.imageUrl} size="sm" /></span>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {
@@ -258,7 +306,7 @@ export function BottomNav() {
   const online = useOnlineStatus();
   const context = getNavigationContext(location.pathname, location.search);
 
-  return <nav className="bottom-nav" aria-label="Primary navigation">
+  return <nav className="bottom-nav shell-nav" aria-label="Primary navigation">
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="groups" /></span><span className="nav-item__label">Groups</span></span></Link>
     <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="activity" /></span><span className="nav-item__label">History</span></span></Link>
     <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact mobileNav active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
@@ -268,12 +316,53 @@ export function BottomNav() {
 
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
-  const routeClass = location.pathname === '/' ? 'home' : location.pathname === '/activity' ? 'history' : location.pathname === '/settings' ? 'settings' : location.pathname.includes('/manage') ? 'group-management' : location.pathname.includes('/credit') ? 'credit' : location.pathname.includes('/settle') || location.pathname.includes('/settlements') ? 'settlement' : location.pathname.includes('/expense') || location.pathname.includes('/scheduled-expense') ? 'expense' : location.pathname.match(/^\/groups\/[^/]+$/) ? 'group-overview' : 'default';
+  const routeClass = location.pathname === '/' ? 'home' : location.pathname === '/activity' ? 'history' : location.pathname === '/settings' ? 'settings' : location.pathname.includes('/manage') ? 'group-management' : location.pathname.includes('/credit') || location.pathname.includes('/refund') ? 'credit' : location.pathname.includes('/settle') || location.pathname.includes('/settlements') ? 'settlement' : location.pathname.includes('/expense') || location.pathname.includes('/scheduled-expense') ? 'expense' : location.pathname.match(/^\/groups\/(?!new$)[^/]+$/) ? 'group-overview' : 'default';
+  useEffect(() => {
+    let frame = 0;
+    let timeout = 0;
+    let observer: MutationObserver | undefined;
+    const setTimer = (callback: () => void, delay: number) => typeof window.setTimeout === 'function'
+      ? window.setTimeout(callback, delay)
+      : globalThis.setTimeout(callback, delay) as unknown as number;
+    const clearTimer = (handle: number) => {
+      if (typeof window.clearTimeout === 'function') window.clearTimeout(handle);
+      else globalThis.clearTimeout(handle);
+    };
+    const scheduleFrame = (callback: () => void) => typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame(callback)
+      : (typeof globalThis.queueMicrotask === 'function' ? (globalThis.queueMicrotask(callback), 0) : setTimer(callback, 0));
+    const cancelFrame = (handle: number) => {
+      if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(handle);
+      else clearTimer(handle);
+    };
+    let targetId = location.hash.slice(1);
+    try { targetId = decodeURIComponent(targetId); } catch { /* Keep the raw hash when it is malformed. */ }
+    const restore = () => {
+      if (!location.hash) {
+        if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+        return true;
+      }
+      const target = document.getElementById(targetId);
+      if (!(target instanceof HTMLElement)) return false;
+      if (typeof target.scrollIntoView === 'function') target.scrollIntoView({ block: 'start', inline: 'nearest' });
+      if (typeof target.focus === 'function') target.focus({ preventScroll: true });
+      observer?.disconnect();
+      if (timeout) clearTimer(timeout);
+      return true;
+    };
+    frame = scheduleFrame(() => {
+      if (restore() || !location.hash) return;
+      observer = new MutationObserver(() => { restore(); });
+      observer.observe(document.body, { childList: true, subtree: true });
+      timeout = setTimer(() => { observer?.disconnect(); }, 2_000);
+    });
+    return () => { cancelFrame(frame); observer?.disconnect(); if (timeout) clearTimer(timeout); };
+  }, [location.pathname, location.search, location.hash]);
   return <AppShell><div className={`route-view route-view--${routeClass}`}>{children}</div></AppShell>;
 }
 
 export function Surface({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`surface ${className}`.trim()}>{children}</div>;
+  return <Card as="div" className={`ui-surface ${className.split(/\s+/).filter((token) => token && token !== 'surface').join(' ')}`.trim()}>{children}</Card>;
 }
 
 export function Field({ label, children, className = '', error, errorId }: { label: string; children: ReactNode; className?: string; error?: string; errorId?: string }) {
@@ -290,7 +379,7 @@ export function Money({ amountMinor, currency, tone, size = 'normal' }: { amount
 }
 
 export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' | 'warning' | 'neutral' }) {
-  return <span className={`status status--${tone}`}>{children}</span>;
+  return <span className={`status ui-status status--${tone}`}>{children}</span>;
 }
 
 export function Modal({ title, description, children, onClose, className = '' }: { title: string; description?: ReactNode; children: ReactNode; onClose: () => void; className?: string }) {
@@ -319,8 +408,8 @@ export function Modal({ title, description, children, onClose, className = '' }:
     document.addEventListener('keydown', onKeyDown);
     return () => { document.removeEventListener('keydown', onKeyDown); modalScrollLocks = Math.max(0, modalScrollLocks - 1); if (!modalScrollLocks) document.body.style.overflow = modalPreviousOverflow; previousFocus.current?.focus(); };
   }, []);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className={`modal-sheet ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} ref={dialogRef}>
+  return <div className="modal-backdrop ui-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className={`modal-sheet ui-modal ${className}`.trim()} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1} ref={dialogRef}>
       <div className="modal-header"><h2 id={titleId}>{title}</h2><Button type="button" variant="secondary" onClick={onClose} aria-label="Close">Close</Button></div>
       {description ? <div id={descriptionId} className="modal-description">{description}</div> : null}
       {children}

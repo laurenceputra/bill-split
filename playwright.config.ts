@@ -1,8 +1,6 @@
 import { defineConfig } from '@playwright/test';
 import { BASE_URL } from './tests/e2e/config.mjs';
 
-const playwrightExecutablePath = process.env.BILLSPLIT_PLAYWRIGHT_EXECUTABLE_PATH;
-
 export default defineConfig({
   testDir: './tests/e2e',
   outputDir: 'test-results',
@@ -18,17 +16,17 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     browserName: 'chromium',
-    ...(playwrightExecutablePath
-      ? { launchOptions: { executablePath: playwrightExecutablePath } }
-      : {}),
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
   },
   webServer: {
-    command: 'node tests/e2e/start-server.mjs',
+    command: 'node tests/e2e/web-server-wrapper.mjs',
     url: BASE_URL,
-    timeout: 120_000,
+    // The local D1 migration set is intentionally run from a clean persisted
+    // directory. Give Wrangler enough time to finish it before classifying the
+    // environment as unavailable.
+    timeout: 300_000,
     reuseExistingServer: false,
     stdout: 'pipe',
     stderr: 'pipe',

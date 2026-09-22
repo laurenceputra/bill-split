@@ -1,3 +1,12 @@
 @import './tokens.css';
 @import './base.css';
-@import './components.css';
+@import './foundations.css';
+@import './shell.css';
+@import './primitives.css';
+@import './home-creation.css';
+@import './group-management.css';
+@import './group-overview.css';
+@import './transaction-forms.css';
+@import './history-insights.css';
+@import './settings.css';
+@import './responsive.css';
