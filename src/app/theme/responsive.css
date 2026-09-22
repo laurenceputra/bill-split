@@ -258,16 +258,6 @@
     align-self: flex-start;
   }
 
-  .member-row {
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .member-row__actions {
-    order: 3;
-    justify-content: flex-start;
-  }
-
   .allocation-row {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
@@ -278,11 +268,6 @@
 
   .allocation-row > input {
     width: 100%;
-  }
-
-  .member-email-control {
-    flex: 0 1 auto;
-    order: 2;
   }
 
   .member-email-control form {
@@ -315,6 +300,24 @@
 
   .empty-state__actions .button {
     width: 100%;
+  }
+}
+
+@media (min-width: 30.001rem) {
+  .member-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "identity actions";
+  }
+
+  .member-row--with-email-control {
+    grid-template-areas:
+      "identity actions"
+      "email actions";
+  }
+
+  .member-row--identity-only {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "identity";
   }
 }
 
@@ -354,8 +357,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-.management-sections > *,
-  .group-settings {
+  .management-sections > * {
     padding: var(--surface-padding-wide);
   }
 }
