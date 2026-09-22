@@ -6,7 +6,7 @@ BillSplit records shared financial history; it does not process payments or move
 ## Principles
 
 - **Financial hierarchy first.** Who owes whom, how much, and what is due come before metadata, management, and admin controls.
-- **Warm, calm, practical.** Use plum for primary action and focus, sage for settled/positive outcomes, and restrained warm neutrals for the ledger surface.
+- **Warm, calm, practical.** Use plum only for primary action, selection, and focus; use sage and coral only to explain financial outcomes; keep the page and dividers warm and quiet.
 - **Token-led implementation.** Components use semantic tokens, never hardcoded component colors. Prefer shared primitives over route-specific duplicates.
 - **Progressive disclosure.** Show the next useful action first; move advanced tools, history, and destructive actions behind clear affordances.
 - **Truthful states.** Distinguish loading, cached, offline, stale, pending, empty, and error states. Never imply a payment was processed.
@@ -20,42 +20,42 @@ Use these names in theme variables and component APIs. Do not invent near-duplic
 
 | Token | Hex | Use |
 |---|---|---|
-| `primary` | `#6B4FD3` | Primary actions, links, focus emphasis |
+| `primary` | `#68435D` | Primary actions, selection, and focus emphasis |
 | `primary-fg` | `#FFFFFF` | Foreground on primary controls |
-| `primary-hover` | `#5F43C5` | Hover state |
-| `primary-pressed` | `#5338B4` | Pressed/active state |
-| `primary-focus-ring` | `#5338B4` | Keyboard focus ring |
-| `primary-subtle` | `#EEE9FA` | Selected and soft emphasis backgrounds |
-| `primary-subtle-hover` | `#E5DDF7` | Hover on subtle emphasis |
-| `page` | `#F7F3FA` | App/page background |
-| `surface` | `#FFFFFF` | Cards, fields, modal surfaces |
-| `surface-elevated` | `#FFFFFF` | Elevated cards, dialogs, and sheets |
-| `surface-secondary` | `#FBF9FC` | Nested or lower-emphasis surfaces |
-| `border` | `#E7DFF0` | Default borders |
-| `border-strong` | `#D8CDE4` | Emphasized boundaries |
-| `divider` | `#ECE6F1` | Content separation |
-| `text` | `#2F2540` | Primary text and amounts |
-| `text-secondary` | `#746A84` | Supporting text |
-| `text-tertiary` | `#6E647A` | Placeholder text, hints, and low-emphasis metadata |
-| `text-disabled` | `#B8AFBF` | Disabled text and controls |
+| `primary-hover` | `#57364E` | Hover state |
+| `primary-pressed` | `#482B41` | Pressed/active state |
+| `primary-focus-ring` | `#68435D` | Keyboard focus ring |
+| `primary-subtle` | `#F0E7ED` | Selected and soft emphasis backgrounds |
+| `primary-subtle-hover` | `#E6D9E1` | Hover on subtle emphasis |
+| `page` | `#F5F0E8` | Warm app/page background |
+| `surface` | `#FFFCF7` | Focused surfaces, fields, modal surfaces |
+| `surface-elevated` | `#FFFCF7` | Focused cards, dialogs, and sheets |
+| `surface-secondary` | `#F9F5EF` | Lower-emphasis surfaces |
+| `border` | `#D8CEC1` | Default boundaries |
+| `border-strong` | `#BFAFA0` | Emphasized boundaries |
+| `divider` | `#E2D9CE` | Thin warm content separation |
+| `text` | `#33282D` | Primary text and amounts |
+| `text-secondary` | `#756A67` | Supporting text |
+| `text-tertiary` | `#6F625D` | Placeholder text, hints, and low-emphasis metadata |
+| `text-disabled` | `#B8ADA6` | Disabled text and controls |
 | `text-inverse` | `#FFFFFF` | Text on dark/primary surfaces |
 
 ### Financial and status semantics
 
 | Token | Hex | Use |
 |---|---|---|
-| `positive-bg` | `#D8F0E1` | Settled/positive background |
-| `positive-subtle` | `#EEF8F2` | Soft positive background |
-| `positive-fg` | `#216B4A` | Settled/positive text and icon |
-| `debt-bg` | `#F7D7D2` | Debt/amount-due background |
-| `debt-subtle` | `#FCF0EE` | Soft debt background |
-| `debt-fg` | `#9A403A` | Debt text and icon |
-| `debt-strong` | `#A94741` | Strong debt emphasis |
-| `warning-bg` | `#FDECC8` | Warning background |
-| `warning-subtle` | `#FFF7E6` | Soft warning background |
-| `warning-fg` | `#8A5B00` | Offline, stale, pending, and warning text |
-| `neutral-bg` | `#F1EEF4` | Neutral status background |
-| `neutral-fg` | `#746A84` | Neutral status text |
+| `positive-bg` | `#DCE9D9` | Settled/positive background |
+| `positive-subtle` | `#EEF5EC` | Soft positive background |
+| `positive-fg` | `#3F684B` | Settled/positive text and icon |
+| `debt-bg` | `#EBC2B8` | Debt/amount-due background |
+| `debt-subtle` | `#FAECE8` | Soft debt background |
+| `debt-fg` | `#7A3E38` | Debt text and icon |
+| `debt-strong` | `#743A35` | Strong debt emphasis |
+| `warning-bg` | `#F2DEB8` | Warning background |
+| `warning-subtle` | `#FBF3E3` | Soft warning background |
+| `warning-fg` | `#775A24` | Offline, stale, pending, and warning text |
+| `neutral-bg` | `#EEE9E2` | Neutral status background |
+| `neutral-fg` | `#6F625D` | Neutral status text |
 
 Color is never the sole indicator: pair it with text, an icon, position, or a status label.
 
@@ -91,7 +91,7 @@ primitive without changing API or focus order.
 
 ## Typography
 
-- Use **Inter** for all interface text and numeric content, with a system sans-serif fallback. Load the needed weights rather than substituting a display face.
+- Use **Inter** for all interface text and numeric content, with a system sans-serif fallback. The app bundles only the latin 400, 600, and 700 weights from `@fontsource/inter`; do not add a network-only font fetch.
 - Establish a clear scale: compact labels and metadata, readable body text, strong page/card headings, and the largest weight/size reserved for balances and totals.
 - Use weight and size for hierarchy; avoid all-caps paragraphs and excessive bolding.
 - Financial amounts use `font-variant-numeric: tabular-nums` (or the equivalent numeric font feature) so columns align. Keep currency code/symbol and sign unambiguous, and do not silently convert currencies.
@@ -101,7 +101,7 @@ primitive without changing API or focus order.
 
 - Use an 8px-based spacing system; retain 4px for micro spacing. The shared scale is 4, 8, 12, 16, 20, 24, 32, and 48px. Use 16px page padding on mobile and 24–32px on desktop; keep related content tight and give major sections more breathing room.
 - Cards and controls use generous touchable padding and predictable alignment. Prefer one content column on small screens and a constrained, readable content width on desktop.
-- Use small radii for fields and pills, medium radii for cards, and larger radii only for prominent containers or sheets. Keep the radius vocabulary small and shared.
+- Use restrained radii: modest rounding for cards and controls, with the pill radius reserved for statuses, chips, and segmented choices. Larger radii belong only to sheets.
 - Shadows are soft, warm, and sparing: use a subtle elevation for cards or modal layers, never a dark or dramatic glow. Borders should carry most of the structure.
 - Minimum interactive target is **44px** in both dimensions, including icon-only controls.
 
@@ -166,11 +166,13 @@ nearest section or ledger group.
   rows; its outer section and metric rows are not cards. Invitations and the
   no-groups empty state remain contained because they need distinct status and
   recovery treatment.
-- **Group Overview** uses four compact macro-cards: balances, recent
-  transactions, scheduled expenses, and people. Each macro-card has one white
-  elevated surface, a thin lavender border, approximately 12px radius, and
+- **Group Overview** uses exactly four compact macro-cards: balances, recent
+  transactions, scheduled expenses, and people. Each macro-card has one warm
+  contained surface, a thin warm border, approximately 10–12px radius, and
   compact 16px padding; its internal entries are transparent ledger rows with
-  dividers rather than nested painted cards. The reading order remains
+  dividers rather than nested painted cards. Balance rows never use a tinted
+  full-row band: state is carried by the amount and a restrained accent edge.
+  The reading order remains
   balances → transactions → schedules → people → tools on mobile. At 896px and
   above, transparent structural columns place balances and transactions in the
   main column and schedules and people in the context column. Secondary actions
@@ -188,10 +190,11 @@ nearest section or ledger group.
   containment. Fieldsets, amount anchors, disclosures, validation messages,
   and modal/bottom-sheet content may be visually distinct, but generic
   sections and ledger rows do not become extra cards.
-- **Management and settings** may retain contained administrative sections so
-  destructive, connection-dependent, invitation, export, and account actions
-  do not visually merge. Their member and activity collections still use
-  ledger rows and avoid cards nested inside those sections.
+- **Management and settings** use editorial sections and dividers. Group
+  management has one People macro section with flat member ledger rows; invite,
+  default split, export, and settings sections follow it with frequent actions
+  before admin/destructive controls. Only connection-dependent or destructive
+  decisions may retain justified containment.
 
 ### Card-density review criterion
 

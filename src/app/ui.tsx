@@ -7,7 +7,7 @@ import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 
-export type IconName = 'groups' | 'activity' | 'add' | 'more' | 'check' | 'warning' | 'close';
+export type IconName = 'groups' | 'activity' | 'settings' | 'add' | 'more' | 'check' | 'warning' | 'close';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
 let modalScrollLocks = 0;
 let modalPreviousOverflow = '';
@@ -18,6 +18,7 @@ export function Icon({ name, className = 'nav-icon' }: { name: IconName; classNa
   if (name === 'warning') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 3.5 19h17L12 4Z" /><path d="M12 9v4m0 3h.01" /></svg>;
   if (name === 'close') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>;
   if (name === 'activity') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3" /></svg>;
+  if (name === 'settings') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="m19 13.5 1.2 1-.9 1.6-1.5-.4a7.5 7.5 0 0 1-1.2 1.2l.4 1.5-1.6.9-1-1.2a7.5 7.5 0 0 1-1.7.2l-.7 1.4h-1.8l-.7-1.4a7.5 7.5 0 0 1-1.7-.2l-1 1.2-1.6-.9.4-1.5a7.5 7.5 0 0 1-1.2-1.2l-1.5.4-.9-1.6 1.2-1a7.5 7.5 0 0 1-.2-1.7l-1.4-.7v-1.8l1.4-.7a7.5 7.5 0 0 1 .2-1.7l-1.2-1 .9-1.6 1.5.4a7.5 7.5 0 0 1 1.2-1.2l-.4-1.5 1.6-.9 1 1.2a7.5 7.5 0 0 1 1.7-.2l.7-1.4h1.8l.7 1.4a7.5 7.5 0 0 1 1.7.2l1-1.2 1.6.9-.4 1.5a7.5 7.5 0 0 1 1.2 1.2l1.5-.4.9 1.6-1.2 1a7.5 7.5 0 0 1 .2 1.7l1.4.7v1.8l-1.4.7c0 .6-.1 1.2-.2 1.7Z" /></svg>;
   if (name === 'more') return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></svg>;
   return <svg className={className} viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-5h8v5M3 20h18" /></svg>;
 }
@@ -271,7 +272,7 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   };
   useEffect(() => { setSelection(''); }, [location.pathname, location.search, groupId, online]);
   return <div className={`split-transaction-control${className ? ` ${className}` : ''}${active ? ' split-transaction-control--active' : ''}`} role="group" aria-label="Add transaction">
-    <Link className="split-transaction-control__primary" data-primary-action="true" to={navigation.primaryPath} aria-label={primaryAriaLabel ?? navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add' : navigation.primaryLabel}</Link>
+    <Link className="split-transaction-control__primary" data-primary-action="true" to={navigation.primaryPath} aria-label={primaryAriaLabel ?? navigation.primaryAriaLabel} aria-current={primaryCurrent ? 'page' : undefined}>{mobileNav ? <span className="nav-item__content"><span className="nav-item__icon"><svg className="nav-item__glyph nav-item__glyph--add" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14" /></svg></span><span className="nav-item__label">Add</span></span> : compact ? 'Add expense' : navigation.primaryLabel}</Link>
     <select id={selectId} className="split-transaction-control__menu" aria-label={menuLabel} title={menuTitle} aria-describedby={menuDisabled ? descriptionId : undefined} disabled={menuDisabled} value={selection} onChange={(event) => chooseTransaction(event.target.value)}>
       <option value="">More transaction types</option>
       {navigation.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
@@ -310,7 +311,7 @@ export function BottomNav() {
     <Link className="nav-item" to={context.groupsPath} aria-current={context.activeSection === 'groups' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="groups" /></span><span className="nav-item__label">Groups</span></span></Link>
     <Link className="nav-item" to={context.historyPath} aria-current={context.activeSection === 'activity' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="activity" /></span><span className="nav-item__label">History</span></span></Link>
     <div className={`nav-item nav-item--add${context.activeSection === 'add' || context.activeSection === 'settle' ? ' nav-item--add--active' : ''}`}><SplitTransactionControl className="nav-item__capsule" groupId={context.groupContext?.id} online={online} compact mobileNav active={context.activeSection === 'add' || context.activeSection === 'settle'} primaryCurrent={context.primaryIsCurrent} /></div>
-    <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="more" /></span><span className="nav-item__label">Settings</span></span></Link>
+    <Link className="nav-item" to={context.morePath} aria-current={context.activeSection === 'settings' ? 'page' : undefined}><span className="nav-item__content"><span className="nav-item__icon"><Icon name="settings" /></span><span className="nav-item__label">Settings</span></span></Link>
   </nav>;
 }
 

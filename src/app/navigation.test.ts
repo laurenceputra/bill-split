@@ -64,7 +64,7 @@ describe('getNavigationContext', () => {
   it('builds expense-first scoped destinations and preserves a global chooser fallback', () => {
     expect(getTransactionNavigation('group/123')).toEqual({
       primaryPath: '/groups/group%2F123/expense/new',
-      primaryLabel: '+ Add expense',
+      primaryLabel: 'Add expense',
       primaryAriaLabel: 'Add expense',
       options: [
         { value: 'refund', label: 'Refund/reimbursement', path: '/groups/group%2F123/refund/new', disabled: false },

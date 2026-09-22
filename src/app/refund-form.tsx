@@ -524,9 +524,9 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       <Link to={`/groups/${groupId}`} className="back">← Group</Link>
        <PageHeader className="page-title" headingId="refund-form-title" eyebrow="Online-only ledger action" title={loadedCredit ? 'Edit refund or reimbursement' : 'Record money back'} />
       {!online ? <ConnectionBanner detail="Refunds and payments require a connection. New expenses remain available offline." /> : null}
-      <form onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
+       <FormSurface className="refund-form__surface"><form onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
         <p id="refund-form-help" className="muted">Start with an expense when possible. The original payment or bill adjustment derives payer and affected shares; a member reimbursement requires a confirmed recipient.</p>
-         <FormSurface><fieldset><legend>How should this money be recorded?</legend>
+          <fieldset><legend>How should this money be recorded?</legend>
            <Field label="Apply this to"><select value={linked ? 'linked' : 'standalone'} onChange={(event) => { const nextPath = event.target.value as 'linked' | 'standalone'; setApplications(refundApplicationsForPath(nextPath, applications)); if (nextPath === 'standalone' && mode === 'direct_provider_offset') setMode('member_reimbursement'); }}><option value="linked">One or more expenses</option><option value="standalone">No specific expense</option></select></Field>
            <Field label="Source"><select aria-describedby="refund-source-help" value={subtype} onChange={(event) => setSubtype(event.target.value as typeof subtype)}>{refundSourceOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></Field>
            <small id="refund-source-help" className="refund-form__help">This source controls how the transaction is labeled in the ledger and exports.</small>
@@ -536,9 +536,9 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
           <Field label={`How much? (${currency})`}><input required inputMode="decimal" value={amount} onChange={(event) => { setAmount(event.target.value); setAmountTouched(true); setAmountProvenance('user'); }} aria-invalid={Boolean(showValidation && amountMinor <= 0)} /><small>Credit total: {amountMinor > 0 ? money(amountMinor) : '—'} {currency} · {amountProvenance === 'default' ? 'Suggested and editable' : 'Entered total'}</small></Field>
           <Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field>
           <Field label="Note (optional)"><textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} /></Field>
-         </fieldset></FormSurface>
+          </fieldset>
 
-         <FormSurface><fieldset><legend>{linked ? 'Which expenses should this reduce?' : 'Advanced standalone details'}</legend>
+          <fieldset><legend>{linked ? 'Which expenses should this reduce?' : 'Advanced standalone details'}</legend>
           {linked ? <>
             <Field label="Search eligible expenses"><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by description or date" /></Field>
              {applications.map((application, index) => { const expense = expenses.find((candidate) => candidate.id === application.expenseId); const capacity = expense ? expenseCapacity(expense, loadedCredit?.id) : 0; const fillAmount = refundApplicationFillAmount(applications, application.id, amountMinor, capacity, currency); return <div className="refund-application-row" key={application.id}>
@@ -554,9 +554,9 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
             {expenseError ? <p role="alert">{refundErrorText(expenseError)} <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense details</Button></p> : null}
             {expenseResource.error ? <p className="cache-status" role="status">Showing cached eligible expenses; they may be out of date. <Button type="button" variant="secondary" onClick={retryMissingExpenses}>Retry expense list</Button></p> : null}
            </> : <p className="muted">Standalone records do not change an expense. Explicitly identify who received the money and whose costs this should reduce.</p>}
-         </fieldset></FormSurface>
+          </fieldset>
 
-         <FormSurface><fieldset><legend>Money flow</legend>
+          <fieldset><legend>Money flow</legend>
           {mode === 'member_reimbursement' ? <>
             <h2>Who received the money?</h2>
             <AllocationRows rows={recipientRows} label="Recipient" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'recipient')} minimumRows={1} showErrors={showValidation} error={showValidation && recipientsMinor !== amountMinor ? 'Recipient amounts must total the refund.' : undefined} />
@@ -565,12 +565,12 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
               {linked && !adjustBenefits ? <><p className="muted">Affected shares follow the original expense split and are read-only until adjusted.</p><LedgerList label="Affected shares">{derivedDisplay.map((allocation) => <LedgerRow key={allocation.personId}><span>{memberLabel(allocation.personId)} · original split</span><Money amountMinor={allocation.amountMinor} currency={currency} /></LedgerRow>)}</LedgerList><div className="refund-allocation-actions"><Button type="button" variant="secondary" onClick={() => setAdjustBenefits(true)}>Adjust who benefits</Button></div></> : <><AllocationRows rows={affectedRows} label="Affected member" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'beneficiary')} minimumRows={!linked ? 1 : 0} showErrors={showValidation} error={showValidation && affectedRows.length > 0 && affectedMinor !== amountMinor ? 'Affected-member amounts must total the refund.' : undefined} /><div className="refund-allocation-actions"><Button type="button" variant="secondary" onClick={() => setAllocations((current) => [...current, emptyAllocation('beneficiary')])}>Add affected member</Button></div></>}
           </> : <p className="muted">Both payer and affected shares are derived from linked expenses.</p>}
           {!linked && mode === 'member_reimbursement' ? <p className="muted">Standalone mode requires explicit recipient and affected-member allocations.</p> : null}
-         </fieldset></FormSurface>
+          </fieldset>
 
-          <FormSurface><SectionHeader title="Preview" /><p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} />{linked ? <> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></> : null}</p><LedgerList className="refund-preview-list" label="Refund preview">{previewPeople.map((person) => <LedgerRow className="refund-preview-person" key={person.personId}><span><strong>{memberLabel(person.personId)}</strong>{person.components.map((component) => <small className="refund-preview-component" key={`${person.personId}-${component.label}`}>{component.label}: <Money amountMinor={component.amountMinor} currency={currency} /></small>)}<small className="refund-preview-net">Net balance effect: <Money amountMinor={person.netMinor} currency={currency} tone={person.netMinor > 0 ? 'positive' : person.netMinor < 0 ? 'debt' : undefined} /></small></span></LedgerRow>)}</LedgerList><p className="muted">Amounts use integer cents with the same stable remainder rule as the server. {mode === 'direct_provider_offset' ? 'The payment and cost reductions both reduce the group balance.' : 'Received money is a negative ledger effect; a cost reduction is positive.'}</p></FormSurface>
+           <section className="refund-preview-section"><SectionHeader title="Preview" /><p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} />{linked ? <> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></> : null}</p><LedgerList className="refund-preview-list" label="Refund preview">{previewPeople.map((person) => <LedgerRow className="refund-preview-person" key={person.personId}><span><strong>{memberLabel(person.personId)}</strong>{person.components.map((component) => <small className="refund-preview-component" key={`${person.personId}-${component.label}`}>{component.label}: <Money amountMinor={component.amountMinor} currency={currency} /></small>)}<small className="refund-preview-net">Net balance effect: <Money amountMinor={person.netMinor} currency={currency} tone={person.netMinor > 0 ? 'positive' : person.netMinor < 0 ? 'debt' : undefined} /></small></span></LedgerRow>)}</LedgerList><p className="muted">Amounts use integer cents with the same stable remainder rule as the server. {mode === 'direct_provider_offset' ? 'The payment and cost reductions both reduce the group balance.' : 'Received money is a negative ledger effect; a cost reduction is positive.'}</p></section>
         {showValidation || error ? <p id="refund-form-status" role="alert" className="error">{refundErrorText(error || new Error(localError || 'Invalid form'))}</p> : <p id="refund-form-status" className={submitDisabled ? 'cache-status' : 'sr-only'} role="status" aria-live="polite">{submitDisabled ? statusReason : 'Refund form is ready. Submit is available.'}</p>}
          <ActionGroup className="actions"><Button type="submit" disabled={submitDisabled}>{busy ? 'Saving…' : loadedCredit ? 'Save refund/reimbursement' : 'Record money back'}</Button><Link className="button button--secondary" to={`/groups/${groupId}`}>Cancel</Link></ActionGroup>
-      </form>
+       </form></FormSurface>
     </section>
   </Layout>;
 }

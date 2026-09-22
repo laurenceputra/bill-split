@@ -51,7 +51,7 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid var(--color-focus);
+  outline: 3px solid var(--color-primary-focus-ring);
   outline-offset: 3px;
 }
 
@@ -95,7 +95,7 @@ h2 {
 }
 
 small {
-  color: var(--color-ink-muted);
+  color: var(--color-text-secondary);
   font-size: var(--text-sm);
 }
 
@@ -125,7 +125,7 @@ select {
   min-height: var(--control-min-height);
   /* Keep the native caret clearance separate from flow spacing tokens. */
   padding: 0.65rem 2.5rem 0.65rem 0.875rem;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%23746A84' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%23756A67' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position: right 0.875rem center;
   background-repeat: no-repeat;
   background-size: 1rem;
@@ -169,12 +169,13 @@ textarea {
 fieldset {
   min-width: 0;
   margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-4);
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  border-radius: 0;
+  padding: var(--space-5) 0 0;
 }
 
 legend {
   padding: 0 var(--space-2);
-  font-weight: 750;
+  font-weight: 600;
 }

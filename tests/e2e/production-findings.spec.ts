@@ -4,6 +4,47 @@ const GROUP_ID = '00000000-0000-4000-8000-000000003002';
 const EMPTY_GROUP_ID = '00000000-0000-4000-8000-000000003001';
 const SECOND_GROUP_ID = '00000000-0000-4000-8000-000000003003';
 
+test('keeps History tabs on one line with touch-safe active indication', async ({ authenticatedPage: page }) => {
+  for (const viewport of [{ width: 320, height: 844 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/activity?view=insights&period=month', { waitUntil: 'domcontentloaded' });
+    const tabs = page.locator('.history-tabs');
+    await expect(tabs).toBeVisible();
+    const layout = await tabs.evaluate((element) => {
+      const links = Array.from(element.querySelectorAll('a'));
+      const lineCount = (link: Element) => {
+        const range = document.createRange();
+        range.selectNodeContents(link);
+        return new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size;
+      };
+      return {
+        display: getComputedStyle(element).display,
+        flexWrap: getComputedStyle(element).flexWrap,
+        overflowX: getComputedStyle(element).overflowX,
+        documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+        labels: links.map((link) => ({ text: link.textContent?.trim(), lines: lineCount(link) })),
+        targets: links.map((link) => {
+          const box = link.getBoundingClientRect();
+          return { width: box.width, height: box.height };
+        }),
+        active: links.filter((link) => link.classList.contains('active') && link.getAttribute('aria-current') === 'page').map((link) => ({ borderBottomWidth: getComputedStyle(link).borderBottomWidth })),
+      };
+    });
+    const geometry = JSON.stringify({ viewport, layout });
+    expect(layout.display, geometry).toBe('flex');
+    expect(layout.flexWrap, geometry).toBe('nowrap');
+    expect(['auto', 'scroll']).toContain(layout.overflowX);
+    expect(layout.documentWidth, geometry).toBeLessThanOrEqual(viewport.width + 1);
+    expect(layout.labels, geometry).toEqual([
+      { text: 'Changes', lines: 1 },
+      { text: 'Transactions', lines: 1 },
+      { text: 'Insights', lines: 1 },
+    ]);
+    expect(layout.targets.every((target) => target.width >= 44 && target.height >= 44), geometry).toBe(true);
+    expect(layout.active, geometry).toEqual([{ borderBottomWidth: '3px' }]);
+  }
+});
+
 function shortInsightFixture(monthCount: number) {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, '0');

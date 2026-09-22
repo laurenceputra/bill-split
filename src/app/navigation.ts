@@ -27,7 +27,7 @@ export type TransactionNavigationOption = {
 
 export type TransactionNavigation = {
   primaryPath: string;
-  primaryLabel: '+ Add expense' | 'Add transaction';
+  primaryLabel: 'Add expense' | 'Add transaction';
   primaryAriaLabel: 'Add expense' | 'Add transaction';
   options: TransactionNavigationOption[];
 };
@@ -109,7 +109,7 @@ export function getTransactionNavigation(groupId?: unknown, online = true): Tran
   const unavailableReason = !scoped ? ' (choose a group first)' : !online ? ' (online only)' : '';
   return {
     primaryPath: scoped ? `/groups/${validGroupId}/expense/new` : '/add',
-    primaryLabel: scoped ? '+ Add expense' : 'Add transaction',
+    primaryLabel: scoped ? 'Add expense' : 'Add transaction',
     primaryAriaLabel: scoped ? 'Add expense' : 'Add transaction',
     options: [
       { value: 'refund', label: `Refund/reimbursement${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/refund/new` : undefined, disabled: !scoped || !online },

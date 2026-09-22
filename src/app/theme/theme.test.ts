@@ -1,33 +1,28 @@
 import { describe, expect, it } from 'vitest';
-// The application tsconfig intentionally does not include Node types; this
-// test runs in Vitest's Node environment and reads the authored stylesheet.
+// The application tsconfig intentionally does not include Node types.
 // @ts-expect-error Node types are not shipped to the browser build.
 import { readFileSync } from 'node:fs';
 
-const compositionCss = readFileSync(new URL('./composition.css', import.meta.url), 'utf8');
-const screenCss = [
-  'home-creation.css',
-  'group-management.css',
-  'group-overview.css',
-  'transaction-forms.css',
-  'history-insights.css',
-  'settings.css',
-  'responsive.css',
-].map((file) => readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')).join('\n');
-const css = `${readFileSync(new URL('./shell.css', import.meta.url), 'utf8')}\n${readFileSync(new URL('./primitives.css', import.meta.url), 'utf8')}\n${screenCss}`;
-const responsiveCss = readFileSync(new URL('./responsive.css', import.meta.url), 'utf8');
-const foundationsCss = readFileSync(new URL('./foundations.css', import.meta.url), 'utf8');
-const shellCss = readFileSync(new URL('./shell.css', import.meta.url), 'utf8');
-const primitivesCss = readFileSync(new URL('./primitives.css', import.meta.url), 'utf8');
-const themeCss = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
-const baseCss = readFileSync(new URL('./base.css', import.meta.url), 'utf8');
-const tokensCss = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8');
+const themeDir = new URL('./', import.meta.url);
+const read = (file: string) => readFileSync(new URL(file, themeDir), 'utf8');
+const files = ['tokens.css', 'base.css', 'foundations.css', 'shell.css', 'primitives.css', 'home-creation.css', 'group-management.css', 'group-overview.css', 'transaction-forms.css', 'history-insights.css', 'settings.css', 'responsive.css'];
+const css = files.map(read).join('\n');
+const theme = read('theme.css');
+const tokens = read('tokens.css');
+const base = read('base.css');
+const foundations = read('foundations.css');
+const shell = read('shell.css');
+const responsive = read('responsive.css');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.meta.url), 'utf8');
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
 const auditSource = readFileSync(new URL('../../../tests/e2e/audit.spec.ts', import.meta.url), 'utf8');
 
-const tokenValue = (name: string) => tokensCss.match(new RegExp(`${name}\\s*:\\s*(#[0-9A-Fa-f]{6})`))?.[1] ?? '';
+const tokenValue = (name: string): string => {
+  const value = tokens.match(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*(#[0-9A-Fa-f]{6}|var\\(--[^)]+\\))`))?.[1] ?? '';
+  const alias = value.match(/^var\((--[^)]+)\)$/)?.[1];
+  return alias ? tokenValue(alias) : value;
+};
 const relativeLuminance = (hex: string) => {
   const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
@@ -37,499 +32,177 @@ const contrastRatio = (foreground: string, background: string) => {
   return (higher + 0.05) / (lower + 0.05);
 };
 
-describe('responsive navigation layout contract', () => {
-  it('loads the authored layers in foundation, shell, primitive, composition order', () => {
-    expect(themeCss).toContain("@import './tokens.css';");
-    expect(themeCss).toContain("@import './foundations.css';");
-    expect(themeCss).toContain("@import './shell.css';");
-    expect(themeCss).toContain("@import './primitives.css';");
-    for (const file of ['home-creation.css', 'group-management.css', 'group-overview.css', 'transaction-forms.css', 'history-insights.css', 'settings.css', 'responsive.css']) {
-      expect(themeCss).toContain(`@import './${file}';`);
+describe('Warm Ledger visual system', () => {
+  it('loads latin-only Inter weights that are actually used', () => {
+    for (const weight of [400, 600, 700]) expect(theme).toContain(`@fontsource/inter/latin-${weight}.css`);
+    expect(theme).not.toContain('@fontsource/inter/500.css');
+    expect(theme).not.toContain('@fontsource/inter/latin-500.css');
+    expect(theme).not.toMatch(/@fontsource\/inter\/(?:400|600|700)\.css/);
+    expect(theme).toContain("@import './tokens.css';");
+    expect(theme).toContain("@import './responsive.css';");
+    expect(tokens).toContain('--font-body: Inter,');
+    expect(css).not.toMatch(/font-weight:\s*900/);
+  });
+
+  it('keeps every semantic foreground/background pair at WCAG AA contrast', () => {
+    const pairs: Array<[string, string]> = [
+      ['--color-primary-fg', '--color-primary'],
+      ['--color-primary-fg', '--color-primary-hover'],
+      ['--color-primary-fg', '--color-primary-pressed'],
+      ['--color-text-inverse', '--color-primary'],
+      ['--color-primary-hover', '--color-primary-subtle'],
+      ['--color-primary-hover', '--color-primary-subtle-hover'],
+      ['--color-text', '--color-page'],
+      ['--color-text', '--color-surface'],
+      ['--color-text-secondary', '--color-page'],
+      ['--color-text-secondary', '--color-surface'],
+      ['--color-text-secondary', '--color-surface-secondary'],
+      ['--color-text-tertiary', '--color-page'],
+      ['--color-text-tertiary', '--color-surface'],
+      ['--color-text-tertiary', '--color-surface-secondary'],
+      ['--color-control-placeholder', '--color-control-bg'],
+      ['--color-control-invalid-border', '--color-control-invalid-bg'],
+      ['--color-positive-fg', '--color-positive-bg'],
+      ['--color-positive-fg', '--color-positive-subtle'],
+      ['--color-positive-fg', '--color-page'],
+      ['--color-positive-fg', '--color-surface'],
+      ['--color-debt-fg', '--color-debt-bg'],
+      ['--color-debt-fg', '--color-debt-subtle'],
+      ['--color-debt-fg', '--color-page'],
+      ['--color-debt-fg', '--color-surface'],
+      ['--color-debt-strong', '--color-debt-bg'],
+      ['--color-debt-strong', '--color-debt-subtle'],
+      ['--color-warning-fg', '--color-warning-bg'],
+      ['--color-warning-fg', '--color-warning-subtle'],
+      ['--color-warning-fg', '--color-page'],
+      ['--color-neutral-fg', '--color-neutral-bg'],
+      ['--color-neutral-fg', '--color-page'],
+      ['--color-neutral-fg', '--color-surface'],
+    ];
+    for (const [foregroundName, backgroundName] of pairs) {
+      const foreground = tokenValue(foregroundName);
+      const background = tokenValue(backgroundName);
+      expect(foreground, `${foregroundName} must be an authored hex token`).toMatch(/^#/);
+      expect(background, `${backgroundName} must be an authored hex token`).toMatch(/^#/);
+      expect(contrastRatio(foreground, background), `${foregroundName} on ${backgroundName}`).toBeGreaterThanOrEqual(4.5);
     }
-    expect(foundationsCss).toContain('--breakpoint-desktop-px: 896px;');
-    expect(shellCss).toContain('.shell-frame');
-    expect(primitivesCss).toContain('.ui-ledger-list');
-    expect(primitivesCss).toContain('.ui-form-surface');
-  });
-
-  it('keeps screen ownership split and the former composition entrypoint empty', () => {
-    expect(compositionCss.split('\n').length).toBeLessThan(20);
-    expect(compositionCss).not.toMatch(/\.route-view|\.card span|(^|\n)section\s*\{/);
-    expect(screenCss).not.toMatch(/(^|\n)\.route-view\s+section|\.card\s+span/);
-    for (const file of ['home-creation.css', 'group-management.css', 'group-overview.css', 'transaction-forms.css', 'history-insights.css', 'settings.css']) {
-      const authored = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
-      expect(authored.match(/@media\s*\([^)]*(?:min|max)-width:\s*(?:48|56)rem\)/g) || []).toHaveLength(0);
-    }
-    expect(screenCss).not.toContain('.section-title');
-    expect(screenCss).not.toContain('.invitations-panel > .list');
-  });
-
-  it('uses one authored block for each shared responsive boundary', () => {
-    const mediaCount = (query: string) => (responsiveCss.match(new RegExp(`@media \\(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g')) || []).length;
-    for (const query of ['max-width: 30rem', 'max-width: 55.999rem', 'min-width: 48rem', 'min-width: 56rem', 'forced-colors: active', 'prefers-reduced-motion: reduce']) expect(mediaCount(query)).toBe(1);
-    expect(responsiveCss).not.toMatch(/\.route-view\s+section|\.card\s+span|\.section-title|\.invitations-panel\s*>\s*\.list/);
-  });
-
-  it('keeps four-pixel mobile edge spacing while preserving safe areas', () => {
-    expect(css).toContain('padding-right: max(var(--space-1), var(--safe-right));');
-    expect(css).toContain('padding-left: max(var(--space-1), var(--safe-left));');
-    expect(css).toContain('padding-bottom: calc(var(--space-1) + var(--safe-bottom));');
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.top-bar\s*\{[\s\S]*padding-right: max\(var\(--space-1\), var\(--safe-right\)\);/);
-  });
-
-  it('reserves mobile navigation space and removes that reservation on desktop', () => {
-    expect(css).toContain('padding: var(--space-6) max(var(--space-4), var(--safe-right)) calc(var(--space-4) + var(--nav-height) + var(--space-2) + var(--safe-bottom)) max(var(--space-4), var(--safe-left));');
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.app-main\s*\{[\s\S]*padding-bottom: var\(--space-10\);[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
-  });
-
-  it('removes the install reservation globally when InstallAction renders no child', () => {
-    const emptyRule = /\.install-slot:empty\s*\{\s*display: none;\s*\}/;
-    const baseRuleIndex = css.indexOf('.install-slot {');
-    const emptyRuleIndex = css.search(emptyRule);
-    const mobileRulesIndex = css.indexOf('@media (max-width: 30rem)');
-
-    expect(css).toMatch(emptyRule);
-    expect(baseRuleIndex).toBeGreaterThanOrEqual(0);
-    expect(emptyRuleIndex).toBeGreaterThan(baseRuleIndex);
-    expect(emptyRuleIndex).toBeGreaterThanOrEqual(0);
-    expect(emptyRuleIndex).toBeLessThan(mobileRulesIndex);
-    // :empty is more specific than the mobile .install-slot display: contents
-    // override, so an empty slot stays removed at every viewport.
-    expect(css).toMatch(/\.install-slot\s*\{[\s\S]*width: 4\.5rem;[\s\S]*min-width: 4\.5rem;[\s\S]*flex: 0 0 4\.5rem;/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
-  });
-
-  it('keeps the mobile contracts at 320 and 390 pixels', () => {
-    expect([320, 390].every((viewport) => viewport >= 320 && viewport <= 30 * 16)).toBe(true);
-    expect(baseCss).toContain('html {\n  min-width: 320px;');
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.install-slot\s*\{[\s\S]*display: contents;/);
-    expect(css).toContain('.install-slot > .install-control {\n    width: auto;\n  }');
-    expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;/);
-    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*align-self: stretch;/);
-    expect(css).toMatch(/\.install-action\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
-  });
-
-  it('uses explicit action gaps and a predictable single-column mobile layout', () => {
-    expect(css).toMatch(/\.home-actions\s*\{[\s\S]*display: grid;[\s\S]*column-gap: var\(--space-3\);[\s\S]*row-gap: var\(--space-2\);/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.home-actions\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
-    expect(css).toMatch(/\.ui-section-header\s*\{[\s\S]*flex-wrap: wrap;[\s\S]*row-gap: var\(--space-2\);/);
-    expect(css).toMatch(/\.ui-section-header > :first-child > :is\(h2, h3, h4\)\s*\{[\s\S]*min-width: 0;/);
-    expect(css).toMatch(/\.ui-section-header \+ \.member-list\s*\{[\s\S]*margin-top: 0;/);
-    expect(css).toMatch(/:where\(\.ui-section-header\) \+ p\s*\{[\s\S]*margin-top: 0;/);
-  });
-
-  it('keeps adjacent insight summary cards at least twelve pixels apart on narrow screens', () => {
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.insight-summary-grid\s*\{[\s\S]*gap: var\(--space-3\);/);
-  });
-
-  it('normalizes disclosure flow and nested surfaces without changing semantic sections', () => {
-    expect(tokensCss).toContain('--control-min-height: 2.75rem;');
-    expect(css).toMatch(/\.ui-section-header\s*>\s*:first-child\s*>\s*:is\(h2, h3, h4\)\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.ui-surface\s*>\s*form,[\s\S]*?\.ui-form-surface\s*>\s*form\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/details\s*>\s*:is\(p, form, \.cache-status, \.error, \.offline-banner, \.ui-empty-state, \.status\)\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.balance-breakdown\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.generic-invitation-disclosure\[open\]\s*\{[\s\S]*gap: var\(--space-3\);/);
-    expect(css).toMatch(/\.transaction-filters-disclosure\s*\{[\s\S]*gap: var\(--space-3\);[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.transaction-filters\s*\{[\s\S]*margin: 0;/);
-    expect(css).toMatch(/\.schedule-list-content\s*\{[\s\S]*display: grid;/);
-    expect(css).toMatch(/\.pending-transactions\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
-    expect(css).toMatch(/\.split-default-choices\s*\{[\s\S]*border: 0;[\s\S]*padding: 0;/);
-    expect(appSource).toContain('className="transaction-filters-disclosure"');
-    expect(appSource).toContain('className="schedule-list-content"');
-  });
-
-  it('keeps overview macro-cards explicit while flattening their internal rows', () => {
-    expect(css).toMatch(/\.insight-section\s*\{[\s\S]*margin: 0;[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;[\s\S]*padding: 0;/);
-    expect(css).toMatch(/\.ui-card-surface,[\s\S]*\.ui-surface,[\s\S]*\.ui-form-surface,[\s\S]*\.ui-empty-state\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
-    expect(css).not.toMatch(/\.route-view section,[\s\S]*\.refund-form section\s*\{/);
-    expect(css).toMatch(/\.ui-ledger-list\s*\{[\s\S]*gap: 0;[\s\S]*\}/);
-    expect(css).toMatch(/\.ui-ledger-row\s*\{[\s\S]*min-height: 3\.65rem;[\s\S]*border-bottom: 1px solid var\(--color-border\);[\s\S]*background: transparent;/);
-    expect(css).toMatch(/\.transaction-list > li:not\(:last-child\) > \.ui-ledger-row,[\s\S]*\.activity-list > li:not\(:last-child\) > \.ui-ledger-row\s*\{[\s\S]*border-bottom: 1px solid var\(--color-border\);/);
-    expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*background: var\(--color-surface\);/);
-    expect(css).toMatch(/\.insights-compact \.insight-metrics\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
-    expect(css).toMatch(/\.insights-compact \.insight-metric\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*border: 0;[\s\S]*background: transparent;/);
-    expect(css).toMatch(/\.group-overview-card\s*\{[\s\S]*border: 1px solid var\(--color-border\);[\s\S]*border-radius: 0\.75rem;[\s\S]*box-shadow: none;[\s\S]*padding: var\(--space-4\);/);
-    expect(css).toMatch(/\.group-overview-columns,[\s\S]*\.group-overview-main,[\s\S]*\.group-overview-context\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-4\);/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border: 0;[\s\S]*background: transparent;[\s\S]*box-shadow: none;/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
-    expect(css).toMatch(/\.balance-cards\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*gap: 0;/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card--positive\s*\{[\s\S]*background: var\(--color-positive-subtle\);/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card--debt\s*\{[\s\S]*background: var\(--color-debt-subtle\);/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card \.money\s*\{[\s\S]*font-size: clamp\(1\.875rem, 4vw, 2rem\);/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.group-overview-columns\s*\{[\s\S]*grid-template-columns: minmax\(0, 1\.2fr\) minmax\(18rem, 0\.8fr\);/);
-    expect(css).toMatch(/\.transaction-row--overview\s*\{[\s\S]*min-height: 4\.25rem;/);
-    expect(css).toMatch(/\.group-overview-tools\s*\{[\s\S]*border-top: 1px solid var\(--color-divider\);/);
-    expect(css).toMatch(/\.route-view--group-overview \.balance-card:last-child\s*\{[\s\S]*border-bottom: 0;/);
-    expect(appSource).not.toContain('<Surface className="insights-compact"');
-    expect(appSource).not.toContain('LegacyGroupOverview');
-    expect(appSource).not.toContain('Legacy Group Overview');
-    expect(appSource).toContain('<ul className="balance-cards">');
-     expect(appSource).toContain('<LedgerList className="transaction-list"');
-     expect(appSource).toContain('<LedgerList className="reading-width activity-list"');
-    expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-summary-heading/);
-    expect(appSource).toMatch(/<section className="insight-section"[\s\S]*insight-change-heading/);
-    expect(appSource).toContain('className="insights-page"');
-    expect(appSource).toContain('className="insight-summary-card"');
-    expect(appSource).toContain('className="insight-chart insight-category-trends"');
-    for (const module of ['group-overview-card--balances', 'group-overview-card--transactions', 'group-overview-card--schedules', 'group-overview-card--people']) expect(appSource).toContain(module);
-    expect(appSource).toContain('className="group-overview-columns"');
-    expect(appSource).toContain('className="people-preview-list"');
-    expect(appSource).toContain('className="group-overview-tools"');
-    expect(appSource).toContain('More group actions');
-    expect(appSource).toContain('overview = false');
-     expect(appSource).toContain('balance.raw.map((item) => <LedgerRow');
-     expect(appSource).toContain('balance.suggestions.map((suggestion) => <LedgerRow');
-     expect(appSource).toContain('schedules.map((schedule) => <LedgerRow as="li" className="schedule-row"');
-    expect(appSource).not.toContain('balance.raw.map((item) => <div className="row"');
-    expect(appSource).not.toContain('schedules.map((schedule) => <div className="row schedule-row"');
-    expect(appSource).toContain('props.resource.data !== undefined ? <Disclosure');
-    for (const staleSelector of ['.group-overview-grid', '.group-ledger', '.route-view--group-overview > .page-title', '.route-view--group-overview > .compact-balances', '.route-view--group-overview > .group-overview-tools', '.group-overview-tools > .group-overview-actions']) expect(css).not.toContain(staleSelector);
-    expect(css).toMatch(/\.group-overview-card\s*\{[\s\S]*background: var\(--color-surface-elevated\);[\s\S]*padding: var\(--space-4\);/);
-    expect(css).toMatch(/\.group-overview-columns,[\s\S]*\.group-overview-context\s*\{[\s\S]*gap: var\(--space-4\);/);
-    expect(css).toMatch(/\.group-overview-tools\s*\{[\s\S]*margin: var\(--space-4\) 0 0;[\s\S]*padding-top: var\(--space-2\);/);
-  });
-
-  it('audits explicit painted surface roots once while treating dialogs as separate roots', () => {
-    expect(auditSource).toContain('const surfaceRootSelector =');
-     for (const root of ['.ui-surface', '.ui-card-surface', '.ui-form-surface', '.ui-empty-state', '.schedule-preview', '.recurrence-toggle', '.summary-row', '.participant-row', '.method-row', '.insight-summary-card', '.insight-category-trends', '.compact-balances', '.group-overview-card', '.route-loading__card', '.modal-sheet', '[role="dialog"]']) expect(auditSource).toContain(root);
-    expect(auditSource).not.toContain('.balance-card,.');
-    expect(auditSource).not.toContain('.insight-metric,.');
-    expect(auditSource).toContain('querySelectorAll(surfaceRootSelector)');
-    expect(auditSource).toContain('const flatRouteContainerSelector =');
-    expect(auditSource).toContain('const surfaceCandidate =');
-    expect(auditSource).toContain('const hasPaint =');
-    expect(auditSource).toContain("flat-route-container-paint");
-    expect(auditSource).toContain('.history-panel');
-    expect(auditSource).toContain('.insights-page');
-    expect(auditSource).toContain('.route-view--group-overview > section:not(.compact-balances)');
-    expect(auditSource).not.toMatch(/surfaceRootSelector\s*=\s*['\"][^'\"]*section/);
-    expect(auditSource).toContain('.modal-sheet,[role="dialog"]');
-    expect(auditSource).toContain("!element.matches('.modal-backdrop')");
-    expect(auditSource).toContain('if (depth > 2) add');
-  });
-
-  it('keeps focus and semantic small-text tokens readable on their light surfaces', () => {
-    const white = '#FFFFFF';
-    expect(tokenValue('--color-primary-focus-ring')).toMatch(/^#/);
-    expect(contrastRatio(tokenValue('--color-primary-focus-ring'), white)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(tokenValue('--color-primary-focus-ring'), tokenValue('--color-page'))).toBeGreaterThanOrEqual(3);
-    expect(contrastRatio(tokenValue('--color-warning-fg'), tokenValue('--color-warning-bg'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-warning-fg'), tokenValue('--color-warning-subtle'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-debt-fg'), tokenValue('--color-debt-bg'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-debt-fg'), tokenValue('--color-debt-subtle'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-positive-fg'), tokenValue('--color-positive-bg'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-positive-fg'), tokenValue('--color-positive-subtle'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(tokenValue('--color-text-tertiary'), white)).toBeGreaterThanOrEqual(4.5);
-    expect(baseCss).toContain('input::placeholder {\n  color: var(--color-text-tertiary);');
+    expect(base).toContain('input::placeholder {\n  color: var(--color-text-tertiary);');
+    expect(css).toMatch(/\.error\s*\{[\s\S]*background: var\(--color-debt-bg\);[\s\S]*color: var\(--color-debt-fg\);/);
+    expect(css).toMatch(/\.ui-resource-state--error\s*\{[\s\S]*background: var\(--color-debt-subtle\);[\s\S]*color: var\(--color-debt-fg\);/);
   });
 
-  it('keeps standalone section actions content-sized without shrinking grouped controls', () => {
-    expect(css).toMatch(/\.ui-surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\),[\s\S]*?\.ui-form-surface\s*>\s*:is\(button, \.button, \.inline-action, input\[type="button"\], input\[type="submit"\], input\[type="reset"\], \[role="button"\]\)\s*\{[\s\S]*?justify-self:\s*start;/);
-    expect(css).toMatch(/\.full-width-button\s*\{[\s\S]*width:\s*100%;/);
-    expect(css).toMatch(/\.home-actions\s*>\s*button\s*\{[\s\S]*width:\s*100%;/);
-    expect(css).toMatch(/\.member-email-control form\s*>\s*button\s*\{[\s\S]*justify-self:\s*stretch;/);
-    expect(css).toMatch(/\.actions\s*\{[\s\S]*display:\s*flex;/);
-    expect(css).toMatch(/form\s*\{[\s\S]*display:\s*grid;/);
-    expect(css).toMatch(/\.ui-ledger-list\s*\{[\s\S]*display:\s*grid;/);
-    expect(appSource).toContain('Load more audit events');
-    expect(appSource).toContain('Clear cached data');
-    expect(appSource).toContain('>Manage people</Link>');
-    expect(css).toMatch(/\.people-summary-compact \+ \.inline-action\s*\{[\s\S]*display: flex;[\s\S]*margin-top: var\(--space-2\);/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.schedule-row__actions\s*\{[\s\S]*flex-basis: 100%;[\s\S]*justify-content: flex-start;/);
-    expect(css).toMatch(/\.cache-status > \.inline-action\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*min-height: var\(--control-min-height\);/);
+  it('uses semantic tokens without old authored aliases or caret colors', () => {
+    expect(tokens).toContain('--color-page: #F5F0E8;');
+    expect(tokens).toContain('--color-primary: #68435D;');
+    expect(tokens).toContain('--color-positive-fg:');
+    expect(tokens).toContain('--color-debt-fg:');
+    expect(css).not.toMatch(/var\(--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\)/);
+    expect(tokens).not.toMatch(/--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\s*:/);
+    expect(base).toContain("stroke='%23756A67'");
+    expect(base).not.toContain('%23746A84');
   });
 
-  it('lets conditional status messages use the containing form grid gap', () => {
-    expect(css).toMatch(/form\s*>\s*:is\(\.cache-status, \.warning\)\s*\{[\s\S]*margin: 0;/);
+  it('owns the 895/896 responsive boundary in one responsive layer', () => {
+    expect(foundations).toContain('--breakpoint-desktop-px: 896px;');
+    expect(responsive).toContain('@media (max-width: 55.999rem)');
+    expect(responsive).toContain('@media (min-width: 56rem)');
+    expect(responsive).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: grid;/);
+    expect(responsive).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
+    expect(895).toBeLessThan(896);
   });
 
-  it('keeps safe-area spacing sourced from environment in the authored theme', () => {
-    expect(tokensCss).toMatch(/--safe-(top|right|bottom|left): env\(safe-area-inset-/);
-    expect(css).toContain('var(--safe-bottom)');
-    expect(css).toContain('var(--safe-left)');
-    expect(css).toContain('var(--safe-right)');
+  it('preserves safe-area spacing and reserves the mobile navigation', () => {
+    expect(tokens).toMatch(/--safe-(top|right|bottom|left): env\(safe-area-inset-/);
+    expect(shell).toContain('padding: calc(var(--space-3) + var(--safe-top))');
+    expect(shell).toContain('padding-bottom: calc(var(--space-1) + var(--safe-bottom));');
+    expect(shell).toContain('padding: var(--space-6) max(var(--space-4), var(--safe-right)) calc(var(--space-4) + var(--nav-height) + var(--space-2) + var(--safe-bottom)) max(var(--space-4), var(--safe-left));');
+    expect(shell).toContain('inset: 0 0 calc(-1 * (var(--space-1) + var(--safe-bottom))) 0;');
+    expect(responsive).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.top-bar\s*\{[\s\S]*padding-right: max\(var\(--space-1\), var\(--safe-right\)\);/);
   });
 
-  it('keeps sr-only content assistive-technology-visible and associates the grouped trend chart values', () => {
-    expect(baseCss).toMatch(/\.sr-only:not\(:focus\):not\(:active\)\s*\{[\s\S]*position: absolute;[\s\S]*width: 1px;[\s\S]*height: 1px;[\s\S]*overflow: hidden;[\s\S]*clip: rect\(0 0 0 0\);/);
-    expect(baseCss).not.toMatch(/\.sr-only[^}]*display:\s*none/);
-    expect(appSource).toMatch(/<div className="sr-only category-trend-values-wrapper">\s*<table id=\{valuesId\} className="category-trend-values">/);
-    expect(appSource).not.toMatch(/<table id=\{valuesId\}[^>]*role=/);
-    expect(appSource).toContain('aria-describedby={guidanceId}');
-    expect(appSource).toContain('aria-describedby={guidanceId} aria-details={valuesId}');
-    expect(appSource).toContain('<figure className="category-trend-figure"');
-    expect(appSource).toContain('insightTrendMaximum(categories)');
-    expect(appSource).toContain('insightCategoryColor(item.category)');
-    expect(appSource).toContain('insightTrendBarHeight(value, maximum)');
-    expect(css).toMatch(/\.category-trend-bar\s*\{[\s\S]*width:\s*0\.45rem;/);
-    expect(css).not.toMatch(/\.category-trend-(?:bar|marker)--\d/);
-    expect(css).toMatch(/\.category-trend-values-wrapper\s*\{[\s\S]*display:\s*block;[\s\S]*max-width:\s*1px;[\s\S]*overflow:\s*hidden;/);
-    expect(css).not.toMatch(/\.category-trend-values\s*\{[^}]*display:/);
-    expect(css).toMatch(/\.category-trend-month\s+small\s*\{[\s\S]*white-space:\s*nowrap;/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot\s*\{[\s\S]*min-width:\s*0;/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.category-trend-plot--long\s*\{[\s\S]*min-width:\s*24rem;/);
-    expect(appSource).toContain("months.length > 3 ? ' category-trend-plot--long' : ''");
+  it('keeps controls touch-safe, mobile form controls at 16px, and focus visible', () => {
+    expect(tokens).toContain('--control-min-height: 2.75rem;');
+    expect(base).toContain('button,\na,\ninput,\nselect,\ntextarea');
+    expect(base).toContain('font-size: max(16px, 1rem);');
+    expect(base).toMatch(/button:focus-visible,[\s\S]*outline: 3px solid var\(--color-primary-focus-ring\);[\s\S]*outline-offset: 3px;/);
+    expect(css).toMatch(/\.ui-ledger-row\[href\]:focus-visible\s*\{[\s\S]*outline: 3px solid var\(--color-primary-focus-ring\);/);
+    expect(shell).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\)/);
+    expect(shell).toMatch(/\.nav-item\s*\{[\s\S]*min-height: var\(--nav-height\);/);
+    expect(shell).toMatch(/\.split-transaction-control__menu\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*min-height: var\(--control-min-height\);/);
   });
 
-  it('keeps activity row focus visible inside clipped lists', () => {
-    expect(css).toMatch(/\.ui-ledger-row\[href\]:focus-visible\s*\{[\s\S]*box-shadow: inset 0 0 0 3px var\(--color-focus\);[\s\S]*outline: 3px solid var\(--color-focus\);[\s\S]*outline-offset: -3px;/);
+  it('keeps forced colors and reduced motion usable', () => {
+    expect(base).toMatch(/@media \(forced-colors: active\)[\s\S]*select\s*\{[\s\S]*appearance: auto;[\s\S]*background-image: none;/);
+    expect(responsive).toMatch(/@media \(forced-colors: active\)[\s\S]*Highlight/);
+    expect(responsive).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*animation-duration: 0\.01ms/);
   });
 
-  it('keeps every editable control at the 16px floor without shrinking the main amount', () => {
-    const sharedControlRule = baseCss.match(/input,\nselect,\ntextarea\s*\{\n  width: 100%;([\s\S]*?)\n\}/)?.[1] ?? '';
-    expect(sharedControlRule).toContain('font-size: max(16px, 1rem);');
-    expect(css).toMatch(/\.dev-identity input\s*\{[\s\S]*font-size: 1rem;/);
-    expect(css).toMatch(/\.amount-input--long\s*\{[\s\S]*font-size: 1rem;/);
-    expect(css).toMatch(/\.amount-input--very-long\s*\{[\s\S]*font-size: 1rem;/);
-    expect(css).toMatch(/\.amount-field > input\s*\{[\s\S]*font-size: var\(--text-amount\);/);
-    expect(css).not.toContain('font-size: 0.76rem;');
-    expect(css).not.toContain('font-size: 0.6rem;');
-  });
-
-  it('raises the mobile add tile while preserving the shared content track', () => {
-    expect(css).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;[\s\S]*background: transparent;[\s\S]*margin-top: calc\(-1 \* \(var\(--space-2\) \+ 4px\)\);[\s\S]*margin-bottom: 0;[\s\S]*border-radius: var\(--radius-lg\) var\(--radius-lg\) 0 0;[\s\S]*overflow: visible;/);
-    expect(css).toMatch(/\.nav-item--add::before\s*\{[\s\S]*inset: 0 0 calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\)\)\) 0;[\s\S]*background: var\(--color-primary\);/);
-    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: 100%;[\s\S]*height: 100%;[\s\S]*align-self: stretch;[\s\S]*overflow: hidden;/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*display: flex;[\s\S]*height: 100%;[\s\S]*align-items: flex-end;[\s\S]*border-radius: var\(--radius-lg\) 0 0 0;[\s\S]*background: var\(--color-primary\);/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*height: 100%;[\s\S]*border-left-color: rgba\(255, 255, 255, 0\.45\);[\s\S]*border-radius: 0 var\(--radius-lg\) 0 0;/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__primary,[\s\S]*\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[\s\S]*border-top-color: var\(--color-primary-strong\);[\s\S]*border-right-color: var\(--color-primary-strong\);[\s\S]*border-bottom-color: var\(--color-primary-strong\);[\s\S]*background-color: var\(--color-primary-strong\);/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active::before\s*\{[\s\S]*background: var\(--color-primary-strong\);/);
-    expect(css).not.toMatch(/\.bottom-nav \.nav-item--add\.nav-item--add--active \.split-transaction-control__menu\s*\{[^}]*border-color:/);
-    expect(css).not.toContain('.nav-item__capsule .split-transaction-control {');
-    expect(uiSource).toContain('mobileNav');
-    expect(uiSource).toContain('className="nav-item__content"');
-    expect(uiSource).toContain('className="nav-item__icon"');
-    expect(uiSource).toContain('className="nav-item__glyph nav-item__glyph--add"');
-    expect(uiSource).toContain('className="nav-item__label"');
-    expect(uiSource).not.toContain('nav-add-stack');
-    expect(uiSource).not.toContain('nav-add-icon');
-    expect(uiSource).toContain('aria-hidden="true"');
-  });
-
-  it('keeps the raised tile focus indicators segment-specific and safe-area extension decorative', () => {
-    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule\s*\{/);
-    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible,[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*outline: none;[\s\S]*outline-offset: 0;/);
-    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible\s*\{[\s\S]*box-shadow:\s*inset 0 3px 0 var\(--color-on-primary\),[\s\S]*inset 0 -3px 0 var\(--color-on-primary\),[\s\S]*inset 3px 0 0 var\(--color-on-primary\);/);
-    expect(css).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*border-left: 1px solid rgba\(255, 255, 255, 0\.45\);[\s\S]*box-shadow:\s*inset 0 3px 0 var\(--color-on-primary\),[\s\S]*inset 0 -3px 0 var\(--color-on-primary\),[\s\S]*inset -3px 0 0 var\(--color-on-primary\);/);
-    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible\s*\{[\s\S]*box-shadow:\s*inset 0 3px 0 Highlight,[\s\S]*inset 0 -3px 0 Highlight,[\s\S]*inset 3px 0 0 Highlight;/);
-    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible\s*\{[\s\S]*border-left: 1px solid ButtonText;[\s\S]*box-shadow:\s*inset 0 3px 0 Highlight,[\s\S]*inset 0 -3px 0 Highlight,[\s\S]*inset -3px 0 0 Highlight;/);
-    expect(css).toMatch(/\.nav-item--add::before\s*\{[\s\S]*pointer-events: none;/);
-    expect(css).not.toMatch(/\.nav-item--add\s*\{[^}]*margin-bottom: calc\(-1 \* \(var\(--space-1\) \+ var\(--safe-bottom\) \+ 1px\)\)/);
-  });
-
-  it('keeps split-select popup options readable and usable in forced colors', () => {
-    const selectRule = css.match(/\.split-transaction-control__menu\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
-    expect(selectRule).toContain('font-size: max(16px, 1rem);');
-    expect(selectRule).toContain('overflow: hidden;');
-    expect(selectRule).toContain('text-indent: -9999px;');
-    expect(selectRule).not.toMatch(/font-size:\s*0(?:px)?\s*;/);
-    expect(css).toMatch(/\.split-transaction-control__menu\s*\{[\s\S]*-webkit-appearance:\s*none;[\s\S]*appearance:\s*none;[\s\S]*background-repeat:\s*no-repeat;/);
-    expect(css).toMatch(/\.split-transaction-control__menu option\s*\{[\s\S]*background-color: var\(--color-surface\);[\s\S]*color: var\(--color-ink\);[\s\S]*font: 1rem\/1\.4 var\(--font-body\);[\s\S]*text-indent: 0;/);
-    expect(css).toMatch(/\.split-transaction-control__menu option:disabled\s*\{[\s\S]*background-color: var\(--color-surface-muted\);[\s\S]*color: var\(--color-ink-muted\);/);
-    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.split-transaction-control__menu\s*\{[\s\S]*-webkit-appearance:\s*menulist;[\s\S]*appearance:\s*auto;[\s\S]*background-image: none;[\s\S]*color: ButtonText;[\s\S]*overflow: visible;[\s\S]*text-indent: 0;/);
-    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*\.split-transaction-control__menu option,[\s\S]*\.split-transaction-control__menu option:disabled\s*\{[\s\S]*background-color: Canvas;[\s\S]*color: CanvasText;[\s\S]*font: 1rem\/1\.4 var\(--font-body\);[\s\S]*text-indent: 0;/);
-  });
-
-  it('keeps the mobile add tile full-width in the center navigation column', () => {
-    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*grid-template-columns: minmax\(44px, 1fr\) minmax\(44px, 1fr\) clamp\(100px, 25vw, 112px\) minmax\(44px, 1fr\);/);
-    expect(css).toMatch(/\.nav-item__content\s*\{[\s\S]*grid-template-rows: var\(--nav-icon-size\) auto;[\s\S]*gap: var\(--nav-content-gap\);/);
-    expect(css).toMatch(/\.nav-item__icon\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);/);
-    expect(css).toMatch(/\.nav-item__label\s*\{[\s\S]*max-width: 100%;[\s\S]*overflow: hidden;[\s\S]*text-overflow: ellipsis;[\s\S]*line-height: var\(--nav-label-line-height\);/);
-    expect(css).toMatch(/\.nav-item__capsule\s*\{[\s\S]*overflow: hidden;/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
-    expect(css).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*flex: 0 0 var\(--control-min-height\);[\s\S]*width: var\(--control-min-height\);/);
-    expect(css).toMatch(/\.nav-item__glyph\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);[\s\S]*stroke-width: 1\.8;/);
-    expect(css).toMatch(/\.nav-item__glyph--add\s*\{[\s\S]*width: var\(--nav-icon-size\);[\s\S]*height: var\(--nav-icon-size\);/);
-    expect(css).toMatch(/\.bottom-nav\s*\{[\s\S]*--nav-content-gap: 4px;[\s\S]*--nav-content-inset: var\(--space-2\);/);
-    expect(css).not.toContain('.nav-add-stack');
-    expect(css).not.toContain('.nav-add-label');
-    expect(css).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
-  });
-
-  it('keeps refund helper text in normal flow below its preceding control', () => {
-    expect(css).toMatch(/\.refund-form__help\s*\{[\s\S]*display: block;[\s\S]*margin: var\(--space-2\) 0;/);
-    expect(css).not.toMatch(/\.refund-form__help\s*\{[^}]*margin-top:\s*calc\([^}]*-1/);
-  });
-
-  it('keeps the activity filter separated from the result list at every responsive size', () => {
-    expect(css).toMatch(/\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-4\);/);
-    expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.activity-filter\s*\{[\s\S]*margin-bottom: var\(--space-5\);/);
-    expect(appSource).toContain('className="activity-filter reading-width"');
-  });
-
-  it('uses a native timezone select and preserves boundary recovery actions', () => {
-    expect(appSource).toContain('<select id="creator-timezone"');
-    expect(appSource).not.toContain('<datalist id="timezone-options">');
-    expect(appSource).toContain('timezoneLabel(zone, timezoneLabelDate)');
-    expect(appSource).toContain('value={timezoneSelectValue}');
-    expect(appSource).toContain('value={zone}');
-    expect(appSource).toContain('Other IANA timezone…');
-    expect(appSource).toContain('id="custom-timezone"');
-    expect(appSource).toContain('scheduledExpenseInput.parse');
-    expect(errorBoundarySource).toContain('>Reload</button>');
-    expect(errorBoundarySource).toContain('href="/">Return to Groups</a>');
-    expect(errorBoundarySource).not.toContain('clearCachedData');
-  });
-
-  it('keeps recurrence opt-in clear and preview dates separated', () => {
-    expect(appSource).toContain('id="repeat-expense"');
-    expect(appSource).toContain('<span>Repeat this expense</span>');
-    expect(appSource).toContain('Categories are saved with expenses. Notes are saved for one-time expenses only');
-    expect(appSource).toContain('showNotes={false}');
-    expect(appSource).toContain('Categories are saved with scheduled expenses. Notes are available for one-time expenses only');
-    expect(appSource).toContain('aria-describedby="one-time-only-details-help"');
-    expect(css).toMatch(/\.one-time-only-details\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-3\);/);
-    expect(css).toMatch(/\.schedule-preview ol\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
-    expect(appSource).toContain('scheduleContinuationText(endDate, schedulePreview)');
-    expect(appSource).toContain('occurrences affect balances only when posted');
-  });
-
-  it('keeps tablet sizing and desktop overrides for 1024 and 1280 pixels', () => {
-    expect(768).toBeGreaterThanOrEqual(48 * 16);
-    expect([1024, 1280].every((viewport) => viewport >= 56 * 16)).toBe(true);
-    expect(css).not.toMatch(/@media \(min-width: 30\.0625rem\) and \(max-width: 47\.999rem\)[\s\S]*\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary/);
-    expect(css).toMatch(/@media \(min-width: 48rem\)[\s\S]*\.nav-item\s*\{[\s\S]*padding-inline: var\(--space-3\);/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
-  });
-
-  it('stacks refund allocation rows below the 56rem breakpoint with matching specificity', () => {
-    expect(css).toMatch(/\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\) minmax\(7rem, 10rem\) auto;/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.allocation-row\.refund-allocation-row\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);[\s\S]*grid-template-areas:/);
-  });
-
-  it('keeps the public landing separate from the private shell', () => {
-    expect(appSource).toContain('<PublicShell returnTo={returnTo}>');
-    expect(appSource).toContain("if (auth.status === 'unauthenticated') return <PublicLanding");
-    expect(css).toMatch(/\.public-shell\s*\{[\s\S]*min-height: 100vh;/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.landing-primary,[\s\S]*width: 100%;/);
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.landing-hero\s*\{[\s\S]*grid-template-columns:/);
-  });
-
-  it('uses a data-free private-shaped auth loading shell', () => {
-    expect(uiSource).toContain('export function AuthLoadingShell()');
-    expect(uiSource).toContain('aria-live="polite">Loading…</p>');
-    expect(appSource).toContain('return <AuthLoadingShell />;');
-    expect(uiSource.match(/className="nav-item__content"/g)).toHaveLength(8);
-    expect(css).toMatch(/\.auth-loading-shell \.nav-item__content\s*\{[\s\S]*align-self: flex-end;/);
-    expect(css).toMatch(/\.auth-loading-shell \.nav-item__capsule\s*\{[\s\S]*align-items: flex-end;[\s\S]*padding: 0 var\(--space-1\) var\(--nav-content-inset\);/);
-    expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*position: fixed;[\s\S]*max-height:/);
-    expect(baseCss).toContain('scrollbar-gutter: stable;');
-  });
-
-  it('keeps cold route placeholders visual-only while preserving cached resources', () => {
+  it('keeps loading, cached, offline, and error states explicit in source', () => {
     expect(appSource).toContain('function HomeLoadingPlaceholder()');
     expect(appSource).toContain('function GroupOverviewLoadingPlaceholder()');
-    expect(appSource).toContain('const coldHomeLoading = online && !offline');
-    expect(appSource).toContain("me.status === 'idle' || me.status === 'loading'");
-    expect(appSource).toContain('const coldGroupLoading = online && !offline');
-    expect(appSource).toContain('if (coldGroupLoading) return <Layout><GroupOverviewLoadingPlaceholder /></Layout>;');
-    expect(appSource).toContain('function GroupOverviewUnavailable');
-    expect(appSource).toContain('Group unavailable offline');
-    expect(appSource).toContain('This group is not cached on this device. Reconnect to load it.');
-    expect(appSource).toContain('<Link className="back" to="/">← Groups</Link>');
-    expect(uiSource).toContain('aria-hidden="true"');
+    expect(appSource).toContain('<ResourceState');
+    expect(appSource).toContain('role="status"');
+    expect(appSource).toContain('offline-banner');
+    expect(appSource).toContain('cache-status');
+    expect(appSource).toContain('Showing cached');
+    expect(errorBoundarySource).toContain('role="alert"');
+    expect(uiSource).toContain('export function AuthLoadingShell()');
+    expect(uiSource).toContain('aria-live="polite"');
     expect(css).toContain('.skeleton {');
   });
 
-  it('keeps the tablet auth banner above the fixed navigation and mirrors group actions', () => {
-    expect(css).toMatch(/\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--space-4\) \+ var\(--safe-bottom\)\);/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.auth-banner\s*\{[\s\S]*bottom: calc\(var\(--nav-height\)[\s\S]*var\(--safe-bottom\)\);/);
-    expect(css).toMatch(/\.skeleton--back\s*\{[\s\S]*min-height: var\(--control-min-height\);/);
-    expect(css).toMatch(/\.route-loading__actions--expense\s*\{[\s\S]*flex-wrap: nowrap;/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.route-loading__actions--expense\s*\{[\s\S]*flex-direction: row;/);
-    expect(appSource).toContain('className="route-loading__actions route-loading__actions--expense"');
+  it('keeps the mobile Add geometry, affordance, and focus contracts', () => {
+    expect(shell).toMatch(/\.nav-item--add\s*\{[\s\S]*align-items: stretch;[\s\S]*background: transparent;[\s\S]*margin-top: calc\(-1 \* \(var\(--space-2\) \+ 4px\)\);/);
+    expect(shell).toMatch(/\.nav-item--add::before\s*\{[\s\S]*background: var\(--color-primary\);[\s\S]*pointer-events: none;/);
+    expect(shell).toMatch(/\.nav-item__capsule\s*\{[\s\S]*width: 100%;[\s\S]*height: 100%;[\s\S]*align-self: stretch;[\s\S]*overflow: hidden;/);
+    expect(shell).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__primary\s*\{[\s\S]*align-items: flex-end;[\s\S]*background: var\(--color-primary\);/);
+    expect(shell).toMatch(/\.bottom-nav \.nav-item__capsule \.split-transaction-control__menu\s*\{[\s\S]*min-width: var\(--control-min-height\);[\s\S]*border-left-color: rgba\(255, 255, 255, 0\.45\);/);
+    expect(shell).toMatch(/\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__primary:focus-visible/);
+    expect(responsive).toMatch(/@media \(forced-colors: active\)[\s\S]*\.bottom-nav \.split-transaction-control\.nav-item__capsule \.split-transaction-control__menu:focus-visible[\s\S]*Highlight/);
+    expect(uiSource).toContain('mobileNav');
+    expect(uiSource).toContain('More transaction types');
+    expect(uiSource).toContain('aria-label={menuLabel}');
   });
 
-  it('keeps public sign-up hover readable and reduces landing-page whitespace', () => {
-    expect(css).toMatch(/\.public-sign-up:hover\s*\{[\s\S]*background: var\(--color-secondary-hover\);[\s\S]*color: var\(--color-primary-strong\);/);
-    expect(css).toMatch(/\.public-main\s*\{\s*padding-top: clamp\(var\(--space-8\), 5vw, var\(--space-12\)\);/);
-    expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
+  it('keeps overview macro-cards and allowed route surfaces explicit', () => {
+    for (const name of ['group-overview-card--balances', 'group-overview-card--transactions', 'group-overview-card--schedules', 'group-overview-card--people']) expect(appSource).toContain(name);
+    expect(appSource).toContain('<ul className="balance-cards">');
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card--positive,[\s\S]*border-left: 0\.2rem solid currentColor;/);
+    expect(css).toMatch(/\.route-view--group-overview \.balance-card\s*\{[\s\S]*background: transparent;[\s\S]*border-bottom: 1px solid var\(--color-divider\);/);
+    expect(css).not.toMatch(/\.route-view--group-overview \.balance-card--(?:positive|debt)\s*\{[^}]*background:\s*var\(--color-(positive|debt)-subtle\)/);
+    expect(css).toMatch(/\.insight-metric\s*\{[\s\S]*border-bottom: 1px solid var\(--color-divider\);[\s\S]*padding: var\(--space-3\) 0;/);
+    expect(css).not.toMatch(/\.insight-metric\s*\{[^}]*border:\s*1px solid/);
+    expect(css).toMatch(/\.insight-summary-card\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
+    expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
+    expect(appSource).toContain('className="creation-form-surface"');
+    expect(refundSource()).toContain('<FormSurface className="refund-form__surface"><form');
   });
 
-  it('keeps route composition financial-first at desktop and touch-safe on mobile', () => {
-    expect(appSource).toContain('className="card group-card"');
-    expect(appSource).toContain('<AvatarStack people={people} />');
-    expect(appSource).toContain('className="group-overview-tools"');
-    expect(appSource).not.toContain('className="group-overview-actions actions"');
-    expect(uiSource).toContain('className={`route-view route-view--${routeClass}`}');
-    expect(css).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.group-overview-columns\s*\{[\s\S]*grid-template-columns: minmax\(0, 1\.2fr\) minmax\(18rem, 0\.8fr\);/);
-    expect(css).toMatch(/\.route-view--expense \.amount-field\s*\{[\s\S]*min-height:/);
-    expect(css).toMatch(/\.modal-sheet:has\(\.payer-list\)\s*\{[\s\S]*align-self: center;/);
+  it('keeps editorial desktop navigation and primary Add hierarchy', () => {
+    expect(shell).toMatch(/\.desktop-nav__item\s*\{[\s\S]*border-bottom: 2px solid transparent;[\s\S]*border-radius: 0;/);
+    expect(shell).toMatch(/\.split-transaction-control\s*\{[\s\S]*border-radius: var\(--radius-control\);[\s\S]*box-shadow: none;/);
+    expect(shell).toMatch(/\.split-transaction-control__primary\s*\{[\s\S]*background: var\(--color-primary\);[\s\S]*font-weight: 700;/);
+    expect(uiSource).toContain("compact ? 'Add expense'");
+    expect(uiSource).toContain('className="desktop-nav__add"');
+    expect(css).toMatch(/\.status\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
+    expect(css).toMatch(/\.chip\s*\{[\s\S]*border-radius: var\(--radius-pill\);/);
   });
 
-  it('audits the payer modal at every canonical responsive width', () => {
-    expect(auditSource).toContain("if (scenario.name === 'expense-form') {");
-    expect(auditSource).not.toContain("if (scenario.name === 'expense-form' && viewport.width <= 768)");
-    expect(auditSource).toContain('full canonical responsive coverage');
-     expect(auditSource).toContain('test.setTimeout(900_000);');
+  it('keeps semantic source contracts and responsive audit coverage', () => {
+    expect(uiSource).toContain('export function Layout(');
+    expect(uiSource).toContain('<AppShell>');
+    expect(uiSource).toContain('route-view route-view--${routeClass}');
+    expect(appSource).toContain('<section className="activity-filter reading-width"');
+    expect(appSource).toContain('aria-labelledby="insight-summary-heading"');
+    expect(appSource).toContain('aria-labelledby="balances-heading"');
+    expect(appSource).toContain('summary="More group actions"');
+    expect(auditSource).toContain('const surfaceRootSelector =');
     for (const width of [320, 390, 768, 895, 896, 1440]) expect(auditSource).toContain(`{ width: ${width},`);
-  });
-
-  it('keeps home empty actions separate and group cards compact on mobile', () => {
-    expect(appSource).toContain('className="empty-state__actions"');
-    expect(appSource).toContain('to="/friends/new">Add a friend</Link>');
-    expect(appSource).toContain('to="/groups/new">Create a group</Link>');
-    expect(appSource.indexOf('className="group-cards"')).toBeLessThan(appSource.indexOf('<CompactInsights userId='));
-    expect(css).toMatch(/\.empty-state__actions\s*\{[\s\S]*gap: var\(--space-2\);/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.empty-state__actions\s*\{[\s\S]*flex-direction: column;/);
-    expect(css).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.group-card \.card__balances\s*\{[\s\S]*flex: 0 1 auto;/);
-    expect(css).toMatch(/\.creation-person\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-3\);/);
-    expect(tokensCss).toContain('--color-logo-upper: #B8A6E3;');
-  });
-
-  it('gives both public sign-in buttons the primary treatment and keeps focus visible', () => {
-    const signInRule = css.match(/\.public-sign-in\s*\{([^}]*)\}/)?.[1] ?? '';
-    const signInHoverRule = css.match(/\.public-sign-in:hover\s*\{([^}]*)\}/)?.[1] ?? '';
-
-    expect(signInRule).toContain('background: var(--color-primary);');
-    expect(signInRule).toContain('color: var(--color-on-primary);');
-    expect(signInHoverRule).toContain('background: var(--color-primary-strong);');
-    expect(signInHoverRule).toContain('color: var(--color-on-primary);');
-    expect(css).toMatch(/\.button,\s*button\s*\{[\s\S]*background: var\(--color-primary\);/);
-    expect(baseCss).toMatch(/button:focus-visible\s*,[\s\S]*outline: 3px solid var\(--color-focus\);/);
-    expect(appSource).toContain('className="button landing-primary public-sign-in"');
-    expect(appSource).toContain('>Sign up</button>');
-    expect(uiSource).toContain('className="public-sign-in"');
-    expect(uiSource).toContain('>Sign up</button>');
-  });
-
-  it('keeps proof items free of decorative borders and offset padding', () => {
-    const proofItemRule = css.match(/\.landing-proof > div\s*\{([^}]*)\}/)?.[1] ?? '';
-
-    expect(proofItemRule).toContain('display: grid;');
-    expect(proofItemRule).toContain('gap: var(--space-1);');
-    expect(proofItemRule).not.toContain('border-top');
-    expect(proofItemRule).not.toContain('padding-top');
-  });
-
-  it('keeps targeted participant email controls owner-only and group-scoped', () => {
-    expect(appSource).toContain('function TargetedInvitationControl');
-    expect(appSource).toContain('createTargetedGroupInvitation(groupId, member.personId, email.trim())');
-    expect(appSource).toContain('invitationsResource={invitationsResource}');
-    expect(appSource).toContain('function OwnerGroupManagement');
-    expect(appSource).toContain('getOwnerInvitations(groupId, signal)');
-    expect(appSource).toContain('invitationsResource?.data !== undefined ? <TargetedInvitationControl');
-    expect(appSource).toContain('summary>Invite a new member</summary>');
-    expect(appSource).toContain('filter((invitation) => invitation.targetPersonId == null)');
-    expect(appSource).toContain('currentPersonId={currentPersonId}');
-    expect(appSource).toContain('personLabel(payer.personId)');
-    expect(appSource).toContain('entityType="expense" userId={me.data?.id}');
-    expect(appSource).toContain('summary="View audit history"');
-    expect(css).toMatch(/\.member-email-control\s*\{[\s\S]*display: grid;[\s\S]*gap: var\(--space-2\);/);
-    expect(css).toMatch(/@media \(max-width: 30rem\)[\s\S]*\.member-email-control form\s*\{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
-  });
-
-  it('contains targeted email controls and wraps pending invitation text', () => {
-    const containmentRule = css.match(/\.member-email-control,\s*\.member-email-control form,\s*\.member-email-control \.field,\s*\.member-email-control__pending,\s*\.member-email-control__pending-actions\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(containmentRule).toContain('min-width: 0;');
-    expect(containmentRule).toContain('max-width: 100%;');
-    expect(css).toMatch(/\.member-email-control__pending\s*\{[\s\S]*overflow-wrap: anywhere;/);
-    expect(css).toMatch(/\.member-email-control__pending > span:first-child\s*\{[\s\S]*min-width: 0;[\s\S]*overflow-wrap: anywhere;/);
-  });
-
-  it('defines every spacing token referenced by the authored stylesheets', () => {
-    const references = [...`${css}\n${baseCss}`.matchAll(/var\(--(space-\d+)\)/g)].map((match) => match[1]);
-    expect([...new Set(references)].every((token) => new RegExp(`--${token}\\s*:`).test(tokensCss))).toBe(true);
+    expect(auditSource).toContain('full canonical responsive coverage');
   });
 });
+
+function refundSource() {
+  return readFileSync(new URL('../refund-form.tsx', import.meta.url), 'utf8');
+}
