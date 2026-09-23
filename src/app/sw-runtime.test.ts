@@ -6,7 +6,7 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../../public/sw.js', import.meta.url), 'utf8')
   .replace("'__BILLSPLIT_CACHE_VERSION__'", "'test-cache'")
-  .replaceAll('__BILLSPLIT_SHELL_ASSETS__', "['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png', '/assets/app-123.js']");
+  .replaceAll('__BILLSPLIT_SHELL_ASSETS__', "['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-16.png', '/icons/icon-32.png', '/icons/logo-400.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-192.png', '/icons/icon-maskable-512.png', '/assets/app-123.js']");
 
 function workerHarness(cacheMatch: (request: Request | string) => Promise<Response | undefined>, networkFetch: (request?: Request) => Promise<Response> = async () => { throw new Error('unexpected network request'); }, cachePut = () => new Promise<void>(() => undefined)) {
   const handlers = new Map<string, (event: any) => void>();

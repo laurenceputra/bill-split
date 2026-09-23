@@ -1,12 +1,12 @@
 # BillSplit Design Language
-## Warm Ledger: Plum & Sage
+## Warm Ledger: Purple & Sage
 
 BillSplit records shared financial history; it does not process payments or move money. This language keeps that history calm, legible, and trustworthy across group, transaction, schedule, and people views.
 
 ## Principles
 
 - **Financial hierarchy first.** Who owes whom, how much, and what is due come before metadata, management, and admin controls.
-- **Warm, calm, practical.** Use plum only for primary action, selection, and focus; use sage and coral only to explain financial outcomes; keep the page and dividers warm and quiet.
+- **Warm, calm, practical.** Use purple for primary action, selection, and focus; use sage and coral only to explain financial outcomes; keep the lavender page and dividers quiet.
 - **Token-led implementation.** Components use semantic tokens, never hardcoded component colors. Prefer shared primitives over route-specific duplicates.
 - **Progressive disclosure.** Show the next useful action first; move advanced tools, history, and destructive actions behind clear affordances.
 - **Truthful states.** Distinguish loading, cached, offline, stale, pending, empty, and error states. Never imply a payment was processed.
@@ -20,42 +20,55 @@ Use these names in theme variables and component APIs. Do not invent near-duplic
 
 | Token | Hex | Use |
 |---|---|---|
-| `primary` | `#68435D` | Primary actions, selection, and focus emphasis |
+| `primary` | `#6B4FD3` | Primary actions, selection, and focus emphasis |
 | `primary-fg` | `#FFFFFF` | Foreground on primary controls |
-| `primary-hover` | `#57364E` | Hover state |
-| `primary-pressed` | `#482B41` | Pressed/active state |
-| `primary-focus-ring` | `#68435D` | Keyboard focus ring |
-| `primary-subtle` | `#F0E7ED` | Selected and soft emphasis backgrounds |
-| `primary-subtle-hover` | `#E6D9E1` | Hover on subtle emphasis |
-| `page` | `#F5F0E8` | Warm app/page background |
-| `surface` | `#FFFCF7` | Focused surfaces, fields, modal surfaces |
-| `surface-elevated` | `#FFFCF7` | Focused cards, dialogs, and sheets |
-| `surface-secondary` | `#F9F5EF` | Lower-emphasis surfaces |
-| `border` | `#D8CEC1` | Default boundaries |
-| `border-strong` | `#BFAFA0` | Emphasized boundaries |
-| `divider` | `#E2D9CE` | Thin warm content separation |
-| `text` | `#33282D` | Primary text and amounts |
-| `text-secondary` | `#756A67` | Supporting text |
-| `text-tertiary` | `#6F625D` | Placeholder text, hints, and low-emphasis metadata |
-| `text-disabled` | `#B8ADA6` | Disabled text and controls |
+| `primary-hover` | `#5F43C5` | Hover state |
+| `primary-pressed` | `#5338B4` | Pressed/active state |
+| `primary-focus-ring` | `#5338B4` | Keyboard focus ring |
+| `primary-subtle` | `#EEE9FA` | Selected and soft emphasis backgrounds |
+| `primary-subtle-hover` | `#E5DDF7` | Hover on subtle emphasis |
+| `page` | `#F7F3FA` | Lavender app/page background |
+| `surface` | `#FFFFFF` | Focused surfaces, fields, modal surfaces |
+| `surface-elevated` | `#FFFFFF` | Focused cards, dialogs, and sheets |
+| `surface-secondary` | `#FBF9FC` | Lower-emphasis surfaces |
+| `border` | `#E7DFF0` | Default boundaries |
+| `border-strong` | `#D8CDE4` | Emphasized boundaries |
+| `control-border` | `#927FA6` | Native input, select, and textarea boundaries (at least 3:1 against field and page surfaces) |
+| `divider` | `#ECE6F1` | Thin lavender content separation |
+| `text` | `#2F2540` | Primary text and amounts |
+| `text-secondary` | `#746A84` | Supporting text |
+| `text-tertiary` | `#6E647A` | Placeholder text, hints, and low-emphasis metadata |
+| `text-disabled` | `#B8AFBF` | Disabled text and controls |
 | `text-inverse` | `#FFFFFF` | Text on dark/primary surfaces |
+
+### Logo artwork
+
+Artwork supplied by project requester for BillSplit use. [Source credit](https://chatgpt.com/s/m_6ab44cde3f388191a94c4dbc2cf49b2d).
+The supplied lavender-to-purple S is extracted from `scripts/logo-source.jpg`
+using `node scripts/generate-logo.mjs`. Its gradient and pale lavender interior
+are artwork, not a semantic UI color token. The transparent header logo and
+standard icons retain the mark without a tile; Apple touch and maskable icons
+use a solid lavender background with the mark inside the central safe area.
+Use the generated local PNG favicons at small sizes.
 
 ### Financial and status semantics
 
 | Token | Hex | Use |
 |---|---|---|
-| `positive-bg` | `#DCE9D9` | Settled/positive background |
-| `positive-subtle` | `#EEF5EC` | Soft positive background |
-| `positive-fg` | `#3F684B` | Settled/positive text and icon |
-| `debt-bg` | `#EBC2B8` | Debt/amount-due background |
-| `debt-subtle` | `#FAECE8` | Soft debt background |
-| `debt-fg` | `#7A3E38` | Debt text and icon |
-| `debt-strong` | `#743A35` | Strong debt emphasis |
-| `warning-bg` | `#F2DEB8` | Warning background |
-| `warning-subtle` | `#FBF3E3` | Soft warning background |
-| `warning-fg` | `#775A24` | Offline, stale, pending, and warning text |
-| `neutral-bg` | `#EEE9E2` | Neutral status background |
-| `neutral-fg` | `#6F625D` | Neutral status text |
+| `positive-bg` | `#D8F0E1` | Settled/positive background |
+| `positive-subtle` | `#EEF8F2` | Soft positive background |
+| `positive-fg` | `#216B4A` | Settled/positive text and icon |
+| `debt-bg` | `#F7D7D2` | Debt/amount-due background |
+| `debt-subtle` | `#FCF0EE` | Soft debt background |
+| `debt-fg` | `#9A403A` | Debt text and icon |
+| `debt-strong` | `#A0403A` | Strong debt emphasis |
+| `warning-bg` | `#FDECC8` | Warning background |
+| `warning-subtle` | `#FFF7E6` | Soft warning background |
+| `warning-fg` | `#8A5B00` | Offline, stale, pending, and warning text |
+| `neutral-bg` | `#F1EEF4` | Neutral status background |
+| `neutral-fg` | `#6E647A` | Neutral status text |
+
+The pre-plum `debt-strong` (`#A94741`) on `debt-bg` was 4.26:1; `#A0403A` restores AA at 4.74:1. The pre-plum `neutral-fg` (`#746A84`) on `neutral-bg` was 4.42:1; `#6E647A` restores AA at 4.85:1. Both adjustments retain the original hue and intent.
 
 Color is never the sole indicator: pair it with text, an icon, position, or a status label.
 
@@ -243,6 +256,7 @@ Icons clarify a nearby label or familiar navigation item; they do not replace es
 - Design and verify at **390px** mobile and **1440px** desktop widths; support a minimum width of **320px** without horizontal scrolling.
 - Treat **768px**, **895px**, and **896px** as explicit responsive boundaries. At 768px and below, prioritize a single-column, touch-first layout. At 895px, test the boundary behavior; at 896px and above, allow desktop navigation and multi-column arrangements where useful.
 - Mobile uses a persistent four-item bottom navigation: **Groups**, **History**, **Add**, and **Settings**. Keep labels visible, make **Add** centered and prominent, respect safe-area insets, and do not let content hide behind it.
+- `docs/screenshots/group-overview-mobile-viewport.png` captures the 390×844 viewport (not the full page) so the fixed bottom navigation is visible.
 - Desktop uses a top navigation containing **BillSplit**, **Groups**, **History**, **Add expense**, **Settings**, connection state, relevant install/pending/update controls, and the user avatar. Frequent tasks appear before admin tools.
 - Preserve mobile DOM order; responsive CSS must not create a misleading reading or focus order. In **Group Overview**, the order is: **balances → transactions → schedules → people → tools**. Tools may move visually but not ahead of financial content in the DOM.
 - Use semantic landmarks (`header`, `nav`, `main`, `section`, `footer`) and progressive disclosure for secondary controls.

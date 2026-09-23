@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 import { finalizeServiceWorker } from '../../scripts/finalize-service-worker.mjs';
 
 const worker = `const CACHE = '__BILLSPLIT_CACHE_VERSION__';\nconst SHELL_FILES = __BILLSPLIT_SHELL_ASSETS__;`;
+const icons = ['icon.svg', 'icon-16.png', 'icon-32.png', 'logo-400.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-192.png', 'icon-maskable-512.png'];
 
 async function fixture(assetBody = 'app') {
   const root = await mkdtemp(resolve(tmpdir(), 'bill-split-sw-'));
@@ -20,9 +21,7 @@ async function fixture(assetBody = 'app') {
   await writeFile(resolve(root, 'assets/app-123.js'), assetBody);
   await writeFile(resolve(root, 'assets/app-123.css'), 'css');
   await writeFile(resolve(root, 'manifest.webmanifest'), '{}');
-  await writeFile(resolve(root, 'icons/icon.svg'), 'svg');
-  await writeFile(resolve(root, 'icons/icon-192.png'), 'png');
-  await writeFile(resolve(root, 'icons/icon-512.png'), 'png');
+  for (const icon of icons) await writeFile(resolve(root, 'icons', icon), icon);
   await writeFile(resolve(root, 'sw.js'), worker);
   return root;
 }
@@ -32,12 +31,12 @@ describe('production service-worker finalizer', () => {
     const root = await fixture();
     const result = await finalizeServiceWorker(root);
     const output = await readFile(resolve(root, 'sw.js'), 'utf8');
-    expect(result.assets).toEqual(['/','/index.html','/manifest.webmanifest','/icons/icon.svg','/icons/icon-192.png','/icons/icon-512.png','/assets/app-123.js','/assets/app-123.css']);
+    expect(result.assets).toEqual(['/', '/index.html', '/manifest.webmanifest', ...icons.map(icon => `/icons/${icon}`), '/assets/app-123.js', '/assets/app-123.css']);
     expect(output).toContain(result.version);
     expect(output).toContain('/assets/app-123.js');
     expect(output).not.toMatch(/__BILLSPLIT_/);
     expect(output).toMatch(/const CACHE = "bill-split-shell-[a-f0-9]{20}";/);
-    expect(output).toContain('const SHELL_FILES = ["/","/index.html","/manifest.webmanifest","/icons/icon.svg","/icons/icon-192.png","/icons/icon-512.png","/assets/app-123.js","/assets/app-123.css"];');
+    expect(output).toContain(`const SHELL_FILES = ${JSON.stringify(result.assets)};`);
   });
 
   it('changes the version when a shell asset changes', async () => {

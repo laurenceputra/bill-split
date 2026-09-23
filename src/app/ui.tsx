@@ -24,7 +24,7 @@ export function Icon({ name, className = 'nav-icon' }: { name: IconName; classNa
 }
 
 export function LogoMark({ className = '' }: { className?: string }) {
-  return <svg className={`brand-logo ${className}`.trim()} viewBox="0 0 32 32" aria-hidden="true"><circle className="brand-logo__base" cx="16" cy="16" r="12" /><path className="brand-logo__upper" d="M4 16a12 12 0 0 1 24 0c-3-1.8-7-2.8-12-2.8S7 14.2 4 16Z" /><path className="brand-logo__gap" d="M4 16.1c3.2-1.8 7.2-2.7 12-2.7s8.8.9 12 2.7c-3.2 1.8-7.2 2.7-12 2.7s-8.8-.9-12-2.7Z" /></svg>;
+  return <img className={`brand-logo ${className}`.trim()} src="/icons/logo-400.png" alt="" aria-hidden="true" />;
 }
 
 function Brand({ link = false }: { link?: boolean }) {

@@ -506,18 +506,6 @@
   flex: 0 0 auto;
 }
 
-.brand-logo__base {
-  fill: var(--color-text);
-}
-
-.brand-logo__upper {
-  fill: var(--color-logo-upper);
-}
-
-.brand-logo__gap {
-  fill: var(--color-surface);
-}
-
 .dev-identity {
   display: flex;
   align-items: center;

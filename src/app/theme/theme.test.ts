@@ -92,15 +92,23 @@ describe('Warm Ledger visual system', () => {
     expect(css).toMatch(/\.ui-resource-state--error\s*\{[\s\S]*background: var\(--color-debt-subtle\);[\s\S]*color: var\(--color-debt-fg\);/);
   });
 
+  it('keeps native control boundaries visible on their adjacent surfaces', () => {
+    for (const background of ['--color-control-bg', '--color-surface', '--color-page', '--color-surface-secondary']) {
+      expect(contrastRatio(tokenValue('--color-control-border'), tokenValue(background)), `control border on ${background}`).toBeGreaterThanOrEqual(3);
+    }
+    expect(base).toMatch(/input,\s*select,\s*textarea\s*\{[^}]*border: 1px solid var\(--color-control-border\);/);
+    expect(base).toContain('border-color: var(--color-primary);');
+  });
+
   it('uses semantic tokens without old authored aliases or caret colors', () => {
-    expect(tokens).toContain('--color-page: #F5F0E8;');
-    expect(tokens).toContain('--color-primary: #68435D;');
+    expect(tokens).toContain('--color-page: #F7F3FA;');
+    expect(tokens).toContain('--color-primary: #6B4FD3;');
     expect(tokens).toContain('--color-positive-fg:');
     expect(tokens).toContain('--color-debt-fg:');
     expect(css).not.toMatch(/var\(--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\)/);
     expect(tokens).not.toMatch(/--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\s*:/);
-    expect(base).toContain("stroke='%23756A67'");
-    expect(base).not.toContain('%23746A84');
+    expect(base).toContain("stroke='%23746A84'");
+    expect(base).not.toContain('%23756A67');
   });
 
   it('owns the 895/896 responsive boundary in one responsive layer', () => {

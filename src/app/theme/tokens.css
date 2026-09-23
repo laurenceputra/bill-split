@@ -1,48 +1,47 @@
 :root {
   color-scheme: light;
-  /* Warm Ledger semantic palette. Plum is an action and focus color, not a
-     page decoration. Financial colors are reserved for financial states. */
-  --color-primary: #68435D;
+  /* Warm Ledger semantic palette. Purple is an action and focus color;
+     sage and coral are reserved for financial states. */
+  --color-primary: #6B4FD3;
   --color-primary-fg: #FFFFFF;
-  --color-primary-hover: #57364E;
-  --color-primary-pressed: #482B41;
-  --color-primary-focus-ring: #68435D;
-  --color-primary-subtle: #F0E7ED;
-  --color-primary-subtle-hover: #E6D9E1;
-  --color-logo-upper: #B994AA;
-  --color-page: #F5F0E8;
-  --color-surface: #FFFCF7;
-  --color-surface-elevated: #FFFCF7;
-  --color-surface-secondary: #F9F5EF;
-  --color-border: #D8CEC1;
-  --color-border-strong: #BFAFA0;
-  --color-divider: #E2D9CE;
-  --color-text: #33282D;
-  --color-text-secondary: #756A67;
-  --color-text-tertiary: #6F625D;
-  --color-text-disabled: #B8ADA6;
+  --color-primary-hover: #5F43C5;
+  --color-primary-pressed: #5338B4;
+  --color-primary-focus-ring: #5338B4;
+  --color-primary-subtle: #EEE9FA;
+  --color-primary-subtle-hover: #E5DDF7;
+  --color-page: #F7F3FA;
+  --color-surface: #FFFFFF;
+  --color-surface-elevated: #FFFFFF;
+  --color-surface-secondary: #FBF9FC;
+  --color-border: #E7DFF0;
+  --color-border-strong: #D8CDE4;
+  --color-divider: #ECE6F1;
+  --color-text: #2F2540;
+  --color-text-secondary: #746A84;
+  --color-text-tertiary: #6E647A;
+  --color-text-disabled: #B8AFBF;
   --color-text-inverse: #FFFFFF;
-  --color-positive-bg: #DCE9D9;
-  --color-positive-subtle: #EEF5EC;
-  --color-positive-fg: #3F684B;
-  --color-debt-bg: #EBC2B8;
-  --color-debt-subtle: #FAECE8;
-  --color-debt-fg: #7A3E38;
-  --color-debt-strong: #743A35;
-  --color-warning-bg: #F2DEB8;
-  --color-warning-subtle: #FBF3E3;
-  --color-warning-fg: #775A24;
-  --color-neutral-bg: #EEE9E2;
-  --color-neutral-fg: #6F625D;
+  --color-positive-bg: #D8F0E1;
+  --color-positive-subtle: #EEF8F2;
+  --color-positive-fg: #216B4A;
+  --color-debt-bg: #F7D7D2;
+  --color-debt-subtle: #FCF0EE;
+  --color-debt-fg: #9A403A;
+  --color-debt-strong: #A0403A;
+  --color-warning-bg: #FDECC8;
+  --color-warning-subtle: #FFF7E6;
+  --color-warning-fg: #8A5B00;
+  --color-neutral-bg: #F1EEF4;
+  --color-neutral-fg: #6E647A;
 
   /* Control and layer semantics. Components should use these names rather
      than deriving a new color from the palette. */
   --color-control-bg: var(--color-surface);
-  --color-control-border: var(--color-border-strong);
+  --color-control-border: #927FA6;
   --color-control-placeholder: var(--color-text-tertiary);
   --color-control-invalid-bg: var(--color-debt-subtle);
   --color-control-invalid-border: var(--color-debt-fg);
-  --color-scrim: rgb(51 40 45 / 48%);
+  --color-scrim: rgb(47 37 64 / 48%);
   --shadow-soft: 0 2px 10px rgb(51 40 45 / 5%);
   --shadow-raised: 0 8px 24px rgb(51 40 45 / 9%);
   --shadow-primary: 0 3px 8px rgb(104 67 93 / 16%);

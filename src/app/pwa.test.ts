@@ -11,8 +11,31 @@ const serviceWorker = read('../../public/sw.js');
 const main = read('./main.tsx');
 const ui = read('./ui.tsx');
 const outbox = read('./outbox.ts');
+const icon = (name: string) => readFileSync(new URL(`../../public/icons/${name}`, import.meta.url));
 
 describe('standalone PWA contract', () => {
+  it('uses local, correctly sized artwork with separate transparent and maskable icons', () => {
+    const entries = manifest.icons as Array<{ src: string; sizes: string; purpose: string }>;
+    for (const [name, size, purpose] of [
+      ['icon-16.png', 16, 'favicon'], ['icon-32.png', 32, 'favicon'],
+      ['logo-400.png', 400, 'brand'], ['icon-192.png', 192, 'any'],
+      ['icon-512.png', 512, 'any'], ['icon-maskable-192.png', 192, 'maskable'],
+      ['icon-maskable-512.png', 512, 'maskable'], ['apple-touch-icon.png', 180, 'apple'],
+    ] as const) {
+      const png = icon(name);
+      expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+      expect(png.readUInt32BE(16)).toBe(size);
+      expect(png.readUInt32BE(20)).toBe(size);
+      expect(png[25]).toBe(6); // RGBA; transparent artwork is not a white tile.
+      if (purpose === 'any' || purpose === 'maskable') {
+        expect(entries).toContainEqual(expect.objectContaining({ src: `/icons/${name}`, sizes: `${size}x${size}`, purpose }));
+      }
+    }
+    expect(read('../../public/icons/icon.svg')).toContain('data:image/png;base64,');
+    expect(html).toContain('/icons/apple-touch-icon.png');
+    expect(ui).toContain('/icons/logo-400.png');
+    expect(serviceWorker).toContain('/icons/logo-400.png');
+  });
   it('keeps standalone manifest behavior and includes iOS install metadata', () => {
     expect(manifest.display).toBe('standalone');
     expect(manifest.display_override).toEqual(['standalone', 'minimal-ui']);
