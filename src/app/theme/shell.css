@@ -824,6 +824,7 @@
   background-color: var(--color-primary-hover);
 }
 
+.nav-icon,
 .nav-item__glyph {
   display: block;
   width: var(--nav-icon-size);
