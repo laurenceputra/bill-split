@@ -1,6 +1,5 @@
 import { test as base, type Browser, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
 import { DB_NAME, DB_VERSION } from '../../src/app/idb';
-import { BASE_URL } from './config.mjs';
 
 export { BASE_URL } from './config.mjs';
 export const DEV_EMAIL = 'dev@example.com';
