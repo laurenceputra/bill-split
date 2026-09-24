@@ -1,34 +1,53 @@
 :root {
   color-scheme: light;
-  --color-canvas: #f5f2fb;
-  --color-surface: #ffffff;
-  --color-surface-muted: #faf9fd;
-  --color-ink: #1d2340;
-  --color-ink-muted: #62677d;
-  --color-ink-subtle: #62677d;
-  --color-primary: #6d4aff;
-  --color-primary-strong: #5436dc;
-  --color-primary-soft: #eeeaff;
-  --color-mint: #daf6e9;
-  --color-mint-ink: #167453;
-  --color-coral: #ffe3df;
-  --color-coral-ink: #a23d37;
-  --color-border: #ebe8f2;
-  --color-border-strong: #ddd8e9;
-  --color-focus: #5d3edb;
-  --color-on-primary: #ffffff;
-  --color-topbar: rgb(245 242 251 / 0.9);
-  --color-nav-surface: rgb(255 255 255 / 0.96);
-  --color-overlay: rgb(29 35 64 / 0.48);
-  --color-secondary-hover: #e3dcff;
-  --color-danger-border: #ffc7c0;
-  --color-danger-hover: #ffd3cd;
-  --shadow-soft: 0 8px 30px rgb(49 37 91 / 0.06);
-  --shadow-raised: 0 14px 34px rgb(49 37 91 / 0.12);
-  --shadow-primary: 0 8px 16px rgb(109 74 255 / 0.28);
-  --radius-sm: 0.65rem;
-  --radius-md: 1rem;
-  --radius-lg: 1.35rem;
+  /* Warm Ledger semantic palette. Purple is an action and focus color;
+     sage and coral are reserved for financial states. */
+  --color-primary: #6B4FD3;
+  --color-primary-fg: #FFFFFF;
+  --color-primary-hover: #5F43C5;
+  --color-primary-pressed: #5338B4;
+  --color-primary-focus-ring: #5338B4;
+  --color-primary-subtle: #EEE9FA;
+  --color-primary-subtle-hover: #E5DDF7;
+  --color-page: #F7F3FA;
+  --color-surface: #FFFFFF;
+  --color-surface-elevated: #FFFFFF;
+  --color-surface-secondary: #FBF9FC;
+  --color-border: #E7DFF0;
+  --color-border-strong: #D8CDE4;
+  --color-divider: #ECE6F1;
+  --color-text: #2F2540;
+  --color-text-secondary: #746A84;
+  --color-text-tertiary: #6E647A;
+  --color-text-disabled: #B8AFBF;
+  --color-text-inverse: #FFFFFF;
+  --color-positive-bg: #D8F0E1;
+  --color-positive-subtle: #EEF8F2;
+  --color-positive-fg: #216B4A;
+  --color-debt-bg: #F7D7D2;
+  --color-debt-subtle: #FCF0EE;
+  --color-debt-fg: #9A403A;
+  --color-debt-strong: #A0403A;
+  --color-warning-bg: #FDECC8;
+  --color-warning-subtle: #FFF7E6;
+  --color-warning-fg: #8A5B00;
+  --color-neutral-bg: #F1EEF4;
+  --color-neutral-fg: #6E647A;
+
+  /* Control and layer semantics. Components should use these names rather
+     than deriving a new color from the palette. */
+  --color-control-bg: var(--color-surface);
+  --color-control-border: #927FA6;
+  --color-control-placeholder: var(--color-text-tertiary);
+  --color-control-invalid-bg: var(--color-debt-subtle);
+  --color-control-invalid-border: var(--color-debt-fg);
+  --color-scrim: rgb(47 37 64 / 48%);
+  --shadow-soft: 0 2px 10px rgb(51 40 45 / 5%);
+  --shadow-raised: 0 8px 24px rgb(51 40 45 / 9%);
+  --shadow-primary: 0 3px 8px rgb(104 67 93 / 16%);
+  --radius-sm: 0.35rem;
+  --radius-md: 0.65rem;
+  --radius-lg: 0.85rem;
   --radius-pill: 999px;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -54,13 +73,15 @@
   --safe-left: env(safe-area-inset-left, 0px);
   --font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: var(--font-body);
-  --text-xs: 0.7rem;
-  --text-sm: 0.82rem;
-  --text-md: 0.9375rem;
-  --text-lg: 1.08rem;
+  --text-xs: 0.72rem;
+  --text-sm: 0.84rem;
+  --text-md: 0.95rem;
+  --text-lg: 1.1rem;
   --text-xl: clamp(1.5rem, 7vw, 2rem);
   --text-amount: clamp(2.25rem, 11vw, 3rem);
   --line-height-tight: 1;
+  --line-height-body: 1.5;
+  --line-height-label: 1.25;
 }
 
 @media (min-width: 48rem) {

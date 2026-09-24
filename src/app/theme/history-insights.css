@@ -1,0 +1,525 @@
+.activity-description {
+  overflow-wrap: anywhere;
+}
+
+.activity-filter {
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+  padding-bottom: var(--space-4);
+}
+
+.history-tabs {
+  display: flex;
+  max-width: 100%;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+
+.history-tabs a {
+  flex: 0 0 auto;
+  min-height: var(--control-min-height);
+  padding: 0.65rem 1rem;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.history-tabs a:hover,
+.history-tabs a.active {
+  color: var(--color-primary-hover);
+}
+
+.history-tabs a.active {
+  border-bottom: 3px solid var(--color-primary);
+}
+
+.history-panel {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.insights-compact,
+.insights-page {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.insights-compact {
+margin: var(--space-4) 0;
+border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+
+.insight-metrics,
+.insight-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-2);
+}
+
+.insight-metric {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-divider);
+  padding: var(--space-3) 0;
+}
+
+.insight-metric:last-child {
+  border-bottom: 0;
+}
+
+.insight-metrics {
+  gap: 0;
+  border-top: 1px solid var(--color-divider);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.insights-compact .insight-metrics {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.insights-compact .insight-metric {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  background: transparent;
+}
+
+.insights-compact .insight-metric__currency {
+  grid-column: 1;
+}
+
+.insights-compact .insight-metric > strong {
+  min-width: 0;
+  grid-column: 2;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.insights-compact .insight-metric > .muted {
+  grid-column: 1 / -1;
+}
+
+.insights-compact .insight-metric > small {
+  grid-column: 1 / -1;
+}
+
+.insight-metric__currency {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.insight-metric .money {
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-summary-card {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.insight-summary-card__primary {
+  overflow-wrap: anywhere;
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-disclosure {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.insight-controls {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.insight-currency-tabs {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.insight-currency-tab {
+  flex: 0 0 auto;
+  min-width: 4rem;
+  min-height: var(--control-min-height);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.insight-currency-tab[aria-selected="true"] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-subtle);
+  color: var(--color-primary-hover);
+}
+
+.insight-currency-panel {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-4);
+}
+
+.insight-currency-panel > .insight-section,
+.insight-category-trends {
+  min-width: 0;
+}
+
+/* Semantic insight sections preserve landmarks without becoming an outer
+   page card. Summary and chart modules opt into containment individually. */
+.insight-section {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.insight-category-trends {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-soft);
+  padding: var(--surface-padding);
+}
+
+.insight-chart h3 {
+  margin: 0;
+}
+
+.insight-chart {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.insight-module-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.category-trend-figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.category-trend-guidance {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.category-trend-bars {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: var(--space-2) 0;
+  scrollbar-width: thin;
+}
+
+.category-trend-bars:focus-visible {
+  outline: 3px solid var(--color-primary-focus-ring);
+  outline-offset: 3px;
+}
+
+.category-trend-plot {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.category-trend-month {
+  display: grid;
+  grid-template-rows: 7rem auto;
+  align-items: end;
+  min-width: 0;
+  text-align: center;
+}
+
+.category-trend-month-bars {
+  display: flex;
+  height: 7rem;
+  align-items: end;
+  justify-content: center;
+  gap: 0.2rem;
+  border-bottom: 1px solid var(--color-border-strong);
+}
+
+.category-trend-bar {
+  display: block;
+  width: 0.45rem;
+  flex: 0 0 0.45rem;
+  min-height: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.category-trend-month small {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.category-trend-legend {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.category-trend-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-2);
+}
+
+.category-trend-marker {
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.2rem;
+  border-radius: 50%;
+}
+
+.category-trend-summary__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.category-trend-name,
+.category-trend-current,
+.category-trend-total,
+.category-trend-direction {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.category-trend-name {
+  font-weight: 700;
+}
+
+.category-trend-current,
+.category-trend-total {
+  font-variant-numeric: tabular-nums;
+}
+
+.category-trend-total,
+.category-trend-direction {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.category-trend-values-wrapper {
+  display: block;
+  width: 1px;
+  min-width: 0;
+  max-width: 1px;
+  overflow: hidden;
+}
+
+.balance-cards {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.transaction-list > li,
+.activity-list > li {
+  min-width: 0;
+  list-style: none;
+}
+
+.balance-card {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: var(--space-3);
+}
+
+.balance-card strong,
+.balance-card .money {
+  overflow-wrap: anywhere;
+}
+
+.balance-card--balance .money {
+  font-size: var(--text-sm);
+}
+
+.balance-card__currency {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.balance-breakdown {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.balance-cards > li > :is(.cache-status, .error, .offline-banner, .status),
+.balance-breakdown > :is(.cache-status, .error, .offline-banner, .status),
+.transaction-filters-disclosure > :is(.cache-status, .error, .offline-banner, .status),
+.scheduled-summary > details > :is(.cache-status, .error, .offline-banner, .status),
+.scheduled-summary .schedule-list-content > :is(.cache-status, .error, .offline-banner, .status) {
+  margin: 0;
+}
+
+.balance-breakdown > div {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.balance-breakdown h3 {
+  margin: 0;
+}
+
+.balance-breakdown > p {
+  margin: 0;
+}
+
+.transaction-row strong {
+  overflow-wrap: anywhere;
+}
+
+.transaction-row__category,
+.transaction-row__notes {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.transaction-filters-disclosure {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.transaction-filters-disclosure > summary,
+.scheduled-summary > details > summary,
+.balance-breakdown > summary {
+  min-height: var(--control-min-height);
+  cursor: pointer;
+  color: var(--color-primary-hover);
+  font-weight: 700;
+}
+
+.transaction-filters {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+/* Kind is the primary history control above the disclosure. Keep the
+   secondary filters focused on search and transaction attributes. */
+.transaction-filters > .field:nth-child(2) {
+  display: none;
+}
+
+.transaction-filters-disclosure > .cache-status {
+  margin: 0;
+}
+
+.transaction-filters .actions {
+  margin-bottom: 0;
+}
+
+.scheduled-summary {
+  margin-bottom: var(--space-6);
+}
+
+.scheduled-summary > details {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+/* ScheduleList is also used inside the overview disclosure. Keep its
+   standalone semantic section, but make the nested presentation content-only. */
+.scheduled-summary .schedule-list-content {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.people-summary-compact {
+  max-width: 42rem;
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.people-summary-compact + .inline-action {
+  display: flex;
+  width: fit-content;
+  margin-top: var(--space-2);
+}
+
+.group-tools {
+  margin-top: var(--space-2);
+}
+
+.route-view--history .history-tabs {
+  max-width: var(--reading-max);
+  margin-top: var(--space-5);
+  border-bottom-color: var(--color-border-strong);
+}
+
+.route-view--history .history-tabs a {
+  text-align: center;
+}
+
+.route-view--history .history-panel {
+  max-width: var(--reading-max);
+}
+
+.route-view--history .activity-filter {
+  max-width: var(--reading-max);
+}
+
+.route-view--history .transaction-row,
+.route-view--history .history-panel > .ui-ledger-list > .ui-ledger-row,
+.route-view--history .history-panel > .ui-ledger-list > li > .ui-ledger-row {
+  min-height: 4.25rem;
+}
+
+.route-view--history .transaction-row > .money,
+.route-view--history .history-panel > .ui-ledger-list > .ui-ledger-row > .money,
+.route-view--history .history-panel > .ui-ledger-list > li > .ui-ledger-row > .money {
+  font-size: var(--text-md);
+}

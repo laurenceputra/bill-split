@@ -84,6 +84,29 @@ INSERT INTO splits (expense_id, person_id, amount_minor, metadata_json) VALUES
 INSERT INTO settlements (id, group_id, from_person_id, to_person_id, amount_minor, currency, settlement_date, note, created_by, created_at, updated_at, client_operation_id, version) VALUES
   ('00000000-0000-4000-8000-000000005001', '00000000-0000-4000-8000-000000003002', '00000000-0000-4000-8000-000000002003', '00000000-0000-4000-8000-000000002001', 1000, 'USD', '2025-08-13', 'Partial repayment', '00000000-0000-4000-8000-000000001001', '2025-08-13T20:00:00.000Z', '2025-08-13T20:30:00.000Z', NULL, 2);
 
+-- Tombstones keep detail routes representative without affecting active group
+-- balances. They also make restore affordances auditable in the browser matrix.
+INSERT INTO expenses (id, group_id, description, amount_minor, currency, expense_date, category, notes, created_by, created_at, updated_at, deleted_at, client_operation_id, version) VALUES
+  ('00000000-0000-4000-8000-000000004004', '00000000-0000-4000-8000-000000003002', 'Deleted museum tickets', 3600, 'USD', '2025-08-14', 'Activities', 'Retained tombstone for restore coverage.', '00000000-0000-4000-8000-000000001001', '2025-08-14T20:00:00.000Z', '2025-08-14T20:30:00.000Z', datetime('now', '-1 day'), NULL, 2);
+
+INSERT INTO settlements (id, group_id, from_person_id, to_person_id, amount_minor, currency, settlement_date, note, created_by, created_at, updated_at, deleted_at, client_operation_id, version) VALUES
+  ('00000000-0000-4000-8000-000000005002', '00000000-0000-4000-8000-000000003002', '00000000-0000-4000-8000-000000002004', '00000000-0000-4000-8000-000000002001', 750, 'USD', '2025-08-14', 'Deleted partial repayment', '00000000-0000-4000-8000-000000001001', '2025-08-14T20:00:00.000Z', '2025-08-14T20:30:00.000Z', datetime('now', '-1 day'), NULL, 2);
+
+INSERT INTO credits (id, group_id, subtype, delivery_mode, amount_minor, currency, credit_date, note, created_by, created_at, updated_at, deleted_at, client_operation_id, version) VALUES
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000003002', 'refund', 'member_reimbursement', 4200, 'USD', '2025-08-15', 'Canal dinner refund', '00000000-0000-4000-8000-000000001001', '2025-08-15T20:00:00.000Z', '2025-08-15T20:30:00.000Z', NULL, NULL, 1),
+  ('00000000-0000-4000-8000-000000008002', '00000000-0000-4000-8000-000000003002', 'refund', 'member_reimbursement', 1000, 'USD', '2025-08-16', 'Deleted refund tombstone', '00000000-0000-4000-8000-000000001001', '2025-08-16T20:00:00.000Z', '2025-08-16T20:30:00.000Z', datetime('now', '-1 day'), NULL, 2);
+
+INSERT INTO credit_applications (credit_id, expense_id, amount_minor) VALUES
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000004001', 4200);
+
+INSERT INTO credit_allocations (credit_id, person_id, allocation_type, amount_minor) VALUES
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000002003', 'recipient', 4200),
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000002001', 'beneficiary', 1400),
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000002003', 'beneficiary', 1400),
+  ('00000000-0000-4000-8000-000000008001', '00000000-0000-4000-8000-000000002004', 'beneficiary', 1400),
+  ('00000000-0000-4000-8000-000000008002', '00000000-0000-4000-8000-000000002003', 'recipient', 1000),
+  ('00000000-0000-4000-8000-000000008002', '00000000-0000-4000-8000-000000002004', 'beneficiary', 1000);
+
 INSERT INTO revisions (id, entity_type, entity_id, revision, snapshot_json, created_by, created_at) VALUES
   ('00000000-0000-4000-8000-000000006001', 'expense', '00000000-0000-4000-8000-000000004001', 1, '{"id":"00000000-0000-4000-8000-000000004001","groupId":"00000000-0000-4000-8000-000000003002","description":"Dinner by the canal","amountMinor":8400,"currency":"USD","date":"2025-08-10","category":"Food","notes":"Original note","createdBy":"00000000-0000-4000-8000-000000001001","version":1,"payers":[{"personId":"00000000-0000-4000-8000-000000002001","amountMinor":8400}],"splits":[{"personId":"00000000-0000-4000-8000-000000002001","amountMinor":2800},{"personId":"00000000-0000-4000-8000-000000002003","amountMinor":2800},{"personId":"00000000-0000-4000-8000-000000002004","amountMinor":2800}]}', '00000000-0000-4000-8000-000000001001', '2025-08-10T19:30:00.000Z'),
   ('00000000-0000-4000-8000-000000006002', 'settlement', '00000000-0000-4000-8000-000000005001', 1, '{"id":"00000000-0000-4000-8000-000000005001","groupId":"00000000-0000-4000-8000-000000003002","fromPersonId":"00000000-0000-4000-8000-000000002003","toPersonId":"00000000-0000-4000-8000-000000002001","amountMinor":500,"currency":"USD","date":"2025-08-13","note":"Initial partial repayment","createdBy":"00000000-0000-4000-8000-000000001001","version":1}', '00000000-0000-4000-8000-000000001001', '2025-08-13T20:30:00.000Z');

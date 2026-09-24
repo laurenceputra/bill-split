@@ -4,6 +4,47 @@ const GROUP_ID = '00000000-0000-4000-8000-000000003002';
 const EMPTY_GROUP_ID = '00000000-0000-4000-8000-000000003001';
 const SECOND_GROUP_ID = '00000000-0000-4000-8000-000000003003';
 
+test('keeps History tabs on one line with touch-safe active indication', async ({ authenticatedPage: page }) => {
+  for (const viewport of [{ width: 320, height: 844 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto('/activity?view=insights&period=month', { waitUntil: 'domcontentloaded' });
+    const tabs = page.locator('.history-tabs');
+    await expect(tabs).toBeVisible();
+    const layout = await tabs.evaluate((element) => {
+      const links = Array.from(element.querySelectorAll('a'));
+      const lineCount = (link: Element) => {
+        const range = document.createRange();
+        range.selectNodeContents(link);
+        return new Set(Array.from(range.getClientRects()).map((rect) => Math.round(rect.top))).size;
+      };
+      return {
+        display: getComputedStyle(element).display,
+        flexWrap: getComputedStyle(element).flexWrap,
+        overflowX: getComputedStyle(element).overflowX,
+        documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+        labels: links.map((link) => ({ text: link.textContent?.trim(), lines: lineCount(link) })),
+        targets: links.map((link) => {
+          const box = link.getBoundingClientRect();
+          return { width: box.width, height: box.height };
+        }),
+        active: links.filter((link) => link.classList.contains('active') && link.getAttribute('aria-current') === 'page').map((link) => ({ borderBottomWidth: getComputedStyle(link).borderBottomWidth })),
+      };
+    });
+    const geometry = JSON.stringify({ viewport, layout });
+    expect(layout.display, geometry).toBe('flex');
+    expect(layout.flexWrap, geometry).toBe('nowrap');
+    expect(['auto', 'scroll']).toContain(layout.overflowX);
+    expect(layout.documentWidth, geometry).toBeLessThanOrEqual(viewport.width + 1);
+    expect(layout.labels, geometry).toEqual([
+      { text: 'Changes', lines: 1 },
+      { text: 'Transactions', lines: 1 },
+      { text: 'Insights', lines: 1 },
+    ]);
+    expect(layout.targets.every((target) => target.width >= 44 && target.height >= 44), geometry).toBe(true);
+    expect(layout.active, geometry).toEqual([{ borderBottomWidth: '3px' }]);
+  }
+});
+
 function shortInsightFixture(monthCount: number) {
   const now = new Date();
   const pad = (value: number) => String(value).padStart(2, '0');
@@ -371,6 +412,128 @@ test('contains the open targeted email form across responsive member-row widths'
   }
 });
 
+test('keeps member grid slots, action spacing, and management dividers stable at narrow widths', async ({ authenticatedPage: page }) => {
+  for (const viewport of [{ width: 320, height: 844 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/groups/${GROUP_ID}/manage`);
+    await expect(page.getByRole('list', { name: 'Group members' })).toBeVisible();
+
+    const geometry = await page.locator('.management-sections').evaluate((management) => {
+      const rowFor = (name: string) => [...management.querySelectorAll<HTMLElement>('.member-row')].find((row) => row.textContent?.includes(name));
+      const inspectRow = (row: HTMLElement | undefined) => {
+        if (!row) return undefined;
+        const rowBox = row.getBoundingClientRect();
+        const visible = (element: Element) => {
+          const style = getComputedStyle(element);
+          const box = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+        };
+        const descendants = [row, ...[...row.querySelectorAll('*')].filter(visible)];
+        const controls = [...row.querySelectorAll<HTMLElement>('button, input, summary')].filter(visible);
+        const overlaps = controls.flatMap((first, firstIndex) => controls.slice(firstIndex + 1).filter((second) => {
+          const a = first.getBoundingClientRect();
+          const b = second.getBoundingClientRect();
+          return Math.min(a.right, b.right) > Math.max(a.left, b.left) && Math.min(a.bottom, b.bottom) > Math.max(a.top, b.top);
+        }).map((second) => `${first.tagName}:${second.tagName}`));
+        return {
+          bounds: { left: rowBox.left, right: rowBox.right, top: rowBox.top, bottom: rowBox.bottom },
+          overflow: descendants.map((element) => element.getBoundingClientRect()).filter((box) => box.left < rowBox.left - 1 || box.right > rowBox.right + 1 || box.top < rowBox.top - 1 || box.bottom > rowBox.bottom + 1).length,
+          controls: controls.map((element) => ({ height: element.getBoundingClientRect().height, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right })),
+          overlaps,
+          action: row.querySelector<HTMLElement>('.member-row__actions')?.getBoundingClientRect(),
+          emailStyle: (() => { const element = row.querySelector<HTMLElement>('.member-email-control'); const style = element && getComputedStyle(element); return style ? { marginTop: style.marginTop, paddingTop: style.paddingTop, borderTopWidth: style.borderTopWidth } : undefined; })(),
+        };
+      };
+      const settings = management.querySelector<HTMLElement>('#settings');
+      const settingsTop = settings?.getBoundingClientRect().top || 0;
+      const dividerCount = settings ? [...management.querySelectorAll<HTMLElement>('*')].filter((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return Math.abs(box.top - settingsTop) < 0.5 && style.borderTopWidth === '1px' && style.borderTopStyle !== 'none';
+      }).length : 0;
+      const exportSection = management.querySelector<HTMLElement>('.export-controls');
+      const settingsBody = settings?.querySelector<HTMLElement>(':scope > .group-settings');
+      return {
+        documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+        viewport: window.innerWidth,
+        owner: inspectRow(rowFor('You')),
+        unlinked: inspectRow(rowFor('Sam Rivera')),
+        linked: inspectRow(rowFor('Registered User')),
+        actionGap: [...new Set([...management.querySelectorAll<HTMLElement>('.member-row__actions')].map((element) => getComputedStyle(element).gap))],
+        dividerCount,
+        exportBorder: exportSection ? getComputedStyle(exportSection).borderTopWidth : '',
+        settingsBorder: settings ? getComputedStyle(settings).borderTopWidth : '',
+        settingsBodyBorder: settingsBody ? getComputedStyle(settingsBody).borderTopWidth : '',
+      };
+    });
+
+    const detail = JSON.stringify({ viewport, geometry });
+    expect(geometry.documentWidth, detail).toBeLessThanOrEqual(viewport.width + 1);
+    for (const variant of [geometry.owner, geometry.unlinked, geometry.linked]) {
+      expect(variant, detail).toBeDefined();
+      expect(variant!.overflow, detail).toBe(0);
+      expect(variant!.overlaps, detail).toEqual([]);
+      for (const control of variant!.controls) {
+        expect(control.height, detail).toBeGreaterThanOrEqual(44);
+        expect(control.left, detail).toBeGreaterThanOrEqual(0);
+        expect(control.right, detail).toBeLessThanOrEqual(viewport.width + 1);
+      }
+    }
+    expect(geometry.actionGap, detail).toEqual(['8px']);
+    expect(geometry.unlinked!.action!.left, detail).toBe(geometry.linked!.action!.left);
+    expect(geometry.unlinked!.emailStyle, detail).toEqual({ marginTop: '0px', paddingTop: '0px', borderTopWidth: '0px' });
+    expect(geometry.dividerCount, detail).toBe(1);
+    expect(geometry.exportBorder, detail).toBe('1px');
+    expect(geometry.settingsBorder, detail).toBe('1px');
+    expect(geometry.settingsBodyBorder, detail).toBe('0px');
+  }
+});
+
+test('contains pending invitation controls in the same member grid slot at 320 and 390', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL);
+  const page = await context.newPage();
+  const invitation = { id: 'targeted-pending-geometry', groupId: GROUP_ID, email: 'mateo-login@example.com', createdBy: 'owner', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', targetPersonId: '00000000-0000-4000-8000-000000002005' };
+  await page.route(`${BASE_URL}/api/groups/${GROUP_ID}/invitations**`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ invitations: [invitation] }) }));
+  try {
+    for (const viewport of [{ width: 320, height: 844 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/groups/${GROUP_ID}/manage`);
+      const mateo = page.getByRole('list', { name: 'Group members' }).getByRole('listitem').filter({ hasText: 'Mateo Silva' });
+      await expect(mateo).toContainText('Pending invitation for mateo-login@example.com');
+      await expect(mateo.getByRole('button', { name: 'Change' })).toBeVisible();
+      await expect(mateo.getByRole('button', { name: 'Revoke' })).toBeVisible();
+      const geometry = await mateo.evaluate((row) => {
+        const controls = [...row.querySelectorAll<HTMLElement>('button')].map((element) => {
+          const box = element.getBoundingClientRect();
+          return { height: box.height, left: box.left, right: box.right };
+        });
+        const elements = [row, ...[...row.querySelectorAll('*')]];
+        const rowBox = row.getBoundingClientRect();
+        return {
+          documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+          rowBox: { left: rowBox.left, right: rowBox.right },
+          overflow: elements.map((element) => element.getBoundingClientRect()).filter((box) => box.left < rowBox.left - 1 || box.right > rowBox.right + 1).length,
+          controls,
+          actionGap: getComputedStyle(row.querySelector<HTMLElement>('.member-row__actions')!).gap,
+          emailGap: getComputedStyle(row.querySelector<HTMLElement>('.member-email-control__pending-actions')!).gap,
+        };
+      });
+      const detail = JSON.stringify({ viewport, geometry });
+      expect(geometry.documentWidth, detail).toBeLessThanOrEqual(viewport.width + 1);
+      expect(geometry.overflow, detail).toBe(0);
+      expect(geometry.actionGap, detail).toBe('8px');
+      expect(geometry.emailGap, detail).toBe('8px');
+      for (const control of geometry.controls) {
+        expect(control.height, detail).toBeGreaterThanOrEqual(44);
+        expect(control.left, detail).toBeGreaterThanOrEqual(0);
+        expect(control.right, detail).toBeLessThanOrEqual(viewport.width + 1);
+      }
+    }
+  } finally {
+    await context.close();
+  }
+});
+
 test('validates and submits the friend creation form with its consent-safe payload', async ({ authenticatedPage: page }) => {
   let responseStatus = 409;
   let requestBody: unknown;
@@ -429,7 +592,7 @@ test('validates and submits an expanded multi-person group creation payload', as
 });
 
 test('binds existing and later accounts to the targeted person without changing ledger identity', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const existingAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'empty@example.com' };
   const laterAccountHeaders = { ...browserHeaders, 'X-Dev-Email': 'target-created-after@example.com' };
@@ -458,7 +621,7 @@ test('binds existing and later accounts to the targeted person without changing 
 });
 
 test('does not grant an existing registered email group access until its invitation is accepted', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const ownerHeaders = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const registeredHeaders = { ...browserHeaders, 'X-Dev-Email': 'registered@example.com' };
   const added = await request.post(`/api/groups/${EMPTY_GROUP_ID}/people`, { headers: ownerHeaders, data: { name: 'Renamed registered user', email: 'registered@example.com' } });
@@ -478,7 +641,7 @@ test('does not grant an existing registered email group access until its invitat
 });
 
 test('accepts the schema maximum participant payload in local D1 and keeps removed settlement history usable', async ({ request }) => {
-  const browserHeaders = { Origin: 'http://127.0.0.1:8788', 'Sec-Fetch-Site': 'same-origin' };
+  const browserHeaders = { Origin: new URL(BASE_URL).origin, 'Sec-Fetch-Site': 'same-origin' };
   const headers = { ...browserHeaders, 'X-Dev-Email': 'dev@example.com' };
   const responses = await Promise.all(Array.from({ length: 100 }, (_, index) => request.post(`/api/groups/${GROUP_ID}/people`, { headers, data: { name: `Bounded participant ${index}` } })));
   const people: string[] = [];

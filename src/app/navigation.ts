@@ -27,7 +27,7 @@ export type TransactionNavigationOption = {
 
 export type TransactionNavigation = {
   primaryPath: string;
-  primaryLabel: '+ Add expense' | 'Add transaction';
+  primaryLabel: 'Add expense' | 'Add transaction';
   primaryAriaLabel: 'Add expense' | 'Add transaction';
   options: TransactionNavigationOption[];
 };
@@ -109,7 +109,7 @@ export function getTransactionNavigation(groupId?: unknown, online = true): Tran
   const unavailableReason = !scoped ? ' (choose a group first)' : !online ? ' (online only)' : '';
   return {
     primaryPath: scoped ? `/groups/${validGroupId}/expense/new` : '/add',
-    primaryLabel: scoped ? '+ Add expense' : 'Add transaction',
+    primaryLabel: scoped ? 'Add expense' : 'Add transaction',
     primaryAriaLabel: scoped ? 'Add expense' : 'Add transaction',
     options: [
       { value: 'refund', label: `Refund/reimbursement${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/refund/new` : undefined, disabled: !scoped || !online },
@@ -131,7 +131,9 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   const path = pathname.split(/[?#]/, 1)[0].replace(/\/{2,}/g, '/').replace(/\/+$/, '') || HOME_PATH;
   const segments = path.split('/').filter(Boolean).map(decodeSegment);
   const queryGroupId = path === '/activity' ? new URLSearchParams(search).get('group') || undefined : undefined;
-  const routeGroupId = segments[0] === 'groups' && segments[1] ? segments[1] : undefined;
+  // `new` is a route keyword, not a group identifier. Keeping it out of the
+  // context also prevents `/groups/new/add` from becoming a scoped chooser.
+  const routeGroupId = segments[0] === 'groups' && segments[1] && segments[1].toLowerCase() !== 'new' ? segments[1] : undefined;
   const groupId = routeGroupId || queryGroupId;
   const group = groupId
     ? {

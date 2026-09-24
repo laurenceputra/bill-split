@@ -47,10 +47,24 @@ describe('getNavigationContext', () => {
     expect(getNavigationContext('/groups/group-123/add')).toMatchObject({ route: 'add-transaction', activeSection: 'add', addPath: '/groups/group-123/add', groupId: 'group-123' });
   });
 
+  it('does not treat the new-group routes as a group context', () => {
+    for (const path of ['/groups/new', '/groups/new/add']) {
+      const context = getNavigationContext(path);
+      expect(context.groupId).toBeUndefined();
+      expect(context.groupContext).toBeUndefined();
+      expect(context.addPath).toBe('/add');
+    }
+    expect(getNavigationContext('/groups/group-123/add')).toMatchObject({
+      groupId: 'group-123',
+      groupContext: { id: 'group-123', addPath: '/groups/group-123/add' },
+      addPath: '/groups/group-123/add',
+    });
+  });
+
   it('builds expense-first scoped destinations and preserves a global chooser fallback', () => {
     expect(getTransactionNavigation('group/123')).toEqual({
       primaryPath: '/groups/group%2F123/expense/new',
-      primaryLabel: '+ Add expense',
+      primaryLabel: 'Add expense',
       primaryAriaLabel: 'Add expense',
       options: [
         { value: 'refund', label: 'Refund/reimbursement', path: '/groups/group%2F123/refund/new', disabled: false },

@@ -4,15 +4,14 @@
 
 html {
   min-width: 320px;
-  background: var(--color-canvas);
-  scrollbar-gutter: stable;
+  background: var(--color-page);
 }
 
 body {
   min-width: 320px;
   margin: 0;
-  background: var(--color-canvas);
-  color: var(--color-ink);
+  background: var(--color-page);
+  color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--text-md);
   line-height: 1.5;
@@ -51,7 +50,7 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid var(--color-focus);
+  outline: 3px solid var(--color-primary-focus-ring);
   outline-offset: 3px;
 }
 
@@ -95,7 +94,7 @@ h2 {
 }
 
 small {
-  color: var(--color-ink-muted);
+  color: var(--color-text-secondary);
   font-size: var(--text-sm);
 }
 
@@ -110,13 +109,25 @@ input,
 select,
 textarea {
   width: 100%;
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-control-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
-  color: var(--color-ink);
+  color: var(--color-text);
   /* Keep controls at least 16px while preserving larger root sizing. */
   font-size: max(16px, 1rem);
   padding: 0.65rem 0.8rem;
+}
+
+input:not(:disabled):not([aria-invalid="true"]):hover,
+select:not(:disabled):not([aria-invalid="true"]):hover,
+textarea:not(:disabled):not([aria-invalid="true"]):hover {
+  border-color: var(--color-primary);
+}
+
+input:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 select {
@@ -125,7 +136,7 @@ select {
   min-height: var(--control-min-height);
   /* Keep the native caret clearance separate from flow spacing tokens. */
   padding: 0.65rem 2.5rem 0.65rem 0.875rem;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%2373788f' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%23746A84' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position: right 0.875rem center;
   background-repeat: no-repeat;
   background-size: 1rem;
@@ -146,7 +157,20 @@ select:disabled {
 }
 
 input::placeholder {
-  color: var(--color-ink-subtle);
+  color: var(--color-text-tertiary);
+}
+
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--color-debt-fg);
+  background: var(--color-debt-subtle);
+}
+
+input[aria-invalid="true"]:focus-visible,
+select[aria-invalid="true"]:focus-visible,
+textarea[aria-invalid="true"]:focus-visible {
+  outline-color: var(--color-debt-fg);
 }
 
 textarea {
@@ -156,12 +180,13 @@ textarea {
 fieldset {
   min-width: 0;
   margin: 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-4);
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  border-radius: 0;
+  padding: var(--space-5) 0 0;
 }
 
 legend {
   padding: 0 var(--space-2);
-  font-weight: 750;
+  font-weight: 600;
 }

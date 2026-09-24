@@ -1,0 +1,754 @@
+.pending-transactions {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.pending-transactions__heading {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.form-row {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.expense-form {
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--space-3);
+}
+
+.expense-heading {
+  margin-bottom: var(--space-3);
+}
+
+.expense-heading .back {
+  margin-bottom: var(--space-2);
+}
+
+.expense-heading__actions {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.amount-field {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(5.5rem, 7rem) minmax(0, 1fr);
+  grid-template-areas:
+    "label label"
+    "currency amount";
+  align-items: end;
+  gap: var(--space-2);
+}
+
+.amount-field--very-long {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "label"
+    "currency"
+    "amount";
+}
+
+.amount-field--very-long > select {
+  width: max-content;
+  min-width: 5.5rem;
+  max-width: 100%;
+}
+
+.amount-field--very-long > input {
+  width: 100%;
+}
+
+.amount-field > span {
+  grid-area: label;
+}
+
+.amount-field > input {
+  grid-area: amount;
+  width: 100%;
+  min-width: 0;
+  min-height: 3rem;
+  overflow: auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--text-amount);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: var(--line-height-tight);
+  padding: 0 0.875rem 0 0;
+  text-align: right;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.amount-field > select {
+  grid-area: currency;
+  min-width: 0;
+  min-height: var(--control-min-height);
+  /* Deliberate extra inline space reserves the native caret affordance. */
+  padding-left: 0.875rem;
+  padding-right: 2.5rem;
+}
+
+.amount-input {
+min-width: 0;
+  overflow: auto;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+  padding-right: 0.875rem;
+  text-overflow: clip;
+text-align: right;
+}
+
+.amount-input--long {
+  /* Detached payer/allocation fields must also stay above iOS's zoom floor. */
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.amount-field > input.amount-input--long {
+  font-size: clamp(1.85rem, 8vw, 2.75rem);
+}
+
+.amount-input--very-long {
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+.refund-form__help {
+  display: block;
+  margin: var(--space-2) 0;
+}
+
+.refund-form__surface {
+  width: min(100%, var(--reading-max));
+  margin-inline: auto;
+}
+
+.refund-form__surface > form {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.refund-form__surface > form > fieldset,
+.refund-preview-section {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.refund-preview-section {
+  border-top: 1px solid var(--color-divider);
+  padding-top: var(--space-5);
+}
+
+.refund-application-row {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-4);
+}
+
+.refund-application-row + .refund-application-row {
+  padding-top: var(--space-2);
+}
+
+.refund-application-row > :is(.button, button),
+.refund-application-actions :is(.button, button),
+.refund-allocation-actions :is(.button, button),
+.refund-allocation-row__remove {
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.refund-application-actions,
+.refund-allocation-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.refund-application-status {
+  display: block;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.refund-application-status--fully-applied {
+  color: var(--color-positive-fg);
+}
+
+.refund-application-status--overallocated {
+  color: var(--color-debt-fg);
+}
+
+.allocation-row.refund-allocation-row {
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 10rem) auto;
+  grid-template-areas: "person amount remove";
+  align-items: start;
+}
+
+.refund-allocation-row__person {
+  grid-area: person;
+}
+
+.refund-allocation-row__amount {
+  grid-area: amount;
+}
+
+.refund-allocation-row__remove {
+  grid-area: remove;
+  align-self: end;
+}
+
+.refund-preview-person > span {
+  gap: var(--space-1);
+}
+
+.refund-preview-component,
+.refund-preview-net {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.refund-preview-component .money,
+.refund-preview-net .money {
+  flex: 0 0 auto;
+}
+
+.refund-preview-net {
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-1);
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+.refund-preview-application-status {
+  font-weight: 700;
+}
+
+.amount-field > input.amount-input--very-long {
+  font-size: clamp(1.15rem, 5vw, 2rem);
+  letter-spacing: 0;
+}
+
+.field--compact {
+  gap: var(--space-1);
+}
+
+.field--compact input {
+  min-height: var(--control-min-height);
+  padding: var(--space-2) var(--space-3);
+}
+
+.field--compact select {
+  min-height: var(--control-min-height);
+  /* Deliberate extra inline space reserves the native caret affordance. */
+  padding: var(--space-2) 2.5rem var(--space-2) 0.875rem;
+}
+
+.secondary-fields {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+}
+
+.summary-row,
+.participant-row,
+.method-row {
+  display: flex;
+  width: 100%;
+  min-height: var(--control-min-height);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+}
+
+.participant-row {
+  min-height: var(--control-min-height);
+  padding: var(--space-2) var(--space-3);
+}
+
+.summary-row {
+  min-width: 0;
+}
+
+.summary-row > span {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+
+.summary-row__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-row > span small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.summary-row > strong {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.summary-row,
+.participant-row {
+  cursor: pointer;
+}
+
+.summary-row:hover,
+.participant-row:hover {
+  background: var(--color-primary-subtle);
+}
+
+.participant-row[aria-pressed="true"]:hover {
+  background: var(--color-primary-subtle);
+}
+
+.participant-list {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  gap: var(--space-2);
+}
+
+.participant-list > .participant-row {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.creation-person {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.expense-form fieldset {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.one-time-only-details {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.participant-row[aria-pressed="true"] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-subtle);
+  color: var(--color-primary-hover);
+  box-shadow: inset 0 -2px 0 var(--color-primary);
+}
+
+.participant-row__name {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1;
+  align-items: center;
+  overflow: hidden;
+  gap: var(--space-2);
+}
+
+.participant-row__label {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.participant-row__name small {
+  flex: 0 0 auto;
+}
+
+.checkmark {
+  display: inline-grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  color: transparent;
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.participant-row[aria-pressed="true"] .checkmark {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-primary-fg);
+}
+
+.participant-row > .allocation-row__amount {
+  min-width: 0;
+  max-width: 48%;
+  flex: 0 0 auto;
+  overflow-wrap: anywhere;
+}
+
+.allocation-list,
+.payer-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.allocation-row,
+.payer-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(6rem, 8rem);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.allocation-row {
+  grid-template-areas: "person input";
+  align-items: start;
+}
+
+.payer-row {
+  grid-template-areas: "select amount";
+}
+
+.payer-row--removable {
+  grid-template-areas:
+    "select amount"
+    "remove remove";
+}
+
+.payer-row > select {
+  grid-area: select;
+  min-width: 0;
+}
+
+.payer-row > input {
+  grid-area: amount;
+  min-width: 0;
+}
+
+.payer-row > button {
+  grid-area: remove;
+  justify-self: start;
+}
+
+.allocation-row__person {
+  display: grid;
+  min-width: 0;
+  grid-area: person;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.allocation-row__person > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.allocation-row > input {
+  grid-area: input;
+  align-self: start;
+  min-width: 0;
+  overflow: auto;
+  text-align: right;
+}
+
+.allocation-row__amount {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.allocation-row:has(> input[aria-invalid="true"]) .allocation-row__amount {
+  display: none;
+}
+
+
+/* Keep decimal financial fields aligned even in compact editors without a field wrapper. */
+input[inputmode="decimal"] {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.allocation-summary {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.split-default-choices {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.split-default-choices p {
+  margin: 0;
+}
+
+.split-default-choices .actions {
+  margin: 0;
+}
+
+.full-width-button {
+  width: 100%;
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  align-items: end;
+  justify-content: center;
+  background: var(--color-scrim);
+  overflow: hidden;
+  padding: var(--space-3) max(var(--space-3), var(--safe-right)) calc(var(--space-3) + var(--safe-bottom)) max(var(--space-3), var(--safe-left));
+}
+
+.modal-sheet {
+  width: min(100%, 34rem);
+  max-height: min(90vh, 45rem);
+  max-height: min(90dvh, 45rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-md) var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+}
+
+.modal-description {
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.modal-header h2 {
+  margin-bottom: 0;
+}
+
+.modal-sheet form {
+  margin: 0;
+}
+
+.modal-sheet,
+.modal-description {
+  overflow-wrap: anywhere;
+}
+
+.modal-sheet > p {
+  margin-bottom: var(--space-3);
+}
+
+.modal-sheet .allocation-summary {
+  margin: var(--space-3) 0;
+}
+
+.modal-sheet > .full-width-button {
+  display: flex;
+  margin-top: var(--space-3);
+}
+
+.modal-sheet fieldset {
+  padding: var(--space-3);
+}
+
+.modal-sheet .button--secondary {
+  min-height: var(--control-min-height);
+  padding: var(--space-2) var(--space-3);
+}
+
+.route-view--expense > .expense-form,
+.route-view--credit,
+.route-view--credit > .refund-form,
+.route-view--settlement > form {
+  max-width: var(--reading-max);
+}
+
+.route-view--credit {
+  width: min(100%, var(--reading-max));
+  margin-inline: auto;
+}
+
+.route-view--expense .amount-field {
+  min-height: 8rem;
+  align-content: center;
+  border: 0;
+  border-bottom: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  padding: var(--space-4) var(--space-5);
+}
+
+.route-view--expense .amount-field > span {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.route-view--expense .secondary-fields {
+  border-top: 1px solid var(--color-divider);
+  padding-top: var(--space-5);
+}
+
+.route-view--expense .summary-row {
+  border-color: var(--color-divider);
+  background: var(--color-primary-subtle);
+}
+
+.route-view--expense .summary-row > strong {
+  color: var(--color-primary);
+}
+
+.route-view--expense .expense-form fieldset {
+  border-color: var(--color-divider);
+}
+
+.route-view--expense .schedule-preview {
+  border-color: var(--color-positive-fg);
+  background: var(--color-positive-subtle);
+}
+
+.route-view--expense .updated-elsewhere {
+  border-color: var(--color-warning-fg);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning-fg);
+}
+
+.route-view--credit :is(.ui-form-surface, .ui-surface) > p:first-child {
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.route-view--credit :is(.ui-form-surface, .ui-surface) input[inputmode="decimal"] {
+  min-height: 4.5rem;
+  border: 0;
+  border-bottom: 1px solid var(--color-divider);
+  background: transparent;
+  font-size: clamp(2rem, 8vw, 3rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: right;
+}
+
+.route-view--credit :is(.ui-form-surface, .ui-surface) fieldset {
+  background: transparent;
+}
+
+.route-view--credit .ui-form-surface fieldset {
+  border-color: var(--color-divider);
+}
+
+.route-view--expense .modal-sheet:has(.payer-list) {
+  border-top: 3px solid var(--color-primary);
+}
+
+.route-view--expense .payer-list {
+  gap: var(--space-3);
+}
+
+.route-view--expense .payer-row {
+  border-color: var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-secondary);
+  padding: var(--space-3);
+}
+
+.route-view--expense .payer-row input {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: right;
+}
+
+.route-view--settlement .ui-page-header .money,
+.route-view--expense .ui-page-header .money,
+.route-view--credit .ui-page-header .money {
+  font-size: clamp(1.6rem, 5vw, 2.4rem);
+}
+
+.route-view--settlement .offline-banner,
+.route-view--expense .offline-banner,
+.route-view--credit .offline-banner {
+  border-color: var(--color-warning-fg);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning-fg);
+}
+
+.landing-page .ledger-preview {
+  transform: none;
+}
+
+.expense-detail-surface,
+.credit-detail-surface,
+.settlement-detail-surface {
+  border: 0;
+  border-top: 1px solid var(--color-divider);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding-inline: 0;
+}
+
+.landing-page .ledger-preview__total strong {
+  color: var(--color-debt-strong);
+}

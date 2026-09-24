@@ -1,0 +1,16 @@
+/* Shared layout tokens for route composition. */
+:root {
+  --container-page: var(--content-max);
+  --container-reading: var(--reading-max);
+  --container-form: var(--reading-max);
+  --space-control-inline: var(--space-3);
+  --space-surface-inline: var(--surface-padding);
+  --radius-control: var(--radius-sm);
+  --radius-surface: var(--radius-md);
+  --radius-sheet: var(--radius-lg);
+  --shadow-surface: var(--shadow-soft);
+  --shadow-overlay: var(--shadow-raised);
+  --breakpoint-tablet: 48rem;
+  --breakpoint-desktop: 56rem;
+  --breakpoint-desktop-px: 896px;
+}

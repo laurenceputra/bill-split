@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test';
+import { BASE_URL } from './tests/e2e/config.mjs';
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -13,16 +14,19 @@ export default defineConfig({
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
   ],
   use: {
-    baseURL: 'http://127.0.0.1:8788',
+    baseURL: BASE_URL,
     browserName: 'chromium',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
   },
   webServer: {
-    command: 'node tests/e2e/start-server.mjs',
-    url: 'http://127.0.0.1:8788',
-    timeout: 120_000,
+    command: 'node tests/e2e/web-server-wrapper.mjs',
+    url: BASE_URL,
+    // The local D1 migration set is intentionally run from a clean persisted
+    // directory. Give Wrangler enough time to finish it before classifying the
+    // environment as unavailable.
+    timeout: 300_000,
     reuseExistingServer: false,
     stdout: 'pipe',
     stderr: 'pipe',

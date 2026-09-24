@@ -1,15 +1,16 @@
-import { test as base, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { test as base, type Browser, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
 import { DB_NAME, DB_VERSION } from '../../src/app/idb';
 
-export const BASE_URL = 'http://127.0.0.1:8788';
+export { BASE_URL } from './config.mjs';
 export const DEV_EMAIL = 'dev@example.com';
 export const EMPTY_EMAIL = 'empty@example.com';
 export const REGISTERED_EMAIL = 'registered@example.com';
 
-export async function newAuthenticatedContext(browser: Browser, email = DEV_EMAIL, viewport?: { width: number; height: number }) {
+export async function newAuthenticatedContext(browser: Browser, email = DEV_EMAIL, viewport?: { width: number; height: number }, options?: Pick<BrowserContextOptions, 'serviceWorkers'>) {
   return browser.newContext({
     viewport,
     extraHTTPHeaders: { 'X-Dev-Email': email },
+    ...options,
   });
 }
 

@@ -2,7 +2,7 @@ const CACHE = '__BILLSPLIT_CACHE_VERSION__';
 // Vite serves files from public/ unchanged during development. Keep the
 // source worker parseable there; the production finalizer replaces both
 // placeholder references with the exact generated shell list.
-const DEV_SHELL_FILES = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
+const DEV_SHELL_FILES = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-16.png', '/icons/icon-32.png', '/icons/logo-400.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-192.png', '/icons/icon-maskable-512.png'];
 const SHELL_FILES = typeof __BILLSPLIT_SHELL_ASSETS__ === 'undefined' ? DEV_SHELL_FILES : __BILLSPLIT_SHELL_ASSETS__;
 const MAX_ASSETS = 80;
 const NAVIGATION_TIMEOUT_MS = 3000;

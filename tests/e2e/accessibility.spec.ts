@@ -38,11 +38,11 @@ test('owner manage route exposes semantic member rows and owner controls', async
   await expect(members.getByRole('listitem').filter({ hasText: 'Sam Rivera' }).getByRole('button', { name: 'Remove' })).toBeVisible();
   const sam = members.getByRole('listitem').filter({ hasText: 'Sam Rivera' });
   await expect(sam.locator('summary')).toHaveText('Add email');
-  await expect(page.getByLabel('Email for Sam Rivera')).toHaveCount(0);
+  await expect(page.getByLabel('Email for Sam Rivera')).toBeHidden();
   await sam.locator('summary').click();
   await expect(page.getByLabel('Email for Sam Rivera')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Invitations' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Invite a new member' })).toBeVisible();
+  await expect(page.locator('.invitations-panel summary').filter({ hasText: 'Invite a new member' })).toBeVisible();
   await expect(page.getByText('No invitations yet.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Export JSON' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Delete group' })).toBeVisible();
@@ -68,10 +68,182 @@ test('group page keeps primary actions, balances, and transactions before manage
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`/groups/${richGroupId}`);
   await expect(page.getByRole('heading', { name: 'Recent transactions' })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'People in this group' })).toBeVisible();
+  await expect(page.locator('.schedule-overview-list')).toBeVisible();
+  await expect(page.locator('.group-overview-tools')).toHaveJSProperty('open', false);
+  await expect(page.getByRole('link', { name: '+ Add expense' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Settle up' })).toBeVisible();
   const headings = await page.locator('main h2').allTextContents();
   expect(headings.indexOf('Your balances')).toBeGreaterThanOrEqual(0);
   expect(headings.indexOf('Recent transactions')).toBeGreaterThanOrEqual(0);
+  expect(headings.indexOf('Scheduled expenses')).toBeGreaterThanOrEqual(0);
+  expect(headings.indexOf('People')).toBeGreaterThanOrEqual(0);
   expect(headings.indexOf('Your balances')).toBeLessThan(headings.indexOf('Recent transactions'));
+  expect(headings.indexOf('Recent transactions')).toBeLessThan(headings.indexOf('Scheduled expenses'));
+  expect(headings.indexOf('Scheduled expenses')).toBeLessThan(headings.indexOf('People'));
+});
+
+test('group overview keeps transaction loading, error, and cached states truthful', async ({ browser }) => {
+  const transactionsPath = `${BASE_URL}/api/groups/${richGroupId}/transactions**`;
+  const cachedTransactionsPath = new RegExp(`/api/groups/${richGroupId}/transactions(?:\\?.*)?$`);
+
+  const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const loadingPage = await loadingContext.newPage();
+  let releaseLoading!: () => void;
+  const loadingGate = new Promise<void>((resolve) => { releaseLoading = resolve; });
+  await loadingPage.route(transactionsPath, async (route) => { await loadingGate; await route.continue(); });
+  try {
+    await loadingPage.goto(`/groups/${richGroupId}`);
+    const card = loadingPage.locator('.group-overview-card--transactions');
+    await expect(card).toBeVisible();
+    await expect(card.getByRole('status').filter({ hasText: 'Loading recent transactions…' })).toBeVisible();
+    await expect(card).not.toContainText('Recent transactions are unavailable until this group’s transaction data is loaded.');
+  } finally {
+    releaseLoading();
+    await loadingContext.close();
+  }
+
+  const errorContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const errorPage = await errorContext.newPage();
+  await errorPage.route(transactionsPath, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'TRANSACTIONS_UNAVAILABLE', message: 'Transaction fixture outage' } }) }));
+  try {
+    await errorPage.goto(`/groups/${richGroupId}`);
+    const card = errorPage.locator('.group-overview-card--transactions');
+    await expect(card).toBeVisible();
+    await expect(card.locator('.error')).toContainText('Transaction fixture outage');
+    await expect(card).toContainText('Recent transactions are unavailable until this group’s transaction data is loaded.');
+  } finally {
+    await errorContext.close();
+  }
+
+  // The cached-state assertion must observe the actual 503 response. A
+  // previously registered production worker can otherwise keep Playwright's
+  // route handler out of the request path, making this check race the worker
+  // rather than the application transport.
+  const cachedContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block' });
+  const cachedPage = await cachedContext.newPage();
+  try {
+    await cachedPage.goto(`/groups/${richGroupId}`);
+    await expect(cachedPage.locator('.transaction-row--overview').filter({ hasText: 'Dinner by the canal (edited)' })).toBeVisible();
+    await cachedPage.waitForLoadState('networkidle');
+    await seedOfflineTrust(cachedPage);
+    await cachedPage.evaluate(({ dbName, dbVersion, groupId }) => new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open(dbName, dbVersion);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const transaction = db.transaction('groupSnapshots', 'readwrite');
+        const get = transaction.objectStore('groupSnapshots').get(['00000000-0000-4000-8000-000000001001', groupId]);
+        get.onsuccess = () => {
+          const snapshot = get.result;
+          if (!snapshot) { db.close(); reject(new Error('Expected cached group snapshot')); return; }
+          snapshot.cachedAtByResource = { ...snapshot.cachedAtByResource, transactions: new Date(0).toISOString() };
+          transaction.objectStore('groupSnapshots').put(snapshot);
+        };
+        transaction.oncomplete = () => { db.close(); resolve(); };
+         transaction.onerror = () => { db.close(); reject(transaction.error); };
+         };
+       }), { dbName: DB_NAME, dbVersion: DB_VERSION, groupId: richGroupId });
+    let refreshFailures = 0;
+    await cachedPage.route(cachedTransactionsPath, (route) => {
+      refreshFailures += 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'TRANSACTIONS_REFRESH_FAILED', message: 'Transaction refresh failed' } }) });
+    });
+    await cachedPage.reload({ waitUntil: 'domcontentloaded' });
+    const card = cachedPage.locator('.group-overview-card--transactions');
+    await expect(card).toContainText('Dinner by the canal (edited)');
+    await expect.poll(() => refreshFailures).toBeGreaterThan(0);
+    await expect(card).toContainText('Showing cached transactions; it may be out of date.');
+    await expect(card.locator('.error')).toHaveCount(0);
+  } finally {
+    await cachedContext.close();
+  }
+});
+
+test('group overview reloads fully cached financial data while schedules remain genuinely uncached offline', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 320, height: 844 });
+  const page = await context.newPage();
+  let scheduleRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().includes(`/api/groups/${richGroupId}/scheduled-expenses`)) scheduleRequests += 1;
+  });
+  try {
+    await page.goto(`/groups/${richGroupId}`);
+    await expect(page.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
+    await expect(page.locator('.transaction-row--overview')).not.toHaveCount(0);
+    await expect(page.locator('.group-overview-card--balances .balance-card')).not.toHaveCount(0);
+    await seedOfflineTrust(page);
+    await page.waitForLoadState('networkidle');
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    });
+    scheduleRequests = 0;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+
+    await expect(page.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
+    await expect(page.locator('.group-overview-card--balances .balance-card')).not.toHaveCount(0);
+    await expect(page.locator('.transaction-row--overview').filter({ hasText: 'Dinner by the canal (edited)' })).toBeVisible();
+    const scheduleCard = page.locator('.group-overview-card--schedules');
+    await expect(scheduleCard).toContainText('Scheduled expenses need a connection and are not cached on this device.');
+    await expect(scheduleCard.locator('details')).toHaveCount(0);
+    await expect(scheduleCard.locator('.schedule-overview-row')).toHaveCount(0);
+    expect(scheduleRequests).toBe(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('group overview renders PairwiseBalance names with participant precedence and sorted schedule dates', async ({ authenticatedPage: page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const currentPersonId = '00000000-0000-4000-8000-000000002001';
+  const activePersonId = '00000000-0000-4000-8000-000000002003';
+  const removedPersonId = '00000000-0000-4000-8000-000000009901';
+  await page.route(`${BASE_URL}/api/groups/${richGroupId}/balances`, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as { balances: Record<string, { raw: unknown[]; simplified: unknown[] }> };
+    body.balances.USD = {
+      ...(body.balances.USD || { raw: [] }),
+      raw: [],
+      simplified: [
+        { fromPersonId: removedPersonId, fromName: 'Former Pairwise Name', toPersonId: activePersonId, toName: 'Stale active name', amountMinor: 100, currency: 'USD' },
+        { fromPersonId: activePersonId, fromName: 'Stale active name', toPersonId: currentPersonId, toName: 'Stale current name', amountMinor: 200, currency: 'USD' },
+        { fromPersonId: currentPersonId, fromName: 'Stale current name', toPersonId: removedPersonId, toName: 'Former Pairwise Name', amountMinor: 300, currency: 'USD' },
+      ],
+    };
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await page.route(`${BASE_URL}/api/groups/${richGroupId}/scheduled-expenses**`, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as { scheduledExpenses: Array<Record<string, unknown>> };
+    const template = body.scheduledExpenses[0];
+    if (!template) throw new Error('Expected a scheduled expense fixture');
+    body.scheduledExpenses = [
+      { ...template, id: 'schedule-later', description: 'Later schedule', nextOccurrenceDate: '2025-10-01' },
+      { ...template, id: 'schedule-first-tie', description: 'First tie schedule', nextOccurrenceDate: '2025-09-01' },
+      { ...template, id: 'schedule-second-tie', description: 'Second tie schedule', nextOccurrenceDate: '2025-09-01' },
+    ];
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+
+  await page.goto(`/groups/${richGroupId}`);
+  const breakdown = page.locator('.balance-breakdown');
+  await breakdown.locator('summary').click();
+  await expect(breakdown).toContainText('Former Pairwise Name → Sam Rivera');
+  await expect(breakdown).toContainText('Sam Rivera → You');
+  await expect(breakdown).toContainText('You → Former Pairwise Name');
+  await expect(breakdown).not.toContainText('Stale active name');
+  await expect(breakdown).not.toContainText('Stale current name');
+
+  const scheduleCard = page.locator('.group-overview-card--schedules');
+  const expectedDate = await page.evaluate(() => new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }).format(new Date('2025-09-01T00:00:00Z')));
+  await expect(scheduleCard.locator('.ui-section-header .muted')).toHaveText(`3 active · Next ${expectedDate}`);
+  const previewRows = scheduleCard.locator('.schedule-overview-row');
+  await expect(previewRows).toHaveCount(2);
+  await expect(previewRows.nth(0)).toContainText('First tie schedule');
+  await expect(previewRows.nth(0)).toContainText(`Next occurrence ${expectedDate}`);
+  await expect(previewRows.nth(1)).toContainText('Second tie schedule');
 });
 
 test('active auth banner stays clear of tablet navigation controls', async ({ browser }) => {
@@ -160,7 +332,7 @@ test('group route cold loading keeps mobile anchors stable and actions horizonta
         const rect = element?.getBoundingClientRect();
         return rect ? { top: rect.top, height: rect.height } : undefined;
       };
-      return { back: box('.route-loading--group .skeleton--back'), title: box('.route-loading--group .page-title'), actions: box('.route-loading--group .route-loading__actions'), direction: getComputedStyle(document.querySelector('.route-loading--group .route-loading__actions')!).flexDirection };
+      return { back: box('.route-loading--group .skeleton--back'), title: box('.route-loading--group .ui-page-header .skeleton--title'), actions: box('.route-loading--group .route-loading__actions'), direction: getComputedStyle(document.querySelector('.route-loading--group .route-loading__actions')!).flexDirection };
     });
     expect(loading.back?.height).toBeGreaterThanOrEqual(44);
     expect(loading.actions?.height).toBeGreaterThanOrEqual(44);
@@ -173,7 +345,7 @@ test('group route cold loading keeps mobile anchors stable and actions horizonta
         const rect = element?.getBoundingClientRect();
         return rect ? { top: rect.top, height: rect.height } : undefined;
       };
-      return { back: box('.back'), title: box('.page-title'), actions: box('.expense-heading__actions'), direction: getComputedStyle(document.querySelector('.expense-heading__actions')!).flexDirection, layoutShift: (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift?.() || 0 };
+      return { back: box('.back'), title: box('.ui-page-header h1'), actions: box('.expense-heading__actions'), direction: getComputedStyle(document.querySelector('.expense-heading__actions')!).flexDirection, layoutShift: (window as Window & { __groupColdLayoutShift?: () => number }).__groupColdLayoutShift?.() || 0 };
     });
     expect(rendered.direction).toBe('row');
     expect(Math.abs((rendered.back?.top || 0) - (loading.back?.top || 0))).toBeLessThanOrEqual(8);
@@ -219,7 +391,7 @@ test('completed transaction searches preserve cached results on narrow and deskt
       const observations: Observation[] = [];
       const read = (): Observation => ({
         loading: [...panel.querySelectorAll('[role="status"]')].some((element) => element.textContent?.trim() === 'Loading…'),
-        empty: panel.querySelector('.empty') !== null,
+        empty: panel.querySelector('.ui-empty-state') !== null,
         dinner: panel.textContent?.includes('Dinner by the canal (edited)') === true,
         removedDinner: false,
       });
@@ -288,7 +460,7 @@ test('normalizes disclosure spacing and nested surfaces across responsive bounda
     await expect(balance).toBeVisible();
     await balance.locator('summary').click();
     await expect(balance).toHaveJSProperty('open', true);
-    await expect(balance.locator('.list, .empty, .cache-status').first()).toBeVisible();
+    await expect(balance.locator('.ui-ledger-list, .ui-empty-state, .cache-status').first()).toBeVisible();
     const balanceGeometry = await balance.evaluate((element) => {
       const summary = element.querySelector(':scope > summary')?.getBoundingClientRect();
       const firstContent = Array.from(element.children).find((child) => child.tagName !== 'SUMMARY')?.getBoundingClientRect();
@@ -359,12 +531,12 @@ test('direct section and surface forms own their flow spacing', async ({ authent
 
   await page.goto('/');
   await page.getByRole('link', { name: '+ Add friend' }).click();
-  await expect(page.locator('.surface form')).toBeVisible();
-  expect(await marginOf(page.locator('.surface form'))).toBe('0px');
+  await expect(page.locator('.ui-form-surface form')).toBeVisible();
+  expect(await marginOf(page.locator('.ui-form-surface form'))).toBe('0px');
 
   await page.goto('/groups/new');
   await expect(page.getByRole('heading', { name: 'New group' })).toBeVisible();
-  await expect(page.locator('.surface form')).toBeVisible();
+  await expect(page.locator('.ui-form-surface form')).toBeVisible();
   await page.getByRole('button', { name: 'Add another person' }).click();
   await expect(page.locator('.creation-person')).toHaveCount(2);
 
@@ -393,7 +565,7 @@ test('direct section and surface forms own their flow spacing', async ({ authent
 });
 
 test('standalone section actions stay content-sized across responsive boundaries', async ({ authenticatedPage: page }) => {
-  const viewports = [390, 895, 896, 1440];
+  const viewports = [320, 390, 768, 895, 896, 1440];
   const actionGeometry = async (locator: Locator) => locator.evaluate((element) => {
     const parent = element.parentElement;
     const style = getComputedStyle(element);
@@ -414,7 +586,7 @@ test('standalone section actions stay content-sized across responsive boundaries
     const manageGeometry = await actionGeometry(managePeople);
     expect(manageGeometry.justifySelf).toBe('start');
     expect(manageGeometry.width).toBeLessThan(manageGeometry.parentContentWidth);
-    const recentList = page.locator('section[aria-labelledby="recent-transactions-heading"] > .list');
+    const recentList = page.locator('section[aria-labelledby="recent-transactions-heading"] > .ui-ledger-list');
     await expect(recentList).toBeVisible();
     const listGeometry = await actionGeometry(recentList);
     expect(Math.abs(listGeometry.width - listGeometry.parentContentWidth)).toBeLessThanOrEqual(1);
@@ -458,8 +630,9 @@ test('expense form status messages own spacing through the form grid', async ({ 
 
 test('scheduled disclosure keeps loading, offline, empty, and error states inside its flow', async ({ browser }) => {
   const schedulePath = `${BASE_URL}/api/groups/${richGroupId}/scheduled-expenses**`;
+  const scheduleCard = (page: Page) => page.locator('.group-overview-card--schedules');
   const openSchedule = async (page: Page) => {
-    const disclosure = page.locator('.scheduled-summary > details');
+    const disclosure = scheduleCard(page).locator('details');
     await expect(disclosure).toHaveJSProperty('open', false);
     await expect(disclosure.locator('.schedule-list-content')).toBeHidden();
     await disclosure.locator('summary').click();
@@ -470,6 +643,17 @@ test('scheduled disclosure keeps loading, offline, empty, and error states insid
     return disclosure;
   };
 
+  const populatedContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const populatedPage = await populatedContext.newPage();
+  try {
+    await populatedPage.goto(`/groups/${richGroupId}`);
+    await expect(populatedPage.locator('.group-overview-card--schedules .schedule-overview-list')).toBeVisible();
+    const disclosure = await openSchedule(populatedPage);
+    await expect(disclosure.locator('.schedule-row')).toHaveCount(1);
+  } finally {
+    await populatedContext.close();
+  }
+
   const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
   const loadingPage = await loadingContext.newPage();
   let releaseLoading!: () => void;
@@ -478,8 +662,10 @@ test('scheduled disclosure keeps loading, offline, empty, and error states insid
   try {
     await loadingPage.goto(`/groups/${richGroupId}`);
     await expect(loadingPage.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
-    const disclosure = await openSchedule(loadingPage);
-    await expect(disclosure.getByRole('status').filter({ hasText: 'Loading…' })).toBeVisible();
+    const card = scheduleCard(loadingPage);
+    await expect(card).toBeVisible();
+    await expect(card.locator('details')).toHaveCount(0);
+    await expect(card.getByRole('status').filter({ hasText: 'Loading…' })).toBeVisible();
   } finally {
     releaseLoading();
     await loadingContext.close();
@@ -490,8 +676,10 @@ test('scheduled disclosure keeps loading, offline, empty, and error states insid
   await errorPage.route(schedulePath, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SCHEDULE_UNAVAILABLE', message: 'Schedule fixture outage' } }) }));
   try {
     await errorPage.goto(`/groups/${richGroupId}`);
-    const disclosure = await openSchedule(errorPage);
-    await expect(disclosure.locator('.error')).toContainText('Schedule fixture outage');
+    const card = scheduleCard(errorPage);
+    await expect(card).toBeVisible();
+    await expect(card.locator('details')).toHaveCount(0);
+    await expect(card.locator('.error')).toContainText('Schedule fixture outage');
   } finally {
     await errorContext.close();
   }
@@ -509,21 +697,88 @@ test('scheduled disclosure keeps loading, offline, empty, and error states insid
 
   const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
   const offlinePage = await offlineContext.newPage();
+  let offlineScheduleRequests = 0;
+  offlinePage.on('request', (request) => {
+    if (request.url().includes(`/api/groups/${richGroupId}/scheduled-expenses`)) offlineScheduleRequests += 1;
+  });
   try {
     await offlinePage.goto(`/groups/${richGroupId}`);
     await expect(offlinePage.locator('.schedule-row')).toHaveCount(1);
+    await seedOfflineTrust(offlinePage);
+    await offlinePage.waitForLoadState('networkidle');
     await offlineContext.setOffline(true);
     await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
-    const disclosure = await openSchedule(offlinePage);
-    await expect(disclosure).toContainText('Schedule management requires a connection.');
+    await offlinePage.addInitScript(() => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    });
+    offlineScheduleRequests = 0;
+    await offlinePage.reload({ waitUntil: 'domcontentloaded' });
+    const card = scheduleCard(offlinePage);
+    await expect(card).toContainText('Scheduled expenses need a connection and are not cached on this device.');
+    await expect(card.locator('details')).toHaveCount(0);
+    await expect(card.locator('.schedule-overview-row')).toHaveCount(0);
+    expect(offlineScheduleRequests).toBe(0);
   } finally {
     await offlineContext.close();
   }
 });
 
+test('group overview balance states keep unknown counts out of the visible card', async ({ browser }) => {
+  for (const viewport of [{ width: 320, height: 844 }, { width: 390, height: 844 }, { width: 896, height: 900 }]) {
+    const balancesPath = `${BASE_URL}/api/groups/${richGroupId}/balances`;
+    let releaseLoading!: () => void;
+    const loadingGate = new Promise<void>((resolve) => { releaseLoading = resolve; });
+    const loadingContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const loadingPage = await loadingContext.newPage();
+    await loadingPage.route(balancesPath, async (route) => { await loadingGate; await route.continue(); });
+    try {
+      await loadingPage.goto(`/groups/${richGroupId}`);
+      const card = loadingPage.locator('.group-overview-card--balances');
+      await expect(card).toBeVisible();
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
+      await expect(card).toContainText('Balances are unavailable until this group’s balance data is loaded.');
+    } finally {
+      releaseLoading();
+      await loadingContext.close();
+    }
+
+    const errorContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const errorPage = await errorContext.newPage();
+    await errorPage.route(balancesPath, (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'BALANCE_UNAVAILABLE', message: 'Balance fixture outage' } }) }));
+    try {
+      await errorPage.goto(`/groups/${richGroupId}`);
+      const card = errorPage.locator('.group-overview-card--balances');
+      await expect(card).toBeVisible();
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
+      await expect(card.locator('.error')).toContainText('Balance fixture outage');
+    } finally {
+      await errorContext.close();
+    }
+
+    let releaseOffline!: () => void;
+    const offlineGate = new Promise<void>((resolve) => { releaseOffline = resolve; });
+    const offlineContext = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const offlinePage = await offlineContext.newPage();
+    await offlinePage.route(balancesPath, async (route) => { await offlineGate; await route.continue(); });
+    try {
+      await offlinePage.goto(`/groups/${richGroupId}`);
+      await expect(offlinePage.getByRole('heading', { name: 'Europe trip · USD + EUR' })).toBeVisible();
+      await offlineContext.setOffline(true);
+      await offlinePage.evaluate(() => window.dispatchEvent(new Event('offline')));
+      const card = offlinePage.locator('.group-overview-card--balances');
+      await expect(card).toBeVisible();
+      await expect(card.locator('.ui-section-header .muted')).toHaveCount(0);
+      await expect(card).toContainText('Balances are unavailable until this group’s balance data is loaded.');
+    } finally {
+      releaseOffline();
+      await offlineContext.close();
+    }
+  }
+});
+
 test('group overview exposes history and manage anchors', async ({ authenticatedPage: page }) => {
   await page.goto(`/groups/${richGroupId}`);
-  await page.getByRole('link', { name: 'View all transactions' }).click();
+  await page.getByRole('link', { name: 'See all' }).click();
   await expect(page).toHaveURL(new RegExp(`/activity\\?group=${richGroupId}&view=transactions$`));
   await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Transactions' })).toHaveAttribute('aria-current', 'page');
@@ -534,6 +789,18 @@ test('group overview exposes history and manage anchors', async ({ authenticated
   await page.getByRole('link', { name: 'Manage people' }).click();
   await expect(page).toHaveURL(new RegExp(`/groups/${richGroupId}/manage#people$`));
   await expect(page.locator('#people')).toBeFocused();
+});
+
+test('history TransactionRow keeps detailed metadata, category, and note content', async ({ authenticatedPage: page }) => {
+  await page.goto(`/activity?group=${richGroupId}&view=transactions`);
+  await expect(page.getByText('Payment · Sam Rivera paid Dev User')).toBeVisible();
+  const row = page.locator('.transaction-row').filter({ hasText: 'Dinner by the canal (edited)' }).first();
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('Expense · Dinner by the canal (edited)');
+  await expect(row).toContainText('Food');
+  await expect(row).toContainText('The original dinner description was edited to exercise the history view.');
+  await expect(row.locator('.transaction-row__category')).toHaveText('Category: Food');
+  await expect(row.locator('.transaction-row__notes')).toHaveText('Note: The original dinner description was edited to exercise the history view.');
 });
 
 test('group navigation keeps History and Add expense scoped to the group', async ({ browser }) => {
@@ -979,7 +1246,7 @@ test('manage route shows loading and then concise offline state', async ({ brows
     await expect(page.locator('.offline-banner')).toContainText('cached group data');
     await expect(page.getByText('Showing cached invitations; they may be out of date. Invitation changes require a connection.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Invite a new member' }).click();
+    await page.locator('.invitations-panel summary').filter({ hasText: 'Invite a new member' }).click();
     await expect(page.getByRole('button', { name: 'Invite' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Add friend' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Export JSON' })).toBeDisabled();
@@ -1018,7 +1285,7 @@ test('cold offline manage route does not fetch uncached owner invitations', asyn
     await expect(page.getByText('Invitations aren’t cached on this device and need a connection')).toBeVisible();
     await expect(page.getByText('Loading…')).toHaveCount(0);
     await expect(page.locator('#invitation-management-error')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Invite a new member' }).click();
+    await page.locator('.invitations-panel summary').filter({ hasText: 'Invite a new member' }).click();
     await expect(page.getByRole('button', { name: 'Invite' })).toBeDisabled();
     expect(invitationRequests).toBe(0);
   } finally {

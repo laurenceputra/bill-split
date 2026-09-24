@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const CACHE_PLACEHOLDER = '__BILLSPLIT_CACHE_VERSION__';
 const ASSETS_PLACEHOLDER = '__BILLSPLIT_SHELL_ASSETS__';
 const HASHED_ASSET = /^\/assets\/[a-zA-Z0-9._-]+\.(?:js|css|svg|png|webp|woff2?)$/;
-const SHELL_FILES = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
+const SHELL_FILES = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-16.png', '/icons/icon-32.png', '/icons/logo-400.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-192.png', '/icons/icon-maskable-512.png'];
 
 function extractAssets(html) {
   const assets = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/gi)].flatMap((match) => {
