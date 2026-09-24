@@ -793,6 +793,7 @@ test('group overview exposes history and manage anchors', async ({ authenticated
 
 test('history TransactionRow keeps detailed metadata, category, and note content', async ({ authenticatedPage: page }) => {
   await page.goto(`/activity?group=${richGroupId}&view=transactions`);
+  await expect(page.getByText('Payment · Sam Rivera paid Dev User')).toBeVisible();
   const row = page.locator('.transaction-row').filter({ hasText: 'Dinner by the canal (edited)' }).first();
   await expect(row).toBeVisible();
   await expect(row).toContainText('Expense · Dinner by the canal (edited)');

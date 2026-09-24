@@ -1295,7 +1295,9 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     await expect(page.locator('.group-overview-card--schedules .schedule-overview-list')).toBeVisible();
     await expect(page.locator('.group-overview-card--schedules .schedule-overview-row')).toHaveCount(1);
     await expect(page.getByRole('list', { name: 'People in this group' })).toBeVisible();
-    expect(await page.locator('.transaction-row--overview').count()).toBeGreaterThan(0);
+    await expect(page.locator('.transaction-row--overview').first()).toBeVisible();
+    await expect(page.locator('.group-overview-card--balances .balance-card--positive').first()).toBeVisible();
+    await expect(page.locator('.group-overview-card--balances .balance-card--debt').first()).toBeVisible();
     await expect(page.locator('.group-overview-tools')).toHaveJSProperty('open', false);
 
     const structure = await page.locator('.group-overview-columns').evaluate((element) => {
@@ -1335,7 +1337,10 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
         return { ...box(card), radius: parseFloat(style.borderTopLeftRadius), padding: parseFloat(style.paddingTop), border: parseFloat(style.borderTopWidth), background: style.backgroundColor, shadow: style.boxShadow };
       });
       const balanceAmounts = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card--balances .balance-card .money')).map((element) => ({ fontSize: parseFloat(getComputedStyle(element).fontSize), background: getComputedStyle(element.parentElement || element).backgroundColor }));
-      const balanceStates = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card--balances .balance-card--positive,.group-overview-card--balances .balance-card--debt')).map((element) => ({ background: getComputedStyle(element).backgroundColor, amountFontSize: parseFloat(getComputedStyle(element.querySelector('.money') || element).fontSize) }));
+      const balanceStates = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card--balances .balance-card--positive,.group-overview-card--balances .balance-card--debt')).map((element) => {
+        const style = getComputedStyle(element);
+        return { kind: element.classList.contains('balance-card--positive') ? 'positive' : 'debt', background: style.backgroundColor, accentWidth: parseFloat(style.borderLeftWidth), accentColor: style.borderLeftColor, amountFontSize: parseFloat(getComputedStyle(element.querySelector('.money') || element).fontSize) };
+      });
       const transactions = Array.from(route.querySelectorAll<HTMLElement>('.transaction-row--overview'));
       const transactionTexts = transactions.map((transaction) => transaction.textContent || '');
       const peoplePreview = route.querySelector<HTMLElement>('.people-preview-list');
@@ -1385,7 +1390,11 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     expect(geometry.actionGroupWithinHeader).toBe(true);
     expect(geometry.actionPlacementValid).toBe(true);
     expect(geometry.balanceAmounts.every((amount) => amount.fontSize >= 28 && amount.fontSize <= 36)).toBe(true);
-    expect(geometry.balanceStates.every((state) => state.background !== 'transparent' && state.background !== 'rgba(0, 0, 0, 0)' && state.amountFontSize >= 28)).toBe(true);
+    expect(geometry.balanceStates.length).toBeGreaterThan(0);
+    expect(geometry.balanceStates.some((state) => state.kind === 'positive')).toBe(true);
+    expect(geometry.balanceStates.some((state) => state.kind === 'debt')).toBe(true);
+    expect(geometry.balanceStates.every((state) => (state.background === 'transparent' || state.background === 'rgba(0, 0, 0, 0)') && state.accentWidth > 0 && state.accentColor !== 'transparent' && state.accentColor !== 'rgba(0, 0, 0, 0)' && state.amountFontSize >= 28)).toBe(true);
+    expect(new Set(geometry.balanceStates.filter((state) => state.kind === 'positive').map((state) => state.accentColor))).not.toEqual(new Set(geometry.balanceStates.filter((state) => state.kind === 'debt').map((state) => state.accentColor)));
     expect(geometry.transactionTexts.some((text) => text.includes('Dinner by the canal (edited)'))).toBe(true);
     expect(geometry.categoryStyles.some((style) => style.background !== 'transparent' && style.background !== 'rgba(0, 0, 0, 0)' && style.radius > 0 && style.fontSize <= 14)).toBe(true);
     expect(geometry.scheduleText).toContain('Monthly apartment rent');

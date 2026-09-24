@@ -9,11 +9,26 @@
   row-gap: var(--space-2);
 }
 
+.ui-page-header {
+  max-width: 100%;
+  margin-bottom: var(--space-4);
+}
+
 .ui-page-header > :first-child,
 .ui-section-header > :first-child {
   min-width: 0;
   display: grid;
   gap: var(--flow-tight);
+}
+
+.ui-page-header > :first-child {
+  max-width: 100%;
+  flex: 1 1 12rem;
+}
+
+.ui-page-header > :last-child {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ui-page-header :where(h1, p),
@@ -135,8 +150,7 @@
   padding: var(--space-surface-inline);
 }
 
-.ui-form-surface > form,
-.ui-form-surface > .ui-stack {
+.ui-form-surface > form {
   margin-block: 0;
 }
 
@@ -213,32 +227,6 @@ main.app-main > h1 {
 .stack > :where(h1, h2, h3, h4, p) {
   margin: 0;
 }
-
-.ui-page-header {
-  min-width: 0;
-  max-width: 100%;
-  align-items: flex-start;
-  margin-bottom: var(--space-4);
-  flex-wrap: wrap;
-}
-
-.ui-page-header > :first-child {
-  min-width: 0;
-  max-width: 100%;
-  flex: 1 1 12rem;
-}
-
-.ui-page-header > :last-child {
-  min-width: 0;
-  max-width: 100%;
-}
-
-
-
-
-
-
-
 
 .ui-page-header h1 {
   overflow-wrap: anywhere;
