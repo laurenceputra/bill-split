@@ -13,6 +13,7 @@ const base = read('base.css');
 const foundations = read('foundations.css');
 const shell = read('shell.css');
 const responsive = read('responsive.css');
+const homeCreation = read('home-creation.css');
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.meta.url), 'utf8');
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
@@ -120,6 +121,15 @@ describe('Warm Ledger visual system', () => {
     expect(895).toBeLessThan(896);
   });
 
+  it('keeps group cards single-column until desktop and content-height beside taller cards', () => {
+    expect(homeCreation).toMatch(/\.group-cards\s*\{\s*align-items: start;\s*\}/);
+    expect(homeCreation).not.toMatch(/\.group-cards\s*\{[^}]*grid-template-columns:/);
+    const tablet = responsive.match(/@media \(min-width: 48rem\) \{([\s\S]*?)\n\}\s*@media \(min-width: 56rem\)/)?.[1] ?? '';
+    const desktop = responsive.match(/@media \(min-width: 56rem\) \{([\s\S]*?)\n\}\s*@media \(prefers-reduced-motion: reduce\)/)?.[1] ?? '';
+    expect(tablet).toMatch(/\.cards\s*\{[^}]*grid-template-columns: repeat\(auto-fit, minmax\(15rem, 1fr\)\);[^}]*\}\s*\.group-cards\s*\{\s*grid-template-columns: minmax\(0, 1fr\);\s*\}/);
+    expect(desktop).toMatch(/\.group-cards\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);\s*\}/);
+  });
+
   it('preserves safe-area spacing and reserves the mobile navigation', () => {
     expect(tokens).toMatch(/--safe-(top|right|bottom|left): env\(safe-area-inset-/);
     expect(shell).toContain('padding: calc(var(--space-3) + var(--safe-top))');
@@ -182,6 +192,9 @@ describe('Warm Ledger visual system', () => {
     expect(css).toMatch(/\.insight-metric\s*\{[\s\S]*border-bottom: 1px solid var\(--color-divider\);[\s\S]*padding: var\(--space-3\) 0;/);
     expect(css).not.toMatch(/\.insight-metric\s*\{[^}]*border:\s*1px solid/);
     expect(css).toMatch(/\.insight-summary-card\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
+    expect(css).toMatch(/\.insight-summary-card\s*\{[^}]*background: var\(--color-surface\);/);
+    expect(appSource).toContain('className="card group-card ui-card-surface"');
+    expect(appSource).toContain('currencyDisplay="code"');
     expect(css).toMatch(/\.insight-category-trends\s*\{[\s\S]*border: 1px solid var\(--color-border\);/);
     expect(appSource).toContain('className="creation-form-surface"');
     expect(refundSource()).toContain('<FormSurface className="refund-form__surface"><form');

@@ -4,6 +4,35 @@ Canonical audit widths are **320, 390, 768, 895, 896, and 1440px**. The
 private shell keeps the mobile bottom navigation through 895px and switches to
 the desktop top navigation and two-column group overview at 896px.
 
+| Home / Insights state | 320px | 390px | 768px | 895px | 896px | 1440px |
+| --- | --- | --- | --- | --- | --- | --- |
+| Populated Home groups | Single compact, content-height white linked cards; wrapped names and ISO-coded numeric balances remain readable with no painted inner rows | Same; primary group links precede management | One readable column | One column and bottom navigation | Up to two columns and desktop navigation | Two readable columns; no stretched card heights |
+| Home loading, cached, offline, empty, error | Skeleton/notice, cached/offline status, empty-state creation actions, and retry remain distinct; no inaccessible group links when data is absent | Same | Same | Same | Same | Same |
+| Global and group Insights summary/chart | Route audit only | Focused summary/chart paint, transparent sections, tabs and chart accessibility | Route audit only | Route audit only | Route audit only | Focused summary/chart paint, transparent sections, tabs and chart accessibility |
+
+`tests/e2e/home-insights-surfaces.spec.ts` checks populated Home card paint,
+content-height geometry, destinations, currency labels, action order and navigation
+at all six widths with two intercepted realistic groups (long name, large SGD
+balance and EUR debt). Global and group Insights summary/chart paint, transparent
+sections, accessible tabs and chart are checked at 390 and 1440px; other Insights
+widths and Home loading/cached/offline/empty/error states remain in the existing
+route audit and targeted fixtures, not this focused geometry spec.
+
+Loaded local-browser references from the merged-main UI with these fixes:
+`docs/screenshots/home-mobile.png` (390px, full page) and `home-desktop.png`
+(1440px viewport) show seeded Home; `home-sgd-stress-mobile.png` (390px,
+full page) and `home-sgd-stress-desktop.png` (1440px viewport) show the
+two-group API overlay (Li Ling, SGD 42.16; nine-person Maternity household
+and shared care expenses, SGD 5,439.72 and EUR 123.45 owed). The loaded
+all-time USD references `spending-insights-global-mobile.png`,
+`spending-insights-group-mobile.png` (390px full page),
+`spending-insights-global-desktop.png`, and
+`spending-insights-group-desktop.png` (1440px full page) show separate filled
+summary and chart surfaces; `warm-ledger-insights-desktop.png` is the same
+1440px group Insights view. The mobile bottom navigation was confirmed live
+and hidden only for full-page capture to avoid a repeated fixed stripe. These
+references do not depict loading, cached, offline, empty, or error states.
+
 The refund/reimbursement matrix below remains the release checklist for the
 dedicated online-only refund flow. The Warm Ledger states cover the newer
 credit and shell surfaces without replacing those refund-specific checks.

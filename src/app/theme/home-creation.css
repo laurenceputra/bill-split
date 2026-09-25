@@ -237,6 +237,10 @@
   gap: var(--space-3);
 }
 
+.group-cards {
+  align-items: start;
+}
+
 .creation-form-surface {
   width: min(100%, var(--reading-max));
 }
@@ -252,11 +256,10 @@
 }
 
 .group-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  align-content: start;
   min-height: 4.5rem;
-  gap: var(--space-4);
+  gap: var(--space-2);
   padding: var(--space-4) var(--space-5);
   color: var(--color-text);
   text-decoration: none;
@@ -265,7 +268,6 @@
 .group-card__identity {
   display: grid;
   min-width: 0;
-  flex: 1 1 12rem;
   gap: var(--space-1);
 }
 
@@ -288,17 +290,14 @@
 }
 
 .card__name {
-  flex: 1 1 10rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .card__balances {
   display: grid;
   min-width: 0;
-  max-width: min(58%, 15rem);
-  flex: 0 1 15rem;
   gap: var(--space-1);
-  justify-items: end;
-  text-align: right;
 }
 
 .card__balance {
@@ -306,7 +305,7 @@
   min-width: 0;
   max-width: 100%;
   align-items: baseline;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: var(--space-2);
 }
 
@@ -349,30 +348,6 @@
 .group-card > strong {
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-@media (min-width: 56rem) {
-  /* Give the identity column the full card width before the balance summary.
-     This keeps long group names editorial rather than reducing them to one
-     word per line beside the amount column. */
-  .group-card {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .group-card__identity,
-  .card__balances {
-    width: 100%;
-    max-width: none;
-  }
-
-  .group-card__identity {
-    flex: 0 1 auto;
-  }
-
-  .card__balances {
-    flex: 0 1 auto;
-  }
 }
 
 .creation-person {
