@@ -175,6 +175,11 @@ nearest section or ledger group.
 ### Route surface rules
 
 - **Home** keeps group cards as the primary navigation surfaces. The spending
+  group links themselves carry the single white card surface (no nested painted
+  balances); content determines their height, with one column through 895px and
+  at most two readable columns from 896px. Numeric balances show their ISO code
+  once, including mixed-currency ledgers; settled/unavailable labels retain a
+  currency code. The spending
   snapshot is a borderless section with aligned, divider-separated currency
   rows; its outer section and metric rows are not cards. Invitations and the
   no-groups empty state remain contained because they need distinct status and
@@ -195,7 +200,8 @@ nearest section or ledger group.
   Transaction and activity results are transparent divider-separated ledger
   rows; the history page itself is not a card.
 - **Insights** keeps the page and filter controls in flow. Only intentional
-  summary and chart modules may be contained, and they must not introduce
+  summary and chart modules use solid white surfaces inside a transparent
+  section, and they must not introduce
   painted cards inside painted cards. The exact-value table remains available
   to assistive technology and the existing loading, cached, offline, empty,
   and error states remain explicit.

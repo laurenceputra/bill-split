@@ -129,25 +129,6 @@
     margin-inline: auto;
   }
 
-.group-card {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .group-card .card__balances {
-    flex: 0 1 auto;
-    width: 100%;
-    max-width: none;
-    align-items: flex-start;
-    justify-items: start;
-    text-align: left;
-  }
-
-  .group-card .card__balance {
-    width: 100%;
-    justify-content: space-between;
-  }
-
   .route-view--expense .amount-field {
     padding-inline: var(--space-4);
   }
@@ -345,6 +326,10 @@
     grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   }
 
+  .group-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .activity-filter {
     margin-bottom: var(--space-5);
   }
@@ -363,6 +348,10 @@
 }
 
 @media (min-width: 56rem) {
+  .group-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
 .public-shell {
     padding-left: max(var(--space-6), var(--safe-left));
     padding-right: max(var(--space-6), var(--safe-right));

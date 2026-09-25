@@ -375,8 +375,8 @@ export function Field({ label, children, className = '', error, errorId }: { lab
   return <label className={`field ${className}`.trim()}><span>{label}</span>{describedChild}{error ? <small id={resolvedErrorId} className="field-error" role="alert">{error}</small> : null}</label>;
 }
 
-export function Money({ amountMinor, currency, tone, size = 'normal' }: { amountMinor: number; currency: string; tone?: 'positive' | 'debt'; size?: 'normal' | 'large' }) {
-  return <strong className={`money money--${size}${tone ? ` money--${tone}` : ''}`}>{new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amountMinor / 100)}</strong>;
+export function Money({ amountMinor, currency, tone, size = 'normal', currencyDisplay = 'symbol' }: { amountMinor: number; currency: string; tone?: 'positive' | 'debt'; size?: 'normal' | 'large'; currencyDisplay?: 'symbol' | 'code' }) {
+  return <strong className={`money money--${size}${tone ? ` money--${tone}` : ''}`}>{new Intl.NumberFormat(undefined, { style: 'currency', currency, currencyDisplay }).format(amountMinor / 100)}</strong>;
 }
 
 export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' | 'warning' | 'neutral' }) {
