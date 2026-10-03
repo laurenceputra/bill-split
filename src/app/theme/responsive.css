@@ -405,10 +405,6 @@
     display: none;
   }
 
-.route-view--expense .amount-field {
-    min-height: 9rem;
-  }
-
   .modal-sheet:has(.payer-list) {
     align-self: center;
     border-radius: var(--radius-lg);

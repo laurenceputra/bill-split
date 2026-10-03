@@ -41,6 +41,21 @@ credit and shell surfaces without replacing those refund-specific checks.
 
 ### Expense date and recurrence disclosure
 
+The expense-only amount row is left aligned beside currency, with a 4px label
+gap and reduced vertical padding (no added surface or split information). Normal
+desktop amounts use 44px type; existing long-amount sizing and very-long stacked
+fallback remain unchanged. `expense-amount-layout.spec.ts` checks normal, long,
+and very-long values at **320, 390, 767, 768, 895, 896, and 1440px**, including
+44px touch targets, inline proximity, stacked fallback, no page overflow, and
+returning to normal input. Boundary values of 9 and 15 characters retain the
+existing normal/long thresholds. Oversized inline values can still scroll
+internally in the native text input, especially at 320px; full simultaneous
+visibility is not guaranteed. The focused Chromium test checks no internal
+overflow for fitting text, complete value retention and Home/End caret access
+for oversized text, and left-aligned text returning to its start on blur.
+The date/recurrence audits below retain coverage of
+disclosures and loading, cached/offline, empty, and error states.
+
 The expense form uses native DOM order: Group/person (new entries), Amount,
 Description, Date/Start date, Repeat (new entries), revealed recurrence settings,
 payer and split, expense details, submit. The same date input stays mounted when

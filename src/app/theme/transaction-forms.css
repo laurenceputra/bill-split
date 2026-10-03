@@ -636,13 +636,19 @@ input[inputmode="decimal"] {
 }
 
 .route-view--expense .amount-field {
-  min-height: 8rem;
+  --text-amount: clamp(2.25rem, 7vw, 2.75rem);
+  min-height: 0;
   align-content: center;
+  row-gap: var(--space-1);
   border: 0;
   border-bottom: 1px solid var(--color-divider);
   border-radius: 0;
   background: transparent;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-2) 0;
+}
+
+.route-view--expense .amount-field > input {
+  text-align: left;
 }
 
 .route-view--expense .amount-field > span {
