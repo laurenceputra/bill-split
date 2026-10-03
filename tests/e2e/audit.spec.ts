@@ -960,6 +960,99 @@ function assertAuthenticatedRequest(requests: ApiRequestObservation[], auth: str
 
 test.describe.configure({ mode: 'serial' });
 
+test('expense date recurrence responsive audit and reference screenshots', async ({ browser }) => {
+  test.setTimeout(240_000);
+  const recordedFindings: Finding[] = [];
+  for (const viewport of [...viewports, { width: 767, height: 1024 }]) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, viewport);
+    const page = await context.newPage();
+    try {
+      for (const large of [false, true]) {
+        const route = `/groups/${large ? ids.large : ids.rich}/expense/new`;
+        await page.goto(`${BASE_URL}${route}`, { waitUntil: 'networkidle' });
+        await expect(page.locator('#expense-date')).toBeVisible();
+        await page.getByLabel('Expense amount').fill('420');
+        await page.getByPlaceholder('What was this for?').fill('Shared apartment rent');
+        await page.getByLabel('Date', { exact: true }).fill('2026-10-15');
+        if (large) await page.getByLabel('Split method').selectOption('shares');
+        for (const state of ['one-time', 'monthly', 'weekly-custom', 'repeat-off']) {
+          if (state === 'monthly') {
+            await page.getByLabel('Repeat this expense').check();
+            await page.getByLabel('Creator timezone').selectOption('UTC');
+            await expect(page.getByLabel('Creator timezone')).toHaveValue('UTC');
+          }
+          if (state === 'weekly-custom') {
+            await page.getByRole('combobox', { name: 'Repeats', exact: true }).selectOption('weekly');
+            await page.getByLabel('Monday', { exact: true }).check();
+            await page.getByLabel('Creator timezone').selectOption({ label: 'Other IANA timezone…' });
+            await page.getByLabel('Other IANA timezone', { exact: true }).fill('America/Los_Angeles');
+          }
+          if (state === 'repeat-off') await page.getByLabel('Repeat this expense').uncheck();
+          const scenario: Scenario = { name: `expense-date-${large ? 'large-shares' : 'rich'}-${state}`, path: route, auth: DEV_EMAIL, context: 'Expense date / repeat disclosure, long participants and custom allocation stress', expected: { mode: 'normal', heading: state === 'monthly' || state === 'weekly-custom' ? 'Schedule an expense' : 'Add expense' } };
+          const findings = await auditGeometry(page, scenario, route, viewport);
+          recordedFindings.push(...findings);
+          // Existing participant labels intentionally ellipsize; retain those
+          // stress findings in the report without expanding this date-only fix.
+          expect(findings.filter((finding) => (finding.severity === 'major' || finding.severity === 'critical') && !(finding.kind === 'long-text-containment' && finding.selector?.startsWith('span.participant-row__label')))).toEqual([]);
+          const failures: HarnessFailure[] = [];
+          await saveScreenshot(page, auditArtifactDirectory('normal'), scenario.name, failures, scenario, route, viewport);
+          expect(failures).toEqual([]);
+          if (process.env.UPDATE_EXPENSE_SCREENSHOTS === '1' && !large && [390, 1440].includes(viewport.width) && ['one-time', 'monthly'].includes(state)) {
+            // Geometry above verifies the live fixed nav. Hide it only for the
+            // full-page reference so it does not obscure recurrence controls.
+            await page.screenshot({ path: path.join(process.cwd(), 'docs', 'screenshots', `expense-form${state === 'monthly' ? '-recurring' : ''}-${viewport.width === 390 ? 'mobile' : 'desktop'}.png`), fullPage: true, animations: 'disabled', style: '.bottom-nav { visibility: hidden !important; }' });
+          }
+        }
+      }
+      await context.setOffline(true);
+      await page.getByLabel('Repeat this expense').check();
+      await expect(page.getByRole('button', { name: 'Create schedule' })).toBeDisabled();
+      await expect(page.getByText('Schedule management is online-only.', { exact: false })).toBeVisible();
+      const scenario: Scenario = { name: 'expense-date-cached-offline', path: routeFrom(page), auth: DEV_EMAIL, context: 'Loaded group retained offline; schedule submission unavailable', expected: { mode: 'offline', heading: 'Schedule an expense' } };
+      const offlineFindings = await auditGeometry(page, scenario, scenario.path, viewport);
+      recordedFindings.push(...offlineFindings);
+      expect(offlineFindings.filter((finding) => (finding.severity === 'major' || finding.severity === 'critical') && !(finding.kind === 'long-text-containment' && finding.selector?.startsWith('span.participant-row__label')))).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }
+  await writeFile(path.join(auditArtifactDirectory('normal'), 'expense-date-findings.json'), JSON.stringify(recordedFindings, null, 2));
+});
+
+test('expense date recurrence loading empty and resource error states', async ({ browser }) => {
+  test.setTimeout(180_000);
+  for (const viewport of [...viewports, { width: 767, height: 1024 }]) {
+    for (const state of ['loading', 'error', 'empty']) {
+      const context = await newAuthenticatedContext(browser, state === 'empty' ? EMPTY_EMAIL : DEV_EMAIL, viewport);
+      const page = await context.newPage();
+      let release = () => {};
+      const pending = new Promise<void>((resolve) => { release = resolve; });
+      try {
+        if (state !== 'empty') await page.route(`**${apiPaths.group(ids.rich)}`, async (route) => {
+          if (state === 'loading') await pending;
+          await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'Expense group temporarily unavailable' } }) });
+        });
+        const route = state === 'empty' ? '/expense/new' : `/groups/${ids.rich}/expense/new`;
+        await page.goto(`${BASE_URL}${route}`, { waitUntil: 'domcontentloaded' });
+        await expect(page.locator('.shell-header').getByRole('status')).toContainText('Connected');
+        if (state === 'loading') await expect(page.getByRole('status').filter({ hasText: 'Loading' }).first()).toBeVisible();
+        if (state === 'error') await expect(page.locator('#expense-resource-error')).toBeVisible();
+        if (state === 'empty') await expect(page.getByText('No groups yet.', { exact: false })).toBeVisible();
+        await expect(page.locator('.auth-loading-shell')).toHaveCount(0);
+        await expect(page.locator('#expense-date')).toHaveCount(0);
+        const scenario: Scenario = { name: `expense-date-${state}`, path: route, auth: state === 'empty' ? EMPTY_EMAIL : DEV_EMAIL, context: 'ExpenseForm / distinct unavailable target states', expected: { mode: 'normal', heading: 'Add expense' } };
+        expect((await auditGeometry(page, scenario, route, viewport)).filter((finding) => finding.severity === 'major' || finding.severity === 'critical')).toEqual([]);
+        const failures: HarnessFailure[] = [];
+        await saveScreenshot(page, auditArtifactDirectory('intercepted'), scenario.name, failures, scenario, route, viewport);
+        expect(failures).toEqual([]);
+      } finally {
+        release();
+        await context.close();
+      }
+    }
+  }
+});
+
 test('browser audit matrix captures validated routes, geometry, and full-page screenshots', async ({ browser }, testInfo) => {
   test.setTimeout(900_000);
   const findings: Finding[] = [];

@@ -23,6 +23,12 @@
   gap: var(--space-3);
 }
 
+.recurrence-settings {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
 .expense-heading {
   margin-bottom: var(--space-3);
 }
