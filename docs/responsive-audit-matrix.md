@@ -39,6 +39,48 @@ credit and shell surfaces without replacing those refund-specific checks.
 
 ## Automated route coverage
 
+### Expense date and recurrence disclosure
+
+The expense form uses native DOM order: Group/person (new entries), Amount,
+Description, Date/Start date, Repeat (new entries), revealed recurrence settings,
+payer and split, expense details, submit. The same date input stays mounted when
+Repeat changes. Schedule edits omit Repeat and place settings after Start date.
+Split/default/deletion behavior is unchanged.
+
+| Expense state | 320 | 390 | 767 / 768 | 895 / 896 | 1440 |
+| --- | --- | --- | --- | --- | --- |
+| Repeat off; on monthly; on weekly with custom IANA timezone; off again | Date before payer/split; settings directly after checkbox; preview/help contained | Same | Same across form boundary | Same across navigation boundary | Same DOM order, readable width |
+| Large group with long names and shares allocations, same four repeat states | Custom allocation stress; existing participant ellipsis reported separately | Same | Same | Same | Same |
+| Loaded/cached group, offline recurring form | Group retained; schedule save disabled with online-only explanation | Same | Same | Same | Same |
+| Loading group, unavailable group (503), empty global target | Distinct loading/retry/create-target states; no date or impossible save action | Same | Same | Same | Same |
+| Expense edit / schedule edit | Existing route matrix | Focused behavior test: date precedes payer; settings follow Start date; no checkbox | Existing route matrix (768) | Existing route matrix | Existing route matrix |
+
+`tests/e2e/audit.spec.ts` adds the focused `expense date recurrence` audits,
+using the existing geometry/screenshot harness and rich, large, and empty fixtures.
+All seven widths above are exercised for new-entry disclosure and unavailable
+states. `scheduled-expense.spec.ts` checks direct adjacency/order, date-node
+identity, amount/description/date/category/notes preservation, retained weekly
+settings, edit modes and schedule-only submission.
+
+Generate the four tracked full-page references directly from the loaded rich
+fixture (USD 420, Shared apartment rent, October 15 2026, default monthly/UTC):
+
+```sh
+UPDATE_EXPENSE_SCREENSHOTS=1 npm run test:e2e:local -- tests/e2e/audit.spec.ts --grep 'expense date recurrence responsive audit'
+```
+
+The wrapper uses `/ms-playwright`; no browser installation is needed. Set
+`BILLSPLIT_E2E_PORT` to a free port when another local harness is running.
+The opt-in writes `docs/screenshots/expense-form-{mobile,desktop}.png` and
+`expense-form-recurring-{mobile,desktop}.png` at 390/1440px. Fixed navigation
+is checked live, then hidden only for tracked full-page capture to avoid covering
+recurrence controls. Additional state screenshots and
+`expense-date-findings.json` remain ignored under `test-results/audit/normal/`;
+unavailable-state captures are under `test-results/audit/intercepted/`.
+Existing long participant labels intentionally ellipsize: those containment
+findings are recorded, not treated as date/recurrence regressions. Other major
+geometry findings fail the focused audit.
+
 `tests/e2e/audit.spec.ts` runs normal route scenarios at **320, 390, 768,
 895, 896, and 1440px**. Redirects are recorded by their final canonical URL;
 the routes below are the concrete fixture-backed paths, not placeholders.
