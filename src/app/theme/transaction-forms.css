@@ -636,22 +636,85 @@ input[inputmode="decimal"] {
 }
 
 .route-view--expense .amount-field {
-  --text-amount: clamp(2.25rem, 7vw, 2.75rem);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: none;
   min-height: 0;
   align-content: center;
   row-gap: var(--space-1);
   border: 0;
-  border-bottom: 1px solid var(--color-divider);
   border-radius: 0;
   background: transparent;
-  padding: var(--space-2) 0;
+  padding: 0;
 }
 
-.route-view--expense .amount-field > input {
+.expense-amount-control {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+}
+
+.expense-amount-control:focus-within {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.expense-amount-control:has(input[aria-invalid="true"]) {
+  border-color: var(--color-debt-fg);
+  outline-color: var(--color-debt-fg);
+}
+
+.expense-amount-control > :is(input, select) {
+  min-width: 0;
+  min-height: var(--control-min-height);
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  outline: none;
+}
+
+.expense-amount-control > select {
+  border-right: 1px solid var(--color-control-border);
+}
+
+.expense-amount-control > input {
+  font-size: 1.75rem;
+  font-weight: 400;
+  letter-spacing: 0;
   text-align: left;
 }
 
-.route-view--expense .amount-field > span {
+.expense-amount-control > input.amount-input--long {
+  font-size: 1.5rem;
+}
+
+.amount-field--very-long .expense-amount-control {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.amount-field--very-long .expense-amount-control > select {
+  border-right: 0;
+  border-bottom: 1px solid var(--color-control-border);
+}
+
+.expense-amount-control > input.amount-input--very-long {
+  font-size: max(16px, 1rem);
+}
+
+@media (forced-colors: active) {
+  .expense-amount-control:focus-within {
+    outline-color: Highlight;
+  }
+
+  .expense-amount-control:has(input[aria-invalid="true"]) {
+    border-color: CanvasText;
+    outline-color: Highlight;
+  }
+}
+
+.route-view--expense .amount-field > label {
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
   letter-spacing: 0.04em;

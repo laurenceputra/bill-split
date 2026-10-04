@@ -129,10 +129,6 @@
     margin-inline: auto;
   }
 
-  .route-view--expense .amount-field {
-    padding-inline: var(--space-4);
-  }
-
   .route-view--expense .modal-sheet:has(.payer-list) {
     border-radius: var(--radius-lg) var(--radius-lg) var(--radius-md) var(--radius-md);
   }

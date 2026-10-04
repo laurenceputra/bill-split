@@ -12,15 +12,20 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
         await amount.fill(value);
         await expect(amount).toHaveAttribute('data-amount-length', length);
         const geometry = await amount.evaluate((input) => {
-          const field = input.parentElement!;
+           const shell = input.parentElement!;
+           const field = shell.parentElement!;
           const currency = field.querySelector('select')!;
-          const label = field.querySelector('span')!;
+           const label = field.querySelector('label')!;
           const amountRect = input.getBoundingClientRect();
           const currencyRect = currency.getBoundingClientRect();
           const style = getComputedStyle(input);
           return {
             alignment: style.textAlign,
-            fontSize: parseFloat(style.fontSize),
+             fontSize: parseFloat(style.fontSize),
+             shellWidth: shell.getBoundingClientRect().width,
+             fieldWidth: field.getBoundingClientRect().width,
+             border: getComputedStyle(shell).borderTopWidth,
+             weight: style.fontWeight,
             amount: { x: amountRect.x, y: amountRect.y, right: amountRect.right, height: amountRect.height },
             currency: { x: currencyRect.x, y: currencyRect.y, right: currencyRect.right, height: currencyRect.height },
             labelGap: Math.min(amountRect.y, currencyRect.y) - label.getBoundingClientRect().bottom,
@@ -28,7 +33,11 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
             overflow: document.documentElement.scrollWidth - window.innerWidth,
           };
         });
-        expect(geometry.alignment).toBe('left');
+         expect(geometry.alignment).toBe('left');
+         expect(geometry.shellWidth).toBe(geometry.fieldWidth);
+         expect(geometry.border).toBe('1px');
+         expect(geometry.weight).toBe('400');
+         expect(geometry.fontSize).toBeGreaterThanOrEqual(16);
         expect(geometry.amount.height).toBeGreaterThanOrEqual(44);
         expect(geometry.currency.height).toBeGreaterThanOrEqual(44);
         expect(geometry.amount.right).toBeLessThanOrEqual(width);
@@ -41,7 +50,9 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
           expect(geometry.amount.x - geometry.currency.right).toBeGreaterThanOrEqual(0);
           expect(geometry.amount.x - geometry.currency.right).toBeLessThanOrEqual(8);
           expect(geometry.fieldHeight).toBeLessThan(100);
-          if (width >= 768 && length === 'normal') expect(geometry.fontSize).toBe(44);
+           expect(geometry.currency.right - geometry.currency.x).toBeCloseTo(104, 0);
+           expect(geometry.fontSize).toBeGreaterThanOrEqual(24);
+           expect(geometry.fontSize).toBeLessThanOrEqual(28);
         }
         await expect(amount).toHaveValue(value);
         // The decimal input is native text (no type attribute), so oversized
@@ -79,6 +90,53 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
       // Returning to a typical amount restores the inline layout.
       await amount.fill('12.50');
       await expect(page.locator('.amount-field')).toHaveClass(/amount-field--normal/);
+      const currency = page.getByLabel('Expense currency');
+      const shell = page.locator('.expense-amount-control');
+      await currency.focus();
+      await expect(currency).toBeFocused();
+      await expect(shell).toHaveCSS('outline-style', 'solid');
+      await expect(shell).toHaveCSS('outline-width', '2px');
+      await currency.press('Tab');
+      await expect(amount).toBeFocused();
+      await expect(shell).toHaveCSS('outline-width', '2px');
+      await amount.press('Shift+Tab');
+      await expect(currency).toBeFocused();
+      await page.getByLabel('Description', { exact: true }).fill('Amount validation');
+      await amount.fill('not an amount');
+      await page.getByRole('button', { name: 'Save expense', exact: true }).click();
+      await expect(amount).toHaveAttribute('aria-invalid', 'true');
+      const invalidColor = await amount.evaluate((input) => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--color-debt-fg)';
+        input.parentElement!.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      });
+      await expect(shell).toHaveCSS('border-top-color', invalidColor);
+      await amount.focus();
+      await expect(shell).toHaveCSS('outline-color', invalidColor);
+      await currency.focus();
+      await expect(shell).toHaveCSS('outline-color', invalidColor);
+      await page.emulateMedia({ forcedColors: 'active' });
+      const systemColors = await shell.evaluate((control) => {
+        const probe = document.createElement('span');
+        // Resolve the actual system palette without forced-color substitution.
+        probe.style.forcedColorAdjust = 'none';
+        control.append(probe);
+        probe.style.color = 'CanvasText';
+        const border = getComputedStyle(probe).color;
+        probe.style.color = 'Highlight';
+        const outline = getComputedStyle(probe).color;
+        probe.remove();
+        return { border, outline };
+      });
+      await expect(shell).toHaveCSS('border-top-color', systemColors.border);
+      await expect(shell).toHaveCSS('outline-color', systemColors.outline);
+      await amount.focus();
+      await expect(shell).toHaveCSS('outline-color', systemColors.outline);
+      await expect(shell).toHaveCSS('outline-style', 'solid');
+      await expect(shell).toHaveCSS('outline-width', '2px');
     } finally {
       await context.close();
     }

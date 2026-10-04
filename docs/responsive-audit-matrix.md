@@ -41,12 +41,17 @@ credit and shell surfaces without replacing those refund-specific checks.
 
 ### Expense date and recurrence disclosure
 
-The expense-only amount row is left aligned beside currency, with a 4px label
-gap and reduced vertical padding (no added surface or split information). Normal
-desktop amounts use 44px type; existing long-amount sizing and very-long stacked
-fallback remain unchanged. `expense-amount-layout.spec.ts` checks normal, long,
+The expense-only amount control shares Description's border, background, and
+radius, without a section bottom rule. Currency occupies a fixed 104px left
+segment with a vertical divider; the remaining amount is left aligned in normal
+28px type (24px for long values). Very-long values stack inside the same shell,
+with a horizontal divider and type at least 16px. Each child remains independently
+keyboard accessible, with an explicit amount label and currency accessible name.
+The shared focus-within outline follows either child; amount validation colors
+the outer border and focus outline, including forced-color equivalents.
+`expense-amount-layout.spec.ts` checks normal, long,
 and very-long values at **320, 390, 767, 768, 895, 896, and 1440px**, including
-44px touch targets, inline proximity, stacked fallback, no page overflow, and
+44px touch targets, joined-shell geometry, keyboard focus, stacked fallback, no page overflow, and
 returning to normal input. Boundary values of 9 and 15 characters retain the
 existing normal/long thresholds. Oversized inline values can still scroll
 internally in the native text input, especially at 320px; full simultaneous
