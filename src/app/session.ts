@@ -19,6 +19,8 @@ export type SessionCoordinationMessage = {
   clearOutbox?: boolean;
   phase?: string;
   name?: string;
+  avatarMode?: 'initials' | 'gravatar';
+  avatarHash?: string;
   personId?: string;
   /** Legacy coordination revision for cached messages from older clients. */
   revision?: number;

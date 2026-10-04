@@ -6,6 +6,7 @@ import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextO
 import { generatedExpenseInput } from '../domain/scheduled-expense';
 import { invitationExpiry, normalizeEmail } from '../shared/invitations';
 import { normalizeCategoryDescription as normalizeCategoryDescriptionValue } from '../shared/category';
+import { accountAvatar } from '../shared/avatar';
 import { APPLICATION_SESSION_ACTIVITY_THROTTLE_MS, APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { balanceProjectionQuery, boundCreditProjectionDelta, boundExpenseProjectionDelta, boundSettlementProjectionDelta, groupSelect, projectionMutation, projectionRevisionGuard } from './ledger-projection';
 import { ledgerPeriodBuildGarbageCollection, monthlySummaryMaintenance as runMonthlySummaryMaintenance, previousMonth } from './monthly-summary';
@@ -116,7 +117,7 @@ const decodeExportCursor = (value: string): ExportCursor => {
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The export pagination cursor is invalid'); }
 };
 
-function mapGroup(row: Row | null): Group | null {
+async function mapGroup(row: Row | null): Promise<Group | null> {
   if (!row) return null;
   const balanceSummaries = row.balance_summaries == null ? undefined : (() => {
     try {
@@ -135,6 +136,7 @@ function mapGroup(row: Row | null): Group | null {
     ...(row.role ? { role: text(row.role) as Group['role'] } : {}),
     ...(row.member_count == null ? {} : { memberCount: number(row.member_count) }),
     ...(row.counterpart_name == null ? {} : { counterpartName: text(row.counterpart_name) }),
+    ...(row.counterpart_name == null ? {} : { counterpartAvatar: await accountAvatar(row.counterpart_avatar_mode, text(row.counterpart_email)) }),
     ...(balanceSummaries === undefined ? {} : { balanceSummaries }),
   };
 }
@@ -143,7 +145,9 @@ const authorizedGroupSelect = `SELECT g.*,gm.role,
   (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
   (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
     WHERE other_member.group_id=g.id AND other_member.person_id != gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL
-    ORDER BY p.name LIMIT 1) AS counterpart_name
+    ORDER BY p.name,p.id LIMIT 1) AS counterpart_name,
+  (SELECT u.avatar_mode FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_avatar_mode,
+  (SELECT u.email FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_email
    FROM groups g JOIN group_members gm ON gm.group_id=g.id
    WHERE g.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL`;
 
@@ -267,7 +271,7 @@ export class Repository {
   }
   async me(email: string) { return this.user(email); }
 
-  async updateDisplayName(userId: string, name: string) {
+  async updateDisplayName(userId: string, name: string, avatarMode?: 'initials' | 'gravatar') {
     const value = name.trim();
     const timestamp = now();
     // Keep the person write and the user timestamp in one guarded D1 batch.
@@ -276,8 +280,8 @@ export class Repository {
     const result = await this.db.batch([
       this.db.prepare(`UPDATE people SET name=? WHERE user_id=? AND deleted_at IS NULL
         AND EXISTS (SELECT 1 FROM users WHERE id=? AND deleted_at IS NULL)`).bind(value, userId, userId),
-      this.db.prepare(`UPDATE users SET updated_at=?,profile_revision=profile_revision+1 WHERE id=? AND deleted_at IS NULL
-        AND EXISTS (SELECT 1 FROM people WHERE user_id=? AND deleted_at IS NULL)`).bind(timestamp, userId, userId),
+      this.db.prepare(`UPDATE users SET updated_at=?,avatar_mode=COALESCE(?,avatar_mode),profile_revision=profile_revision+1 WHERE id=? AND deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM people WHERE user_id=? AND deleted_at IS NULL)`).bind(timestamp, avatarMode ?? null, userId, userId),
     ]);
     const personChanges = Number((result[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
     const userChanges = Number((result[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0);
@@ -285,9 +289,9 @@ export class Repository {
       await this.throwIfDeleted(userId);
       throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The active profile could not be updated');
     }
-    const person = await this.db.prepare('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision FROM people p JOIN users u ON u.id=p.user_id WHERE p.user_id=? AND p.deleted_at IS NULL AND u.deleted_at IS NULL').bind(userId).first<Row>();
+    const person = await this.db.prepare('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision,u.avatar_mode,u.email AS account_email FROM people p JOIN users u ON u.id=p.user_id WHERE p.user_id=? AND p.deleted_at IS NULL AND u.deleted_at IS NULL').bind(userId).first<Row>();
     if (!person) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'The active profile could not be loaded');
-    return { id: text(person.id), name: text(person.name), email: person.email == null ? null : text(person.email), createdAt: text(person.created_at), updatedAt: text(person.updated_at), profileRevision: number(person.profile_revision) };
+    return { id: text(person.id), name: text(person.name), email: person.email == null ? null : text(person.email), createdAt: text(person.created_at), updatedAt: text(person.updated_at), profileRevision: number(person.profile_revision), ...await accountAvatar(person.avatar_mode, text(person.account_email)) };
   }
 
   async createApplicationSession(userId: string, tokenHash: string, createdAt = now(), idleExpiresAt = new Date(Date.parse(createdAt) + APPLICATION_SESSION_IDLE_MS).toISOString()) {
@@ -300,11 +304,11 @@ export class Repository {
   }
 
   async applicationSession(tokenHash: string, asOf = now()) {
-    const row = await this.db.prepare(`SELECT s.id,s.user_id,s.created_at,s.last_activity_at,s.idle_expires_at,u.email,u.clerk_user_id,u.updated_at,u.profile_revision,u.deleted_at,p.id AS person_id,p.name AS person_name
+    const row = await this.db.prepare(`SELECT s.id,s.user_id,s.created_at,s.last_activity_at,s.idle_expires_at,u.email,u.clerk_user_id,u.updated_at,u.profile_revision,u.avatar_mode,u.deleted_at,p.id AS person_id,p.name AS person_name
       FROM application_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN people p ON p.user_id=u.id AND p.deleted_at IS NULL
       WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.idle_expires_at>? AND u.deleted_at IS NULL`).bind(tokenHash, asOf).first<Row>();
     if (!row) return null;
-    return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), name: text(row.person_name), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at), updatedAt: text(row.updated_at), profileRevision: number(row.profile_revision) };
+    return { id: text(row.id), userId: text(row.user_id), email: text(row.email), personId: text(row.person_id), name: text(row.person_name), clerkUserId: row.clerk_user_id == null ? undefined : text(row.clerk_user_id), createdAt: text(row.created_at), lastActivityAt: text(row.last_activity_at), idleExpiresAt: text(row.idle_expires_at), updatedAt: text(row.updated_at), profileRevision: number(row.profile_revision), ...await accountAvatar(row.avatar_mode, text(row.email)) };
   }
 
   async renewApplicationSession(sessionId: string, asOf = now(), throttleMs = APPLICATION_SESSION_ACTIVITY_THROTTLE_MS) {
@@ -470,7 +474,7 @@ export class Repository {
 
   async groups(userId: string): Promise<Group[]> {
     const rows = (await this.db.prepare(`${groupSelect()} WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC`).bind(userId).all<Row>()).results;
-    return rows.map((row) => mapGroup(row)!).filter(Boolean);
+    return (await Promise.all(rows.map(mapGroup))).filter((group): group is Group => group !== null);
   }
   async group(groupId: string, userId: string): Promise<Group | null> {
     return mapGroup(await this.db.prepare(authorizedGroupSelect).bind(groupId, userId).first<Row>());
@@ -484,8 +488,8 @@ export class Repository {
     return row ? (text(row.role) === 'owner' ? 'owner' : 'member') : null;
   }
   async members(groupId: string): Promise<GroupMember[]> {
-    const rows = (await this.db.prepare('SELECT p.id AS person_id,p.name,COALESCE(member_user.email,p.email) AS email,gm.joined_at,gm.role,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id LEFT JOIN users member_user ON member_user.id=gm.user_id AND member_user.deleted_at IS NULL WHERE gm.group_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name').bind(groupId).all<Row>()).results;
-    return rows.map((row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' : 'member', linked: flag(row.linked) }));
+    const rows = (await this.db.prepare('SELECT p.id AS person_id,p.name,COALESCE(member_user.email,p.email) AS email,profile_user.avatar_mode,profile_user.email AS account_email,gm.joined_at,gm.role,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id LEFT JOIN users member_user ON member_user.id=gm.user_id AND member_user.deleted_at IS NULL LEFT JOIN users profile_user ON profile_user.id=p.user_id AND profile_user.deleted_at IS NULL WHERE gm.group_id=? AND gm.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name').bind(groupId).all<Row>()).results;
+    return Promise.all(rows.map(async (row) => ({ personId: text(row.person_id), name: text(row.name), email: row.email == null ? null : text(row.email), joinedAt: text(row.joined_at), role: text(row.role) === 'owner' ? 'owner' as const : 'member' as const, linked: flag(row.linked), ...await accountAvatar(row.avatar_mode, text(row.account_email)) })));
   }
   async allMembers(groupId: string): Promise<GroupMember[]> {
     const rows = (await this.db.prepare("SELECT p.id AS person_id,COALESCE(p.name,'Deleted account') AS name,p.email,gm.joined_at,gm.role,gm.deleted_at,gm.user_id IS NOT NULL AS linked FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? ORDER BY p.name").bind(groupId).all<Row>()).results;

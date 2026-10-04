@@ -39,6 +39,28 @@ credit and shell surfaces without replacing those refund-specific checks.
 
 ## Automated route coverage
 
+### Account profile avatar
+
+`tests/e2e/avatar.spec.ts` covers Settings choice/preview, persisted opt-in,
+saved-name Home avatars, group People, desktop header, identity loading,
+save errors, missing-image fallback, and cached offline editing restrictions at **320, 390, 767, 768, 895, 896,
+1440px**. Gravatar requests are intercepted so this audit does not disclose
+fixture identities to a third party. Profile save failure also has a separate
+focused behavior case. Initial identity GET failure uses the existing auth
+recovery shell rather than showing an editable unverified profile.
+The avatar matrix also checks that a name-only cross-tab revision preserves an
+unsaved avatar selection, and that named-group Home counterpart images use the
+other user's preference rather than the current account's image.
+
+| Profile / avatar state | 320 / 390 | 767 / 768 | 895 / 896 | 1440 |
+| --- | --- | --- | --- | --- |
+| Initials default and Gravatar choice/preview | Labeled native choice, privacy help wraps, preview uses account email, Save profile precedes admin | Same across form boundary | Same; saved avatar appears in desktop header from 896 | Same |
+| Home and group People | Saved BillSplit name, not “You”, supplies initials; opted-in images use account metadata | Same | Same; header uses same preference | Same |
+| Missing image / image failure | Initials, no broken image | Same | Same | Same |
+| Cached / offline | Saved preference retained; initials rendered without image requests; saving disabled with contextual help | Same | Same | Same |
+| Loading / empty legacy identity | Loading status; Save disabled until identity exists; legacy preference defaults to initials | Same | Same | Same |
+| Identity or save error | Contextual error/retry; failed save preserves choice and permits retry | Same | Same | Same |
+
 ### Shared native date controls
 
 `tests/e2e/date-controls.spec.ts` runs the same focused matrix in Chromium and

@@ -360,7 +360,7 @@ describe('worker boundary', () => {
     const directives = Object.fromEntries(csp.split(';').map((directive) => { const [name, ...values] = directive.trim().split(/\s+/); return [name, values]; }));
     expect(directives['script-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://challenges.cloudflare.com', 'https://*.protect.clerk.com']));
     expect(directives['connect-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://*.protect.clerk.com']));
-    expect(directives['img-src']).toEqual(expect.arrayContaining(['\'self\'', 'data:', 'https://img.clerk.com']));
+    expect(directives['img-src']).toEqual(expect.arrayContaining(['\'self\'', 'data:', 'https://img.clerk.com', 'https://gravatar.com', 'https://*.gravatar.com']));
     expect(directives['frame-src']).toEqual(expect.arrayContaining(['\'self\'', 'https://challenges.cloudflare.com', 'https://*.protect.clerk.com']));
     expect(directives['worker-src']).toEqual(expect.arrayContaining(['\'self\'', 'blob:']));
     expect(directives['script-src']).not.toContain('https:');

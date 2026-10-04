@@ -10,8 +10,8 @@ test('profile rename is online and transaction audit stays progressively disclos
   await authenticatedPage.goto('/settings');
   await expect(authenticatedPage.getByRole('heading', { name: 'Profile' })).toBeVisible();
   await authenticatedPage.getByLabel('Display name').fill('Playwright user');
-  await authenticatedPage.getByRole('button', { name: 'Save name' }).click();
-  await expect(authenticatedPage.getByRole('status').filter({ hasText: 'Display name updated' })).toBeVisible();
+  await authenticatedPage.getByRole('button', { name: 'Save profile' }).click();
+  await expect(authenticatedPage.getByRole('status').filter({ hasText: 'Profile updated' })).toBeVisible();
 
   await authenticatedPage.goto('/groups/00000000-0000-4000-8000-000000003002/expenses/00000000-0000-4000-8000-000000004001');
   const expenseAuditPath = '/api/groups/00000000-0000-4000-8000-000000003002/audit/expense/00000000-0000-4000-8000-000000004001';
