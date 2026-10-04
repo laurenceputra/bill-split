@@ -19,6 +19,13 @@ const errorBoundarySource = readFileSync(new URL('../ErrorBoundary.tsx', import.
 const uiSource = readFileSync(new URL('../ui.tsx', import.meta.url), 'utf8');
 const auditSource = readFileSync(new URL('../../../tests/e2e/audit.spec.ts', import.meta.url), 'utf8');
 
+describe('native date containment contract', () => {
+  it('normalizes only date chrome and allows shared field tracks to shrink', () => {
+    expect(base).toMatch(/input\[type="date"\]\s*\{[^}]*min-width: 0;[^}]*max-width: 100%;[^}]*-webkit-appearance: none;[^}]*appearance: none;/);
+    expect(read('primitives.css')).toMatch(/form > label,\s*\.field\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);[^}]*min-width: 0;/);
+  });
+});
+
 const tokenValue = (name: string): string => {
   const value = tokens.match(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*(#[0-9A-Fa-f]{6}|var\\(--[^)]+\\))`))?.[1] ?? '';
   const alias = value.match(/^var\((--[^)]+)\)$/)?.[1];

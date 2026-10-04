@@ -33,3 +33,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:integration
+
+  date-controls:
+    name: Date controls (Chromium and WebKit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm run test:e2e -- tests/e2e/date-controls.spec.ts

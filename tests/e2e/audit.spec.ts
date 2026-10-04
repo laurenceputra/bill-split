@@ -261,6 +261,16 @@ async function auditGeometry(page: Page, scenario: Scenario, route: string, view
       if (box.left < -1 || box.right > viewport.width + 1) add('horizontal-overflow-element', 'major', `Visible bounds are ${Math.round(box.left)}..${Math.round(box.right)}px`, selector(element), Math.max(-box.left, box.right - viewport.width));
     }
 
+    for (const input of Array.from(document.querySelectorAll('input[type="date"]')).filter(visible)) {
+      const box = boxOf(input);
+      for (let parent = input.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        const bounds = boxOf(parent);
+        if (box.left < bounds.left - 1 || box.right > bounds.right + 1) {
+          add('date-control-overflow', 'major', `Date control exceeds containing ${selector(parent)}`, selector(input));
+        }
+      }
+    }
+
     const modal = document.querySelector('.modal-sheet');
     const modalIsVisible = Boolean(modal && visible(modal));
     const auditTarget = (element: Element) => visible(element) && !element.matches('.skip-link') && !element.closest('.shell-header,.shell-nav') && !(modalIsVisible && !modal?.contains(element));

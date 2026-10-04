@@ -118,6 +118,15 @@ textarea {
   padding: 0.65rem 0.8rem;
 }
 
+/* Normalize date chrome without replacing the native picker. iOS date
+   controls must be allowed to shrink within their containing field. */
+input[type="date"] {
+  min-width: 0;
+  max-width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 input:not(:disabled):not([aria-invalid="true"]):hover,
 select:not(:disabled):not([aria-invalid="true"]):hover,
 textarea:not(:disabled):not([aria-invalid="true"]):hover {
