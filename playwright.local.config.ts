@@ -7,8 +7,7 @@ const localBrowserOptions = requireValidatedPlaywrightLaunchOptions(process.env)
 
 export default defineConfig({
   ...baseConfig,
-  use: {
-    ...baseConfig.use,
-    ...localBrowserOptions,
-  },
+  projects: baseConfig.projects?.map((project) => project.use?.browserName === 'chromium'
+    ? { ...project, use: { ...project.use, ...localBrowserOptions } }
+    : project),
 });

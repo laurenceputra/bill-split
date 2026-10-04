@@ -39,6 +39,43 @@ credit and shell surfaces without replacing those refund-specific checks.
 
 ## Automated route coverage
 
+### Shared native date controls
+
+`tests/e2e/date-controls.spec.ts` runs the same focused matrix in Chromium and
+the `date-controls-webkit` project. Every row below checks initial, empty, and
+populated date bounds against **every containing ancestor**, not just the page
+(which can hide overflow), plus ISO value retention after editing and blur.
+No overflow clipping or replacement picker is used. Specialized amount grids
+retain their overrides of the shrinkable shared Field column.
+
+| Date location/state | 320 | 390 | 767 / 768 | 895 / 896 | 1440 |
+| --- | --- | --- | --- | --- | --- |
+| Expense create/edit, Repeat off | Date contained | Same | Same across form boundary | Same across navigation boundary | Same |
+| Repeat on, start/end; schedule edit | Both contained; optional end clears; end minimum follows start | Same | Same | Same | Same |
+| Refund create/edit and credit edit alias | Date fits fieldset and form surface | Same | Same | Same | Same |
+| Settlement create and edit open | Date fits shared field and form surface | Same | Same | Same | Same |
+| Transaction filters expanded, global/group | From/to fit disclosure and filter grid | Same | Same | Same | Same |
+| Custom insights, global/group | From/to fit insight grid; Apply range preserves values in URL | Same | Same | Same | Same |
+
+For schedule starts only, empty native rendering is exercised without changing
+the React draft: the existing schedule preview assumes a valid start. Other
+empty controls use normal input events. The existing route/disclosure audits
+continue to cover loading, cached, offline, empty-resource, and error states;
+the focused matrix above is loaded-form geometry/value coverage, not a claim
+that every resource state was rerun in WebKit. The audit geometry harness now
+also reports date controls exceeding any ancestor whenever they are visible.
+
+```sh
+npm run test:e2e:local -- tests/e2e/date-controls.spec.ts --project=chromium
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:e2e -- tests/e2e/date-controls.spec.ts --project=date-controls-webkit
+```
+
+The local browser resolver applies its discovered executable only to Chromium;
+WebKit uses Playwright's matching installed browser. CI installs both browsers
+and host dependencies and runs only this date suite in both projects. Linux
+WebKit is not real iOS Safari: native picker presentation, localized date text,
+and on-device touch/focus behavior still require real-device verification.
+
 ### Expense date and recurrence disclosure
 
 The expense-only amount control shares Description's border, background, and

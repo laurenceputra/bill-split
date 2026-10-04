@@ -15,11 +15,14 @@ export default defineConfig({
   ],
   use: {
     baseURL: BASE_URL,
-    browserName: 'chromium',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'off',
   },
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium' } },
+    { name: 'date-controls-webkit', testMatch: '**/date-controls.spec.ts', use: { browserName: 'webkit' } },
+  ],
   webServer: {
     command: 'node tests/e2e/web-server-wrapper.mjs',
     url: BASE_URL,
