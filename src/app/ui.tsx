@@ -4,10 +4,9 @@ import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
+import { getAuthLifecycle, getAuthState, getConnectionState, getMe, hydrateIdentity, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 import { accountAvatar, avatarUrl, type AvatarPreference } from '../shared/avatar';
-import { getMe, hydrateIdentity } from './api';
 import { RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
 
 export type IconName = 'groups' | 'activity' | 'settings' | 'add' | 'more' | 'check' | 'warning' | 'close';
