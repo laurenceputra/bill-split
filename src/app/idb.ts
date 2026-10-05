@@ -1,5 +1,6 @@
 import type { Activity, Balances, Expense, Group, GroupMember, GroupSplitDefault, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
+import { avatarPreference, type AvatarPreference } from '../shared/avatar';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
 
@@ -8,7 +9,7 @@ export const DB_VERSION = 11;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
-export interface VerifiedIdentity {
+export interface VerifiedIdentity extends AvatarPreference {
   key: 'last';
   userId: string;
   email: string;
@@ -32,7 +33,7 @@ export interface VerifiedClerkIdentity {
  * `identities` and `clerkIdentities` are retained as inert legacy stores so
  * old databases can be cleared safely, but are never consulted for trust.
  */
-export interface OfflineTrustRecord {
+export interface OfflineTrustRecord extends AvatarPreference {
   key: 'current';
   state: 'active' | 'revoked';
   /** Monotonic CAS token. Revocation always advances it. */
@@ -59,7 +60,7 @@ const normalizeOfflineTrust = (value: OfflineTrustRecord | undefined): OfflineTr
   const revision = Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : 0;
   const storedProfileRevision = value.profileRevision;
   const profileRevision = typeof storedProfileRevision === 'number' && Number.isSafeInteger(storedProfileRevision) && storedProfileRevision >= 0 ? storedProfileRevision : undefined;
-  return { ...value, revision, ...(profileRevision === undefined ? {} : { profileRevision }) };
+  return { ...value, ...avatarPreference(value), revision, ...(profileRevision === undefined ? {} : { profileRevision }) };
 };
 const isProfileRevisionNewer = (next?: number, current?: number) => next === undefined ? current === undefined : current === undefined || next > current;
 
@@ -348,7 +349,8 @@ export function saveOfflineTrust(value: Omit<OfflineTrustRecord, 'key' | 'state'
       current.onsuccess = () => {
         const record = normalizeOfflineTrust(current.result as OfflineTrustRecord | undefined);
         if (!isSessionGenerationCurrent(generation) || !allowed() || (record?.revision ?? 0) !== expectedRevision) return;
-         store.put({ ...value, key: OFFLINE_TRUST_KEY, state: 'active', revision: expectedRevision + 1 } satisfies OfflineTrustRecord);
+         if (record?.userId === value.userId && record.profileRevision !== undefined && (value.profileRevision === undefined || value.profileRevision < record.profileRevision)) return;
+         store.put({ ...value, ...avatarPreference(value), key: OFFLINE_TRUST_KEY, state: 'active', revision: expectedRevision + 1 } satisfies OfflineTrustRecord);
         saved = true;
       };
       tx.oncomplete = () => { db.close(); resolve(saved && allowed() && isSessionGenerationCurrent(generation)); };
@@ -361,7 +363,7 @@ export function saveOfflineTrust(value: Omit<OfflineTrustRecord, 'key' | 'state'
 export const readOfflineTrust = () => transaction<OfflineTrustRecord>('offlineTrust', 'readonly', (tx) => tx.objectStore('offlineTrust').get(OFFLINE_TRUST_KEY)).then(normalizeOfflineTrust);
 
 /** Update only the display name of an active trust record with an atomic CAS. */
-export function updateOfflineTrustName(userId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string) {
+export function updateOfflineTrustName(userId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string, avatar?: AvatarPreference) {
   assertSessionGeneration(generation);
   return new Promise<boolean>((resolve, reject) => {
     void open().then((db) => {
@@ -373,7 +375,7 @@ export function updateOfflineTrustName(userId: string, name: string, generation 
         const record = normalizeOfflineTrust(current.result as OfflineTrustRecord | undefined);
         if (!record || record.state !== 'active' || record.userId !== userId || !isSessionGenerationCurrent(generation)) return;
         if (!isProfileRevisionNewer(profileRevision, record.profileRevision)) return;
-        store.put({ ...record, name, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { updatedAt } : {}), revision: record.revision + 1 });
+        store.put({ ...record, name, ...(avatar?.avatarMode === undefined ? {} : avatarPreference(avatar)), ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { updatedAt } : {}), revision: record.revision + 1 });
         updated = true;
       };
       tx.oncomplete = () => { db.close(); resolve(updated && isSessionGenerationCurrent(generation)); };
@@ -599,7 +601,7 @@ export async function updateGroupSnapshotIfGenerationMatches(userId: string, gro
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
 
 /** Patch cached member labels after a confirmed profile rename. */
-export async function patchCachedMemberName(userId: string, personId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string) {
+export async function patchCachedMemberName(userId: string, personId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string, avatar?: AvatarPreference) {
   assertSessionGeneration(generation);
   const db = await open();
   await new Promise<void>((resolve, reject) => {
@@ -622,7 +624,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         const counterpart = snapshot?.currentPersonId && snapshot.members?.length === 2
           ? snapshot.members.find((member) => member.personId !== snapshot.currentPersonId)
           : undefined;
-        return counterpart?.personId === personId ? { ...group, counterpartName: name } : group;
+        return counterpart?.personId === personId ? { ...group, counterpartName: name, ...(avatar?.avatarMode === undefined ? {} : { counterpartAvatar: avatarPreference(avatar) }) } : group;
       });
       groupsPatched = nextGroups.some((group, index) => group !== groupsRow!.groups[index]);
       if (!groupsPatched) return;
@@ -636,11 +638,11 @@ export async function patchCachedMemberName(userId: string, personId: string, na
        for (const row of snapshotRows) {
          if (row.userId !== userId) continue;
           if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) continue;
-        const members = row.members?.map((member) => member.personId === personId ? { ...member, name } : member);
+        const members = row.members?.map((member) => member.personId === personId ? { ...member, name, ...(avatar?.avatarMode === undefined ? {} : avatarPreference(avatar)) } : member);
         const historicalParticipants = row.historicalParticipants?.map((member) => member.personId === personId ? { ...member, name } : member);
         const counterpart = row.currentPersonId && row.members?.length === 2 ? row.members.find((member) => member.personId !== row.currentPersonId) : undefined;
          const legacyPeer = row.group?.kind === undefined && row.group?.memberCount === 2;
-         const group = row.group && (row.group.kind === 'peer' || legacyPeer) && counterpart?.personId === personId ? { ...row.group, counterpartName: name } : row.group;
+         const group = row.group && (row.group.kind === 'peer' || legacyPeer) && counterpart?.personId === personId ? { ...row.group, counterpartName: name, ...(avatar?.avatarMode === undefined ? {} : { counterpartAvatar: avatarPreference(avatar) }) } : row.group;
         const balances = row.balances && Object.fromEntries(Object.entries(row.balances).map(([currency, balance]) => [currency, {
           ...balance,
           raw: balance.raw.map((item) => ({ ...item, name: replace(item.personId, item.name) })),

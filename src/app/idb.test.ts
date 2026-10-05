@@ -12,6 +12,37 @@ beforeEach(async () => {
 });
 
 describe('user-scoped IndexedDB', () => {
+  it('retains an opted-out avatar through stale profile and trust writes', async () => {
+    const trust = { ...user('user-a'), clerkUserId: 'clerk-a', profileRevision: 1, avatarMode: 'gravatar' as const, avatarHash: 'a'.repeat(64) };
+    await saveOfflineTrust(trust);
+    await updateOfflineTrustName('user-a', 'Name-only update', undefined, 2);
+    expect(await readOfflineTrust()).toMatchObject({ avatarMode: 'gravatar', avatarHash: 'a'.repeat(64), profileRevision: 2 });
+    await updateOfflineTrustName('user-a', 'Private Name', undefined, 3, undefined, { avatarMode: 'initials' });
+    await updateOfflineTrustName('user-a', 'Old Name', undefined, 2, undefined, trust);
+    const record = (await readOfflineTrust())!;
+    expect(record).toMatchObject({ name: 'Private Name', profileRevision: 3, avatarMode: 'initials', avatarHash: undefined });
+    expect(await saveOfflineTrust(trust, undefined, undefined, record.revision)).toBe(false);
+    expect(await readOfflineTrust()).toMatchObject({ avatarMode: 'initials', profileRevision: 3 });
+  });
+
+  it('patches cached member and peer avatar metadata with the same profile revision barrier', async () => {
+    await updateGroupSnapshot('user-a', 'group-a', {
+      group: { id: 'group-a', name: 'Peer', currency: 'USD', kind: 'peer', createdAt: '', updatedAt: '', counterpartName: 'Before' },
+      currentPersonId: 'person-user-a', members: [
+        { personId: 'person-user-a', name: 'Viewer', joinedAt: '', role: 'owner' },
+        { personId: 'person-peer', name: 'Before', joinedAt: '', role: 'member' },
+      ],
+    });
+    await patchCachedMemberName('user-a', 'person-peer', 'Saved Peer', undefined, 2, undefined, { avatarMode: 'gravatar', avatarHash: 'b'.repeat(64) });
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.members?.[1]).toMatchObject({ name: 'Saved Peer', avatarMode: 'gravatar', avatarHash: 'b'.repeat(64) });
+    await patchCachedMemberName('user-a', 'person-peer', 'Name only', undefined, 3);
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.members?.[1]).toMatchObject({ name: 'Name only', avatarMode: 'gravatar', avatarHash: 'b'.repeat(64) });
+    await patchCachedMemberName('user-a', 'person-peer', 'Private Peer', undefined, 4, undefined, { avatarMode: 'initials' });
+    await patchCachedMemberName('user-a', 'person-peer', 'Old Peer', undefined, 2, undefined, { avatarMode: 'gravatar', avatarHash: 'b'.repeat(64) });
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.group?.counterpartAvatar).toEqual({ avatarMode: 'initials', avatarHash: undefined });
+    expect((await readGroupSnapshot('user-a', 'group-a'))?.members?.[1]).toMatchObject({ name: 'Private Peer', avatarMode: 'initials', avatarHash: undefined });
+  });
+
   it('stores one atomic trust tuple and rejects split or torn records', async () => {
     await saveVerifiedIdentity(user('legacy'));
     await saveLastVerifiedClerkUserId('clerk-legacy');

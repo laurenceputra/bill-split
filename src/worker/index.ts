@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { accountAvatar } from '../shared/avatar';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
 import { parsePublishableKey } from '@clerk/shared/keys';
@@ -13,7 +14,7 @@ import { CSRF_COOKIE, CSRF_HEADER, constantTimeEqual, cookieValue, randomSession
 import { registerExpenseSettlementRoutes } from './expense-settlement-routes';
 export { parseAuthorizedParties } from './clerk-auth';
 
-type ApplicationAuth = { id: string; email: string; personId: string; name: string; profileRevision?: number; updatedAt?: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
+type ApplicationAuth = { id: string; email: string; personId: string; name: string; avatarMode?: 'initials' | 'gravatar'; avatarHash?: string; profileRevision?: number; updatedAt?: string; clerkUserId?: string; applicationSessionId?: string; idleExpiresAt?: string };
 export type CronStage = 'purge' | 'generation' | 'monthly-summary' | 'build-gc';
 const cronStages: CronStage[] = ['purge', 'generation', 'monthly-summary', 'build-gc'];
 const cronSlotMs = 15 * 60 * 1000;
@@ -46,7 +47,7 @@ export const clerkFrontendApiOrigin = (publishableKey?: string): string | undefi
 export const buildContentSecurityPolicy = (publishableKey?: string): string => {
   const fapi = clerkFrontendApiOrigin(publishableKey);
   const fapiSource = fapi ? ` ${fapi}` : '';
-  return `default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'${fapiSource} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.clerk.com; font-src 'self'; connect-src 'self'${fapiSource} https://*.protect.clerk.com; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com; manifest-src 'self'; worker-src 'self' blob:`;
+  return `default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'${fapiSource} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.clerk.com https://gravatar.com https://*.gravatar.com; font-src 'self'; connect-src 'self'${fapiSource} https://*.protect.clerk.com; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com; manifest-src 'self'; worker-src 'self' blob:`;
 };
 const REVALIDATED_ASSETS = new Set(['/manifest.webmanifest', '/sw.js']);
 const requestIdFor = (request: Request) => {
@@ -167,7 +168,7 @@ const authenticateClerkIdentity = async (c: any) => {
 const authForClerkClaims = async (repo: Repository, identityClaims: Awaited<ReturnType<typeof authenticateClerkIdentity>>) => {
   const identity = await repo.userForClerk(identityClaims.clerkUserId, identityClaims.primaryEmail);
   return {
-    id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}), clerkUserId: identityClaims.clerkUserId,
+    id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), ...await accountAvatar(identity.user.avatar_mode, String(identity.user.email)), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}), clerkUserId: identityClaims.clerkUserId,
   } satisfies ApplicationAuth;
 };
 const issueApplicationSession = async (c: any, auth: ApplicationAuth) => {
@@ -235,7 +236,7 @@ api.use('/api/*', async (c, next) => {
   if (env.ENVIRONMENT === 'development' && !hasApplicationCookie && devEmail && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(devEmail)) {
     try {
       const repo = repositoryFor(env); const identity = await repo.user(devEmail.trim().toLowerCase());
-      const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}) };
+      const auth = { id: String(identity.user.id), email: String(identity.user.email), personId: String(identity.person.id), name: String(identity.person.name), ...await accountAvatar(identity.user.avatar_mode, String(identity.user.email)), profileRevision: Number(identity.user.profile_revision ?? 0), ...(typeof identity.user.updated_at === 'string' ? { updatedAt: identity.user.updated_at } : {}) };
       const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
@@ -273,7 +274,7 @@ api.use('/api/*', async (c, next) => {
     const repo = repositoryFor(env);
     const session = rawToken ? await repo.applicationSession(await sha256Hex(rawToken)) : null;
     if (session) {
-      const auth = { id: session.userId, email: session.email, personId: session.personId, name: session.name, profileRevision: session.profileRevision, updatedAt: session.updatedAt, clerkUserId: session.clerkUserId, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt };
+      const auth = { id: session.userId, email: session.email, personId: session.personId, name: session.name, avatarMode: session.avatarMode, avatarHash: session.avatarHash, profileRevision: session.profileRevision, updatedAt: session.updatedAt, clerkUserId: session.clerkUserId, applicationSessionId: session.id, idleExpiresAt: session.idleExpiresAt };
       const expectedUserId = c.req.header('X-BillSplit-Expected-User-Id');
       if (expectedUserId && expectedUserId !== auth.id) return jsonError(c, 401, 'IDENTITY_MISMATCH', 'The verified identity changed; sign in again before syncing');
       c.set('repo', repo); c.set('auth', auth); c.header('X-BillSplit-User-Id', auth.id); await next();
@@ -351,16 +352,16 @@ api.post('/api/session/bootstrap', async (c) => {
     c.set('auth', sessionAuth);
     c.header('X-BillSplit-User-Id', sessionAuth.id);
     c.header('X-BillSplit-Clerk-User-Id', sessionAuth.clerkUserId!);
-    return c.json({ user: { id: sessionAuth.id, email: sessionAuth.email, personId: sessionAuth.personId, name: sessionAuth.name, profileRevision: sessionAuth.profileRevision, updatedAt: sessionAuth.updatedAt }, idleExpiresAt: sessionAuth.idleExpiresAt });
+    return c.json({ user: { id: sessionAuth.id, email: sessionAuth.email, personId: sessionAuth.personId, name: sessionAuth.name, avatarMode: sessionAuth.avatarMode, avatarHash: sessionAuth.avatarHash, profileRevision: sessionAuth.profileRevision, updatedAt: sessionAuth.updatedAt }, idleExpiresAt: sessionAuth.idleExpiresAt });
   } catch (error) { return repositoryError(c, error); }
 });
-api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, name: a.name, profileRevision: a.profileRevision, ...(a.updatedAt ? { updatedAt: a.updatedAt } : {}), ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
+api.get('/api/me', (c) => { const a = c.get('auth'); c.header('X-BillSplit-User-Id', a.id); if (a.clerkUserId) c.header('X-BillSplit-Clerk-User-Id', a.clerkUserId); return c.json({ id: a.id, email: a.email, personId: a.personId, name: a.name, avatarMode: a.avatarMode, avatarHash: a.avatarHash, profileRevision: a.profileRevision, ...(a.updatedAt ? { updatedAt: a.updatedAt } : {}), ...(a.idleExpiresAt ? { idleExpiresAt: a.idleExpiresAt } : {}) }); });
 api.put('/api/me', zValidator('json', profileNameInput), async (c) => {
   try {
-    const person = await getRepo(c).updateDisplayName(c.get('auth').id, c.req.valid('json').name);
+    const person = await getRepo(c).updateDisplayName(c.get('auth').id, c.req.valid('json').name, c.req.valid('json').avatarMode);
     const auth = c.get('auth');
-    c.set('auth', { ...auth, name: person.name, profileRevision: person.profileRevision, updatedAt: person.updatedAt });
-    return c.json({ user: { id: auth.id, email: auth.email, personId: auth.personId, name: person.name, profileRevision: person.profileRevision, updatedAt: person.updatedAt, ...(auth.idleExpiresAt ? { idleExpiresAt: auth.idleExpiresAt } : {}) } });
+    c.set('auth', { ...auth, name: person.name, avatarMode: person.avatarMode, avatarHash: person.avatarHash, profileRevision: person.profileRevision, updatedAt: person.updatedAt });
+    return c.json({ user: { id: auth.id, email: auth.email, personId: auth.personId, name: person.name, avatarMode: person.avatarMode, avatarHash: person.avatarHash, profileRevision: person.profileRevision, updatedAt: person.updatedAt, ...(auth.idleExpiresAt ? { idleExpiresAt: auth.idleExpiresAt } : {}) } });
   } catch (error) { return repositoryError(c, error); }
 });
 api.post('/api/session/activity', async (c) => {

@@ -1,4 +1,5 @@
 import type { supportedCurrencies } from './schemas';
+import type { AvatarPreference } from './avatar';
 
 export type Currency = typeof supportedCurrencies[number];
 export type GroupKind = 'named' | 'peer';
@@ -16,8 +17,8 @@ export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export interface Person { id: string; name: string; email?: string | null; createdAt: string }
 export interface GroupBalanceSummary { currency: Currency; netMinor: number }
 /** kind is optional only for pre-kind offline snapshots; server responses always carry it. */
-export interface Group { id: string; name: string; currency: Currency; kind?: GroupKind; createdAt: string; updatedAt: string; role?: 'owner' | 'member'; memberCount?: number; counterpartName?: string | null; balanceSummaries?: GroupBalanceSummary[] }
-export interface GroupMember { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null }
+export interface Group { id: string; name: string; currency: Currency; kind?: GroupKind; createdAt: string; updatedAt: string; role?: 'owner' | 'member'; memberCount?: number; counterpartName?: string | null; counterpartAvatar?: AvatarPreference; balanceSummaries?: GroupBalanceSummary[] }
+export interface GroupMember extends AvatarPreference { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null }
 export type HistoricalParticipantStatus = 'active' | 'removed' | 'deleted';
 export interface HistoricalParticipant { personId: string; name: string; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null; status: HistoricalParticipantStatus }
 export interface GroupInvitation { id: string; groupId: string; email: string; createdBy: string; createdAt: string; expiresAt: string; targetPersonId?: string | null; revokedAt?: string | null; acceptedAt?: string | null; acceptedBy?: string | null; rejectedAt?: string | null }

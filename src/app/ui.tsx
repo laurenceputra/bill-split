@@ -1,11 +1,13 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
-import { SignInButton, SignUpButton, useUser } from '@clerk/react';
+import { SignInButton, SignUpButton } from '@clerk/react';
 import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
-import { getAuthLifecycle, getAuthState, getConnectionState, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
+import { getAuthLifecycle, getAuthState, getConnectionState, getMe, hydrateIdentity, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
 import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
+import { accountAvatar, avatarUrl, type AvatarPreference } from '../shared/avatar';
+import { RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
 
 export type IconName = 'groups' | 'activity' | 'settings' | 'add' | 'more' | 'check' | 'warning' | 'close';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -36,12 +38,22 @@ export function Button({ children, variant = 'primary', loading = false, classNa
   return <button {...props} className={`ui-button ${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} aria-busy={loading || undefined} disabled={loading || props.disabled}>{loading ? <span className="button__loading" aria-hidden="true" /> : null}{children}</button>;
 }
 
-export function Avatar({ name, src, size = 'md' }: { name: string; src?: string; size?: 'sm' | 'md' | 'lg' }) {
+export function Avatar({ name, src, avatarMode, avatarHash, email, size = 'md' }: AvatarPreference & { name: string; src?: string; email?: string; size?: 'sm' | 'md' | 'lg' }) {
+  const connection = useConnectionState();
+  const [preview, setPreview] = useState<{ email?: string; avatar: AvatarPreference }>({ avatar: {} });
+  const [failed, setFailed] = useState<string>();
+  useEffect(() => {
+    let active = true;
+    setPreview({ avatar: {} });
+    if (avatarMode === 'gravatar' && email && !avatarHash) void accountAvatar(avatarMode, email).then((value) => { if (active) setPreview({ email, avatar: value }); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [avatarMode, avatarHash, email]);
+  const image = connection.status === 'offline' ? undefined : avatarUrl({ avatarMode, avatarHash: avatarHash || (preview.email === email ? preview.avatar.avatarHash : undefined) }) || src;
   const initials = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || '?';
-  return <span className={`avatar avatar--${size}`} role="img" aria-label={name}>{src ? <img src={src} alt="" /> : initials}</span>;
+  return <span className={`avatar avatar--${size}`} role="img" aria-label={name}>{image && image !== failed ? <img src={image} alt="" referrerPolicy="no-referrer" onError={() => setFailed(image)} /> : initials}</span>;
 }
 
-export function AvatarStack({ people, max = 4 }: { people: Array<{ name: string; src?: string }>; max?: number }) {
+export function AvatarStack({ people, max = 4 }: { people: Array<AvatarPreference & { name: string; src?: string }>; max?: number }) {
   const visible = people.slice(0, max);
   const remaining = Math.max(0, people.length - visible.length);
   return <span className="avatar-stack" aria-label={`${people.length} ${people.length === 1 ? 'person' : 'people'}`}>{visible.map((person) => <Avatar key={`${person.name}-${person.src || ''}`} {...person} size="sm" />)}{remaining ? <span className="avatar avatar--sm avatar--overflow" aria-label={`${remaining} more people`}>+{remaining}</span> : null}</span>;
@@ -182,18 +194,6 @@ function useServiceWorkerUpdate() {
   return useSyncExternalStore(subscribeServiceWorkerUpdate, getServiceWorkerUpdateState, () => ({ updateReady: false, applying: false, blocked: false }));
 }
 
-// Keep the shell renderable in isolated/static states (for example, a route
-// placeholder rendered before the Clerk provider is mounted). The application
-// normally always has the provider, but the navigation does not need to make
-// the cached/loading surface impossible to render without it.
-function useOptionalUser() {
-  try {
-    return useUser().user;
-  } catch {
-    return undefined;
-  }
-}
-
 export function ServiceWorkerUpdate() {
   const update = useServiceWorkerUpdate();
   if (!update.updateReady && !update.applying && !update.blocked) return null;
@@ -284,10 +284,11 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
 export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();
-  const user = useOptionalUser();
+  const identity = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
+  const user = identity.data;
   const unsynced = outbox.length;
-  const identityName = user?.fullName || user?.firstName || user?.primaryEmailAddress?.emailAddress || 'Signed-in user';
-  return <header className="top-bar shell-header"><div className="top-bar__inner"><Brand link /><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div><span className="desktop-user-avatar"><Avatar name={identityName} src={user?.imageUrl} size="sm" /></span>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
+  const identityName = user?.name || '';
+  return <header className="top-bar shell-header"><div className="top-bar__inner"><Brand link /><DesktopNav /><div className="top-bar__actions"><span className={`network-indicator network-indicator--${connection.status}`} role="status">{connectionStatusLabel(connection.status)}{unsynced ? ` · ${unsynced} pending` : ''}</span><ServiceWorkerUpdate /><div className="install-slot"><InstallAction /></div><Link className="desktop-user-avatar" to="/settings" aria-label="Profile settings"><Avatar name={identityName} avatarMode={user?.avatarMode} avatarHash={user?.avatarHash} size="sm" /></Link>{import.meta.env.DEV && <label className="dev-identity"><span>Local identity</span><input aria-label="Local identity email" defaultValue={localStorage.getItem('dev-email') || 'dev@example.com'} onChange={(event) => localStorage.setItem('dev-email', event.target.value)} /></label>}</div></div></header>;
 }
 
 function DesktopNav() {

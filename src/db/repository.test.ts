@@ -71,7 +71,7 @@ class ProfileStatement {
   bind(...args: unknown[]) { this.args = args; return this; }
   async run() { if (this.sql.includes('UPDATE people')) this.db.name = String(this.args[0]); return { meta: { changes: 1 } }; }
   async first<T>() {
-    if (this.sql.includes('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision FROM people')) return this.db.deleted ? null : { id: 'person-1', name: this.db.name, email: 'person@example.com', created_at: '2026-01-01', updated_at: this.db.updatedAt, profile_revision: this.db.profileRevision } as T;
+    if (this.sql.includes('SELECT p.id,p.name,p.email,p.created_at,u.updated_at,u.profile_revision,')) return this.db.deleted ? null : { id: 'person-1', name: this.db.name, email: 'person@example.com', created_at: '2026-01-01', updated_at: this.db.updatedAt, profile_revision: this.db.profileRevision } as T;
     if (this.sql.includes('SELECT deleted_at FROM users')) return this.db.deleted ? { deleted_at: '2026-01-01' } as T : null;
     return null;
   }
@@ -173,7 +173,7 @@ class PurgeAccountingStatement {
 describe('repository profile updates', () => {
   it('updates only the currently linked active person and returns the display name', async () => {
     const db = new ProfileDb();
-    await expect(new Repository(db as never).updateDisplayName('user-1', '  New name  ')).resolves.toEqual({ id: 'person-1', name: 'New name', email: 'person@example.com', createdAt: '2026-01-01', updatedAt: '2026-01-02T00:00:00.000Z', profileRevision: 1 });
+    await expect(new Repository(db as never).updateDisplayName('user-1', '  New name  ')).resolves.toEqual({ id: 'person-1', name: 'New name', email: 'person@example.com', avatarMode: 'initials', createdAt: '2026-01-01', updatedAt: '2026-01-02T00:00:00.000Z', profileRevision: 1 });
   });
   it('verifies both guarded batch writes when the user is deleted before the profile update', async () => {
     const db = new ProfileDb(); db.deleted = true;

@@ -359,6 +359,8 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
   SELECT g.*,gm.role,
     (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
     (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
-      WHERE other_member.group_id=g.id AND other_member.person_id<>gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name LIMIT 1) AS counterpart_name,
+      WHERE other_member.group_id=g.id AND other_member.person_id<>gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_name,
+    (SELECT u.avatar_mode FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_avatar_mode,
+    (SELECT u.email FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_email,
     COALESCE(balance_json.balance_summaries,'[]') AS balance_summaries
   FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id LEFT JOIN balance_json ON balance_json.group_id=g.id`;

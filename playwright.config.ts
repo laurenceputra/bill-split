@@ -10,6 +10,7 @@ export default defineConfig({
   timeout: 180_000,
   expect: { timeout: 8_000 },
   reporter: [
+    ['./tests/e2e/environment-reporter.mjs'],
     ['list'],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
   ],
@@ -31,6 +32,7 @@ export default defineConfig({
     // environment as unavailable.
     timeout: 300_000,
     reuseExistingServer: false,
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
     stdout: 'pipe',
     stderr: 'pipe',
   },

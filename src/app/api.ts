@@ -1,5 +1,6 @@
 import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import type { CreditInput, GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
+import { avatarPreference } from '../shared/avatar';
 import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
@@ -11,7 +12,7 @@ import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, tr
 import { CSRF_COOKIE, CSRF_HEADER } from '../worker/application-session';
 import { persistActivityResponse, persistBalanceResponse, persistCategoriesResponse, persistExpenseDetailsResponse, persistExpenseResponse, persistGroupResponse, persistGroupsResponse, persistSettlementResponse, persistTransactionResponse } from './persisted-resources';
 
-export type CurrentUser = { id: string; email: string; personId: string; name: string; profileRevision?: number; updatedAt?: string; idleExpiresAt?: string };
+export type CurrentUser = { id: string; email: string; personId: string; name: string; avatarMode?: 'initials' | 'gravatar'; avatarHash?: string; profileRevision?: number; updatedAt?: string; idleExpiresAt?: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
 export type ApiResponse<T> = { data: T; userId?: string; clerkUserId?: string; headers?: Headers };
 export type AuthRequiredCode = 'AUTH_REQUIRED' | 'AUTH_INVALID' | 'IDENTITY_MISMATCH';
@@ -787,13 +788,13 @@ async function requireIdentityForCache(signal?: AbortSignal): Promise<CacheIdent
   if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && verifiedIdentity) return { user: verifiedIdentity, authoritative: authLifecycle.status === 'authenticated' };
   const cachedTrust = await trustForCache();
   const cached = cachedTrust && isOfflineTrustUsable(cachedTrust) ? cachedTrust : undefined;
-  if (authLifecycle.status === 'trusted-offline' && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }, authoritative: false };
+  if (authLifecycle.status === 'trusted-offline' && cached) return { user: { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }, authoritative: false };
   try {
     const current = await getMe({ signal });
-    return { user: { id: current.id, email: current.email, personId: current.personId, name: current.name, ...(current.profileRevision === undefined ? {} : { profileRevision: current.profileRevision }), ...(current.updatedAt ? { updatedAt: current.updatedAt } : {}) }, authoritative: current.authoritative === true };
+    return { user: { id: current.id, email: current.email, personId: current.personId, name: current.name, ...avatarPreference(current), ...(current.profileRevision === undefined ? {} : { profileRevision: current.profileRevision }), ...(current.updatedAt ? { updatedAt: current.updatedAt } : {}) }, authoritative: current.authoritative === true };
   } catch (error) {
     if (!isNetwork(error)) throw error;
-    return cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }, authoritative: false } : undefined;
+    return cached ? { user: { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }, authoritative: false } : undefined;
   }
 }
 const offline = <T extends object>(value: T): CachedResult<T> => ({ ...value, offline: true, stale: true });
@@ -950,7 +951,7 @@ const activateTrustedOffline = async (trust: OfflineTrustRecord, expectedEvidenc
   // and cache-clear handlers. Never commit the identity from the pre-await
   // snapshot after one of those barriers has changed.
   if (!offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation) || !(await trustRevisionIsCurrent(trust)) || !offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation)) return authLifecycle;
-    const user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
+    const user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...avatarPreference(trust), ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
   if (!offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation)) return authLifecycle;
    verifiedIdentity = user;
    rememberLocalProfileRevision(user, generation);
@@ -1152,7 +1153,7 @@ const activateProvisionalOffline = async (trust: OfflineTrustRecord, expectedEvi
   if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || !isOfflineTrustUsable(trust) || !cachedTrustMatches(clerkEvidence.userId, trust) || authLifecycle.status === 'authenticated') return authLifecycle;
   if (!(await trustRevisionIsCurrent(trust))) return authLifecycle;
   if (!offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation, authEpoch) || !provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation) || !(await trustRevisionIsCurrent(trust)) || !offlineActivationMemoryIsCurrent(trust, expectedEvidenceEpoch, generation, authEpoch)) return authLifecycle;
-    const user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
+    const user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...avatarPreference(trust), ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
   if (!provisionalRestoreIsCurrent(token, routeGeneration, authEpoch, expectedEvidenceEpoch, generation)) return authLifecycle;
   verifiedIdentity = user;
   verifiedClerkUserId = trust.clerkUserId;
@@ -1590,14 +1591,21 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
        // This is the sole trust write. A timeout or CAS miss is non-fatal to
       // the authoritative session, but it grants no durable offline trust.
        if (options.clerkUserId && result.clerkUserId === options.clerkUserId && result.userId === user.id && (!options.expectedUserId || options.expectedUserId === user.id)) {
-          if (!expectedTrustRead.timedOut) await boundedTrustWrite(saveOfflineTrust({ userId: user.id, email: user.email, personId: user.personId, name: user.name, profileRevision: user.profileRevision, updatedAt: user.updatedAt, clerkUserId: options.clerkUserId!, verifiedAt: new Date().toISOString(), idleExpiresAt: user.idleExpiresAt }, generation, () => authGeneration === authInvalidationGeneration && isClerkEvidenceEpochCurrent(evidenceGeneration) && !getSessionLogoutInProgress(), expectedTrustRead.record?.revision ?? 0));
-        assertAuthEvidence(authGeneration, evidenceGeneration);
-        verifiedClerkUserId = options.clerkUserId;
+          if (!expectedTrustRead.timedOut) await boundedTrustWrite(saveOfflineTrust({ userId: user.id, email: user.email, personId: user.personId, name: user.name, ...avatarPreference(user), profileRevision: user.profileRevision, updatedAt: user.updatedAt, clerkUserId: options.clerkUserId!, verifiedAt: new Date().toISOString(), idleExpiresAt: user.idleExpiresAt }, generation, () => authGeneration === authInvalidationGeneration && isClerkEvidenceEpochCurrent(evidenceGeneration) && !getSessionLogoutInProgress(), expectedTrustRead.record?.revision ?? 0));
+         assertAuthEvidence(authGeneration, evidenceGeneration);
+         verifiedClerkUserId = options.clerkUserId;
         clerkUserIdHydrated = true;
        }
        assertAuthEvidence(authGeneration, evidenceGeneration);
        assertAuthCommitAllowed(generation);
-       // An invalidation already published before this authoritative probe is
+        // Trust persistence yields to profile PUTs and cross-tab updates. Fence
+        // the read again before publishing it, not just before the trust write.
+        if (typeof user.profileRevision === 'number' && !rememberLocalProfileRevision(user, generation)) {
+          const current = verifiedIdentity;
+          if (current?.id === user.id && typeof current.profileRevision === 'number' && current.profileRevision > user.profileRevision) user = current;
+          else throw new ApiError('A newer profile is already active; retry identity verification.', { status: 409, code: 'PROFILE_SUPERSEDED' });
+        }
+        // An invalidation already published before this authoritative probe is
        // the transition which this new commit supersedes. Mark its nonce as
        // consumed so delayed BC delivery cannot revoke the new session; a
        // nonce published after the baseline remains actionable.
@@ -1648,11 +1656,11 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
         assertAuthCommitAllowed(generation);
         if (options.route) {
           await activateTrustedOffline(cached, evidenceGeneration, options.route);
-            return { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }), authoritative: false };
+            return { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }), authoritative: false };
         }
-          const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }), authoritative: false };
+          const result = { ...offline({ id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) }), authoritative: false };
         assertAuthEvidence(authGeneration, evidenceGeneration);
-          verifiedIdentity = { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) };
+          verifiedIdentity = { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) };
         verifiedClerkUserId = cached.clerkUserId;
         clerkUserIdHydrated = true;
         setResourceIdentity(cached.userId);
@@ -1681,28 +1689,28 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
   return await awaitWithAbort(tracked, options.signal);
 }
 
-export async function updateDisplayName(name: string): Promise<DisplayNameUpdateResult> {
+export async function updateDisplayName(name: string, avatarMode?: 'initials' | 'gravatar'): Promise<DisplayNameUpdateResult> {
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
-  const result = await api<{ user: CurrentUser }>('/me', { method: 'PUT', body: JSON.stringify({ name }) });
+  const result = await api<{ user: CurrentUser }>('/me', { method: 'PUT', body: JSON.stringify({ name, avatarMode }) });
   assertRequestGeneration(generation);
   if (!isAuthEpochCurrent(authEpoch)) throw new ApiError('The verified identity changed; the profile was not applied locally.', { status: 401, code: 'IDENTITY_MISMATCH' });
   const profileRevision = result.user.profileRevision;
   if (typeof profileRevision !== 'number' || !Number.isSafeInteger(profileRevision) || profileRevision < 0) throw new ApiError('The server returned no authoritative profile revision.', { status: 502, code: 'PROTOCOL_ERROR' });
   if (!rememberLocalProfileRevision(result.user, generation)) return authoritativeProfileAfterFence(result, generation, authEpoch);
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => { verifiedIdentity = result.user; })) return authoritativeProfileAfterFence(result, generation, authEpoch);
-  await cacheWrite(() => saveVerifiedIdentity({ userId: result.user.id, email: result.user.email, personId: result.user.personId, name: result.user.name, profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt, verifiedAt: new Date().toISOString() }, generation));
+  await cacheWrite(() => saveVerifiedIdentity({ userId: result.user.id, email: result.user.email, personId: result.user.personId, name: result.user.name, ...avatarPreference(result.user), profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt, verifiedAt: new Date().toISOString() }, generation));
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => undefined)) return authoritativeProfileAfterFence(result, generation, authEpoch);
-  await cacheWrite(() => updateOfflineTrustName(result.user.id, result.user.name, generation, result.user.profileRevision, result.user.updatedAt));
+  await cacheWrite(() => updateOfflineTrustName(result.user.id, result.user.name, generation, result.user.profileRevision, result.user.updatedAt, result.user));
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => undefined)) return authoritativeProfileAfterFence(result, generation, authEpoch);
-  await cacheWrite(() => patchCachedMemberName(result.user.id, result.user.personId, result.user.name, generation, result.user.profileRevision, result.user.updatedAt));
+  await cacheWrite(() => patchCachedMemberName(result.user.id, result.user.personId, result.user.name, generation, result.user.profileRevision, result.user.updatedAt, result.user));
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => undefined)) return authoritativeProfileAfterFence(result, generation, authEpoch);
-  await invalidateForMutation.profileChanged(result.user.id, generation, { personId: result.user.personId, name: result.user.name, profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt });
+  await invalidateForMutation.profileChanged(result.user.id, generation, { personId: result.user.personId, name: result.user.name, ...avatarPreference(result.user), profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt });
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => undefined)) return authoritativeProfileAfterFence(result, generation, authEpoch);
   // The profile response is already authoritative. Seed after invalidating
   // related resources so the live identity cannot be made stale immediately.
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => { seedResource('identity', '', result.user, Date.now(), { offline: false }); })) return authoritativeProfileAfterFence(result, generation, authEpoch);
-  if (!applyCurrentProfile(result.user, generation, authEpoch, () => { broadcastSessionCoordination({ type: 'profile-changed', userId: result.user.id, personId: result.user.personId, name: result.user.name, profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt, generation }); })) return authoritativeProfileAfterFence(result, generation, authEpoch);
+  if (!applyCurrentProfile(result.user, generation, authEpoch, () => { broadcastSessionCoordination({ type: 'profile-changed', userId: result.user.id, personId: result.user.personId, name: result.user.name, ...avatarPreference(result.user), profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt, generation }); })) return authoritativeProfileAfterFence(result, generation, authEpoch);
   return result;
 }
 
@@ -1819,7 +1827,7 @@ export async function initializeAuthLifecycle(options: { networkOnly?: boolean; 
         assertAuthCommitAllowed(sessionGeneration);
         if (!(await trustRevisionIsCurrent(trust))) return authLifecycle;
         if (!offlineActivationMemoryIsCurrent(trust, evidenceEpoch, sessionGeneration, authEpoch) || !(await trustRevisionIsCurrent(trust)) || !offlineActivationMemoryIsCurrent(trust, evidenceEpoch, sessionGeneration, authEpoch)) return authLifecycle;
-        let user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
+        let user = { id: trust.userId, email: trust.email, personId: trust.personId, name: trust.name || trust.email.split('@')[0], ...avatarPreference(trust), ...(trust.profileRevision === undefined ? {} : { profileRevision: trust.profileRevision }), ...(trust.updatedAt ? { updatedAt: trust.updatedAt } : {}) };
         if (typeof user.profileRevision === 'number' && !rememberLocalProfileRevision(user, sessionGeneration)) {
           const current = verifiedIdentity;
           if (current?.id === user.id && current.personId === user.personId && typeof current.profileRevision === 'number' && current.profileRevision > user.profileRevision) user = current;
@@ -2597,7 +2605,7 @@ const cacheTimestamp = (value: string) => { const parsed = Date.parse(value); re
 export async function hydrateIdentity() {
   const cached = await cacheRead(readOfflineTrust);
   if (cached && isOfflineTrustUsable(cached)) {
-    const user = { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) };
+    const user = { id: cached.userId, email: cached.email, personId: cached.personId, name: cached.name || cached.email.split('@')[0], ...avatarPreference(cached), ...(cached.profileRevision === undefined ? {} : { profileRevision: cached.profileRevision }), ...(cached.updatedAt ? { updatedAt: cached.updatedAt } : {}) };
     if (cached.profileRevision !== undefined) rememberLocalProfileRevision(user, getSessionGeneration());
     return { data: user, fetchedAt: cacheTimestamp(cached.verifiedAt), offline: true };
   }
@@ -2676,13 +2684,16 @@ subscribeSessionCoordination((message) => {
     const latestProfileRevision = latestProfileRevisions.get(profileRevisionKey);
     if (!isNewerProfileRevision(revision, latestProfileRevision)) return;
      latestProfileRevisions.set(profileRevisionKey, revision);
-     verifiedIdentity = { ...current, name: message.name, ...(message.profileRevision === undefined ? {} : { profileRevision: message.profileRevision }), ...(message.updatedAt ? { updatedAt: message.updatedAt } : {}) };
-     patchResourceData<{ id: string; name: string; profileRevision?: number; updatedAt?: string }>(resourceKeys.identity(), '', (data) => data.id === message.userId ? { ...data, name: message.name!, ...(message.profileRevision === undefined ? {} : { profileRevision: message.profileRevision }), ...(message.updatedAt ? { updatedAt: message.updatedAt } : {}) } : data);
+     // Older tabs publish name-only deltas, not complete profile records.
+     // Omission is not an opt-out; carry the currently accepted preference.
+     const avatar = avatarPreference(message.avatarMode === undefined ? current : message);
+      verifiedIdentity = { ...current, name: message.name, ...avatar, ...(message.profileRevision === undefined ? {} : { profileRevision: message.profileRevision }), ...(message.updatedAt ? { updatedAt: message.updatedAt } : {}) };
+      patchResourceData<CurrentUser>(resourceKeys.identity(), '', (data) => data.id === message.userId ? { ...data, name: message.name!, ...avatar, ...(message.profileRevision === undefined ? {} : { profileRevision: message.profileRevision }), ...(message.updatedAt ? { updatedAt: message.updatedAt } : {}) } : data);
      seedResource('identity', '', verifiedIdentity, Date.now(), { offline: authLifecycle.status === 'trusted-offline' });
-     void cacheWrite(() => saveVerifiedIdentity({ userId: verifiedIdentity!.id, email: verifiedIdentity!.email, personId: verifiedIdentity!.personId, name: verifiedIdentity!.name, profileRevision: verifiedIdentity!.profileRevision, updatedAt: verifiedIdentity!.updatedAt, verifiedAt: new Date().toISOString() }, message.generation)).catch(() => undefined);
-     void updateOfflineTrustName(message.userId, message.name, message.generation, message.profileRevision, message.updatedAt).catch(() => undefined);
-    void patchCachedMemberName(message.userId, message.personId, message.name, message.generation, message.profileRevision, message.updatedAt).catch(() => undefined);
-    void invalidateForMutation.profileChanged(message.userId, message.generation, { personId: message.personId, name: message.name, profileRevision: message.profileRevision, updatedAt: message.updatedAt }).catch(() => undefined);
+      void cacheWrite(() => saveVerifiedIdentity({ userId: verifiedIdentity!.id, email: verifiedIdentity!.email, personId: verifiedIdentity!.personId, name: verifiedIdentity!.name, ...avatarPreference(verifiedIdentity!), profileRevision: verifiedIdentity!.profileRevision, updatedAt: verifiedIdentity!.updatedAt, verifiedAt: new Date().toISOString() }, message.generation)).catch(() => undefined);
+      void updateOfflineTrustName(message.userId, message.name, message.generation, message.profileRevision, message.updatedAt, avatar).catch(() => undefined);
+     void patchCachedMemberName(message.userId, message.personId, message.name, message.generation, message.profileRevision, message.updatedAt, avatar).catch(() => undefined);
+     void invalidateForMutation.profileChanged(message.userId, message.generation, { personId: message.personId, name: message.name, ...avatar, profileRevision: message.profileRevision, updatedAt: message.updatedAt }).catch(() => undefined);
     return;
   }
   if (message.type === 'auth-invalidation' && message.reason === 'account-switch') {

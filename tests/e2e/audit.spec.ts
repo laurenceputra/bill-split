@@ -193,7 +193,7 @@ const scenarios: Scenario[] = [
   { name: 'empty-global-insights', path: '/activity?view=insights&period=all', auth: EMPTY_EMAIL, context: 'History insights / empty aggregate state', expected: { mode: 'normal', heading: 'History', content: 'No counted expenses in this period', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
   { name: 'custom-insights', path: '/activity?view=insights&period=custom', auth: DEV_EMAIL, context: 'History insights / custom range disclosure before two dates are supplied', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
   { name: 'invalid-custom-insights', path: '/activity?view=insights&period=custom&from=2026-02-30&to=2026-01-01', auth: DEV_EMAIL, context: 'History insights / invalid custom date validation and field error relationships', expected: { mode: 'normal', heading: 'History', content: 'Choose two valid dates', apiPaths: [apiPaths.me, apiPaths.groups, apiPaths.spendingInsights] } },
-  { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / Profile rename and trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Renaming is available while online.', apiPaths: [apiPaths.me] } },
+  { name: 'settings', path: '/settings', auth: DEV_EMAIL, context: 'Settings / Profile preference and trusted-device controls', expected: { mode: 'normal', heading: 'Settings', content: 'Profile changes are available while online.', apiPaths: [apiPaths.me] } },
 ];
 
 const authState = (auth: string | undefined): AuthState => auth ? `authenticated:${auth}` : 'public';
