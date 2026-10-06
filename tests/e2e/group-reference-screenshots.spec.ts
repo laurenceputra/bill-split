@@ -5,6 +5,7 @@ import { test, expect } from './fixtures';
 const groupId = '00000000-0000-4000-8000-000000003002';
 
 async function capture(page: Page, testInfo: TestInfo, name: string, fullPage = true) {
+  if (process.env.GROUP_SCREENSHOTS_SKIP_HISTORY === '1' && name.startsWith('warm-ledger-history-')) return;
   await page.evaluate(() => document.fonts.ready);
   const file = `${name}.png`;
   const destination = process.env.UPDATE_GROUP_SCREENSHOTS === '1'

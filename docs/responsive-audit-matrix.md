@@ -1,5 +1,15 @@
 # Warm Ledger responsive audit matrix
 
+## Compact person totals and secondary split control follow-up
+
+| View/state | 320 / 390px | 639px (below person breakpoint) | 640 / 768px | 895 / 896px | 1440px |
+| --- | --- | --- | --- | --- | --- |
+| Spending by person / loaded, positive ties | Identity groups name and winner badge; share and paid retain visible labels and right-aligned amounts | Labeled stacked metrics | Person / Allocated share / Paid headings align with three compact columns; numbers right-aligned | Same columns across shell breakpoint | Person block capped at 48rem without narrowing summary or charts |
+| Spending by person / long names, large amounts | Names and amounts wrap without clipping or overflow | Stress wrapping contained | Three columns wrap within their cells | Same containment | Reading-width block stays contained |
+| Group overview / chevron closed, hovered, focused, open | Shared purple secondary background and border match default link at rest/hover; shared 3px focus ring; joined 44px geometry | No overview change at person breakpoint | Same treatment and native in-flow panel | Same treatment across shell breakpoint | Stable header positions; panel spans joined control |
+
+`insight-people.spec.ts` covers person layout at 320, 390, 639, 640, 768, 895, 896, 1440px and computed secondary rest/hover colors, borders and focus alongside existing six-width overview geometry. Period/currency, zero/no winner, old-response compatibility, empty, failed-refresh and same-session offline/cache cases remain covered. Seeded all-time USD, font-ready reference captures support `GROUP_SCREENSHOTS_SKIP_HISTORY=1` to refresh only the eight affected overview/insights images without history churn.
+
 ## Group history, person insights, and top actions
 
 Focused browser coverage in `tests/e2e/insight-people.spec.ts` verifies the Spending insights default destination and native More group actions chevron closed/open, Enter/Space activation and visible keyboard focus, primary-before-admin order, matching 44px control/chevron geometry, stable title/action positions and in-flow panel containment at all six audit widths. At 320px it verifies distinct exact share/paid amounts, USD/EUR selection, positive ties, all-zero/no winner, custom-period selection, empty suppression, compatibility with responses missing people, and cached totals retained after a failed refresh and while offline. A long unbroken historical name and large amounts are checked for both page overflow and person-row clipping. Cached persistence here is same-session resource-cache persistence, not a cold offline reload test.

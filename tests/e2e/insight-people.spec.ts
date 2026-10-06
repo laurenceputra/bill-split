@@ -19,6 +19,19 @@ test('Spending insights split actions stay aligned and in-flow at every audit wi
   for (const width of [320, 390, 768, 895, 896, 1440]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(tools).toHaveJSProperty('open', false);
+    await page.mouse.move(0, 0);
+    const colors = (selector: string) => page.locator(selector).evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, border: style.borderTopColor };
+    });
+    const rest = await colors('.group-insights-control__primary');
+    expect(await colors('.group-overview-tools summary')).toEqual(rest);
+    await insights.hover();
+    const hover = await colors('.group-insights-control__primary');
+    expect(hover.background).not.toBe(rest.background);
+    await tools.locator('summary').hover();
+    expect(await colors('.group-overview-tools summary')).toEqual(hover);
+    await page.mouse.move(0, 0);
     const geometry = await tools.locator('summary').evaluate((element) => {
       const primary = document.querySelector('.group-overview-header .expense-heading__actions')!;
       const style = getComputedStyle(element);
@@ -37,6 +50,10 @@ test('Spending insights split actions stay aligned and in-flow at every audit wi
     await tools.locator('summary').focus();
     await expect(tools.locator('summary')).toBeFocused();
     expect(await tools.locator('summary').evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none');
+    expect(await tools.locator('summary').evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { width: style.outlineWidth, offset: style.outlineOffset };
+    })).toEqual({ width: '3px', offset: '3px' });
     await page.keyboard.press('Enter');
     for (const name of ['Group history', 'Group settings']) await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
     await expect(tools.getByRole('link', { name: /insights/i })).toHaveCount(0);
@@ -81,6 +98,26 @@ test('person totals follow currency and period; ties, zero, old cache and empty 
   await page.getByRole('tab', { name: 'EUR', exact: true }).click();
   await expect(people.locator('.insight-highest-payer')).toHaveText(['Highest payer (tie)', 'Highest payer (tie)']);
   await expect(people.locator('li').first()).toContainText(/Allocated share.*€1\.00.*Paid.*€5\.00/s);
+  for (const width of [320, 390, 639, 640, 768, 895, 896, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    const headings = people.locator('.insight-people-headings');
+    if (width < 640) await expect(headings).toBeHidden();
+    else {
+      await expect(headings).toBeVisible();
+      const layout = await people.evaluate((element) => {
+        const rows = [...element.querySelectorAll('li')];
+        const boxes = rows.map((row) => [...row.children].map((child) => child.getBoundingClientRect()));
+        const headingBoxes = [...element.querySelector('.insight-people-headings')!.children].map((child) => child.getBoundingClientRect());
+        return { width: element.getBoundingClientRect().width, aligned: boxes.every((cells) => cells.every((cell, i) => Math.abs(cell.left - headingBoxes[i].left) < 1 && Math.abs(cell.right - headingBoxes[i].right) < 1)), sameTop: boxes.every((cells) => cells.every((cell) => Math.abs(cell.top - cells[0].top) < 1)), heights: rows.map((row) => row.getBoundingClientRect().height), rightAligned: [...element.querySelectorAll('.insight-person-metric')].every((metric) => getComputedStyle(metric).textAlign === 'right') };
+      });
+      expect(layout.width).toBeLessThanOrEqual(768);
+      expect(layout.aligned).toBe(true);
+      expect(layout.sameTop).toBe(true);
+      expect(layout.rightAligned).toBe(true);
+      for (const height of layout.heights) expect(height).toBeLessThan(100);
+    }
+    await expect(people.locator('.insight-highest-payer')).toHaveText(['Highest payer (tie)', 'Highest payer (tie)']);
+  }
   await page.goto(`${path.replace('period=all', 'period=custom')}&from=2026-01-01&to=2026-01-31`);
   await expect(people).toContainText('Zero payer A');
   await expect(people.locator('.insight-highest-payer')).toHaveCount(0);
@@ -108,6 +145,11 @@ test('cached person totals survive refresh errors and offline; long names and la
   await expect(people).toContainText('2,345,678,901,234.56');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   expect(await people.evaluate((element) => [...element.querySelectorAll<HTMLElement>('li, .money')].every((child) => child.scrollWidth <= child.clientWidth + 1))).toBe(true);
+  for (const width of [390, 639, 640, 768, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await people.evaluate((element) => [...element.querySelectorAll<HTMLElement>('li, .insight-person-identity, .insight-person-metric, .money')].every((child) => child.scrollWidth <= child.clientWidth + 1))).toBe(true);
+  }
   fail = true;
   await page.clock.install();
   await page.clock.fastForward(31_000);

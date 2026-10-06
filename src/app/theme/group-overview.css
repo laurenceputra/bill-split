@@ -228,9 +228,7 @@
   margin-left: auto;
   min-height: var(--control-min-height);
   padding: 0;
-  border: 1px solid var(--color-border);
   border-radius: 0 var(--radius-control) var(--radius-control) 0;
-  background: var(--color-surface);
   cursor: pointer;
   color: var(--color-primary-hover);
   font-weight: 600;
@@ -238,7 +236,6 @@
 }
 
 .group-overview-tools > summary::-webkit-details-marker { display: none; }
-.group-overview-tools > summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
 .group-insights-control {
   display: grid;
