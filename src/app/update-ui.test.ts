@@ -8,6 +8,20 @@ const state = vi.hoisted(() => ({ phase: 'idle', updateReady: false, applying: f
 vi.mock('./service-worker', () => ({ getServiceWorkerUpdateState: () => state, subscribeServiceWorkerUpdate: () => () => undefined, checkForUpdates: vi.fn() }));
 
 describe('App update controls', () => {
+  it.each([true, false])('limits the live region to status text (settings: %s)', (settings) => {
+    state.phase = 'ready'; state.updateReady = true; state.applying = false; state.blocked = false; state.lastSuccess = 1;
+    const markup = renderToStaticMarkup(createElement(ServiceWorkerUpdate, { settings }));
+    expect(markup.match(/role="status"/g)).toHaveLength(1);
+    expect(markup).not.toContain('aria-live');
+    expect(markup).toContain('<div class="update-control"><span role="status">Update ready. It will apply when all tabs are safe and idle.</span>');
+    if (settings) {
+      expect(markup).toMatch(/<\/span><button[^>]*>Check for updates<\/button><small>Last successful check: [^<]+<\/small><\/div>$/);
+    } else {
+      expect(markup).toMatch(/<\/span><\/div>$/);
+    }
+    state.updateReady = false; state.lastSuccess = undefined;
+  });
+
   it.each(['initializing', 'unsupported', 'checking', 'installing', 'applying', 'offline'] as const)('disables checking during %s', (phase) => {
     state.phase = phase;
     const markup = renderToStaticMarkup(createElement(ServiceWorkerUpdate, { settings: true }));

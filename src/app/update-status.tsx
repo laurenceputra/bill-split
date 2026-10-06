@@ -14,7 +14,7 @@ export function UpdateStatus({ update, settings = false, onCheck }: { update: Se
     deferred: 'Refresh waiting until your work is safe.',
   };
   const disabled = ['initializing', 'unsupported', 'checking', 'installing', 'applying', 'offline'].includes(update.phase);
-  return createElement('div', { className: 'update-control', 'aria-live': 'polite' },
+  return createElement('div', { className: 'update-control' },
     createElement('span', { role: 'status' }, messages[update.phase]),
     settings ? createElement('button', { className: 'update-action', type: 'button', disabled, onClick: onCheck }, update.phase === 'check-error' || update.phase === 'install-error' ? 'Retry update check' : 'Check for updates') : null,
     settings ? createElement('small', null, update.lastSuccess ? `Last successful check: ${new Date(update.lastSuccess).toLocaleString()}` : 'No successful update check yet.') : null);
