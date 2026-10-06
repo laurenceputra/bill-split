@@ -55,6 +55,8 @@ export interface SpendingInsightSummary {
   yourShareMinor: number;
   youPaidMinor: number;
   expenseCount: number;
+  /** Gross expense allocations and payments; group scope only, not current balances. */
+  people?: Array<{ personId: string; name: string; shareMinor: number; paidMinor: number }>;
 }
 export interface SpendingInsightCategoryTrend {
   currency: Currency;

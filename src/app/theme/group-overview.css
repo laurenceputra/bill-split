@@ -211,14 +211,18 @@
 }
 
 .group-overview-tools {
-  display: grid;
-  gap: var(--space-3);
-  margin: var(--space-4) 0 0;
-  border-top: 1px solid var(--color-divider);
-  padding-top: var(--space-2);
+  margin: 0;
+  min-width: 0;
 }
 
+.group-heading-actions { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-2); min-width: 0; }
 .group-overview-tools > summary {
+  min-height: var(--control-min-height);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  cursor: pointer;
   color: var(--color-primary-hover);
   font-weight: 600;
 }

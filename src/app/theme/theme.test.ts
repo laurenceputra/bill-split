@@ -224,7 +224,7 @@ describe('Warm Ledger visual system', () => {
     expect(appSource).toContain('<section className="activity-filter reading-width"');
     expect(appSource).toContain('aria-labelledby="insight-summary-heading"');
     expect(appSource).toContain('aria-labelledby="balances-heading"');
-    expect(appSource).toContain('summary="More group actions"');
+    expect(appSource).toContain('summary="More actions"');
     expect(auditSource).toContain('const surfaceRootSelector =');
     for (const width of [320, 390, 768, 895, 896, 1440]) expect(auditSource).toContain(`{ width: ${width},`);
     expect(auditSource).toContain('full canonical responsive coverage');

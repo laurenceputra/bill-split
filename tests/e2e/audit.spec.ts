@@ -1105,7 +1105,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
                const tools = page.locator('.group-overview-tools');
                await tools.locator('summary').click();
                await expect(tools).toHaveJSProperty('open', true);
-               for (const linkName of ['View spending insights', 'Record credit', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
+                for (const linkName of ['View spending insights', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
                const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-open', context: 'GroupOverview / More group actions disclosure open', expected: { ...scenario.expected, content: 'View spending insights' } };
                await assertRendered(page, toolsScenario, observations, viewport);
                coverage.push({ scenarioName: toolsScenario.name, authState: authState(toolsScenario.auth), route: `${scenario.path} [More group actions open]`, viewport, context: toolsScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
@@ -1486,8 +1486,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     expect(geometry.metaFontSize).toBeLessThanOrEqual(16);
     expect(geometry.headerToGrid).toBeGreaterThanOrEqual(8);
     expect(geometry.headerToGrid).toBeLessThanOrEqual(40);
-    expect(geometry.gridToTools).toBeGreaterThanOrEqual(8);
-    expect(geometry.gridToTools).toBeLessThanOrEqual(40);
+    expect(geometry.gridToTools).toBeLessThan(0);
     expect(geometry.cards.every((card) => card.radius >= 8 && card.radius <= 16 && card.padding >= 12 && card.padding <= 24 && card.border >= 1 && card.background !== 'rgba(0, 0, 0, 0)' && card.shadow === 'none')).toBe(true);
     expect(geometry.actionSizes.every((action) => action.height >= 44)).toBe(true);
     expect(geometry.actionGroupWithinHeader).toBe(true);
@@ -1509,9 +1508,9 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     expect(geometry.peopleOverflow).toMatch(/^\+\d+ more people$/);
     expect(geometry.nestedPaint).toBe(0);
     expect(geometry.firstActionBeforeCard).toBe(true);
-    expect(geometry.toolsAfterCards).toBe(true);
-    expect(geometry.focusableOrder.at(-1)).toBe('tools');
-    expect([...new Set(geometry.focusableOrder)]).toEqual(['balances', 'transactions', 'schedules', 'people', 'tools']);
+    expect(geometry.toolsAfterCards).toBe(false);
+    expect(geometry.focusableOrder[0]).toBe('tools');
+    expect([...new Set(geometry.focusableOrder)]).toEqual(['tools', 'balances', 'transactions', 'schedules', 'people']);
     expect(geometry.focusableOrder.filter((value) => value === 'balances').length).toBeGreaterThan(0);
     expect(geometry.focusableOrder.filter((value) => value === 'transactions').length).toBeGreaterThan(0);
     if (viewport.width < 896) expect(geometry.columns).toBe(1);
@@ -1519,7 +1518,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
 
     await page.locator('.group-overview-tools summary').click();
     await expect(page.getByRole('link', { name: 'View spending insights' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Record credit' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Record credit' })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Group history' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Group settings' })).toBeVisible();
   }
@@ -1545,18 +1544,26 @@ test('representative frequent/admin flow regions keep a primary action and a non
             const box = element.getBoundingClientRect();
             return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
           };
-          const regions = (selector: string) => Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(visible).map((element) => ({ element, top: element.getBoundingClientRect().top, bottom: element.getBoundingClientRect().bottom }));
+          const regions = (selector: string) => Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(visible).map((element) => {
+            const { top, bottom, left, right } = element.getBoundingClientRect();
+            return { element, top, bottom, left, right };
+          });
           const frequent = regions('[data-flow-region="frequent"]');
           const admin = regions('[data-flow-region="admin"]');
           const primary = frequent.filter(({ element }) => element.querySelector('[data-primary-action="true"],button[type="submit"],a.button:not(.button--secondary):not(.button--danger)'));
           const all = [...frequent.map((region) => ({ ...region, kind: 'frequent' })), ...admin.map((region) => ({ ...region, kind: 'admin' }))].sort((first, second) => first.element.compareDocumentPosition(second.element) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
-          const gaps = all.slice(1).map((region, index) => region.top - all[index].bottom);
-          return { frequentCount: frequent.length, adminCount: admin.length, primaryCount: primary.length, invalidOrder: all.some((region, index) => region.kind === 'admin' && all.slice(index + 1).some((next) => next.kind === 'frequent')), gaps, documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), viewportWidth: window.innerWidth, requiredFrequent: frequentSelector, requiredAdmin: adminSelector };
+          // Compact header controls may sit beside each other. Reject intersections
+          // on both axes, including non-adjacent regions, rather than requiring stacking.
+          const overlaps = all.flatMap((region, index) => all.slice(index + 1).filter((next) =>
+            Math.min(region.right, next.right) - Math.max(region.left, next.left) > 1 &&
+            Math.min(region.bottom, next.bottom) - Math.max(region.top, next.top) > 1
+          ).map((next) => ({ first: region.kind, second: next.kind })));
+          return { frequentCount: frequent.length, adminCount: admin.length, primaryCount: primary.length, invalidOrder: all.some((region, index) => region.kind === 'admin' && all.slice(index + 1).some((next) => next.kind === 'frequent')), overlaps, boxes: all.map(({ kind, top, bottom, left, right }) => ({ kind, top, bottom, left, right })), documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth), viewportWidth: window.innerWidth, requiredFrequent: frequentSelector, requiredAdmin: adminSelector };
         }, { frequentSelector: route.frequent, adminSelector: route.admin });
         expect(flow.frequentCount, `${route.name} @ ${viewport.width}px frequent regions`).toBeGreaterThan(0);
         expect(flow.primaryCount, `${route.name} @ ${viewport.width}px primary actions`).toBeGreaterThan(0);
         expect(flow.invalidOrder, `${route.name} @ ${viewport.width}px primary/admin order`).toBe(false);
-        expect(flow.gaps.every((gap) => gap >= -1), `${route.name} @ ${viewport.width}px overlapping flow regions`).toBe(true);
+        expect(flow.overlaps, `${route.name} @ ${viewport.width}px overlapping flow regions: ${JSON.stringify(flow.boxes)}`).toEqual([]);
         expect(flow.documentWidth, `${route.name} @ ${viewport.width}px document overflow`).toBeLessThanOrEqual(flow.viewportWidth + 1);
       });
     }

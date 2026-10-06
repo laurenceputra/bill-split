@@ -45,10 +45,11 @@ class InsightsRouteStatement extends MemberStatement {
     if (this.sql.includes('SELECT group_id,MAX(group_name)')) return { results: [{ group_id: 'group-1', group_name: 'Group', currency: 'USD', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, you_paid_minor: 600, expense_count: 2 }] as T[] };
     if (this.sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: this.trendRows as T[] };
     if (this.sql.includes('category_rows') || this.sql.includes('substr(expense_date')) return { results: [{ currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
-    return { results: [{ currency: 'USD', person_id: 'person-1', person_name: 'Dev', share_minor: 400 }] as T[] };
+    return { results: [{ currency: 'USD', person_id: 'person-1', name: 'Dev', share_minor: 400, paid_minor: 600 }] as T[] };
   }
 }
 class InsightsRouteDb {
+  async batch(statements: InsightsRouteStatement[]) { return Promise.all(statements.map((statement) => statement.all())); }
   trendRows: unknown[] = [{ group_id: 'group-1', currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }];
   prepare(sql: string) { return new InsightsRouteStatement(sql, this.trendRows); }
 }

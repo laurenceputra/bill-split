@@ -1,5 +1,15 @@
 # Warm Ledger responsive audit matrix
 
+## Group history, person insights, and top actions
+
+Focused browser coverage in `tests/e2e/insight-people.spec.ts` verifies button-like native More actions closed/open, primary-before-admin order, touch height and no page overflow at all six audit widths. At 320px it verifies distinct exact share/paid amounts, USD/EUR selection, positive ties, all-zero/no winner, custom-period selection, empty suppression, compatibility with responses missing people, and cached totals retained after a failed refresh and while offline. A long unbroken historical name and large amounts are checked for both page overflow and person-row clipping. Cached persistence here is same-session resource-cache persistence, not a cold offline reload test.
+
+At **320, 390, 768, 895, 896, 1440px**, audit the overview with **More actions closed and open**: Add expense and Settle up precede the separate admin region; the native in-flow disclosure contains spending insights, history, and settings without duplicate Record credit. Links and summary retain 44px touch targets and wrap without horizontal overflow.
+
+At the same widths, audit group Changes, Transactions, and Insights: the authorized selected group's Back to group link precedes filters, updates on selection, and disappears for All groups or unavailable groups. Cached authorized group data retains this context. Person insights show allocated share and paid independently for the selected summary period/currency, including tied highest payers and no highest payer for all-zero data. Names and amounts wrap at narrow widths.
+
+State checks for these views: loading shows no invented person totals; cached/offline summaries retain person totals and notices; empty periods show no person list; cold errors show retry rather than totals; stale errors retain cached totals with notices. Overview loading/unavailable states do not expose management actions without group data. Older cached summaries without person details omit the list until refreshed. These are audit requirements, not claims of completed browser coverage; focused seeded checks cover context and person lists at 320/1440 and global insights at all six widths.
+
 Canonical audit widths are **320, 390, 768, 895, 896, and 1440px**. The
 private shell keeps the mobile bottom navigation through 895px and switches to
 the desktop top navigation and two-column group overview at 896px.
