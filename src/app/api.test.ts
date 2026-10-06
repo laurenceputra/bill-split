@@ -3,11 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, convertNamedToPeerGroup, coordinateAuthBootstrap, createGroup, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getSpendingInsightSummary, getSpendingInsightTrends, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, provisionalAddRoute, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
 import { enqueueExpense } from './outbox';
-import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveOfflineTrust, saveVerifiedIdentity } from './idb';
+import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity } from './idb';
 import { readGroupSnapshot, updateGroupSnapshot } from './idb';
 import { configureResource, getResourceSnapshot, invalidateForMutation, revalidate, resourceKeys, seedResource } from './resource-cache';
 import { adoptSessionGeneration, captureSessionGeneration, clearSessionLogout, getSessionLogoutInProgress } from './session';
 import { isMutationBarrierActive, releaseMutationBarrier } from './mutation-quiescence';
+import { acquireReloadGate, getReloadSafetyState, releaseReloadGate } from './reload-safety';
 
 const markerKey = 'billsplit-pending-account-deletion';
 const storageFor = (values: Map<string, string>, setItem: (key: string, value: string) => void = (key, value) => { values.set(key, value); }) => ({
@@ -33,6 +34,66 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('cancels update preparation for an adopted remote logout and completes durable cleanup', async () => {
+    await establishAuthenticatedMutationSession();
+    await saveGroups({ userId: 'mutation-user', groups: [], cachedAt: new Date().toISOString() });
+    await saveOutboxItem({ clientOperationId: 'remote-logout-queue', userId: 'mutation-user', groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD', date: '2026-01-01', payers: [{ person_id: 'mutation-person', amount_minor: 100 }], splits: [{ person_id: 'mutation-person', amount_minor: 100 }], client_operation_id: 'remote-logout-queue' }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: '', updatedAt: '', status: 'pending', attempts: 0 });
+    let resolveGroups!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn((path: RequestInfo | URL) => String(path).endsWith('/me')
+      ? Promise.resolve(json({ id: 'mutation-user', email: 'mutation@example.com', personId: 'mutation-person' }, 200, 'mutation-user', 'clerk-original'))
+      : new Promise<Response>((resolve) => { resolveGroups = resolve; })));
+    const lateGroups = getGroups();
+    const lateResult = lateGroups.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(resolveGroups).toBeTypeOf('function'));
+    const epoch = getAuthEpoch();
+    const generation = captureSessionGeneration();
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('remote-logout-test', 1_000)).toBe(true);
+    try {
+      adoptSessionGeneration(generation + 1);
+      expect(getReloadSafetyState().gated).toBe(false);
+      expect(getReloadSafetyState().operations).toBeGreaterThan(0);
+      expect(getAuthEpoch()).toBeGreaterThan(epoch);
+      await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+      expect(await readGroups('mutation-user')).toBeUndefined();
+      expect(await readOfflineTrust()).toBeUndefined();
+      resolveGroups(json({ groups: [] }, 200, 'mutation-user'));
+      await expect(lateResult).resolves.toMatchObject({ code: 'AUTH_REQUIRED' });
+      await expect(saveGroups({ userId: 'mutation-user', groups: [], cachedAt: '' }, generation)).rejects.toThrow('local session changed');
+      expect(await readGroups('mutation-user')).toBeUndefined();
+      expect(await listOutbox('mutation-user')).toHaveLength(1);
+      expect(getAuthLifecycle().status).toBe('unauthenticated');
+      expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
+      expect(finalizeSuccessfulClerkSignOut()).toBe(true);
+      expect(getSessionLogoutInProgress()).toBe(false);
+      expect(isMutationBarrierActive()).toBe(false);
+    } finally { releaseReloadGate('remote-logout-test'); clearSessionLogout(undefined, false, true); releaseMutationBarrier(); vi.restoreAllMocks(); }
+  });
+
+  it('keeps update preparation separate from auth invalidation and destructive logout', async () => {
+    await establishAuthenticatedMutationSession();
+    const lifecycle = getAuthLifecycle();
+    const epoch = getAuthEpoch();
+    const generation = captureSessionGeneration();
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('api-test', 1_000)).toBe(true);
+    const fetch = vi.fn();
+    const providerDelete = vi.fn(async () => undefined);
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await expect(createGroup({ name: 'Blocked', currency: 'USD' })).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(deleteAccount('clerk-original')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(deleteClerkUserIfSupported({ delete: providerDelete })).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(clearEverythingForLogout(false)).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(providerDelete).not.toHaveBeenCalled();
+      expect(getAuthLifecycle()).toEqual(lifecycle);
+      expect(getAuthEpoch()).toBe(epoch);
+      expect(captureSessionGeneration()).toBe(generation);
+      expect(getSessionLogoutInProgress()).toBe(false);
+    } finally { releaseReloadGate('api-test'); vi.restoreAllMocks(); }
+  });
+
   it('defines trusted offline cache contracts for global and contextual Add routes', () => {
     expect(provisionalAddRoute('/add')).toEqual({ scope: 'global' });
     expect(provisionalAddRoute('/groups/group%2Fone/add')).toEqual({ scope: 'group', groupId: 'group/one' });

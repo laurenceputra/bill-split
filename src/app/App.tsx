@@ -30,9 +30,15 @@ import { getGroupCreditCsvExportPage } from './api';
 import { localBrowserDate } from './credit-form';
 import { categoryTrendStatus, effectiveInsightCurrency, insightActivitySpanText, insightCategoryColor, insightComparisonDateRange, insightCurrencies, insightDisplayedTrendMonths, insightTrendBarHeight, insightTrendDateRange, insightTrendMaximum, insightTrendMonthLabel, insightTrendMonths, insightTrendReferenceLabel, insightTrendValue, readInsightFilters, topCategoryTrends, validInsightRange, type InsightFilters } from './spending-insights';
 import { RefundCreateRoute, RefundEditRoute } from './refund-form';
+import { useReloadBlocker } from './reload-safety-react';
+import { beginProtectedOperation, createReloadBlocker, runProtectedOperation } from './reload-safety';
+import { ServiceWorkerUpdate } from './ui';
+import { configureServiceWorkerUpdates } from './service-worker';
 
 const today = () => localBrowserDate();
 const operationId = () => crypto.randomUUID();
+const confirm = (message: string) => { const release = beginProtectedOperation('Confirmation dialog'); try { return window.confirm(message); } finally { release(); } };
+const prompt = (message: string, value: string) => { const release = beginProtectedOperation('Confirmation dialog'); try { return window.prompt(message, value); } finally { release(); } };
 const errorText = (error: unknown) => error instanceof ApiError && error.networkFailure ? (error.reconnectRequired ? 'Connection issue. Retry when the connection is available; your pending expense remains retryable.' : 'You appear to be offline. Only new expenses can be queued; edits, deletes, settlements, and membership changes require a connection.') : error instanceof Error ? error.message : 'Something went wrong';
 function Loading() { return <ResourceState state="loading" className="muted">Loading…</ResourceState>; }
 function HomeLoadingPlaceholder() {
@@ -73,11 +79,11 @@ function PublicLanding({ logoutError, accountDeletionNotice }: { logoutError?: u
   const { signOut } = useClerk();
   const [retryingSignOut, setRetryingSignOut] = useState(false);
    const returnTo = `${location.pathname}${location.search}${location.hash}`;
-  const retrySignOut = async () => {
+  const retrySignOut = () => runProtectedOperation(async () => {
     setRetryingSignOut(true);
     try { await signOut({ redirectUrl: '/' }); finalizeSuccessfulClerkSignOut(); }
     catch (cause) { recoverAfterClerkSignOutFailure(cause); setRetryingSignOut(false); }
-  };
+  }, 'Signing out');
   return <PublicShell returnTo={returnTo}>
     <div className="landing-page">
        <section className="landing-hero" aria-labelledby="landing-title">
@@ -139,7 +145,7 @@ function PendingInvitations({ userId, online }: { userId?: string; online: boole
   const [busyId, setBusyId] = useState<string>();
   const [error, setError] = useState<unknown>();
   const invitations = invitationsResource.data?.invitations || [];
-  const respond = async (invitation: GroupInvitation, action: 'accept' | 'reject') => {
+  const respond = (invitation: GroupInvitation, action: 'accept' | 'reject') => runProtectedOperation(async () => {
     if (!online || busyId) return;
     setBusyId(invitation.id); setError(undefined);
     try {
@@ -154,7 +160,7 @@ function PendingInvitations({ userId, online }: { userId?: string; online: boole
       }
     } catch (cause) { setError(cause); }
     finally { setBusyId(undefined); }
-  };
+  }, 'Responding to invitation');
   if (!invitations.length && !error) return null;
   return <Surface className="invitations"><SectionHeader title="Pending invitations" description="Matched to your verified email" /><LedgerList label="Pending invitations">{invitations.map((invitation) => <LedgerRow key={invitation.id}><span><strong>{invitation.email}</strong><small>Expires {new Date(invitation.expiresAt).toLocaleDateString()}</small></span><ActionGroup className="actions"><Button type="button" disabled={!online || busyId === invitation.id} onClick={() => void respond(invitation, 'accept')}>{busyId === invitation.id ? 'Working…' : 'Accept'}</Button><Button type="button" variant="secondary" disabled={!online || busyId === invitation.id} onClick={() => void respond(invitation, 'reject')}>Reject</Button></ActionGroup></LedgerRow>)}</LedgerList>{error ? <ErrorBox error={error} id="invitation-response-error" /> : null}{!online ? <p className="muted">Invitation responses require a connection.</p> : null}</Surface>;
 }
@@ -184,20 +190,24 @@ function GroupSettings({ group, groupId, userId, online, role, activeMemberCount
   const [currency, setCurrency] = useState<Currency>(group.currency);
   const [busy, setBusy] = useState<'save' | 'delete' | 'leave' | 'convert'>();
   const [error, setError] = useState<unknown>();
-  useEffect(() => { setName(managementKind === 'peer' ? '' : group.name); setCurrency(group.currency); }, [group.currency, group.name, managementKind]);
-  const save = async (event: FormEvent) => {
+  const settingsBaseline = useRef({ name: managementKind === 'peer' ? '' : group.name, currency: group.currency });
+  const settingsDirty = name !== settingsBaseline.current.name || currency !== settingsBaseline.current.currency;
+  useReloadBlocker(settingsDirty, 'Unsaved group settings');
+  useEffect(() => { if (!settingsDirty) { const next = { name: managementKind === 'peer' ? '' : group.name, currency: group.currency }; settingsBaseline.current = next; setName(next.name); setCurrency(next.currency); } }, [group.currency, group.name, managementKind]);
+  const save = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     if (!online || busy || conversionBusy || !name.trim()) return;
     setBusy('save'); setError(undefined);
     try {
       await updateGroup(groupId, { name: name.trim(), currency });
+      settingsBaseline.current = { name: name.trim(), currency }; setName(name.trim());
       await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration());
     } catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
-  const remove = async () => {
+  }, 'Saving group');
+  const remove = () => runProtectedOperation(async () => {
     if (!online || busy || conversionBusy) return;
-    const confirmation = window.prompt(`Type the group name exactly to delete “${displayName}”. This is a soft-delete and can be purged after 30 days.`, '');
+    const confirmation = prompt(`Type the group name exactly to delete “${displayName}”. This is a soft-delete and can be purged after 30 days.`, '');
     if (confirmation !== displayName) return;
     setBusy('delete'); setError(undefined);
     try {
@@ -206,30 +216,30 @@ function GroupSettings({ group, groupId, userId, online, role, activeMemberCount
       await invalidateForMutation.groupDeleted(groupId, userId, generation);
       onDeleted();
     } catch (cause) { setError(cause); setBusy(undefined); }
-  };
-  const leave = async () => {
+  }, 'Deleting group');
+  const leave = () => runProtectedOperation(async () => {
     if (!online || busy || conversionBusy || !confirm(`Leave ${displayName}? You will lose access to this group. Historical transactions are retained for the group.`)) return;
     setBusy('leave'); setError(undefined);
     try { const generation = captureSessionGeneration(); await leaveGroup(groupId); await invalidateForMutation.groupLeft(groupId, userId, generation); onLeft(); }
     catch (cause) { setError(cause); setBusy(undefined); }
-  };
-  const convert = async (event: FormEvent) => {
+  }, 'Leaving group');
+  const convert = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     if (!online || busy || conversionBusy || !name.trim()) { if (!name.trim()) setError(new Error('Enter a name for the named group.')); return; }
     setBusy('convert'); setError(undefined);
     onConversionBusyChange?.(true);
-    try { const result = await convertPeerToNamedGroup(groupId, name.trim()); await applyConfirmedGroup(groupId, userId, result.group); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
+    try { const result = await convertPeerToNamedGroup(groupId, name.trim()); settingsBaseline.current = { name: result.group.name, currency: result.group.currency }; setName(result.group.name); setCurrency(result.group.currency); await applyConfirmedGroup(groupId, userId, result.group); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
     catch (cause) { setError(cause); }
     finally { onConversionBusyChange?.(false); setBusy(undefined); }
-  };
-  const convertToPeer = async () => {
+  }, 'Converting group');
+  const convertToPeer = () => runProtectedOperation(async () => {
     if (!online || busy || conversionBusy || activeMemberCount !== 2 || pendingGenericInvitation !== false || !confirm(`Convert “${displayName}” to a peer relationship?`)) return;
     setBusy('convert'); setError(undefined);
     onConversionBusyChange?.(true);
-    try { const result = await convertNamedToPeerGroup(groupId); await applyConfirmedGroup(groupId, userId, result.group); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
+    try { const result = await convertNamedToPeerGroup(groupId); settingsBaseline.current = { name: '', currency: result.group.currency }; setName(''); setCurrency(result.group.currency); await applyConfirmedGroup(groupId, userId, result.group); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
     catch (cause) { setError(cause); }
     finally { onConversionBusyChange?.(false); setBusy(undefined); }
-  };
+  }, 'Converting group');
   const relationshipSettings = managementKind === 'named' ? <section className="group-relationship-settings" aria-labelledby="relationship-type-heading"><SectionHeader title={<span id="relationship-type-heading">Relationship type</span>} description="Owner-only" /><p className="muted">Peer relationships use the other participant’s name as the ledger name and cannot add more people until converted back to a named group.</p>{activeMemberCount === 2 && pendingGenericInvitation === false ? <Button type="button" disabled={!online || Boolean(busy)} onClick={() => void convertToPeer()}>{busy === 'convert' ? 'Converting…' : 'Convert to peer relationship'}</Button> : <div className="muted" role="status"><p>Peer conversion is currently unavailable:</p><ul>{activeMemberCount !== 2 ? <li>Exactly two active ledger participants are required.</li> : null}{pendingGenericInvitation === true ? <li>Revoke pending generic group invitations first.</li> : null}{pendingGenericInvitation === undefined ? <li>Reconnect to confirm the group invitation status.</li> : null}</ul></div>}</section> : null;
   if (role === 'member') return <section className="group-settings"><SectionHeader title="Group settings" description="Member · online-only" /><p className="muted">You can leave this group at any time. The owner must transfer ownership before leaving.</p><ActionGroup className="actions"><Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void leave()}>{busy === 'leave' ? 'Leaving…' : 'Leave group'}</Button></ActionGroup>{error ? <ErrorBox error={error} id="group-settings-error" /> : null}</section>;
     return <section className="group-settings"><SectionHeader title="Group settings" description="Owner · online-only" />{managementKind === 'peer' ? <><p className="muted">This peer ledger is for you and one other participant. Convert it to a named group to add more people and use normal group invitations.</p><form onSubmit={convert} aria-describedby={error ? 'group-settings-error' : undefined}><Field label="New group name"><input required value={name} onChange={(event) => setName(event.target.value)} /></Field><Button type="submit" disabled={!online || Boolean(busy)}>{busy === 'convert' ? 'Converting…' : 'Convert to named group'}</Button></form></> : managementKind === 'unknown' ? <p className="muted" role="status">Group type is unavailable in this cached snapshot. Reconnect before changing group settings.</p> : <><p className="muted">Changing the default currency does not convert existing expenses or settlements. Existing transactions keep their original currency.</p><form onSubmit={save} aria-describedby={error ? 'group-settings-error' : undefined}><Field label="Group name"><input required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Default currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><Button type="submit" disabled={!online || busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save settings'}</Button></form>{relationshipSettings}</> }<ActionGroup className="actions"><Button type="button" variant="danger" disabled={!online || Boolean(busy)} onClick={() => void remove()}>{busy === 'delete' ? 'Deleting…' : 'Delete group'}</Button></ActionGroup>{error ? <ErrorBox error={error} id="group-settings-error" /> : null}<p className="muted">Deleting a group is a soft-delete. It is retained for 30 days before cleanup and removes it from your active groups.</p></section>;
@@ -249,30 +259,30 @@ function GroupExports({ groupId, online }: { groupId: string; online: boolean })
   const [error, setError] = useState<unknown>();
   const controller = useRef<AbortController>();
   const cancel = () => controller.current?.abort();
-  const exportJson = async () => {
+  const exportJson = () => runProtectedOperation(async () => {
     if (!online || busy) return; setBusy('json'); setError(undefined); setProgress('Starting…'); const abort = new AbortController(); controller.current = abort;
      try { const result = await collectPagedGroupExport((cursors, signal) => getGroupExportPage(groupId, { limit: 50, ...cursors }, signal), abort.signal, (count) => setProgress(`Fetched page ${count}`)); await saveDownload(new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), ...result })], { type: 'application/json' }), 'billsplit-group.json'); }
     catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(cause); else setProgress('Cancelled'); }
     finally { controller.current = undefined; setBusy(undefined); }
-  };
-  const exportCsv = async () => {
+  }, 'Exporting group');
+  const exportCsv = () => runProtectedOperation(async () => {
     if (!online || busy) return; setBusy('csv'); setError(undefined); setProgress('Starting…'); const abort = new AbortController(); controller.current = abort;
       try { const pages = await collectPagedExport(async (cursor, signal) => { const page = await getGroupCsvExportPage(groupId, { limit: 100, cursor }, signal); return { items: [await page.blob.text()], nextCursor: page.nextCursor }; }, abort.signal, (count) => setProgress(`Fetched page ${count}`)); await saveDownload(new Blob([assembleCsvPages(pages, 'date,description,amount_minor,currency,payers,splits')], { type: 'text/csv;charset=utf-8' }), 'billsplit-expenses.csv'); }
     catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(cause); else setProgress('Cancelled'); }
     finally { controller.current = undefined; setBusy(undefined); }
-  };
-  const exportSettlements = async () => {
+  }, 'Exporting expenses');
+  const exportSettlements = () => runProtectedOperation(async () => {
     if (!online || busy) return; setBusy('settlements'); setError(undefined); setProgress('Starting…'); const abort = new AbortController(); controller.current = abort;
       try { const pages = await collectPagedExport(async (cursor, signal) => { const page = await getGroupSettlementCsvExportPage(groupId, { limit: 100, cursor }, signal); return { items: [await page.blob.text()], nextCursor: page.nextCursor }; }, abort.signal, (count) => setProgress(`Fetched page ${count}`)); await saveDownload(new Blob([assembleCsvPages(pages, 'date,from_person,to_person,amount_minor,currency,note')], { type: 'text/csv;charset=utf-8' }), 'billsplit-settlements.csv'); }
     catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(cause); else setProgress('Cancelled'); }
     finally { controller.current = undefined; setBusy(undefined); }
-  };
-  const exportCredits = async () => {
+  }, 'Exporting settlements');
+  const exportCredits = () => runProtectedOperation(async () => {
     if (!online || busy) return; setBusy('credits'); setError(undefined); setProgress('Starting…'); const abort = new AbortController(); controller.current = abort;
     try { const pages = await collectPagedExport(async (cursor, signal) => { const page = await getGroupCreditCsvExportPage(groupId, { limit: 100, cursor }, signal); return { items: [await page.blob.text()], nextCursor: page.nextCursor }; }, abort.signal, (count) => setProgress(`Fetched page ${count}`)); await saveDownload(new Blob([assembleCsvPages(pages, 'date,subtype,delivery_mode,amount_minor,currency,applications,allocations,note')], { type: 'text/csv;charset=utf-8' }), 'billsplit-credits.csv'); }
     catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(cause); else setProgress('Cancelled'); }
     finally { controller.current = undefined; setBusy(undefined); }
-  };
+  }, 'Exporting refunds');
   return <section className="export-controls" data-flow-region="admin"><SectionHeader title="Export" description="Paged, connection required" /><p className="muted">Exports fetch bounded pages and can be cancelled before download.</p><ActionGroup className="actions"><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportJson()}>{busy === 'json' ? 'Exporting JSON…' : 'Export JSON'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportCsv()}>{busy === 'csv' ? 'Exporting expenses CSV…' : 'Export expenses CSV'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportSettlements()}>{busy === 'settlements' ? 'Exporting settlements CSV…' : 'Export settlements CSV'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportCredits()}>{busy === 'credits' ? 'Exporting credits CSV…' : 'Export credits CSV'}</Button>{busy ? <Button type="button" variant="danger" onClick={cancel}>Cancel</Button> : null}</ActionGroup>{progress ? <p className="cache-status" role="status">{progress}</p> : null}{error ? <ErrorBox error={error} id="export-error" /> : null}</section>;
 }
 
@@ -306,7 +316,8 @@ function CreationPageLayout({ eyebrow, title, children }: { eyebrow: string; tit
 function FriendCreationPage() {
   const online = useOnlineStatus(); const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses); const nav = useNavigate();
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [currency, setCurrency] = useState<Currency>('USD'); const [busy, setBusy] = useState(false); const [error, setError] = useState<unknown>(); const [op] = useState(operationId);
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!online || busy) return; if (!name.trim()) { setError(new Error('Enter a friend name.')); return; } setBusy(true); setError(undefined); try { const result = await createFriend({ name: name.trim(), email: email.trim() || undefined, currency, client_operation_id: op }); await invalidateForMutation.groupCreated(me.data?.id, captureSessionGeneration()); nav(`/groups/${result.group.id}`); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  useReloadBlocker(Boolean(name || email || currency !== 'USD'), 'Unsaved friend');
+  const submit = (event: FormEvent) => runProtectedOperation(async () => { event.preventDefault(); if (!online || busy) return; if (!name.trim()) { setError(new Error('Enter a friend name.')); return; } setBusy(true); setError(undefined); try { const result = await createFriend({ name: name.trim(), email: email.trim() || undefined, currency, client_operation_id: op }); await invalidateForMutation.groupCreated(me.data?.id, captureSessionGeneration()); nav(`/groups/${result.group.id}`); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Creating friend');
   return <CreationPageLayout eyebrow="New connection" title="Add friend">{!online ? <ConnectionBanner detail="Friend creation requires a connection." /> : null}<FormSurface className="creation-form-surface"><p className="muted">The signed-in account is added as the owner. An email only creates a targeted invitation; it does not grant access until accepted.</p><form onSubmit={submit} aria-describedby={error ? 'create-friend-error' : undefined}><Field label="Friend name"><input id="friend-name" required value={name} onChange={(event) => { setError(undefined); setName(event.target.value); }} /></Field><Field label="Email (optional)"><input id="friend-email" className="email" type="email" value={email} onChange={(event) => { setError(undefined); setEmail(event.target.value); }} /></Field><Field label="Currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field>{error ? <ErrorBox error={error} id="create-friend-error" /> : null}<ActionGroup className="actions" region="frequent"><Button type="submit" data-primary-action="true" disabled={!online || busy}>{busy ? 'Adding…' : 'Add friend'}</Button><Link className="button button--secondary" to="/">Cancel</Link></ActionGroup></form></FormSurface></CreationPageLayout>;
 }
 
@@ -314,27 +325,28 @@ function GroupCreationPage() {
   const online = useOnlineStatus(); const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses); const nav = useNavigate();
   const [name, setName] = useState(''); const [currency, setCurrency] = useState<Currency>('USD'); const [people, setPeople] = useState<PersonDraft[]>(() => [{ id: operationId(), name: '', email: '' }]); const [busy, setBusy] = useState(false); const [error, setError] = useState<unknown>(); const [op] = useState(operationId);
   const updatePerson = (id: string, patch: Partial<PersonDraft>) => setPeople((current) => current.map((person) => person.id === id ? { ...person, ...patch } : person));
-  const submit = async (event: FormEvent) => { event.preventDefault(); if (!online || busy) return; if (!name.trim()) { setError(new Error('Enter a group name.')); return; } if (people.some((person) => !person.name.trim())) { setError(new Error('Enter a name for every participant.')); return; } setBusy(true); setError(undefined); try { const result = await createGroup({ name: name.trim(), currency, people: people.map((person) => ({ name: person.name.trim(), email: person.email.trim() || undefined })), client_operation_id: op }); await invalidateForMutation.groupCreated(me.data?.id, captureSessionGeneration()); nav(`/groups/${result.group.id}`); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  useReloadBlocker(Boolean(name || currency !== 'USD' || people.length !== 1 || people.some((person) => person.name || person.email)), 'Unsaved group');
+  const submit = (event: FormEvent) => runProtectedOperation(async () => { event.preventDefault(); if (!online || busy) return; if (!name.trim()) { setError(new Error('Enter a group name.')); return; } if (people.some((person) => !person.name.trim())) { setError(new Error('Enter a name for every participant.')); return; } setBusy(true); setError(undefined); try { const result = await createGroup({ name: name.trim(), currency, people: people.map((person) => ({ name: person.name.trim(), email: person.email.trim() || undefined })), client_operation_id: op }); await invalidateForMutation.groupCreated(me.data?.id, captureSessionGeneration()); nav(`/groups/${result.group.id}`); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Creating group');
   return <CreationPageLayout eyebrow="New shared ledger" title="New group">{!online ? <ConnectionBanner detail="Group creation requires a connection." /> : null}<FormSurface className="creation-form-surface"><p className="muted">You are the owner. Added people start as ledger-only participants; a targeted invitation is created when an email is supplied.</p><form onSubmit={submit} aria-describedby={error ? 'create-group-error' : undefined}><Field label="Group name"><input id="group-name" required value={name} onChange={(event) => { setError(undefined); setName(event.target.value); }} /></Field><Field label="Currency"><CurrencySelect value={currency} onChange={setCurrency} /></Field><fieldset><legend>People</legend><div className="participant-list"><div className="checkbox-row"><strong>You</strong><span className="muted">Owner</span></div>{people.map((person, index) => <div className="creation-person" key={person.id}><strong>Person {index + 1}</strong><Field label="Name"><input required value={person.name} onChange={(event) => updatePerson(person.id, { name: event.target.value })} /></Field><Field label="Email (optional)"><input className="email" type="email" value={person.email} onChange={(event) => updatePerson(person.id, { email: event.target.value })} /></Field>{people.length > 1 ? <Button type="button" variant="secondary" onClick={() => setPeople((current) => current.filter((candidate) => candidate.id !== person.id))}>Remove person</Button> : null}</div>)}</div><Button type="button" variant="secondary" onClick={() => setPeople((current) => [...current, { id: operationId(), name: '', email: '' }])}>Add another person</Button></fieldset>{error ? <ErrorBox error={error} id="create-group-error" /> : null}<ActionGroup className="actions" region="frequent"><Button type="submit" data-primary-action="true" disabled={!online || busy}>{busy ? 'Creating…' : 'Create group'}</Button><Link className="button button--secondary" to="/">Cancel</Link></ActionGroup></form></FormSurface></CreationPageLayout>;
 }
 
 function MemberDirectory({ groupId, userId, members, currentPersonId, online, owner, invitationsResource, targetedMutationState }: { groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; owner: boolean; invitationsResource?: ResourceSnapshot<{ invitations: GroupInvitation[] }>; targetedMutationState?: TargetedInvitationMutationState }) {
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<unknown>();
-  const remove = async (member: GroupMember) => {
+  const remove = (member: GroupMember) => runProtectedOperation(async () => {
     if (!owner || !online || busy || !confirm(`Remove ${member.name} from this group? Historical transactions remain visible.`)) return;
     setBusy(`remove:${member.personId}`); setError(undefined);
     try { await removeGroupMember(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
-  const transfer = async (member: GroupMember) => {
+  }, 'Removing member');
+  const transfer = (member: GroupMember) => runProtectedOperation(async () => {
     if (!owner || !online || busy || !member.linked || member.role === 'owner' || !confirm(`Transfer ownership to ${member.name}? You will become a member.`)) return;
     setBusy(`transfer:${member.personId}`); setError(undefined);
     try { await transferGroupOwnership(groupId, member.personId); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
+  }, 'Transferring ownership');
   const invitations = invitationsResource?.data?.invitations;
   return <>
     <ul className="member-list" aria-label="Group members">{members.map((member) => <li className={`member-row${(!owner || member.role === 'owner') ? ' member-row--identity-only' : ''}${owner && member.role === 'member' && !member.linked ? ' member-row--with-email-control' : ''}`} key={member.personId}>
@@ -350,30 +362,33 @@ function InvitationAvailabilityStatus({ resource }: { resource?: ResourceSnapsho
   return <div className="member-email-control member-email-control--unavailable"><p className="muted" role="status">{message}</p></div>;
 }
 
-function TargetedInvitationControl({ groupId, userId, member, invitation, online, mutationState }: { groupId: string; userId: string; member: GroupMember; invitation?: GroupInvitation; online: boolean; mutationState: TargetedInvitationMutationState }) {
+export function TargetedInvitationControl({ groupId, userId, member, invitation, online, mutationState }: { groupId: string; userId: string; member: GroupMember; invitation?: GroupInvitation; online: boolean; mutationState: TargetedInvitationMutationState }) {
   const [email, setEmail] = useState(invitation?.email || member.email || '');
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<'save' | 'revoke'>();
   const [error, setError] = useState<unknown>();
   const pending = isPendingInvitation(invitation) ? invitation : undefined;
+  const emailBaseline = useRef(invitation?.email || member.email || '');
+  const emailDirty = email !== emailBaseline.current;
+  useReloadBlocker(emailDirty, 'Unsaved invitation email');
   const mutationAvailable = online && mutationState === 'available';
   const mutationStatus = !online ? 'Email actions unavailable offline.' : mutationState === 'checking' ? 'Refreshing invitation status…' : 'Email actions unavailable. Retry below.';
-  useEffect(() => { setEmail(invitation?.email || member.email || ''); }, [invitation?.email, member.email]);
-  const save = async (event: FormEvent) => {
+  useEffect(() => { if (!emailDirty) { emailBaseline.current = invitation?.email || member.email || ''; setEmail(emailBaseline.current); } }, [invitation?.email, member.email]);
+  const save = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     if (!mutationAvailable || busy || !email.trim()) return;
     setBusy('save'); setError(undefined);
-    try { await createTargetedGroupInvitation(groupId, member.personId, email.trim()); setOpen(false); await invalidateForMutation.invitationsChanged(groupId, userId); }
+    try { await createTargetedGroupInvitation(groupId, member.personId, email.trim()); emailBaseline.current = email.trim(); setEmail(email.trim()); setOpen(false); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
-  const revoke = async () => {
+  }, 'Saving invitation');
+  const revoke = () => runProtectedOperation(async () => {
     if (!pending || !mutationAvailable || busy || !confirm(`Revoke the invitation for ${member.name}?`)) return;
     setBusy('revoke'); setError(undefined);
     try { await revokeGroupInvitation(groupId, pending.id); setOpen(false); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
+  }, 'Revoking invitation');
   return <div className="member-email-control">
     {pending ? <p className="member-email-control__pending" role="status"><span>Pending invitation for <strong>{pending.email}</strong>.</span><span className="member-email-control__pending-actions"><Button type="button" variant="secondary" disabled={!mutationAvailable || Boolean(busy)} onClick={() => setOpen((current) => !current)}>{open ? 'Close' : 'Change'}</Button><Button type="button" variant="danger" disabled={!mutationAvailable || Boolean(busy)} onClick={() => void revoke()}>{busy === 'revoke' ? 'Revoking…' : 'Revoke'}</Button></span></p> : null}
     {pending && (!mutationAvailable || mutationState !== 'available') ? <p className="member-email-control__availability muted" role="status">{mutationStatus}</p> : null}
@@ -388,6 +403,7 @@ function TargetedInvitationForm({ member, email, setEmail, clearError, busy, err
 
 function GenericInvitationControls({ groupId, userId, online, invitationsResource }: { groupId: string; userId: string; online: boolean; invitationsResource: ResourceSnapshot<{ invitations: GroupInvitation[] }> }) {
   const [email, setEmail] = useState('');
+  useReloadBlocker(Boolean(email), 'Unsaved invitation');
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<unknown>();
   const [inviteError, setInviteError] = useState<unknown>();
@@ -396,38 +412,39 @@ function GenericInvitationControls({ groupId, userId, online, invitationsResourc
   const mutationAvailable = effectiveOnline && mutationState === 'available';
   const mutationStatus = !effectiveOnline ? 'Invitation actions unavailable offline.' : mutationState === 'checking' ? 'Refreshing invitation status…' : 'Invitation actions unavailable. Retry below.';
   const invitations = invitationsResource.data?.invitations?.filter((invitation) => invitation.targetPersonId == null);
-  const invite = async (event: FormEvent) => {
+  const invite = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault(); if (!mutationAvailable || busy || !email.trim()) return;
     setBusy('invite'); setInviteError(undefined);
     try { await createGroupInvitation(groupId, email.trim()); setEmail(''); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setInviteError(cause); }
     finally { setBusy(undefined); }
-  };
-  const revoke = async (invitation: GroupInvitation) => {
+  }, 'Sending invitation');
+  const revoke = (invitation: GroupInvitation) => runProtectedOperation(async () => {
     if (!mutationAvailable || busy || !confirm(`Revoke the invitation for ${invitation.email}?`)) return;
     setBusy(invitation.id); setError(undefined);
     try { await revokeGroupInvitation(groupId, invitation.id); await invalidateForMutation.invitationsChanged(groupId, userId); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
+  }, 'Revoking invitation');
   const offlineWithoutCache = !effectiveOnline && invitationsResource.data === undefined;
   return <section className="invitations-panel" aria-labelledby="invitations-heading"><div className="management-section__header"><h2 id="invitations-heading">Invitations</h2><span className="muted">Owner · generic only</span></div><details className="generic-invitation-disclosure"><summary>Invite a new member</summary><p className="muted">Send an invitation to someone who is not in this ledger yet.</p><form onSubmit={invite} aria-describedby={inviteError ? 'invite-error' : undefined}><Field label="Invite by email"><input className="email" type="email" required value={email} disabled={!mutationAvailable || Boolean(busy)} onChange={(event) => { setInviteError(undefined); setEmail(event.target.value); }} /></Field><Button type="submit" disabled={!mutationAvailable || busy === 'invite'}>{busy === 'invite' ? 'Inviting…' : 'Invite'}</Button></form>{inviteError ? <ErrorBox error={inviteError} id="invite-error" /> : null}</details>{!mutationAvailable ? <p className="member-email-control__availability muted" role="status">{mutationStatus}</p> : null}{offlineWithoutCache ? <p className="cache-status">Invitations aren’t cached on this device and need a connection.</p> : <><ResourceNotice resource={invitationsResource} label="invitations" retry={retryFor(resourceKeys.groupInvitations(userId, groupId), userId)} />{!effectiveOnline && invitationsResource.data !== undefined ? <p className="cache-status">Showing cached invitations; they may be out of date. Invitation changes require a connection.</p> : null}</>}{invitationsResource.data !== undefined ? invitations?.length ? <div aria-label="Generic invitation history">{invitations.map((invitation) => { const pending = isPendingInvitation(invitation); const status = pending ? 'Pending' : invitation.acceptedAt ? 'Accepted' : invitation.rejectedAt ? 'Declined' : invitation.revokedAt ? 'Revoked' : 'Expired'; return <div className="invitation-history-row" key={invitation.id}><span><strong>{invitation.email}</strong><small>{status} · Created {new Date(invitation.createdAt).toLocaleDateString()}</small></span>{pending ? <Button type="button" variant="danger" disabled={!mutationAvailable || Boolean(busy)} onClick={() => void revoke(invitation)}>{busy === invitation.id ? 'Revoking…' : 'Revoke'}</Button> : null}</div>; })}</div> : <p className="muted">No invitations yet.</p> : null}{error ? <ErrorBox error={error} id="invitation-management-error" /> : null}</section>;
 }
 
-function AddFriendForm({ groupId, userId, online }: { groupId: string; userId: string; online: boolean }) {
+export function AddFriendForm({ groupId, userId, online }: { groupId: string; userId: string; online: boolean }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  useReloadBlocker(Boolean(name || email), 'Unsaved friend');
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault(); if (!online || busy) return;
     if (!name.trim()) { setError(new Error('Enter a friend name.')); return; }
     setBusy(true); setError(undefined);
     try { await api(`/groups/${groupId}/people`, { method: 'POST', body: JSON.stringify({ name: name.trim(), email: email.trim() || undefined }) }); setName(''); setEmail(''); setOpen(false); await invalidateForMutation.groupChanged(groupId, userId, captureSessionGeneration()); }
     catch (cause) { setError(cause); }
     finally { setBusy(false); }
-  };
+  }, 'Adding friend');
   return <section aria-labelledby="add-friend-heading" data-flow-region="frequent"><SectionHeader title={<span id="add-friend-heading">Add friend</span>} actions={<Button type="button" variant="secondary" data-primary-action="true" disabled={!online} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Cancel' : 'Add friend'}</Button>} />{open ? <form onSubmit={submit} aria-describedby={error ? 'add-person-error' : undefined}><Field label="Friend name"><input required value={name} onChange={(event) => { setError(undefined); setName(event.target.value); }} /></Field><Field label="Email (optional)"><input className="email" type="email" value={email} onChange={(event) => { setError(undefined); setEmail(event.target.value); }} /></Field>{error ? <ErrorBox error={error} id="add-person-error" /> : null}<Button type="submit" data-primary-action="true" disabled={!online || busy}>{busy ? 'Adding…' : 'Add friend'}</Button></form> : <p className="muted">Add a ledger-only friend or link the email they use to sign in.</p>}</section>;
 }
 
@@ -436,7 +453,7 @@ function SplitDefaultSummary({ value, members }: { value: GroupSplitDefault | nu
   return <><p className="muted">{summary.label}</p><p className="muted">Saved defaults affect future entries for everyone. Members can save a shared default while adding an expense; only the owner can edit or clear it here.</p>{summary.warning ? <p className="warning" role="alert">This default includes removed members. New expenses will use an equal split across current members until it is updated.</p> : null}</>;
 }
 
-function SplitDefaultSettings({ groupId, userId, members, value, online, owner, onChanged }: { groupId: string; userId: string; members: GroupMember[]; value: GroupSplitDefault | null; online: boolean; owner: boolean; onChanged: (value: GroupSplitDefault | null) => void }) {
+export function SplitDefaultSettings({ groupId, userId, members, value, online, owner, onChanged }: { groupId: string; userId: string; members: GroupMember[]; value: GroupSplitDefault | null; online: boolean; owner: boolean; onChanged: (value: GroupSplitDefault | null) => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const resolvedEditorDefault = resolveGroupSplitDefault(value, members);
   const [method, setMethod] = useState<'equal' | 'percentage' | 'shares'>(resolvedEditorDefault.method === 'exact' ? 'equal' : resolvedEditorDefault.method);
@@ -444,9 +461,13 @@ function SplitDefaultSettings({ groupId, userId, members, value, online, owner, 
   const [values, setValues] = useState<Record<string, string>>(resolvedEditorDefault.values);
   const [busy, setBusy] = useState<'save' | 'clear'>();
   const [error, setError] = useState<unknown>();
+  const splitBaseline = useRef(JSON.stringify({ method, selected, values }));
+  const splitDirty = JSON.stringify({ method, selected, values }) !== splitBaseline.current;
+  useReloadBlocker(splitDirty, 'Unsaved split default');
   useEffect(() => {
-    if (open) return;
+    if (open || splitDirty) return;
     const resolved = resolveGroupSplitDefault(value, members);
+    splitBaseline.current = JSON.stringify({ method: resolved.method === 'exact' ? 'equal' : resolved.method, selected: resolved.selected, values: resolved.values });
     setMethod(resolved.method === 'exact' ? 'equal' : resolved.method); setSelected(resolved.selected); setValues(resolved.values);
   }, [members, open, value]);
   const cancel = () => { setOpen(false); setError(undefined); };
@@ -455,7 +476,7 @@ function SplitDefaultSettings({ groupId, userId, members, value, online, owner, 
     const each = Math.floor(10_000 / selected.length), remainder = 10_000 - each * selected.length;
     setValues(Object.fromEntries(selected.map((personId, index) => [personId, String((each + (index < remainder ? 1 : 0)) / 100)])));
   };
-  const save = async (event: FormEvent) => {
+  const save = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault(); if (!online || busy) return;
     setBusy('save'); setError(undefined);
     try {
@@ -463,23 +484,24 @@ function SplitDefaultSettings({ groupId, userId, members, value, online, owner, 
       const parsed = groupSplitDefaultInput.parse(input);
       const result = await updateGroupSplitDefault(groupId, parsed);
       const next = result.splitDefault;
-      onChanged(next); setOpen(false);
+      splitBaseline.current = JSON.stringify({ method, selected, values });
+      await onChanged(next); setOpen(false);
     } catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
-  const clear = async () => {
+  }, 'Saving split default');
+  const clear = () => runProtectedOperation(async () => {
     if (!online || busy || !confirm('Use automatic equal split for new expenses?')) return;
     setBusy('clear'); setError(undefined);
-    try { await deleteGroupSplitDefault(groupId); onChanged(null); setOpen(false); }
+    try { await deleteGroupSplitDefault(groupId); splitBaseline.current = JSON.stringify({ method, selected, values }); await onChanged(null); setOpen(false); }
     catch (cause) { setError(cause); }
     finally { setBusy(undefined); }
-  };
+  }, 'Clearing split default');
   const total = selected.reduce((sum, personId) => sum + (Number(values[personId]) || 0), 0);
   const summary = groupSplitDefaultSummary(value, members);
   return <section className="split-default-settings" aria-labelledby="split-default-heading"><div className="management-section__header"><h2 id="split-default-heading">Party default split</h2>{owner ? <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={() => { setError(undefined); setOpen((current) => !current); }}>{open ? 'Close' : value ? 'Edit' : 'Customize'}</Button> : <span className="muted">Owner-only editor</span>}</div>{!open ? <><SplitDefaultSummary value={value} members={members} />{owner ? <p className="muted">Used only when starting a new expense or schedule. Each expense can override it.</p> : <p className="muted">You can save a shared default while adding an expense. Only the owner can edit or clear it here.</p>}</> : <form onSubmit={save} aria-describedby={error ? 'split-default-error' : undefined}><fieldset><legend>Split new entries</legend><div className="radio-list"><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'equal'} onChange={() => setMethod('equal')} />Equal</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'percentage'} onChange={() => setMethod('percentage')} />Percentage</label><label className="checkbox-row"><input type="radio" name="split-default-method" checked={method === 'shares'} onChange={() => setMethod('shares')} />Shares</label></div></fieldset><fieldset><legend>Included members</legend><div className="participant-list">{members.map((member) => <label className="checkbox-row" key={member.personId}><input type="checkbox" checked={selected.includes(member.personId)} onChange={() => setSelected((current) => current.includes(member.personId) ? current.filter((id) => id !== member.personId) : [...current, member.personId])} />{member.name}</label>)}</div></fieldset>{method !== 'equal' ? <div className="allocation-list">{members.filter((member) => selected.includes(member.personId)).map((member) => <Field key={member.personId} label={`${member.name} ${method === 'percentage' ? 'percentage' : 'shares'}`} className="field--compact"><input required inputMode="decimal" value={values[member.personId] || ''} placeholder={method === 'percentage' ? '0.00%' : '1'} onChange={(event) => setValues((current) => ({ ...current, [member.personId]: event.target.value }))} /></Field>)}<p className="allocation-summary" role="status" aria-live="polite">{method === 'percentage' ? `Total ${total.toFixed(2)}% of 100%` : `Total shares ${total}`}</p>{method === 'percentage' ? <Button type="button" variant="secondary" onClick={evenly}>Split evenly</Button> : null}</div> : null}{error ? <ErrorBox error={error} id="split-default-error" /> : null}<div className="actions"><Button type="submit" disabled={!online || busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save'}</Button><Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={cancel}>Cancel</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy) || !value} onClick={() => void clear()}>Use automatic equal split</Button></div>{!online ? <p className="cache-status">Default split editing requires a connection. The cached summary remains available.</p> : null}</form>}{open && value && summary.warning ? <p className="warning" role="alert">Removed members must be removed before saving this default.</p> : null}</section>;
 }
 
-type GroupManagementContentProps = { group: Group; groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; offline: boolean; groupResource: ResourceSnapshot<GroupResponse>; splitDefault: GroupSplitDefault | null; onSplitDefaultChanged: (value: GroupSplitDefault | null) => void; onDeleted: () => void; onLeft: () => void };
+type GroupManagementContentProps = { group: Group; groupId: string; userId: string; members: GroupMember[]; currentPersonId: string | null; online: boolean; offline: boolean; groupResource: ResourceSnapshot<GroupResponse>; splitDefault: GroupSplitDefault | null; onSplitDefaultChanged: (value: GroupSplitDefault | null) => void | Promise<void>; onDeleted: () => void; onLeft: () => void };
 type GroupManagementLayoutProps = Pick<GroupManagementContentProps, 'group' | 'groupId' | 'userId' | 'online' | 'offline' | 'groupResource' | 'onDeleted' | 'onLeft'> & { children: ReactNode; activeMemberCount: number; pendingGenericInvitation?: boolean; conversionBusy?: boolean; onConversionBusyChange?: (busy: boolean) => void };
 
 function GroupManagementLayout({ group, groupId, userId, online, offline, groupResource, children, activeMemberCount, pendingGenericInvitation, conversionBusy, onConversionBusyChange, onDeleted, onLeft }: GroupManagementLayoutProps) {
@@ -525,7 +547,7 @@ function GroupManagementPage() {
   }, [group, id]);
   if ((me.error || groupResource.error) && !group) return <Layout><ErrorBox error={me.error || groupResource.error} onRetry={me.error ? retryFor(resourceKeys.identity(), '') : retryFor(resourceKeys.group(userId, id), me.data?.id)} id="group-manage-error" retryLabel={me.error ? 'Retry identity check' : 'Retry'} /><Link className="back" to={`/groups/${id}`}>← Back to group</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
-  const contentProps = { group, groupId: id, userId, members, currentPersonId: groupResource.data?.currentPersonId ?? null, online, offline, groupResource, splitDefault, onSplitDefaultChanged: (next: GroupSplitDefault | null) => { setSplitDefault(next); void invalidateForMutation.splitDefaultChanged(id, next, userId, captureSessionGeneration()); }, onDeleted: () => nav('/'), onLeft: () => nav('/') };
+  const contentProps = { group, groupId: id, userId, members, currentPersonId: groupResource.data?.currentPersonId ?? null, online, offline, groupResource, splitDefault, onSplitDefaultChanged: (next: GroupSplitDefault | null) => { setSplitDefault(next); return invalidateForMutation.splitDefaultChanged(id, next, userId, captureSessionGeneration()); }, onDeleted: () => nav('/'), onLeft: () => nav('/') };
   return group.role === 'owner' ? <OwnerGroupManagement {...contentProps} /> : <MemberGroupManagement {...contentProps} />;
 }
 
@@ -608,8 +630,8 @@ function PendingExpenseRow({ item, groupName }: { item: ExpenseOutboxItem; group
   const syncing = item.status === 'syncing' && (item.leaseExpiresAt === undefined || item.leaseExpiresAt > Date.now());
   const cannotDiscard = syncing || Boolean(item.deliveryUncertain);
   const explanation = syncing ? 'An in-flight server write cannot be safely cancelled.' : item.deliveryUncertain ? 'The server may have committed this expense; retry or wait for reconciliation.' : undefined;
-  const retry = async () => { setError(undefined); setBusy(true); try { await retryOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  const discard = async () => { if (!confirm('Discard this pending expense?')) return; setError(undefined); setBusy(true); try { await discardOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  const retry = () => runProtectedOperation(async () => { setError(undefined); setBusy(true); try { await retryOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Retrying expense');
+  const discard = () => runProtectedOperation(async () => { if (!confirm('Discard this pending expense?')) return; setError(undefined); setBusy(true); try { await discardOutboxItem(item.clientOperationId); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Discarding expense');
   return <LedgerRow as="div" className="pending-row"><span>{item.display.description}{groupName ? <small>{groupName}</small> : null}<small>{item.display.date} · {item.display.currency} · <Status tone={item.status === 'failed' ? 'debt' : 'warning'}>{statusLabel(item.status, item.deliveryUncertain)}</Status></small>{item.lastError ? <small>{item.lastError.message}</small> : null}{explanation ? <small>{explanation}</small> : null}{error ? <ErrorBox error={error} id={`pending-error-${item.clientOperationId}`} /> : null}</span><div className="pending-row__actions"><Money amountMinor={item.display.amountMinor} currency={item.display.currency} />{connection.status !== 'offline' ? <Button disabled={!canMutate || syncing || busy} type="button" variant="secondary" onClick={() => void retry()}>Retry</Button> : null}<Button disabled={cannotDiscard || busy} title={explanation} type="button" variant="danger" onClick={() => void discard()}>Discard</Button></div></LedgerRow>;
 }
 
@@ -680,13 +702,13 @@ function ScheduleList({ groupId, schedules: initialSchedules, resource, online, 
 function ScheduleListContent({ groupId, schedules, resource, online, userId }: ScheduleListProps) {
   const [busyId, setBusyId] = useState<string>();
   const [error, setError] = useState<unknown>();
-  const updateStatus = async (schedule: ScheduledExpense, action: 'pause' | 'resume' | 'cancel') => {
+  const updateStatus = (schedule: ScheduledExpense, action: 'pause' | 'resume' | 'cancel') => runProtectedOperation(async () => {
     if (action === 'cancel' && !confirm(`Cancel “${schedule.description}”? Future occurrences will not be generated.`)) return;
     setBusyId(schedule.id); setError(undefined);
      try { const generation = captureSessionGeneration(); await changeScheduledExpenseStatus(schedule.id, action, schedule.version); await invalidateForMutation.scheduledExpenseChanged(groupId, userId, schedule.id, generation); }
     catch (cause) { setError(cause); }
     finally { setBusyId(undefined); }
-  };
+  }, 'Updating schedule');
   const connection = useConnectionState();
   if (resource.data === undefined && connection.status === 'offline') return <section className="schedule-management-section" aria-labelledby="scheduled-expenses-heading"><SectionHeader title={<span id="scheduled-expenses-heading">Scheduled expenses</span>} description="Online-only" /><p className="cache-status">Scheduled expenses need a connection and are not cached on this device.</p></section>;
   return <section className="schedule-management-section" aria-labelledby="scheduled-expenses-heading"><SectionHeader title={<span id="scheduled-expenses-heading">Scheduled expenses</span>} description="Online-only" />{resource.data === undefined ? <ResourceNotice resource={resource} label="scheduled expenses" retry={retryFor(resourceKeys.scheduledExpenses(userId, groupId), userId)} /> : schedules.length ? <LedgerList label="Scheduled expenses">{schedules.map((schedule) => <LedgerRow as="li" className="schedule-row" key={schedule.id}><span><strong>{schedule.description}</strong><small>{scheduleSummary(schedule.frequency, schedule.interval, schedule.weekdays)} · {schedule.timezone}</small><small>{schedule.nextOccurrenceDate ? `Next occurrence ${formatScheduleDate(schedule.nextOccurrenceDate)}` : 'No future occurrences'}</small><small><ScheduleStatus status={schedule.status} />{schedule.blockedReason ? ` ${schedule.blockedReason}` : null}</small></span><div className="schedule-row__actions"><Money amountMinor={schedule.amountMinor} currency={schedule.currency} /><Link className="button button--secondary" to={`/groups/${groupId}/scheduled-expense/${schedule.id}`}>Edit</Link>{schedule.status === 'active' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'pause')}>Pause</Button> : schedule.status === 'paused' || schedule.status === 'blocked' ? <Button type="button" variant="secondary" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'resume')}>Resume</Button> : null}{schedule.status !== 'cancelled' ? <Button type="button" variant="danger" disabled={!online || busyId === schedule.id} onClick={() => void updateStatus(schedule, 'cancel')}>Cancel</Button> : null}</div></LedgerRow>)}</LedgerList> : <Empty>No recurring expenses yet.</Empty>}{error ? <ErrorBox error={error} id="scheduled-expense-mutation-error" /> : null}{!online ? <p className="cache-status">Schedule management requires a connection. Existing schedules are not stored for offline use.</p> : null}</section>;
@@ -732,8 +754,8 @@ function CreditDetail() {
   if (!credit) return <Layout><Loading /></Layout>;
   const detailPeople = [...(group.data?.members || []), ...(group.data?.historicalParticipants || []).filter((participant) => !(group.data?.members || []).some((member) => member.personId === participant.personId)).map((participant) => ({ ...participant, name: historicalParticipantName(participant) }))];
   const label = (personId: string) => personId === group.data?.currentPersonId ? 'You' : nameOf(detailPeople, personId);
-  const remove = async () => { if (!online || busy || !confirm('Delete this refund/reimbursement?')) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await deleteCredit(credit.id, credit.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.creditChanged(credit.groupId, mutationUserId, credit.id, generation); if (isSessionGenerationCurrent(generation)) nav(`/groups/${credit.groupId}`); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  const restore = async () => { if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await restoreCredit(credit.id, credit.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.creditChanged(credit.groupId, mutationUserId, credit.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+  const remove = () => runProtectedOperation(async () => { if (!online || busy || !confirm('Delete this refund/reimbursement?')) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await deleteCredit(credit.id, credit.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.creditChanged(credit.groupId, mutationUserId, credit.id, generation); if (isSessionGenerationCurrent(generation)) nav(`/groups/${credit.groupId}`); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Deleting refund');
+  const restore = () => runProtectedOperation(async () => { if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await restoreCredit(credit.id, credit.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.creditChanged(credit.groupId, mutationUserId, credit.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Restoring refund');
   const recipients = credit.allocations.filter((allocation) => allocation.allocationType === 'recipient');
   const affected = credit.allocations.filter((allocation) => allocation.allocationType === 'beneficiary');
   return <Layout><Link to={`/groups/${credit.groupId}`} className="back">← Group</Link><PageHeader className="page-title" eyebrow={`${credit.date} · Refund/reimbursement`} title={credit.deliveryMode === 'direct_provider_offset' ? 'Original payment or bill was adjusted' : 'A group member received the money'} actions={<Money amountMinor={credit.amountMinor} currency={credit.currency} size="large" />} />{!online ? <ConnectionBanner detail="Refund changes require a connection." /> : null}{details.error || group.error ? <p className="cache-status" role="status">Showing cached refund details; names or linked expenses may be out of date.</p> : null}{credit.deletedAt ? <Surface className="credit-detail-tombstone"><strong>Deleted refund/reimbursement</strong><p className="muted">This record can be restored within 30 days.</p><ActionGroup><Button disabled={!online || busy} onClick={() => void restore()}>{busy ? 'Restoring…' : 'Restore refund/reimbursement'}</Button></ActionGroup></Surface> : <><Surface className="credit-detail-surface"><SectionHeader title="Money flow" />{credit.note ? <p>{credit.note}</p> : <p className="muted">No note was added.</p>}<p>Refund/reimbursement total: <Money amountMinor={credit.amountMinor} currency={credit.currency} /></p><p className="muted">This reduces the affected costs by the same amount in the group balance.</p></Surface><Surface className="credit-detail-surface"><SectionHeader title="Linked expenses" />{credit.applications.length ? <LedgerList label="Linked expenses">{credit.applications.map((application) => <LedgerRow as="li" key={application.expenseId}><Link className="ui-ledger-row__link" to={expenseDetailPath(credit.groupId, application.expenseId) || `/groups/${credit.groupId}`}><span><strong>{application.expenseDescription || 'Expense'}</strong>{application.expenseDate ? <small>{application.expenseDate}</small> : null}</span><Money amountMinor={application.amountMinor} currency={credit.currency} /></Link></LedgerRow>)}</LedgerList> : <p className="muted">Standalone refund/reimbursement.</p>}</Surface>{credit.deliveryMode === 'member_reimbursement' ? <Surface><SectionHeader title="Who received the money?" /><LedgerList label="Recipients">{recipients.map((allocation) => <LedgerRow key={`recipient-${allocation.personId}`}><span>{label(allocation.personId)}</span><Money amountMinor={allocation.amountMinor} currency={credit.currency} /></LedgerRow>)}</LedgerList><SectionHeader title="Whose costs did this reduce?" /><LedgerList label="Affected members">{affected.map((allocation) => <LedgerRow key={`affected-${allocation.personId}`}><span>{label(allocation.personId)}</span><Money amountMinor={allocation.amountMinor} currency={credit.currency} /></LedgerRow>)}</LedgerList></Surface> : <Surface><SectionHeader title="Original payment or bill was adjusted" /><p className="muted">The original payer and affected shares were derived from the linked expenses and saved with this refund.</p></Surface>}<ActionGroup><Link className="button button--secondary" to={`/groups/${credit.groupId}/credit/${credit.id}/edit`}>Edit refund/reimbursement</Link><Button type="button" variant="danger" disabled={!online || busy} onClick={() => void remove()}>{busy ? 'Deleting…' : 'Delete refund/reimbursement'}</Button></ActionGroup></>}{error ? <ErrorBox error={error} id="refund-detail-action-error" /> : null}<Disclosure className="reading-width" summary="Audit history">{details.data?.history.length ? <LedgerList label="Refund revisions">{details.data.history.map((item) => <LedgerRow key={item.id}><span>Version {item.revision}</span><small>{new Date(item.createdAt).toLocaleString()}</small></LedgerRow>)}</LedgerList> : <p className="muted">No audit history.</p>}</Disclosure></Layout>;
@@ -788,6 +810,7 @@ function ExpenseForm() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<ExpenseFormError>();
   const [dirty, setDirty] = useState(false);
+  useReloadBlocker(dirty, 'Unsaved expense');
   const [splitCustomized, setSplitCustomized] = useState(false);
   const [defaultApplied, setDefaultApplied] = useState(false);
   const [defaultInvalid, setDefaultInvalid] = useState(false);
@@ -895,7 +918,7 @@ function ExpenseForm() {
     const effectiveDefault = effectiveGroupSplitDefault(storedPartyDefault, members);
     const draftIsSaveable = Boolean(draftDefault.value);
      const choiceState = splitDefaultChoiceState({ newEntry, scheduleMode, method, saveable: draftIsSaveable, draft: draftDefault.value, effective: effectiveDefault, selected, values: allocationValues, members });
-     const savePartyDefault = async (arrangement: GroupSplitDefault | null = draftDefault.value) => {
+      const savePartyDefault = (arrangement: GroupSplitDefault | null = draftDefault.value) => runProtectedOperation(async () => {
         const saveScope = routeKey;
        if (!online || splitDefaultSaveState.status === 'saving' || isSplitDefaultSaveLockedForScope(splitDefaultSavePending.current, saveScope) || !arrangement) return;
         splitDefaultSavePending.current = saveScope;
@@ -912,13 +935,13 @@ function ExpenseForm() {
          if (outcome.requestCurrent) {
              setSavedPartyDefault(result.splitDefault); setDefaultApplied(outcome.draftCurrent); setDefaultInvalid(false); if (outcome.draftCurrent) setSplitCustomized(false); setSplitDefaultSaveState({ status: 'success' });
          }
-         if (isSessionGenerationCurrent(generation)) await invalidateForMutation.splitDefaultChanged(saveGroupId, result.splitDefault, saveUserId, generation);
+      if (isSessionGenerationCurrent(generation)) await invalidateForMutation.splitDefaultChanged(saveGroupId, result.splitDefault, saveUserId, generation);
        } catch (cause) {
           if (isCurrentSplitDefaultSave(saveFence, { token: splitDefaultRequestToken.current, scope: splitDefaultScopeRef.current, sessionGeneration: captureSessionGeneration() })) setSplitDefaultSaveState({ status: 'error', error: cause });
        } finally {
-         splitDefaultSavePending.current = releaseSplitDefaultSaveLock(splitDefaultSavePending.current, saveScope);
-       }
-     };
+          splitDefaultSavePending.current = releaseSplitDefaultSaveLock(splitDefaultSavePending.current, saveScope);
+        }
+      }, 'Saving split default');
    const isYou = (personId: string) => personId === currentPersonId;
   const setAmountAndPayer = (value: string) => { markDirty(); setAmount(value); if (payerRows.length === 1) setPayerRows((rows) => rows.map((row) => ({ ...row, amount: value }))); };
     const markSplitDirty = () => { formSaveToken.current += 1; markDirty(); setSplitCustomized(true); setDefaultApplied(false); setSplitDefaultSaveState((current) => current.status === 'saving' ? current : { status: 'idle' }); };
@@ -949,7 +972,7 @@ function ExpenseForm() {
    };
    const manuallySetCategory = (value: string) => { categoryTouchedRef.current = true; setCategoryTouched(true); setCategorySuggestion(undefined); markDirty(); setCategory(value); };
 
-   const submit = async (event: FormEvent) => {
+   const submit = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     if (submitting) return;
       setSubmitting(true); setFormError(undefined); const generation = captureSessionGeneration(); const mutationUserId = currentUserId;
@@ -1010,7 +1033,7 @@ function ExpenseForm() {
         }
         setSubmitting(false); setFormError({ error: cause, target });
       }
-   };
+   }, 'Saving expense');
 
   return <Layout>
            <PageHeader className="page-title expense-heading" eyebrow={<Link to={routeGroupId ? `/groups/${id}` : '/'} className="back">← <span className="back__label">{routeGroupId ? groupDisplayName(group) : 'Groups'}</span></Link>} title={scheduleMode ? (scheduledExpenseId ? 'Edit recurring expense' : 'Schedule an expense') : expenseId ? 'Edit expense' : 'Add expense'} actions={<ActionGroup className="expense-heading__actions"><Link className="button button--secondary" to={routeGroupId ? `/groups/${id}` : '/'}>Cancel</Link></ActionGroup>} />{meResource.error ? <CachedIdentityNotice resource={meResource} id="expense-identity-error" /> : null}{groupResource.error ? <ResourceNotice resource={groupResource} label="group details" retry={retryFor(resourceKeys.group(formUserId, id), meResource.data?.id)} /> : null}{expenseId && detailResource.error ? <ResourceNotice resource={detailResource} label="expense form data" retry={retryFor(resourceKeys.expenseDetail(formUserId, expenseId), meResource.data?.id)} /> : null}{scheduledExpenseId && scheduleResource.error ? <ResourceNotice resource={scheduleResource} label="scheduled expense form data" retry={retryFor(resourceKeys.scheduledExpense(formUserId, scheduledExpenseId), meResource.data?.id)} /> : null}
@@ -1095,8 +1118,8 @@ function ExpenseDetail() {
   const currentPersonId = group.data?.currentPersonId || '';
   const people = [...members, ...historicalParticipants.filter((participant) => !members.some((member) => member.personId === participant.personId))];
   const personLabel = (personId: string) => personId === currentPersonId ? 'You' : nameOf(people, personId);
-  const restore = async () => { if (!online || busy) return; setBusy(true); setMutationError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await restoreExpense(expense.id, expense.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.expenseChanged(expense.groupId, expense.id, mutationUserId, generation); } catch (cause) { setMutationError(cause); } finally { setBusy(false); } };
-  const remove = async () => { if (!online || busy || !confirm('Delete this expense?')) return; setBusy(true); setMutationError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.expenseChanged(expense.groupId, expense.id, mutationUserId, generation); if (isSessionGenerationCurrent(generation)) nav(`/groups/${expense.groupId}`); } catch (cause) { setMutationError(cause); } finally { setBusy(false); } };
+  const restore = () => runProtectedOperation(async () => { if (!online || busy) return; setBusy(true); setMutationError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await restoreExpense(expense.id, expense.version); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.expenseChanged(expense.groupId, expense.id, mutationUserId, generation); } catch (cause) { setMutationError(cause); } finally { setBusy(false); } }, 'Restoring expense');
+  const remove = () => runProtectedOperation(async () => { if (!online || busy || !confirm('Delete this expense?')) return; setBusy(true); setMutationError(undefined); const generation = captureSessionGeneration(); const mutationUserId = me.data?.id; try { await api(`/expenses/${expense.id}?version=${expense.version}`, { method: 'DELETE' }); if (!isSessionGenerationCurrent(generation)) return; await invalidateForMutation.expenseChanged(expense.groupId, expense.id, mutationUserId, generation); if (isSessionGenerationCurrent(generation)) nav(`/groups/${expense.groupId}`); } catch (cause) { setMutationError(cause); } finally { setBusy(false); } }, 'Deleting expense');
   const refundPath = `/groups/${expense.groupId}/refund/new?expense=${encodeURIComponent(expense.id)}`;
   return <Layout><Link to={`/groups/${expense.groupId}`} className="back">← Group</Link><PageHeader className="page-title" eyebrow={expense.deletedAt ? 'Deleted transaction' : expense.date} title={expense.description} actions={<Money amountMinor={expense.amountMinor} currency={expense.currency} size="large" />} /><ResourceNotice resource={details} label="expense details" retry={retryFor(resourceKeys.expenseDetail(me.data?.id || 'pending', expenseId), me.data?.id)} />{expense.deletedAt ? <Surface className="expense-detail-tombstone"><strong>Deleted expense</strong><p className="muted">This expense is retained for 30 days and cannot receive a refund.</p><ActionGroup><Button disabled={!online || busy} onClick={() => void restore()}>{busy ? 'Restoring…' : 'Restore expense'}</Button></ActionGroup></Surface> : null}<Surface className="expense-detail-surface"><SectionHeader title="Cost after refunds/reimbursements" /><LedgerList label="Expense cost summary"><LedgerRow><span>Gross expense</span><Money amountMinor={summary.grossMinor} currency={expense.currency} /></LedgerRow><LedgerRow><span>Refunds/reimbursements</span><Money amountMinor={summary.refundedMinor} currency={expense.currency} tone="positive" /></LedgerRow><LedgerRow><span>Net group cost</span><Money amountMinor={summary.netGroupCostMinor} currency={expense.currency} /></LedgerRow><LedgerRow><span>Remaining refundable</span><Money amountMinor={summary.remainingRefundableMinor} currency={expense.currency} /></LedgerRow></LedgerList>{!expense.deletedAt && !summary.fullyRefunded ? <Link className="button" to={refundPath}>Add refund</Link> : <p className="muted" role="status">{refundActionLabel(expense)}</p>}</Surface>{expense.linkedCredits?.length ? <Surface className="expense-detail-surface"><SectionHeader title="Refunds/reimbursements" /><LedgerList label="Refunds and reimbursements">{expense.linkedCredits.map((credit) => <LedgerRow as="li" key={credit.creditId}><Link className="ui-ledger-row__link" to={creditDetailPath(expense.groupId, credit.creditId) || `/groups/${expense.groupId}`}><span>{credit.subtype === 'refund' ? 'Refund' : 'Reimbursement'}<small>{credit.date} · {credit.deliveryMode === 'direct_provider_offset' ? 'Original payment or bill adjusted' : 'A group member received the money'}</small></span><Money amountMinor={credit.amountMinor} currency={expense.currency} /></Link></LedgerRow>)}</LedgerList></Surface> : null}<section className="reading-width expense-participants"><SectionHeader title="Payers" /><LedgerList label="Payers">{expense.payers.map((payer) => <LedgerRow key={payer.personId}><span>{personLabel(payer.personId)}</span><Money amountMinor={payer.amountMinor} currency={expense.currency} /></LedgerRow>)}</LedgerList><SectionHeader title="Split" /><LedgerList label="Split members">{expense.splits.map((split) => <LedgerRow key={split.personId}><span>{personLabel(split.personId)}</span><Money amountMinor={split.amountMinor} currency={expense.currency} /></LedgerRow>)}</LedgerList></section>{mutationError ? <ErrorBox error={mutationError} id="expense-mutation-error" /> : null}{!expense.deletedAt && online ? <ActionGroup><Link className="button" to={`/groups/${expense.groupId}/expense/${expense.id}`}>Edit</Link><Button variant="danger" disabled={busy} onClick={() => void remove()}>Delete</Button></ActionGroup> : null}<AuditList groupId={expense.groupId} entityId={expense.id} entityType="expense" userId={me.data?.id} /></Layout>;
 }
@@ -1123,6 +1146,7 @@ function Settle() {
   const [submitting, setSubmitting] = useState(false);
    const [error, setError] = useState<unknown>();
    const [dirty, setDirty] = useState(false);
+   useReloadBlocker(dirty, 'Unsaved payment');
   const settlementRouteKey = `${settleUserId}:${id}`;
    const initializedRoute = useRef<string | undefined>(undefined);
    const initializedSuggestion = useRef<string | undefined>(undefined);
@@ -1160,8 +1184,8 @@ function Settle() {
   if (!group) return <Layout>{resourceError ? <ErrorBox error={resourceError} onRetry={retryFor(resourceError === balancesResource.error ? resourceKeys.balances(settleUserId, id) : resourceKeys.group(settleUserId, id), me.data?.id, Boolean(me.error))} id="settle-resource-error" /> : <Loading />}</Layout>;
     if (!online || offlineData) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{groupDisplayName(group)}</span></Link><PageHeader className="page-title" eyebrow={balancesResource.data ? 'Cached balance' : 'Balance unavailable'} title="Settle up" />{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="offline-banner" role="status">Settlements are online-only. Reconnect to submit; {balancesResource.data ? 'cached balances remain available.' : 'no verified cached balances are available on this device.'}</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} />{balancesResource.data ? Object.entries(balances).map(([currencyKey, balance]) => <section className="reading-section settlement-balance-section" key={currencyKey}><SectionHeader title="Balances" description={currencyKey} />{balance.simplified.length ? <LedgerList label={`${currencyKey} balances`}>{balance.simplified.map((item) => <LedgerRow key={`${currencyKey}-${item.fromPersonId}-${item.toPersonId}`}><span>{item.fromPersonId === currentPersonId ? 'You' : item.fromName} owes {item.toPersonId === currentPersonId ? 'You' : item.toName}</span><Money amountMinor={item.amountMinor} currency={currencyKey} tone="debt" /></LedgerRow>)}</LedgerList> : <Empty>Everyone is settled up.</Empty>}</section>) : null}</Layout>;
     if (balancesResource.data === undefined) return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{groupDisplayName(group)}</span></Link><PageHeader className="page-title" eyebrow="Balance required" title="Settle up" />{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}{!me.error ? <ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /> : null}</Layout>;
-   const submit = async (event: FormEvent) => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); const generation = captureSessionGeneration(); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date, client_operation_id: operation }) }); await invalidateForMutation.settlementChanged(id, me.data?.id, generation); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } };
-        const resetSuggestion = () => { const nextAmount = pairSuggestion ? moneyInput(pairSuggestion.amountMinor) : ''; setAmount(nextAmount); autoAmountRef.current = nextAmount; setDirty(false); };
+   const submit = (event: FormEvent) => runProtectedOperation(async () => { event.preventDefault(); if (submitting) return; setSubmitting(true); setError(undefined); const generation = captureSessionGeneration(); try { await api(`/groups/${id}/settlements`, { method: 'POST', body: JSON.stringify({ from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, currency), currency, date, client_operation_id: operation }) }); await invalidateForMutation.settlementChanged(id, me.data?.id, generation); nav(`/groups/${id}`); } catch (cause) { setSubmitting(false); setError(cause); } }, 'Saving payment');
+         const resetSuggestion = () => { const nextAmount = pairSuggestion ? moneyInput(pairSuggestion.amountMinor) : ''; setAmount(nextAmount); autoAmountRef.current = nextAmount; };
         return <Layout><Link to={`/groups/${id}`} className="back">← <span className="back__label">{groupDisplayName(group)}</span></Link><PageHeader className="page-title" eyebrow={currentPersonId ? 'Suggested from your balance' : 'Payment'} title="Settle up" />{me.error ? <CachedIdentityNotice resource={me} id="settle-identity-error" /> : null}<p className="muted">Record a payment. Partial settlements are supported.</p><ResourceNotice resource={balancesResource} label="balances" retry={retryFor(resourceKeys.balances(settleUserId, id), me.data?.id)} /><FormSurface className="settlement-form-surface"><form className="reading-width" onSubmit={submit} aria-describedby={error ? 'settlement-form-error' : undefined}><Field label="Who paid?"><select value={from} onChange={(event) => { setError(undefined); markDirty(); setFrom(event.target.value); }}>{members.map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => { setError(undefined); markDirty(); setTo(event.target.value); }}>{members.filter((member) => member.personId !== from).map((member) => <option key={member.personId} value={member.personId}>{member.name}{member.personId === currentPersonId ? ' · You' : ''}</option>)}</select></Field><Field label="Currency"><CurrencySelect value={currency} onChange={(value) => { setError(undefined); markDirty(); setCurrency(value); }} /></Field><Field label={`Amount (${currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" aria-invalid={Boolean(error)} value={amount} onChange={(event) => { setError(undefined); markDirty(); setAmount(event.target.value); }} /></Field><Field label="Date"><input required type="date" value={date} onChange={(event) => { setError(undefined); markDirty(); setDate(event.target.value); }} /></Field>{dirty ? <ActionGroup><Button type="button" variant="secondary" onClick={resetSuggestion}>Reset to current suggestion</Button></ActionGroup> : null}{error ? <ErrorBox error={error} id="settlement-form-error" /> : null}<Button className="full-width-button" disabled={submitting} type="submit">{submitting ? 'Recording…' : 'Record payment'}</Button></form></FormSurface></Layout>;
 }
 
@@ -1172,14 +1196,15 @@ function SettlementDetail() {
      const editAmountState = useRef<SettlementEditAmountState>();
    const [busy, setBusy] = useState(false); const [editing, setEditing] = useState(false); const [error, setError] = useState<unknown>(); const [from, setFrom] = useState(''); const [to, setTo] = useState(''); const [amount, setAmount] = useState(''); const [date, setDate] = useState(''); const [note, setNote] = useState('');
    const editSuggestion = balancesResource.data ? settlementSuggestionForPair(balancesResource.data.balances, from, to, settlement?.currency || 'USD') : undefined;
+   useReloadBlocker(editing && Boolean(loadedSettlement) && (from !== loadedSettlement?.fromPersonId || to !== loadedSettlement?.toPersonId || amount !== moneyInput(loadedSettlement?.amountMinor || 0) || date !== loadedSettlement?.date || note !== (loadedSettlement?.note || '')), 'Unsaved payment edit');
      useEffect(() => { if (settlement && !editing) { const savedAmount = moneyInput(settlement.amountMinor); setFrom(settlement.fromPersonId); setTo(settlement.toPersonId); setAmount(savedAmount); editAmountState.current = settlementEditAmountState(`${settlement.fromPersonId}:${settlement.toPersonId}`, savedAmount); setDate(settlement.date); setNote(settlement.note || ''); } }, [editing, settlement]);
       useEffect(() => { if (!editing || !loadedSettlement || from === to || !editAmountState.current) return; const pairKey = `${from}:${to}`; const next = transitionSettlementEditAmount(editAmountState.current, pairKey, editSuggestion); if (next.amount === amount && next.autoAmount === editAmountState.current.autoAmount) return; editAmountState.current = next; setAmount(next.amount); }, [amount, editSuggestion, editing, from, loadedSettlement, to]);
    useEffect(() => { if (editing && from === to) setTo(historicalParticipants.find((participant) => participant.personId !== from)?.personId || ''); }, [editing, from, historicalParticipants, to]);
    if (!loadedSettlement && (detail.error || me.error)) return <Layout><ErrorBox error={detail.error || me.error} id="settlement-detail-error" /></Layout>; if (!loadedSettlement) return <Layout><Loading /></Layout>;
      let participantIds = [...new Set([settlement.fromPersonId, settlement.toPersonId, ...historicalParticipants.map((participant) => participant.personId)])]; const label = (personId: string) => { if (personId === group.data?.currentPersonId) return 'You'; const participant = historicalParticipants.find((candidate) => candidate.personId === personId); return participant ? (participant.status === 'deleted' ? 'Deleted account' : `${participant.name}${participant.status === 'removed' ? ' · Removed' : ''}`) : 'Removed'; }; participantIds = sortOptionsByLabel(participantIds, label, (personId) => personId);
-   const restore = async () => { if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await restoreSettlement(settlement.id, settlement.version); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-  const remove = async () => { if (!confirm('Delete this settlement?')) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await api(`/settlements/${settlement.id}?version=${settlement.version}`, { method: 'DELETE' }); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); nav(`/groups/${settlement.groupId}`); } catch (cause) { setError(cause); } finally { setBusy(false); } };
-   const save = async (event: FormEvent) => { event.preventDefault(); if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await updateSettlement(settlement.id, { from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, settlement.currency), currency: settlement.currency, date, note: note || null, version: settlement.version }); setEditing(false); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } };
+   const restore = () => runProtectedOperation(async () => { if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await restoreSettlement(settlement.id, settlement.version); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Restoring payment');
+  const remove = () => runProtectedOperation(async () => { if (!online || busy || !confirm('Delete this settlement?')) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await api(`/settlements/${settlement.id}?version=${settlement.version}`, { method: 'DELETE' }); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); nav(`/groups/${settlement.groupId}`); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Deleting payment');
+   const save = (event: FormEvent) => runProtectedOperation(async () => { event.preventDefault(); if (!online || busy) return; setBusy(true); setError(undefined); const generation = captureSessionGeneration(); try { await updateSettlement(settlement.id, { from_person_id: from, to_person_id: to, amount_minor: parseMoney(amount, settlement.currency), currency: settlement.currency, date, note: note || null, version: settlement.version }); setEditing(false); await invalidateForMutation.settlementChanged(settlement.groupId, userId, settlement.id, generation); } catch (cause) { setError(cause); } finally { setBusy(false); } }, 'Saving payment');
    if (editing) { try { settlement = { ...settlement, fromPersonId: from, toPersonId: to, amountMinor: parseMoney(amount, settlement.currency), date, note }; } catch { settlement = { ...settlement, fromPersonId: from, toPersonId: to, date, note }; } }
   return <Layout><Link to={`/groups/${settlement.groupId}`} className="back">← Group</Link><PageHeader className="page-title" eyebrow={settlement.deletedAt ? 'Deleted transaction' : settlement.date} title={`${label(settlement.fromPersonId)} paid ${label(settlement.toPersonId)}`} actions={<Money amountMinor={settlement.amountMinor} currency={settlement.currency} size="large" tone="positive" />} />{settlement.deletedAt ? <Surface className="settlement-detail-tombstone"><strong>Deleted settlement</strong><p className="muted">The tombstone is retained for 30 days and can be restored by an active group member.</p><ActionGroup><Button disabled={!online || busy} onClick={() => void restore()}>{busy ? 'Restoring…' : 'Restore settlement'}</Button></ActionGroup></Surface> : editing ? <FormSurface className="settlement-form-surface"><form onSubmit={save}><Field label="Who paid?"><select value={from} onChange={(event) => setFrom(event.target.value)}>{participantIds.filter((personId) => personId !== to).map((personId) => <option key={personId} value={personId}>{label(personId)}</option>)}</select></Field><Field label="Who received?"><select value={to} onChange={(event) => setTo(event.target.value)}>{participantIds.filter((personId) => personId !== from).map((personId) => <option key={personId} value={personId}>{label(personId)}</option>)}</select></Field><Field label={`Amount (${settlement.currency})`}><input className={amountInputClass(amount)} data-amount-length={amountInputLength(amount)} required inputMode="decimal" value={amount} onChange={(event) => { const value = event.target.value; setAmount(value); if (editAmountState.current) editAmountState.current = manuallySetSettlementEditAmount(editAmountState.current, value); }} /></Field><Field label="Date"><input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field><Field label="Note (optional)"><textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} /></Field><ActionGroup><Button type="submit" disabled={!online || busy}>{busy ? 'Saving…' : 'Save changes'}</Button><Button type="button" variant="secondary" onClick={() => setEditing(false)}>Cancel</Button></ActionGroup></form></FormSurface> : <ActionGroup><Button type="button" onClick={() => setEditing(true)} disabled={!online}>Edit settlement</Button><Button type="button" variant="danger" disabled={!online || busy} onClick={() => void remove()}>Delete</Button></ActionGroup>}{error ? <ErrorBox error={error} id="settlement-mutation-error" /> : null}<ResourceNotice resource={detail} label="settlement details" /><AuditList groupId={settlement.groupId} entityId={settlement.id} entityType="settlement" userId={userId} /></Layout>;
 }
@@ -1205,6 +1230,7 @@ function HistoryTransactions({ groupId, groups }: { groupId?: string; groups: Gr
   const scopeKey = `${userId}:${groupId || 'all'}:${filterSignature}`;
   const [pageStates, setPageStates] = useState<Record<string, TransactionPageState>>({}); const [draftState, setDraftState] = useState<{ scopeKey: string; filters: TransactionFilters }>(() => ({ scopeKey, filters }));
   const draftFilters = draftState.scopeKey === scopeKey ? draftState.filters : filters;
+  useReloadBlocker(transactionFilterKey(draftFilters) !== transactionFilterKey(filters), 'Unapplied history filters');
   const setDraftFilters = (update: (current: TransactionFilters) => TransactionFilters) => setDraftState((current) => ({ scopeKey, filters: update(current.scopeKey === scopeKey ? current.filters : filters) }));
   const pageScope = useRef(createPageRequestScope());
   const resourcePage = transactionsResource.data;
@@ -1372,12 +1398,13 @@ function InsightTrendsSection({ resource, currency, online, retry }: { resource:
   return <section className="insight-section" aria-labelledby="insight-change-heading"><SectionHeader level={3} title={<span id="insight-change-heading">Where is spending changing?</span>} description="Independent activity window" />{content}</section>;
 }
 
-function SpendingInsightsPage({ groupId, groupName }: { groupId?: string; groupName?: string }) {
+export function SpendingInsightsPage({ groupId, groupName }: { groupId?: string; groupName?: string }) {
   const online = useOnlineStatus();
   const [searchParams, setSearchParams] = useSearchParams();
   const filters = useMemo(() => readInsightFilters(searchParams), [searchParams]);
   const [customDraft, setCustomDraft] = useState({ from: filters.from || '', to: filters.to || '' });
   const [customError, setCustomError] = useState('');
+  useReloadBlocker(filters.period === 'custom' && (customDraft.from !== (filters.from || '') || customDraft.to !== (filters.to || '')), 'Unapplied insight dates');
   useEffect(() => { if (filters.period === 'custom') setCustomDraft({ from: filters.from || '', to: filters.to || '' }); }, [filters.period, filters.from, filters.to]);
   const customValid = filters.period !== 'custom' || validInsightRange(filters.from, filters.to);
   const comparison = insightComparisonDateRange(filters.period, filters, new Date());
@@ -1440,7 +1467,7 @@ function LegacyTransactionRedirect() {
   return <Navigate to={`/activity?${search}`} replace />;
 }
 
-function ProfileSettings() {
+export function ProfileSettings() {
   const connection = useConnectionState();
   const lifecycle = useAuthLifecycle();
   const online = connection.status === 'connected' && lifecycle.status === 'authenticated';
@@ -1450,18 +1477,21 @@ function ProfileSettings() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<unknown>();
-  useEffect(() => { if (me.data?.name) setName(me.data.name); }, [me.data?.name]);
-  useEffect(() => { setAvatarMode(me.data?.avatarMode || 'initials'); }, [me.data?.avatarMode]);
-  const save = async (event: FormEvent) => {
+  const profileBaseline = useRef({ name: me.data?.name || '', avatarMode: me.data?.avatarMode || 'initials' });
+  const profileDirty = name !== profileBaseline.current.name || avatarMode !== profileBaseline.current.avatarMode;
+  useReloadBlocker(profileDirty, 'Unsaved profile');
+  useEffect(() => { if (name === profileBaseline.current.name && me.data) { profileBaseline.current.name = me.data.name; setName(me.data.name); } }, [me.data?.name]);
+  useEffect(() => { if (avatarMode === profileBaseline.current.avatarMode && me.data) { const next = me.data.avatarMode || 'initials'; profileBaseline.current.avatarMode = next; setAvatarMode(next); } }, [me.data?.avatarMode]);
+  const save = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     const value = name.trim();
     if (!online || busy) return;
     if (value.length < 1 || value.length > 120) { setError(new Error('Display name must be between 1 and 120 characters.')); return; }
     setBusy(true); setMessage(''); setError(undefined);
-     try { const result = await updateDisplayName(value, avatarMode); setName(result.user.name); setAvatarMode(result.user.avatarMode || 'initials'); setMessage(result.superseded ? `A newer profile update is already active: ${result.user.name}.` : 'Profile updated across your groups.'); }
+     try { const result = await updateDisplayName(value, avatarMode); profileBaseline.current = { name: result.user.name, avatarMode: result.user.avatarMode || 'initials' }; setName(result.user.name); setAvatarMode(result.user.avatarMode || 'initials'); setMessage(result.superseded ? `A newer profile update is already active: ${result.user.name}.` : 'Profile updated across your groups.'); }
     catch (cause) { setError(cause); }
     finally { setBusy(false); }
-  };
+  }, 'Saving profile');
   return <MacroSection title="Profile" className="settings-section" region="frequent"><p className="muted">Your display name and avatar are shared across every group. Historical audit entries keep the name captured at the time.</p>{me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="profile-load-error" /> : <form onSubmit={save} aria-describedby={error ? 'profile-error' : 'profile-help'}><Field label="Display name"><input required minLength={1} maxLength={120} value={name} onChange={(event) => { setName(event.target.value); setError(undefined); setMessage(''); }} aria-describedby={error ? 'profile-error' : 'profile-help'} /></Field><span id="profile-help" className="muted">1–120 characters. Profile changes are available while online.</span><Field label="Avatar"><select value={avatarMode} disabled={busy || !me.data} onChange={(event) => { setAvatarMode(event.target.value as 'initials' | 'gravatar'); setMessage(''); }} aria-describedby="avatar-help"><option value="initials">Initials (default)</option><option value="gravatar">Gravatar (opt in)</option></select></Field><p id="avatar-help" className="muted">Gravatar is a third-party service. Opting in lets others load your image using a hash of your account email, and shares their IP address with Gravatar. Email hashes are not anonymous. Initials make no image requests and are used when no image exists, loading fails, or you are offline.</p><div aria-label="Avatar preview"><Avatar name={name} avatarMode={avatarMode} email={me.data?.email} size="lg" /><span className="muted"> Preview for {me.data?.email || 'your account email'}</span></div>{me.data === undefined ? <p role="status">Loading profile…</p> : me.offline ? <p role="status" className="muted">Showing cached profile.</p> : null}{error ? <ErrorBox error={error} id="profile-error" /> : null}<Button type="submit" data-primary-action="true" disabled={!online || busy || me.data === undefined}>{busy ? 'Saving…' : 'Save profile'}</Button>{message ? <p className="cache-status" role="status">{message}</p> : null}{!online ? <p className="muted" role="status">Profile changes require a connection.</p> : null}</form>}</MacroSection>;
 }
 
@@ -1483,6 +1513,7 @@ function Settings() {
   const [exportProgress, setExportProgress] = useState('');
   const [exportError, setExportError] = useState<unknown>();
   const [deletionConfirmation, setDeletionConfirmation] = useState('');
+  useReloadBlocker(Boolean(deletionConfirmation), 'Account deletion confirmation');
    const [deletingAccount, setDeletingAccount] = useState(false);
    const [accountDeletionMessage, setAccountDeletionMessage] = useState('');
    const [accountDeletionError, setAccountDeletionError] = useState<unknown>();
@@ -1497,7 +1528,7 @@ function Settings() {
     return () => { active = false; unsubscribe(); };
   }, []);
 
-  const clearCache = async () => {
+  const clearCache = () => runProtectedOperation(async () => {
     if (!confirm('Clear cached identity, groups, snapshots, and recent preferences? Pending and uncertain expenses will be preserved.')) return;
     setClearing(true); setMessage(''); setError(undefined);
     try {
@@ -1507,9 +1538,9 @@ function Settings() {
       setMessage('Cached account and group data cleared. Pending expenses were preserved.');
     } catch (cause) { setError(cause); }
     finally { setClearing(false); }
-  };
+  }, 'Clearing cached data');
 
-  const logout = async (allDevices = false) => {
+  const logout = (allDevices = false) => runProtectedOperation(async () => {
     if (!online) { setLogoutError(new Error('Logout requires a connection so the server session can be revoked safely.')); return; }
     if (outbox.length && !confirm(`You have ${outbox.length} unsynced expense${outbox.length === 1 ? '' : 's'}. They will stay on this device and sync only after the same account is verified again. Continue?`)) return;
     setClearing(true); setError(undefined); setLogoutError(undefined);
@@ -1524,24 +1555,25 @@ function Settings() {
         throw cause;
       }
     } catch (cause) { setLogoutError(cause); setClearing(false); }
-  };
+  }, 'Signing out');
 
-  const removeAccount = async (event: FormEvent) => {
+  const removeAccount = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault();
     if (!online || clearing || exporting || deletingAccount || deletionConfirmation !== ACCOUNT_DELETION_CONFIRMATION) return;
     setDeletingAccount(true); setAccountDeletionMessage(''); setAccountDeletionError(undefined);
     try {
        if (!clerkUser?.id || !userId) throw new Error('Clerk is still loading this account. Retry account deletion when the identity is available.');
        await deleteAccount(clerkUser.id);
-       const result = await completePendingAccountDeletion(clerkUser, signOut, { clerkEvidence: { isLoaded: clerkLoaded === true, isSignedIn, userId } });
+        const result = await completePendingAccountDeletion(clerkUser, signOut, { clerkEvidence: { isLoaded: clerkLoaded === true, isSignedIn, userId } });
+        setDeletionConfirmation('');
        if (result.clerkStatus === 'unsupported') setAccountDeletionMessage('BillSplit data was deleted. This installed Clerk client cannot delete the Clerk account; manage that account separately.');
       else window.location.assign('/');
     } catch (cause) {
       setAccountDeletionError(cause);
-    } finally { setDeletingAccount(false); setDeletionConfirmation(''); }
-  };
+    } finally { setDeletingAccount(false); }
+  }, 'Deleting account');
 
-  const exportAccount = async () => {
+  const exportAccount = () => runProtectedOperation(async () => {
     if (!online || exporting) return;
     setExporting(true); setExportError(undefined); setExportProgress('Starting…');
     const abort = new AbortController(); exportController.current = abort;
@@ -1553,12 +1585,12 @@ function Settings() {
       await saveDownload(new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), groups })], { type: 'application/json' }), 'billsplit-account.json');
     } catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setExportError(cause); else setExportProgress('Cancelled'); }
     finally { exportController.current = undefined; setExporting(false); }
-  };
+  }, 'Exporting account');
 
     return <Layout>
       <PageHeader className="page-title" eyebrow="More" title="Settings" />
       <ProfileSettings />
-      <SettingsSection title="Device"><p className="muted" role="status">{connectionStatusLabel(connection.status)} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><InstallAction showStatus /></SettingsSection>
+      <SettingsSection title="Device"><p className="muted" role="status">{connectionStatusLabel(connection.status)} · {outbox.length ? `${outbox.length} expense${outbox.length === 1 ? '' : 's'} pending` : 'No expenses pending'}</p><ServiceWorkerUpdate settings /><InstallAction showStatus /></SettingsSection>
       <SettingsSection title="Pending expenses">{outbox.length ? <LedgerList label="Pending expenses">{outbox.map((item) => <LedgerRow key={item.clientOperationId}><span>{item.display.description}<small>{statusLabel(item.status, item.deliveryUncertain)}</small></span><Money amountMinor={item.display.amountMinor} currency={item.display.currency} /></LedgerRow>)}</LedgerList> : <p className="muted">New expenses sync automatically when you are online and signed in.</p>}</SettingsSection>
       <SettingsSection title="Trusted-device offline access"><p className="muted">After a verified visit, this browser keeps a private copy of your identity and recent group data so you can capture new expenses offline. It never stores a Clerk token, and replay still requires an active application session. Only use this on a device you trust.</p></SettingsSection>
       <SettingsSection title="Local data"><p className="muted">Clear cached identity, groups, snapshots, and recent preferences without deleting pending or uncertain outbox expenses. Resolve those from the queue controls before removing them.</p><ActionGroup><Button variant="secondary" disabled={clearing} onClick={() => void clearCache}>{clearing ? 'Clearing…' : 'Clear cached data'}</Button></ActionGroup>{message ? <p className="muted" role="status">{message}</p> : null}{error ? <ErrorBox error={error} /> : null}</SettingsSection>
@@ -1582,10 +1614,24 @@ export function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const { isLoaded, isSignedIn, userId, sessionId } = useAuth();
-  const { signOut } = useClerk();
+  const { signOut: providerSignOut } = useClerk();
+  const signOut = useMemo(() => (options?: { redirectUrl?: string }) => runProtectedOperation(() => providerSignOut(options), 'Signing out'), [providerSignOut]);
   const { user: clerkUser } = useUser();
   const auth = useSyncExternalStore(subscribeAuthLifecycle, getAuthLifecycle, () => ({ status: 'checking' as const }));
   const logoutInProgress = useSyncExternalStore(subscribeSessionState, getSessionLogoutInProgress, () => false);
+  useReloadBlocker(!isLoaded || logoutInProgress || ['checking', 'provisional', 'restoring', 'reverifying'].includes(auth.status), 'Verifying account');
+  useEffect(() => {
+    if (typeof MutationObserver === 'undefined') return;
+    let release: (() => void) | undefined;
+    const observeDialog = () => {
+      const open = Boolean(document.querySelector('.cl-modalBackdrop, .cl-modalContent'));
+      if (open && !release) release = createReloadBlocker('Account dialog');
+      if (!open && release) { release(); release = undefined; }
+    };
+    const observer = new MutationObserver(observeDialog);
+    observer.observe(document.body, { childList: true, subtree: true }); observeDialog();
+    return () => { observer.disconnect(); release?.(); };
+  }, []);
   const clerkSessionRef = useRef<string>();
   const previousOnlineRef = useRef<boolean>();
   const previousClerkEvidenceRef = useRef<string>();
@@ -1603,6 +1649,11 @@ export function App() {
     return scheduler.dispose;
   }, [auth.status]);
    const [pendingDeletion, setPendingDeletion] = useState(hasPendingAccountDeletion);
+   useReloadBlocker(pendingDeletion, 'Account deletion recovery');
+   useEffect(() => {
+     configureServiceWorkerUpdates({ safetyIntegrated: true, autoApply: true });
+     return () => configureServiceWorkerUpdates({ safetyIntegrated: false });
+   }, []);
    const [pendingDeletionError, setPendingDeletionError] = useState<unknown>();
    const [pendingDeletionRetry, setPendingDeletionRetry] = useState(0);
    const [accountDeletionNotice, setAccountDeletionNotice] = useState(false);
@@ -1616,19 +1667,22 @@ export function App() {
    }, [location.pathname, location.search, navigate]);
    const retryPendingDeletion = () => { setPendingDeletionError(undefined); setPendingDeletion(true); setPendingDeletionRetry((value) => value + 1); };
    const discardInvalidDeletionMarker = () => {
+      const release = beginProtectedOperation('Clearing recovery marker');
+      try {
       if (!discardInvalidPendingAccountDeletion()) return;
       setPendingDeletionError(undefined);
       setPendingDeletion(false);
+      } finally { release(); }
    };
    const finishExternalProviderCleanup = () => {
      const phase = getPendingAccountDeletionPhase();
      if (phase !== 'server-deleted' && phase !== 'local-cleared') return;
      if (!confirm('This only clears BillSplit data remaining in this browser. It does not delete or manage your Clerk account. Continue because the original Clerk account was deleted elsewhere?')) return;
      setPendingDeletionError(undefined);
-     void finishLocalCleanupAfterExternalProviderDeletion({ confirmed: true, clerkEvidence: { isLoaded: isLoaded === true, isSignedIn, ...(userId ? { userId } : {}) } }).then(() => {
+     void runProtectedOperation(() => finishLocalCleanupAfterExternalProviderDeletion({ confirmed: true, clerkEvidence: { isLoaded: isLoaded === true, isSignedIn, ...(userId ? { userId } : {}) } }).then(() => {
        setPendingDeletion(false);
        window.location.assign('/');
-     }).catch((cause) => setPendingDeletionError(cause));
+     }).catch((cause) => setPendingDeletionError(cause)), 'Clearing deleted account');
    };
   useEffect(() => {
     const onPending = () => setPendingDeletion(true);
@@ -1638,9 +1692,9 @@ export function App() {
   useEffect(() => {
     if (!pendingDeletion || !isLoaded || isSignedIn === undefined || (isSignedIn === true && !clerkUser)) return;
     let active = true;
-   void (async () => {
+   void runProtectedOperation(async () => {
        return completePendingAccountDeletion(clerkUser, signOut, { clerkEvidence: { isLoaded: isLoaded === true, isSignedIn, ...(userId ? { userId } : {}) } });
-     })().then((result) => {
+     }, 'Recovering account deletion').then((result) => {
       if (!active) return;
         if (result.clerkStatus === 'signed-out') {
           setPendingDeletion(true);

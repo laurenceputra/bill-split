@@ -2,17 +2,18 @@ import React from 'react'; import { createRoot } from 'react-dom/client'; import
 import { ClerkProvider } from '@clerk/react';
 import { AppErrorBoundary } from './ErrorBoundary';
 import { initializeInstallUX } from './install';
-import { observeServiceWorkerRegistration } from './service-worker';
+import { observeServiceWorkerRegistration, serviceWorkerRegistrationFailed } from './service-worker';
 
 export function registerServiceWorker() {
-  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) { serviceWorkerRegistrationFailed(); return; }
   // A dev worker would cache Vite's module graph and interfere with HMR.
   // Production still uses the finalized worker copied from public/.
   if (import.meta.env.DEV) return;
   try {
-    void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(observeServiceWorkerRegistration).catch(() => undefined);
-  } catch {
+    void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(observeServiceWorkerRegistration).catch(serviceWorkerRegistrationFailed);
+  } catch (error) {
     // A restricted browser can throw before returning the registration promise.
+    serviceWorkerRegistrationFailed(error);
   }
 }
 

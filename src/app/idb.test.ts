@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, updateGroupsSnapshot, updateOfflineTrustName } from './idb';
 import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
+import { acquireReloadGate, getReloadSafetyState, releaseReloadGate } from './reload-safety';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -12,6 +13,53 @@ beforeEach(async () => {
 });
 
 describe('user-scoped IndexedDB', () => {
+  it('does not turn an idle snapshot read into an indefinite reload blocker', async () => {
+    await saveRecent('snapshot');
+    const db = await new Promise<IDBDatabase>((resolve) => { const request = indexedDB.open(DB_NAME, DB_VERSION); request.onsuccess = () => resolve(request.result); });
+    const delayedOpen = { result: db } as IDBOpenDBRequest;
+    vi.spyOn(indexedDB, 'open').mockReturnValueOnce(delayedOpen);
+    const pending = readRecent();
+    expect(getReloadSafetyState().operations).toBe(0);
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('snapshot-read', 1_000)).toBe(true);
+    try {
+      delayedOpen.onsuccess!(new Event('success'));
+      expect(await pending).toBe('snapshot');
+    } finally { releaseReloadGate('snapshot-read'); vi.restoreAllMocks(); }
+  });
+
+  it('keeps a durable write protected beyond a caller deadline until commit', async () => {
+    await saveRecent('baseline');
+    const db = await new Promise<IDBDatabase>((resolve) => { const request = indexedDB.open(DB_NAME, DB_VERSION); request.onsuccess = () => resolve(request.result); });
+    const delayedOpen = { result: db } as IDBOpenDBRequest;
+    const open = vi.spyOn(indexedDB, 'open').mockReturnValueOnce(delayedOpen);
+    const pending = saveRecent('committed');
+    expect(getReloadSafetyState().operations).toBeGreaterThan(0);
+    expect(await Promise.race([pending.then(() => 'saved'), new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 1))])).toBe('deadline');
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('pending-write', 1_000)).toBe(false);
+    delayedOpen.onsuccess!(new Event('success'));
+    await pending;
+    open.mockRestore();
+    expect(getReloadSafetyState().operations).toBe(0);
+    expect(await readRecent()).toBe('committed');
+    expect(acquireReloadGate('pending-write', 1_000)).toBe(true);
+    releaseReloadGate('pending-write');
+    vi.restoreAllMocks();
+  });
+
+  it('allows stored idle queue rows, but rejects new writes during preparation', async () => {
+    await saveOutboxItem({ ...expense('idle'), status: 'pending' });
+    expect(getReloadSafetyState().operations).toBe(0);
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('idle-queue', 1_000)).toBe(true);
+    try {
+      await expect(saveRecent('forbidden')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(claimOutboxItem('idle', 'owner')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      expect(await listOutbox('user-a')).toHaveLength(1);
+    } finally { releaseReloadGate('idle-queue'); vi.restoreAllMocks(); }
+  });
+
   it('retains an opted-out avatar through stale profile and trust writes', async () => {
     const trust = { ...user('user-a'), clerkUserId: 'clerk-a', profileRevision: 1, avatarMode: 'gravatar' as const, avatarHash: 'a'.repeat(64) };
     await saveOfflineTrust(trust);

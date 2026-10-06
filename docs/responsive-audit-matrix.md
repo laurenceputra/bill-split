@@ -275,3 +275,40 @@ Targeted email, generic invitation, Add friend, and party default split
 editor disclosures are screenshot-audited for the owner fixture at **320, 895,
 896, and 1440px**. The registered member fixture remains covered in its
 collapsed management state and is not claimed to have owner-only editors.
+
+## Reliable app update controls
+
+The following matrix includes both executed presentation checks and broader
+behavior/lifecycle release checks; the evidence below distinguishes them.
+Run each row at **320, 390, 767, 768, 895, 896, and 1440px**.
+
+| View / state | Required checks at every width |
+| --- | --- |
+| Settings Device: initializing, unsupported, checking, installing | Profile remains first; check control disabled with contextual status; no enabled activation control |
+| Settings Device: idle, no-update, cached last-successful check | Check action and last-successful timestamp readable; timestamp not confused with failed attempt |
+| Settings Device: offline, check-error, install-error | Offline disables discovery; errors offer retry; existing private cached content remains usable |
+| Settings Device and compact header: ready, blocked, applying, deferred | Accessible live status; concise reason wraps without overflow; no force/discard action; all tabs must be safe |
+| Expense and refund drafts; payer/install modal | Untouched defaults do not block; changes survive blur/failed submit; modal lifetime blocks activation |
+| Group/friend creation; group settings; profile name/avatar | Dirty work remains owned while cached data refreshes; primary save actions precede admin controls |
+| Targeted email, generic invite, add-friend, split-default disclosure open/closed | Persistent drafts continue blocking while hidden; reverting semantic values removes draft blocker |
+| History filters and Insights dates outside forms | Unapplied changes block, including invalid dates and fields outside form boundaries |
+| Settings typed deletion, export, logout, local clear | Failed deletion retains confirmation; complete export/file-picker and provider lifetimes protected |
+
+Focused update-control markup tests cover unavailable/checking/installing/applying,
+dirty-blocked discovery, and error retry. Mounted tests cover async profile/refund
+initialization, failed saving/validation, semantic reversion and hidden drafts.
+The App owner now enables safety after mounting the complete UI inventory and
+disables it on cleanup. `tests/e2e/update-settings.spec.ts` executed both tests
+at all seven widths: Settings action order/blurred drafts, and all 13 update
+phases with distinct local/other-tab reasons (98 presentation configurations).
+The status fixtures render the shared production component into the actual
+Settings/header slots and verify overflow and enabled/disabled discovery controls;
+they do not simulate or claim actual worker discovery/activation behavior.
+The combined local update-settings/avatar/user-feedback run passed 11 browser
+tests using `/ms-playwright` through the existing local executable resolver.
+The separate lifecycle run passed 6 Chromium tests against actual core modules
+and coherent production worker/shell artifacts on a real same-origin A/B server.
+That dedicated production-core fixture is not an authenticated full-App A/B
+audit. The focused date-control run passed 7 Chromium tests. WebKit was unavailable
+locally; its verification remains pending CI, with no claim of real iOS Safari
+or native-picker coverage from these Chromium runs.

@@ -8,6 +8,7 @@ import type { ExpenseInput } from '../shared/schemas';
 import { invalidateForMutation } from './resource-cache';
 import { registerLogoutCoordinator } from './logout-coordination';
 import { captureSessionGeneration, getSessionLogoutInProgress, subscribeSessionLogout } from './session';
+import { getReloadSafetyState, runProtectedOperation, subscribeReloadSafety } from './reload-safety';
 
 export type { ExpenseOutboxItem } from './idb';
 export const OUTBOX_LEASE_MS = 30_000;
@@ -41,6 +42,36 @@ export const RETRY_MAX_DELAY_MS = 60_000;
 const notify = () => listeners.forEach((listener) => listener());
 const canFlush = () => getAuthLifecycle().status === 'authenticated' && isUsableConnection();
 const currentOutboxUserId = () => getAuthLifecycle().status === 'authenticated' ? getVerifiedUserId() : undefined;
+type DeferredWork = { epoch: number; userId: string | undefined; operation: () => Promise<unknown> };
+const deferredUpdateWork = new Map<string, DeferredWork>();
+let deferredReplayScheduled = false;
+const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible';
+const deferUpdateWork = (key: string, operation: () => Promise<unknown>, epoch = getAuthEpoch(), userId = getVerifiedUserId()) => {
+  deferredUpdateWork.set(key, { epoch, userId, operation });
+};
+const replayDeferredUpdateWork = () => {
+  if (deferredReplayScheduled || getReloadSafetyState().gated || !deferredUpdateWork.size || !visible()) return;
+  deferredReplayScheduled = true;
+  // Never start operations reentrantly inside safety publication (or wait for
+  // a gate while owning a protected operation). Pending hints own no blocker.
+  void Promise.resolve().then(async () => {
+    for (const [key, work] of deferredUpdateWork) {
+      if (getReloadSafetyState().gated || !visible()) break;
+      deferredUpdateWork.delete(key);
+      // A newly verified authenticated completion may itself be the operation
+      // which releases logoutQuiescing. Each ordinary worker checks that flag.
+      if (getSessionLogoutInProgress() || !isAuthEpochCurrent(work.epoch) || getVerifiedUserId() !== work.userId) continue;
+      try { await work.operation(); } catch { /* The normal recovery paths report/retry failures. */ }
+    }
+  }).finally(() => { deferredReplayScheduled = false; replayDeferredUpdateWork(); });
+};
+let updateWasGated = getReloadSafetyState().gated;
+subscribeReloadSafety(() => {
+  const gated = getReloadSafetyState().gated;
+  const released = updateWasGated && !gated;
+  updateWasGated = gated;
+  if (released) replayDeferredUpdateWork();
+});
 const bounded = <T>(promise: Promise<T>, timeoutMs = OUTBOX_IDB_DEADLINE_MS): Promise<T | undefined> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs); });
@@ -70,6 +101,7 @@ export function setRetrySchedulerForTests(schedule: (callback: () => void, delay
 const leaseKey = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientOperationId'>) => `${item.userId}:${item.clientOperationId}`;
 const clearLeaseRecovery = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientOperationId'>) => {
   const key = leaseKey(item);
+  deferredUpdateWork.delete(`lease:${key}`);
   const timer = leaseRecoveryTimers.get(key);
   if (timer) clearTimer(timer);
   leaseRecoveryTimers.delete(key);
@@ -78,15 +110,20 @@ const scheduleLeaseRecovery = (item: Pick<ExpenseOutboxItem, 'userId' | 'clientO
   clearLeaseRecovery(item);
   if (item.leaseExpiresAt === undefined) return;
   const key = leaseKey(item);
-  const timer = scheduleTimer(() => {
-    leaseRecoveryTimers.delete(key);
+  const recover = async () => {
     if (logoutQuiescing || getSessionLogoutInProgress()) return;
+    if (getReloadSafetyState().gated) { deferUpdateWork(`lease:${key}`, recover); return; }
+    if (!visible() || getVerifiedUserId() !== item.userId) return;
     const authEpoch = getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === item.userId ? getAuthEpoch() : undefined;
     const allowed = authEpoch === undefined ? undefined : () => isAuthEpochCurrent(authEpoch) && getAuthLifecycle().status === 'authenticated' && currentOutboxUserId() === item.userId;
-    void recoverStaleSyncing(item.userId, undefined, authEpoch, allowed || (() => true)).then(() => refreshOutbox()).then(() => {
+    await runProtectedOperation(() => recoverStaleSyncing(item.userId, undefined, authEpoch, allowed || (() => true)).then(() => refreshOutbox()).then(() => {
       if (canFlush() && (typeof document === 'undefined' || document.visibilityState === 'visible')) return flushOutbox();
       return undefined;
-    }).catch(() => undefined);
+    }), 'Recovering queued expense lease');
+  };
+  const timer = scheduleTimer(() => {
+    leaseRecoveryTimers.delete(key);
+    void recover().catch(() => undefined);
   }, Math.max(0, item.leaseExpiresAt - Date.now()) + 1);
   leaseRecoveryTimers.set(key, timer);
 };
@@ -110,6 +147,7 @@ const scheduleConnectionRecovery = (delay = retryDelay(connectionRecoveryAttempt
  */
 export async function recoverConnection(options: { resumeId?: number; alreadyVerified?: boolean } = {}) {
   if (connectionRecoveryPromise || logoutQuiescing || getSessionLogoutInProgress()) return;
+  if (getReloadSafetyState().gated) { deferUpdateWork('connection', () => recoverConnection(options)); return; }
   // Auth-resume completion is ordered through handleAuthenticatedUser. Do not
   // consume its ID here: the authenticated event may still be reactivating
   // auth-required rows in IndexedDB.
@@ -205,6 +243,7 @@ export async function initializeOutbox() {
 }
 
 export async function enqueueExpense(input: { userId: string; groupId: string; payload: ExpenseInput; display: ExpenseOutboxItem['display']; clientOperationId: string }): Promise<ExpenseOutboxItem> {
+  return runProtectedOperation(async () => {
   if (logoutQuiescing || getSessionLogoutInProgress()) throw new ApiError('Logout is in progress. Try again after signing in.', { code: 'AUTH_REQUIRED', status: 401 });
   const lifecycle = getAuthLifecycle().status;
   const trustedUserId = lifecycle === 'provisional' || lifecycle === 'trusted-offline' ? (await bounded(readOfflineTrust())) : undefined;
@@ -219,7 +258,8 @@ export async function enqueueExpense(input: { userId: string; groupId: string; p
    snapshot = [...snapshot.filter((existing) => !(existing.userId === item.userId && existing.clientOperationId === item.clientOperationId)), item].sort((a, b) => a.createdAt.localeCompare(b.createdAt)); notify();
    await invalidateForMutation.expenseChanged(item.groupId, undefined, item.userId, generation);
    void requestBackgroundOutboxSync();
-   return item;
+    return item;
+  }, 'Queueing expense');
 }
 
 const errorDetails = (error: ApiError) => ({ code: error.code, message: error.message, status: error.status });
@@ -244,13 +284,20 @@ const reconcileLateClaim = async (claim: ExpenseOutboxItem, generation: number, 
 };
 
 async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
+  return runProtectedOperation(async () => {
   if (logoutQuiescing || getSessionLogoutInProgress()) return undefined;
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   if (!isAuthEpochCurrent(authEpoch) || !canFlush()) return undefined;
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return undefined;
-   const claimResult = await boundedResult(claimOutboxItem(item.clientOperationId, owner, Date.now(), OUTBOX_LEASE_MS, generation, scopeFor(item, authEpoch)));
-    if (claimResult.timedOut) { void claimResult.late.then((lateClaim) => lateClaim ? reconcileLateClaim(lateClaim, generation, scopeFor(item, authEpoch)) : undefined).catch(() => undefined); return undefined; }
+   let claimTimedOut = false;
+   const claim = runProtectedOperation(async () => {
+     const claimed = await claimOutboxItem(item.clientOperationId, owner, Date.now(), OUTBOX_LEASE_MS, generation, scopeFor(item, authEpoch));
+     if (claimTimedOut && claimed) await reconcileLateClaim(claimed, generation, scopeFor(item, authEpoch));
+     return claimed;
+   }, 'Claiming queued expense');
+   const claimResult = await boundedResult(claim);
+    if (claimResult.timedOut) { claimTimedOut = true; return undefined; }
    const claimed = claimResult.value;
    if (!claimed) return undefined;
    const scope = scopeFor(claimed, authEpoch);
@@ -329,7 +376,8 @@ async function syncItem(item: ExpenseOutboxItem, timeoutMs = OUTBOX_REQUEST_TIME
       if (ambiguous) await bounded(invalidateForMutation.expenseChanged(claimed.groupId, undefined, claimed.userId, generation));
     if (updated) updateSnapshot(updated); else await refreshOutbox();
     return status;
-     } finally { clearTimeout(timer); activeControllers.delete(controller); activeClaims.delete(claimed.clientOperationId); }
+      } finally { clearTimeout(timer); activeControllers.delete(controller); activeClaims.delete(claimed.clientOperationId); }
+  }, 'Syncing expense');
 }
 
 async function markAuthRequired(userId: string, error: ApiError, expectedAuthEpoch: number) {
@@ -340,6 +388,8 @@ async function markAuthRequired(userId: string, error: ApiError, expectedAuthEpo
 }
 
 export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
+   // A background wake-up is a hint, not permission to invalidate preparation.
+   if (getReloadSafetyState().gated) { deferUpdateWork('flush', () => flushOutbox(timeoutMs)); return; }
    if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) {
      if (!logoutQuiescing && !getSessionLogoutInProgress() && (getAuthLifecycle().status === 'authenticated' || getAuthLifecycle().status === 'trusted-offline')) scheduleConnectionRecovery();
      return;
@@ -348,7 +398,7 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
   if (flushPromise) { flushAgain = true; return flushPromise; }
   cancelScheduledRetry();
   const flushEpoch = getAuthEpoch();
-  flushPromise = (async () => {
+  flushPromise = runProtectedOperation(async () => {
     try {
        if (!canFlush() || logoutQuiescing || getSessionLogoutInProgress()) return;
          const lifecycle = getAuthLifecycle().status;
@@ -392,7 +442,7 @@ export async function flushOutbox(timeoutMs = OUTBOX_REQUEST_TIMEOUT_MS) {
       const rerun = flushAgain; flushAgain = false; flushPromise = undefined;
       if (rerun && !logoutQuiescing) Promise.resolve().then(() => flushOutbox(timeoutMs));
     }
-  })();
+  }, 'Syncing queued expenses');
   return flushPromise;
 }
 
@@ -401,6 +451,7 @@ export class OutboxDeliveryUncertainError extends Error { constructor() { super(
 export class OutboxStorageTimeoutError extends Error { constructor() { super('Offline storage did not respond before the deadline. The operation was not confirmed; retry.'); this.name = 'OutboxStorageTimeoutError'; } }
 
 export async function retryOutboxItem(clientOperationId: string) {
+  return runProtectedOperation(async () => {
   const userId = currentOutboxUserId();
   if (!userId) throw new OutboxStorageTimeoutError();
   let scope: OutboxOperationScope = { userId, expectedAuthEpoch: getAuthEpoch() };
@@ -442,9 +493,11 @@ export async function retryOutboxItem(clientOperationId: string) {
   if (!reset) throw new OutboxBusyError();
   await refreshOutbox();
   return flushOutbox();
+  }, 'Retrying queued expense');
 }
 
 export async function discardOutboxItem(clientOperationId: string) {
+  return runProtectedOperation(async () => {
   const userId = currentOutboxUserId();
   if (!userId) throw new OutboxStorageTimeoutError();
   const scope = { userId, expectedAuthEpoch: getAuthEpoch() } satisfies OutboxOperationScope;
@@ -465,6 +518,7 @@ export async function discardOutboxItem(clientOperationId: string) {
     throw new OutboxBusyError();
   }
   snapshot = snapshot.filter((item) => item.clientOperationId !== clientOperationId); notify();
+  }, 'Discarding queued expense');
 }
 
 export function statusLabel(status: OutboxStatus, deliveryUncertain = false) {
@@ -472,6 +526,9 @@ export function statusLabel(status: OutboxStatus, deliveryUncertain = false) {
 }
 
 export async function handleAuthenticatedUser(userId: string, eventEpoch = getAuthEpoch(), resumeId?: number) {
+  if (getSessionLogoutInProgress() || !isAuthEpochCurrent(eventEpoch) || getAuthLifecycle().status !== 'authenticated' || currentOutboxUserId() !== userId) return;
+  if (getReloadSafetyState().gated) { deferUpdateWork(`authenticated:${userId}`, () => handleAuthenticatedUser(userId, eventEpoch, resumeId), eventEpoch, userId); return; }
+  return runProtectedOperation(async () => {
   if (resumeId !== undefined) {
     if (completedResumeIds.has(resumeId)) return;
     const existing = resumeRecoveryPromises.get(resumeId);
@@ -518,10 +575,12 @@ export async function handleAuthenticatedUser(userId: string, eventEpoch = getAu
   if (!isAuthEpochCurrent(eventEpoch)) return;
   await refreshOutbox();
   return changed ? flushOutbox() : undefined;
+  }, 'Restoring queued expenses');
 }
 
 async function quiesceForLogout() {
   logoutQuiescing = true;
+  deferredUpdateWork.clear();
   flushAgain = false;
   cancelScheduledRetry();
   for (const controller of activeControllers) controller.abort();
@@ -537,6 +596,7 @@ registerLogoutCoordinator(quiesceForLogout, resumeAfterFailedLogout);
 subscribeSessionLogout(() => { void quiesceForLogout(); });
 
 if (typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (visible()) replayDeferredUpdateWork(); });
   // Foreground signals are owned by the auth coordinator.  This event is the
   // completion edge of that one operation, so pageshow/focus/visibility storms
   // cannot create a second probe or flush loop.

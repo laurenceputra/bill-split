@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { beginMutationBarrier, MutationBlockedError, releaseMutationBarrier, runMutation, withExclusiveMutationLock } from './mutation-quiescence';
 import { captureSessionGeneration, rollbackSessionLogout, startSessionLogout } from './session';
+import { acquireReloadGate, getReloadSafetyState, releaseReloadGate } from './reload-safety';
 
 type Pending = { mode: 'shared' | 'exclusive'; callback: () => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: unknown) => void };
 
@@ -33,9 +34,35 @@ function mockedLocks() {
 
 describe('mutation Web Locks ordering', () => {
   afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    releaseReloadGate('mutation-test');
     releaseMutationBarrier();
     rollbackSessionLogout(captureSessionGeneration(), false);
     vi.unstubAllGlobals();
+  });
+
+  it('rejects an update-gated mutation synchronously before transport or lock acquisition', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('mutation-test', 1_000)).toBe(true);
+    const transport = vi.fn(async () => undefined);
+    expect(() => runMutation(transport)).toThrowError(expect.objectContaining({ code: 'UPDATE_PREPARING' }));
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it('keeps the uncancelled exclusive wait protected after its logical timeout', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const underlying = new Promise<void>((resolve) => { finish = resolve; });
+    const wait = withExclusiveMutationLock(() => underlying);
+    await vi.advanceTimersByTimeAsync(751);
+    expect(await wait).toBeUndefined();
+    expect(getReloadSafetyState().operations).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(acquireReloadGate('mutation-test', 1_000)).toBe(false);
+    finish();
+    await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+    expect(acquireReloadGate('mutation-test', 1_000)).toBe(true);
   });
 
   it('finishes shared mutation work before logout and blocks a later mutation', async () => {
