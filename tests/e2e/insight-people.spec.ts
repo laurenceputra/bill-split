@@ -5,27 +5,60 @@ const path = `/activity?group=${groupId}&view=insights&period=all&currency=USD`;
 const person = (personId: string, name: string, shareMinor: number, paidMinor: number) => ({ personId, name, shareMinor, paidMinor });
 const summary = (currency: string, people?: ReturnType<typeof person>[]) => ({ currency, groupSpendMinor: 1000, allocatedSpendMinor: 200, yourShareMinor: 200, youPaidMinor: 600, expenseCount: 1, ...(people ? { people } : {}) });
 
-test('top More actions is button-like, in-flow and follows frequent actions at every audit width', async ({ authenticatedPage: page }) => {
+test('Spending insights split actions stay aligned and in-flow at every audit width', async ({ authenticatedPage: page }) => {
   await page.goto(`/groups/${groupId}`);
   const tools = page.locator('.group-overview-tools');
+  await expect(tools).toHaveAttribute('data-flow-region', 'admin');
+  await expect(tools.locator('summary')).toHaveAccessibleName('More group actions');
+  const insights = page.getByRole('link', { name: 'Spending insights', exact: true });
+  await expect(insights).toHaveAttribute('href', `/activity?group=${groupId}&view=insights&period=all`);
+  const positions = () => page.evaluate(() => {
+    const box = (selector: string) => { const r = document.querySelector(selector)!.getBoundingClientRect(); return { top: r.top, height: r.height, width: r.width, left: r.left, right: r.right }; };
+    return { title: box('.group-overview-header h1'), add: box('.group-overview-header .split-transaction-control'), addMenu: box('.group-overview-header .split-transaction-control__menu'), settle: box('.group-overview-header .expense-heading__actions > .button'), insights: box('.group-insights-control__primary'), menu: box('.group-overview-tools summary'), cards: box('.group-overview-columns') };
+  });
   for (const width of [320, 390, 768, 895, 896, 1440]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(tools).toHaveJSProperty('open', false);
     const geometry = await tools.locator('summary').evaluate((element) => {
       const primary = document.querySelector('.group-overview-header .expense-heading__actions')!;
       const style = getComputedStyle(element);
-      return { height: element.getBoundingClientRect().height, border: parseFloat(style.borderTopWidth), radius: parseFloat(style.borderRadius), followsPrimary: Boolean(primary.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) };
+       return { height: element.getBoundingClientRect().height, border: parseFloat(style.borderTopWidth), radius: parseFloat(style.borderTopRightRadius), followsPrimary: Boolean(primary.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) };
     });
     expect(geometry.height).toBeGreaterThanOrEqual(44);
     expect(geometry.border).toBeGreaterThan(0);
     expect(geometry.radius).toBeGreaterThan(0);
     expect(geometry.followsPrimary).toBe(true);
-    await tools.locator('summary').click();
-    for (const name of ['View spending insights', 'Group history', 'Group settings']) await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
+    const closed = await positions();
+    expect(closed.menu.width).toBe(closed.addMenu.width);
+    for (const control of [closed.add, closed.addMenu, closed.settle, closed.insights, closed.menu]) expect(control.height).toBe(44);
+    expect(closed.menu.top).toBe(closed.insights.top);
+    expect(closed.settle.top).toBe(closed.add.top);
+    if (Math.abs(closed.insights.top - closed.add.top) < 1) expect(closed.menu.top).toBe(closed.addMenu.top);
+    await tools.locator('summary').focus();
+    await expect(tools.locator('summary')).toBeFocused();
+    expect(await tools.locator('summary').evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none');
+    await page.keyboard.press('Enter');
+    for (const name of ['Group history', 'Group settings']) await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(tools.getByRole('link', { name: /insights/i })).toHaveCount(0);
+    const opened = await positions();
+    for (const key of ['title', 'add', 'settle', 'insights', 'menu'] as const) expect(opened[key]).toEqual(closed[key]);
+    expect(opened.cards.top).toBeGreaterThan(closed.cards.top);
+    const panel = await tools.locator('nav').boundingBox();
+    expect(panel!.x).toBeCloseTo(closed.insights.left, 0);
+    expect(panel!.width).toBeCloseTo(closed.menu.right - closed.insights.left, 0);
+    expect(panel!.y).toBeGreaterThanOrEqual(closed.menu.top + closed.menu.height);
     await expect(page.getByRole('link', { name: 'Record credit', exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await tools.locator('summary').click();
+    await page.keyboard.press('Space');
+    await expect(tools).toHaveJSProperty('open', false);
+    await expect(tools.locator('summary')).toBeFocused();
   }
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.locator('.group-overview-header h1').evaluate((element) => { element.textContent = 'GroupWithAnExtremelyLongUnbrokenName'.repeat(3); });
+  await tools.locator('summary').click();
+  await tools.locator('nav a').first().evaluate((element) => { element.textContent = 'GroupHistoryWithAnExtremelyLongUnbrokenLabel'.repeat(3); });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  expect(await page.locator('.group-insights-control').evaluate((element) => [...element.querySelectorAll<HTMLElement>('a, nav')].every((child) => child.scrollWidth <= child.clientWidth + 1))).toBe(true);
 });
 
 test('person totals follow currency and period; ties, zero, old cache and empty are distinct', async ({ authenticatedPage: page }) => {
@@ -79,8 +112,7 @@ test('cached person totals survive refresh errors and offline; long names and la
   await page.clock.install();
   await page.clock.fastForward(31_000);
   await page.getByRole('link', { name: '← Back to group', exact: true }).click();
-  await page.locator('.group-overview-tools summary').click();
-  await page.getByRole('link', { name: 'View spending insights', exact: true }).click();
+  await page.getByRole('link', { name: 'Spending insights', exact: true }).click();
   await expect.poll(() => failedReads).toBeGreaterThan(0);
   await expect(people).toContainText('2,345,678,901,234.56');
   await expect(page.getByText('Showing cached selected-period summary; it may be out of date.', { exact: false })).toBeVisible();

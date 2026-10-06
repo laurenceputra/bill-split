@@ -1105,8 +1105,8 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
                const tools = page.locator('.group-overview-tools');
                await tools.locator('summary').click();
                await expect(tools).toHaveJSProperty('open', true);
-                for (const linkName of ['View spending insights', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
-               const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-open', context: 'GroupOverview / More group actions disclosure open', expected: { ...scenario.expected, content: 'View spending insights' } };
+                 for (const linkName of ['Spending insights', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
+                const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-open', context: 'GroupOverview / More group actions disclosure open', expected: { ...scenario.expected, content: 'Group history' } };
                await assertRendered(page, toolsScenario, observations, viewport);
                coverage.push({ scenarioName: toolsScenario.name, authState: authState(toolsScenario.auth), route: `${scenario.path} [More group actions open]`, viewport, context: toolsScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
                await reportForPage(page, toolsScenario, `${scenario.path} [More group actions open]`, viewport, artifactDirectory, findings, failures);
@@ -1517,7 +1517,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     else expect(geometry.columns).toBe(2);
 
     await page.locator('.group-overview-tools summary').click();
-    await expect(page.getByRole('link', { name: 'View spending insights' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Spending insights', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Record credit' })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Group history' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Group settings' })).toBeVisible();

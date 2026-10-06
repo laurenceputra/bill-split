@@ -6,7 +6,7 @@
 }
 
 .group-overview-header {
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
 .group-overview-header h1 {
@@ -213,24 +213,64 @@
 .group-overview-tools {
   margin: 0;
   min-width: 0;
+  /* Span the joined control so the native in-flow panel gets its full width.
+     The default link occupies the left cell over the summary's empty space. */
+  grid-column: 1 / -1;
+  grid-row: 1;
 }
 
 .group-heading-actions { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-2); min-width: 0; }
 .group-overview-tools > summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-min-height);
+  margin-left: auto;
   min-height: var(--control-min-height);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-divider);
-  border-radius: var(--radius-md);
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
   background: var(--color-surface);
   cursor: pointer;
   color: var(--color-primary-hover);
   font-weight: 600;
+  list-style: none;
 }
+
+.group-overview-tools > summary::-webkit-details-marker { display: none; }
+.group-overview-tools > summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+.group-insights-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--control-min-height);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.group-insights-control__primary {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: start;
+  z-index: 1;
+  min-width: 0;
+  min-height: var(--control-min-height);
+  border-right: 0;
+  border-radius: var(--radius-control) 0 0 var(--radius-control);
+  font-size: var(--text-sm);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.group-overview-header .expense-heading__actions { align-items: flex-start; }
+.group-overview-header .expense-heading__actions > .button { min-height: var(--control-min-height); line-height: 1.2; }
 
 .group-overview-tools .group-tools {
   display: grid;
+  min-width: 0;
   margin: 0;
 }
+
+.group-overview-tools:not([open]) .group-tools { display: none; }
 
 .group-tool-row {
   display: flex;
@@ -240,6 +280,7 @@
   color: var(--color-primary-hover);
   padding: var(--space-2) 0;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .group-tool-row:last-child {

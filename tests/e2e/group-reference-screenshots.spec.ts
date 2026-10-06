@@ -33,10 +33,11 @@ for (const [device, width, height] of [['mobile', 390, 844], ['desktop', 1440, 9
     }
     await capture(page, testInfo, `warm-ledger-${device}`);
     await tools.locator('summary').click();
-    for (const name of ['View spending insights', 'Group history', 'Group settings']) {
+    for (const name of ['Group history', 'Group settings']) {
       await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
     }
     await capture(page, testInfo, `group-overview-more-actions-open-${device}`);
+    if (process.env.GROUP_SCREENSHOTS_OVERVIEW_ONLY === '1') return;
 
     await tools.getByRole('link', { name: 'Group history', exact: true }).click();
     const back = page.getByRole('link', { name: '← Back to group', exact: true });
