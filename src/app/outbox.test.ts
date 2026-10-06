@@ -5,6 +5,7 @@ import { clearCachedData, DB_NAME, claimOutboxItem, discardOutboxIfIdle, listOut
 import { getOutboxSnapshot, OUTBOX_IDB_DEADLINE_MS, OUTBOX_LEASE_MS, OUTBOX_LOGOUT_DEADLINE_MS, OutboxBusyError, OutboxDeliveryUncertainError, cancelScheduledRetry, discardOutboxItem, enqueueExpense, flushOutbox, handleAuthenticatedUser, refreshOutbox, recoverConnection, retryDelay, retryOutboxItem, setRetrySchedulerForTests } from './outbox';
 import { clearEverythingForLogout, coordinateAuthBootstrap, getAuthEpoch, getAuthLifecycle, initializeAuthLifecycle, resetForClerkSessionChange } from './api';
 import { clearSessionLogout } from './session';
+import { acquireReloadGate, getReloadSafetyState, releaseReloadGate } from './reload-safety';
 
 const operation = (id: string) => ({ description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: id });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'X-BillSplit-User-Id': 'user-a', 'X-BillSplit-Clerk-User-Id': 'clerk-a' } });
@@ -25,6 +26,90 @@ async function queue(id: string) {
 }
 
 describe('durable expense outbox', () => {
+  it('does not enqueue or dispatch new work while update preparation owns the gate', async () => {
+    await queue('already-durable');
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('outbox-test', 1_000)).toBe(true);
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    try {
+      await expect(queue('not-enqueued')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(retryOutboxItem('already-durable')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await expect(discardOutboxItem('already-durable')).rejects.toMatchObject({ code: 'UPDATE_PREPARING' });
+      await flushOutbox();
+      expect(fetch).not.toHaveBeenCalled();
+      expect((await listOutbox('user-a')).map((item) => item.clientOperationId)).toEqual(['already-durable']);
+    } finally { releaseReloadGate('outbox-test'); await flushOutbox(); vi.restoreAllMocks(); }
+  });
+
+  it('replays a 429 retry timer after preparation releases without another foreground event', async () => {
+    let retry!: () => void;
+    const restoreScheduler = setRetrySchedulerForTests((callback) => { retry = callback; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+    let sends = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => { sends += 1; return sends === 1 ? response({ error: { code: 'RATE_LIMITED', message: 'Retry later' } }, 429) : response({ expense: { id: 'retried' } }, 201); }));
+    try {
+      await queue('gated-429');
+      await flushOutbox();
+      vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+      expect(acquireReloadGate('retry-gate', 1_000)).toBe(true);
+      retry();
+      await Promise.resolve();
+      expect(sends).toBe(1);
+      expect(getReloadSafetyState().operations).toBe(0);
+      releaseReloadGate('retry-gate');
+      await vi.waitFor(async () => expect(await listOutbox('user-a')).toEqual([]));
+      expect(sends).toBe(2);
+      await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+    } finally { releaseReloadGate('retry-gate'); cancelScheduledRetry(); restoreScheduler(); vi.restoreAllMocks(); }
+  });
+
+  it('replays an expired lease recovery timer after the gate releases', async () => {
+    let recover!: () => void;
+    const restoreScheduler = setRetrySchedulerForTests((callback) => { recover = callback; return 1 as ReturnType<typeof setTimeout>; }, () => undefined);
+    const fetch = vi.fn(async () => response({ expense: { id: 'recovered' } }, 201));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const item = await queue('gated-lease');
+      await saveOutboxItem({ ...item, status: 'syncing', leaseOwner: 'old-tab', leaseExpiresAt: Date.now() - 1 });
+      await refreshOutbox();
+      vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+      expect(acquireReloadGate('lease-gate', 1_000)).toBe(true);
+      recover();
+      await Promise.resolve();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(await readOutboxItem('gated-lease')).toMatchObject({ status: 'syncing', leaseOwner: 'old-tab' });
+      expect(getReloadSafetyState().operations).toBe(0);
+      releaseReloadGate('lease-gate');
+      await vi.waitFor(async () => expect(await listOutbox('user-a')).toEqual([]));
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+    } finally { releaseReloadGate('lease-gate'); restoreScheduler(); vi.restoreAllMocks(); }
+  });
+
+  it('coalesces authenticated completion behind preparation and reactivates it on release', async () => {
+    const item = await queue('gated-auth');
+    await saveOutboxItem({ ...item, status: 'auth-required' });
+    const reactivate = vi.spyOn(idb, 'reactivateAuthRequired');
+    const fetch = vi.fn(async () => response({ expense: { id: 'reactivated' } }, 201));
+    vi.stubGlobal('fetch', fetch);
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('auth-gate', 1_000)).toBe(true);
+    try {
+      await handleAuthenticatedUser('user-a', getAuthEpoch(), 91_001);
+      await handleAuthenticatedUser('user-a', getAuthEpoch(), 91_001);
+      // A stale callback must not replace the valid coalesced completion.
+      await handleAuthenticatedUser('user-a', getAuthEpoch() - 1, 91_002);
+      expect(reactivate).not.toHaveBeenCalled();
+      expect(await readOutboxItem('gated-auth')).toMatchObject({ status: 'auth-required' });
+      expect(getReloadSafetyState().operations).toBe(0);
+      releaseReloadGate('auth-gate');
+      await vi.waitFor(async () => expect(await listOutbox('user-a')).toEqual([]));
+      expect(reactivate).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+    } finally { releaseReloadGate('auth-gate'); vi.restoreAllMocks(); }
+  });
+
   it('does not flush before the authenticated /api/me lifecycle completes', async () => {
     await queue('auth-gated');
     resetForClerkSessionChange();
@@ -287,6 +372,7 @@ describe('durable expense outbox', () => {
     await vi.advanceTimersByTimeAsync(OUTBOX_IDB_DEADLINE_MS + 25);
     await flush;
     expect(await readOutboxItem('late-claim')).toMatchObject({ status: 'syncing', leaseOwner: expect.any(String) });
+    expect(getReloadSafetyState().operations).toBeGreaterThan(0);
 
     releaseClaim();
     await vi.waitFor(async () => expect(await listOutbox('user-a')).toEqual([]));
@@ -294,6 +380,7 @@ describe('durable expense outbox', () => {
   });
 
   it('bounds logout quiescence when an aborted transport never settles', async () => {
+    let resolveTransport!: (value: Response) => void;
     let expenseCalls = 0;
     let abortObserved = false;
     let transportStarted!: () => void;
@@ -304,7 +391,7 @@ describe('durable expense outbox', () => {
       expenseCalls += 1;
       transportStarted();
       actual.signal?.addEventListener('abort', () => { abortObserved = true; });
-      return new Promise<Response>(() => undefined);
+      return new Promise<Response>((resolve) => { resolveTransport = resolve; });
     }));
     await queue('never-settles');
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -316,6 +403,12 @@ describe('durable expense outbox', () => {
     await expect(logout).resolves.toBeUndefined();
     expect(abortObserved).toBe(true);
     await flush;
+    expect(getReloadSafetyState().operations).toBeGreaterThan(0);
+    vi.spyOn(Date, 'now').mockReturnValue(getReloadSafetyState().lastInteraction + 5_001);
+    expect(acquireReloadGate('hung-transport', 1_000)).toBe(false);
+    resolveTransport(response({ expense: { id: 'late-server-id' } }, 201));
+    await vi.waitFor(() => expect(getReloadSafetyState().operations).toBe(0));
+    vi.restoreAllMocks();
   });
 
   it('keeps an expired trust record queue visible and sends under the live verified session', async () => {

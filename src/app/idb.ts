@@ -3,6 +3,7 @@ import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { avatarPreference, type AvatarPreference } from '../shared/avatar';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationCurrent } from './session';
+import { beginProtectedOperation } from './reload-safety';
 
 export const DB_NAME = 'bill-split-local';
 export const DB_VERSION = 11;
@@ -227,11 +228,15 @@ export class IndexedDBUnavailableError extends Error {
 
 const available = () => typeof indexedDB !== 'undefined';
 
-function open(): Promise<IDBDatabase> {
+function open(waitForUnblocked = false): Promise<IDBDatabase> {
   if (!available()) return Promise.reject(new IndexedDBUnavailableError());
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+    let releaseUpgrade: (() => void) | undefined;
+    let rejectedWhileBlocked = false;
     request.onupgradeneeded = (event) => {
+      try { releaseUpgrade = beginProtectedOperation('Upgrading offline storage'); }
+      catch (error) { request.transaction?.abort(); reject(error); return; }
       const database = request.result;
       // Keep this store and its legacy key intact. Older builds wrote `form` here.
       if (!database.objectStoreNames.contains('recent')) database.createObjectStore('recent');
@@ -278,21 +283,41 @@ function open(): Promise<IDBDatabase> {
         };
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new IndexedDBUnavailableError());
-    request.onblocked = () => reject(new IndexedDBUnavailableError('Offline storage is busy. Close another BillSplit tab and try again.'));
+    request.onsuccess = () => { releaseUpgrade?.(); if (rejectedWhileBlocked) request.result.close(); else resolve(request.result); };
+    request.onerror = () => { releaseUpgrade?.(); reject(request.error || new IndexedDBUnavailableError()); };
+    request.onblocked = () => { if (!waitForUnblocked) { rejectedWhileBlocked = true; reject(new IndexedDBUnavailableError('Offline storage is busy. Close another BillSplit tab and try again.')); } };
   });
 }
 
+/** Own the actual transaction, not a request promise or a caller's deadline.
+ * In particular, a bubbling request error is not yet a transaction abort. */
+async function openForWrite() {
+  const release = beginProtectedOperation('Saving offline data');
+  try {
+    const db = await open(true);
+    return {
+      close: () => db.close(),
+      transaction: (stores: string | string[], mode: IDBTransactionMode) => {
+        try {
+          const tx = db.transaction(stores, mode);
+          tx.addEventListener('complete', release, { once: true });
+          tx.addEventListener('abort', release, { once: true });
+          return tx;
+        } catch (error) { db.close(); release(); throw error; }
+      },
+    };
+  } catch (error) { release(); throw error; }
+}
+
 async function transaction<T>(stores: string | string[], mode: IDBTransactionMode, action: (tx: IDBTransaction) => IDBRequest<T> | void): Promise<T | undefined> {
-  const db = await open();
+  const db = await (mode === 'readwrite' ? openForWrite() : open());
   return new Promise((resolve, reject) => {
     let result: T | undefined;
     const tx = db.transaction(stores, mode);
     try {
       const request = action(tx);
       if (request) request.onsuccess = () => { result = request.result; };
-    } catch (error) { reject(error); return; }
+    } catch (error) { tx.abort(); db.close(); reject(error); return; }
     tx.oncomplete = () => { db.close(); resolve(result); };
     tx.onerror = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
@@ -341,7 +366,7 @@ export const readLastVerifiedClerkUserId = () => transaction<VerifiedClerkIdenti
 export function saveOfflineTrust(value: Omit<OfflineTrustRecord, 'key' | 'state' | 'revision'>, generation = captureSessionGeneration(), allowed: () => boolean = () => true, expectedRevision = 0) {
   assertSessionGeneration(generation);
   return new Promise<boolean>((resolve, reject) => {
-    void open().then((db) => {
+    void openForWrite().then((db) => {
       const tx = db.transaction('offlineTrust', 'readwrite');
       const store = tx.objectStore('offlineTrust');
       const current = store.get(OFFLINE_TRUST_KEY);
@@ -366,7 +391,7 @@ export const readOfflineTrust = () => transaction<OfflineTrustRecord>('offlineTr
 export function updateOfflineTrustName(userId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string, avatar?: AvatarPreference) {
   assertSessionGeneration(generation);
   return new Promise<boolean>((resolve, reject) => {
-    void open().then((db) => {
+    void openForWrite().then((db) => {
       const tx = db.transaction('offlineTrust', 'readwrite');
       const store = tx.objectStore('offlineTrust');
       const current = store.get(OFFLINE_TRUST_KEY);
@@ -389,7 +414,7 @@ export function updateOfflineTrustName(userId: string, name: string, generation 
 export function revokeOfflineTrust() {
   return new Promise<boolean>((resolve, reject) => {
     void (async () => {
-      const db = await open();
+      const db = await openForWrite();
       const tx = db.transaction('offlineTrust', 'readwrite');
       const store = tx.objectStore('offlineTrust');
       const current = store.get(OFFLINE_TRUST_KEY);
@@ -420,7 +445,7 @@ export const readMutationGeneration = async (userId: string) => (await transacti
 /** Save a groups response only if no mutation was committed since the request started. */
 export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutationGeneration: number, generation = captureSessionGeneration()) {
   if (!isSessionGenerationCurrent(generation)) return false;
-  const db = await open();
+  const db = await openForWrite();
   return new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction(['groups', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
     const generations = tx.objectStore('mutationGenerations');
@@ -441,7 +466,7 @@ export async function saveGroupsIfGenerationMatches(value: CachedGroups, mutatio
 /** Patch one group in the persisted home snapshot without discarding list-only fields. */
 export async function updateGroupsSnapshot(userId: string, groupId: string, group: Group, generation = captureSessionGeneration()) {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction(['groups', 'resourceFreshness'], 'readwrite');
     const groups = tx.objectStore('groups');
@@ -467,7 +492,7 @@ export async function updateGroupsSnapshot(userId: string, groupId: string, grou
 export async function invalidateCachedGroups(userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; detailsGroupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) {
   assertSessionGeneration(generation);
   const staleAt = new Date(0).toISOString();
-  const db = await open();
+  const db = await openForWrite();
   await new Promise<void>((resolve, reject) => {
     const stores = [...(options.groups === false ? [] : ['groups', 'resourceFreshness']), ...(options.groupId || options.transactions ? ['groupSnapshots', 'resourceFreshness'] : []), ...(options.transactions ? ['globalTransactions'] : []), ...(options.groupId || options.detailsGroupId ? ['expenseDetails'] : []), 'mutationGenerations', ...(options.activity ? ['activity'] : []), ...(options.categories ? ['categories'] : [])].filter((store, index, all) => all.indexOf(store) === index);
     const tx = db.transaction(stores, 'readwrite');
@@ -543,7 +568,7 @@ const mergeGroupSnapshotPatch = (current: GroupSnapshot | undefined, patch: Grou
 
 export async function updateGroupSnapshot(userId: string, groupId: string, patch: GroupSnapshotPatch, generation = captureSessionGeneration()) {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise<GroupSnapshot>((resolve, reject) => {
     const tx = db.transaction(['groupSnapshots', 'resourceFreshness'], 'readwrite');
     const store = tx.objectStore('groupSnapshots');
@@ -572,7 +597,7 @@ export async function updateGroupSnapshot(userId: string, groupId: string, patch
  */
 export async function updateGroupSnapshotIfGenerationMatches(userId: string, groupId: string, patch: GroupSnapshotPatch, mutationGeneration: number, generation = captureSessionGeneration()) {
   if (!isSessionGenerationCurrent(generation)) return false;
-  const db = await open();
+  const db = await openForWrite();
   return new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction(['groupSnapshots', 'resourceFreshness', 'mutationGenerations'], 'readwrite');
     const currentGeneration = tx.objectStore('mutationGenerations').get(userId);
@@ -603,7 +628,7 @@ export const readGroupSnapshot = (userId: string, groupId: string) => transactio
 /** Patch cached member labels after a confirmed profile rename. */
 export async function patchCachedMemberName(userId: string, personId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string, avatar?: AvatarPreference) {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(['groups', 'groupSnapshots', 'globalTransactions', 'resourceFreshness'], 'readwrite');
     const snapshots = tx.objectStore('groupSnapshots').getAll();
@@ -685,7 +710,7 @@ export const saveActivity = (value: CachedActivity, generation = captureSessionG
   assertSessionGeneration(generation);
   if (mutationGeneration === undefined) return transaction('activity', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('activity').put({ ...value, activity: normalizeActivity(value.activity) }); });
   return new Promise<boolean>((resolve, reject) => {
-    void open().then((db) => {
+    void openForWrite().then((db) => {
       const tx = db.transaction(['activity', 'mutationGenerations'], 'readwrite');
       const current = tx.objectStore('mutationGenerations').get(value.userId);
       let saved = false;
@@ -709,7 +734,7 @@ export const saveGlobalTransactions = (value: CachedGlobalTransactions, generati
   assertSessionGeneration(generation);
   if (mutationGeneration === undefined) return transaction('globalTransactions', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('globalTransactions').put(value); });
   return new Promise<boolean>((resolve, reject) => {
-    void open().then((db) => {
+    void openForWrite().then((db) => {
       const tx = db.transaction(['globalTransactions', 'mutationGenerations'], 'readwrite');
       const current = tx.objectStore('mutationGenerations').get(value.userId);
       let saved = false;
@@ -731,7 +756,7 @@ export const saveExpenseDetails = (value: CachedExpenseDetails, generation = cap
 };
 export async function saveExpenseDetailsIfGenerationMatches(value: CachedExpenseDetails, mutationGeneration: number, generation = captureSessionGeneration()) {
   if (!isSessionGenerationCurrent(generation)) return false;
-  const db = await open();
+  const db = await openForWrite();
   return new Promise<boolean>((resolve, reject) => {
     const tx = db.transaction(['expenseDetails', 'mutationGenerations'], 'readwrite');
     const current = tx.objectStore('mutationGenerations').get(value.userId);
@@ -751,7 +776,7 @@ export const saveCategories = (value: CachedCategories, generation = captureSess
   assertSessionGeneration(generation);
   if (mutationGeneration === undefined) return transaction('categories', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('categories').put(value); });
   return new Promise<boolean>((resolve, reject) => {
-    void open().then((db) => {
+    void openForWrite().then((db) => {
       const tx = db.transaction(['categories', 'mutationGenerations'], 'readwrite');
       const current = tx.objectStore('mutationGenerations').get(value.userId);
       let saved = false;
@@ -806,7 +831,7 @@ export async function listOutbox(userId?: string): Promise<ExpenseOutboxItem[]> 
 
 
 export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: number, rebindAuthEpoch?: number, allowed: () => boolean = () => true) {
-  const db = await open();
+  const db = await openForWrite();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -827,7 +852,7 @@ export async function recoverStaleSyncing(userId?: string, expectedAuthEpoch?: n
 /** Atomically claims a pending or expired-syncing row for one browser tab. */
 export async function claimOutboxItem(clientOperationId: string, owner: string, now = Date.now(), leaseMs = 30_000, generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -850,7 +875,7 @@ export async function claimOutboxItem(clientOperationId: string, owner: string, 
 
 export async function updateOutboxIfOwned(clientOperationId: string, owner: string, patch: Partial<ExpenseOutboxItem>, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -872,7 +897,7 @@ export async function updateOutboxIfOwned(clientOperationId: string, owner: stri
 /** Release a claim only when it is still the exact lease which was claimed. */
 export async function releaseOutboxClaimIfOwned(clientOperationId: string, owner: string, leaseExpiresAt: number, attempts: number, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -893,7 +918,7 @@ export async function releaseOutboxClaimIfOwned(clientOperationId: string, owner
 
 export async function removeOutboxIfOwned(clientOperationId: string, owner: string, now = Date.now(), generation = captureSessionGeneration(), scope?: OutboxOperationScope): Promise<boolean> {
   assertSessionGeneration(generation);
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -912,7 +937,7 @@ export async function removeOutboxIfOwned(clientOperationId: string, owner: stri
 }
 
 export async function discardOutboxIfIdle(clientOperationId: string, now = Date.now(), scope?: OutboxOperationScope): Promise<boolean> {
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -930,7 +955,7 @@ export async function discardOutboxIfIdle(clientOperationId: string, now = Date.
 }
 
 export async function resetOutboxIfIdle(clientOperationId: string, now = Date.now(), scope?: OutboxOperationScope): Promise<ExpenseOutboxItem | undefined> {
-  const db = await open();
+  const db = await openForWrite();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -949,7 +974,7 @@ export async function resetOutboxIfIdle(clientOperationId: string, now = Date.no
 }
 
 export async function reactivateAuthRequired(userId: string, allowed: () => boolean = () => true, authEpoch?: number) {
-  const db = await open();
+  const db = await openForWrite();
   let changed = 0;
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -966,7 +991,7 @@ export async function reactivateAuthRequired(userId: string, allowed: () => bool
 /** Rebind durable unsent work to a newly verified auth epoch. Active leases
  * remain untouched; their existing lease/expiry rules own stale syncing rows. */
 export async function rebindOutboxAuthEpoch(userId: string, authEpoch: number, allowed: () => boolean = () => true) {
-  const db = await open();
+  const db = await openForWrite();
   let changed = 0;
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
@@ -988,7 +1013,7 @@ export async function rebindOutboxAuthEpoch(userId: string, authEpoch: number, a
 }
 
 export async function markOutboxAuthRequired(userId: string, lastError: ExpenseOutboxItem['lastError'], expectedAuthEpoch?: number) {
-  const db = await open();
+  const db = await openForWrite();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');
     const store = tx.objectStore('expenseOutbox');
@@ -1004,7 +1029,7 @@ export async function reconcileOutboxItems(userId: string, groupId: string, expe
   assertSessionGeneration(generation);
   const operations = new Set(expenses.filter((expense) => expense.groupId === groupId && expense.createdBy === userId && expense.clientOperationId).map((expense) => expense.clientOperationId));
   if (!operations.size) return 0;
-  const db = await open();
+  const db = await openForWrite();
   let removed = 0;
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction('expenseOutbox', 'readwrite');

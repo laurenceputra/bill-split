@@ -6,6 +6,7 @@ import type { Credit, Expense, GroupResponse } from '../shared/types';
 import { AllocationRows, beneficiaryRowsComplete, beneficiarySnapshotMatches, buildRefundInput, createRefundOperationController, duplicateRefundAllocationTypes, groupRefundPreviewRows, initialRefundApplications, RefundCreateRoute, RefundExpensePickerOptions, RefundForm, refundAllocationPeople, refundAllocationRowsHavePositiveAmounts, refundAllocationDuplicateError, refundAllocationRowsForValidation, refundApplicationFillAmount, refundApplicationRowsHavePositiveAmounts, refundApplicationStatus, refundApplicationsForPath, refundBeneficiaryPreviewRows, refundErrorText, refundExpenseOptions, refundModeOptions, refundPreviewRows, refundSourceOptions, removeRefundAllocation } from './refund-form';
 import { ApiError } from './api';
 import { resourceKeys, seedResource } from './resource-cache';
+import { getReloadSafetyState } from './reload-safety';
 
 const expense = (id: string, currency: Expense['currency']): Expense => ({ id, groupId: 'group', description: id, amountMinor: 1000, currency, date: '2026-01-01', createdBy: 'user', createdAt: '', updatedAt: '', version: 1, payers: [], splits: [] });
 afterEach(() => vi.unstubAllGlobals());
@@ -368,11 +369,18 @@ describe('refund expense picker behavior', () => {
     expect(before.selects).toContain('custom');
     expect(before.inputs).toContain('0.60');
     expect(before.inputs).toContain('0.40');
-    await act(async () => { renderer.root.findByType('textarea').props.onChange({ target: { value: 'Updated note' } }); });
+    expect(getReloadSafetyState().reason).toBeUndefined();
+    await act(async () => { renderer.root.findByType('form').props.onChangeCapture(); renderer.root.findByType('textarea').props.onChange({ target: { value: 'Updated note' } }); });
     const after = fields();
     expect(after.note).toBe('Updated note');
     expect(after.selects).toEqual(before.selects);
     expect(after.inputs).toEqual(before.inputs);
-    renderer.unmount();
+    expect(getReloadSafetyState().reason).toBe('Unsaved refund');
+    // Blur and failed validation do not discard the state owner's draft.
+    await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => undefined }); });
+    expect(getReloadSafetyState().reason).toBe('Unsaved refund');
+    await act(async () => { renderer.root.findByType('textarea').props.onChange({ target: { value: 'Original note' } }); });
+    expect(getReloadSafetyState().reason).toBeUndefined();
+    await act(async () => renderer.unmount());
   });
 });

@@ -5,7 +5,10 @@ import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, getMe, hydrateIdentity, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
-import { applyServiceWorkerUpdate, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
+import { checkForUpdates, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
+import { useReloadBlocker } from './reload-safety-react';
+import { runProtectedOperation } from './reload-safety';
+import { UpdateStatus } from './update-status';
 import { accountAvatar, avatarUrl, type AvatarPreference } from '../shared/avatar';
 import { RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
 
@@ -191,19 +194,18 @@ function useOutbox() {
 }
 
 function useServiceWorkerUpdate() {
-  return useSyncExternalStore(subscribeServiceWorkerUpdate, getServiceWorkerUpdateState, () => ({ updateReady: false, applying: false, blocked: false }));
+  return useSyncExternalStore(subscribeServiceWorkerUpdate, getServiceWorkerUpdateState, getServiceWorkerUpdateState);
 }
 
-export function ServiceWorkerUpdate() {
+export function ServiceWorkerUpdate({ settings = false }: { settings?: boolean }) {
   const update = useServiceWorkerUpdate();
-  if (!update.updateReady && !update.applying && !update.blocked) return null;
-  const message = update.applying ? 'Applying update…' : update.blocked ? 'Finish your current entry before updating.' : 'A new BillSplit version is ready.';
-  return <div className="update-control" role="status" aria-live="polite"><span>{message}</span>{!update.applying ? <button className="update-action" type="button" onClick={() => { applyServiceWorkerUpdate(); }}>{update.blocked ? 'Apply when ready' : 'Update'}</button> : null}</div>;
+  return <UpdateStatus update={update} settings={settings} onCheck={() => void checkForUpdates()} />;
 }
 
 export function InstallAction({ showStatus = false, label = 'Install' }: { showStatus?: boolean; label?: string } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
+  useReloadBlocker(showHelp || install.mode === 'prompting', 'Installing app');
   if (install.installed) return showStatus ? <p className="muted" role="status">BillSplit is installed on this device.</p> : null;
   if (install.mode === 'prompting') {
     return showStatus
@@ -224,7 +226,7 @@ export function InstallAction({ showStatus = false, label = 'Install' }: { showS
 
   const ios = install.mode === 'ios-manual';
   return <>
-    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void consumeInstallPrompt(); else setShowHelp(true); }}>{label}</button></div>
+    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void runProtectedOperation(() => consumeInstallPrompt(), 'Installing app'); else setShowHelp(true); }}>{label}</button></div>
     {ios && showHelp ? <Modal title="Install BillSplit" description="Add BillSplit to your Home Screen for a faster, app-like experience." onClose={() => setShowHelp(false)}><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
   </>;
 }
@@ -385,6 +387,7 @@ export function Status({ children, tone }: { children: ReactNode; tone: 'positiv
 }
 
 export function Modal({ title, description, children, onClose, className = '' }: { title: string; description?: ReactNode; children: ReactNode; onClose: () => void; className?: string }) {
+  useReloadBlocker(true, 'Open dialog');
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);

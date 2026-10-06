@@ -59,9 +59,16 @@ describe('standalone PWA contract', () => {
     expect(main).toContain("typeof navigator === 'undefined'");
     expect(main).toContain('if (import.meta.env.DEV) return;');
     expect(main).toContain('observeServiceWorkerRegistration');
-    expect(ui).toContain('A new BillSplit version is ready.');
-    expect(ui).toContain('applyServiceWorkerUpdate()');
-    expect(serviceWorker).toContain("event.data?.type !== 'SKIP_WAITING'");
+    expect(read('./update-status.tsx')).toContain('Check for updates');
+    expect(ui).toContain('checkForUpdates()');
+    expect(ui).not.toContain('applyServiceWorkerUpdate()');
+    expect(ui).not.toContain('Apply when ready');
+    const app = read('./App.tsx');
+    expect(app).toContain('configureServiceWorkerUpdates({ safetyIntegrated: true, autoApply: true })');
+    expect(app).toContain('configureServiceWorkerUpdates({ safetyIntegrated: false })');
+    expect(serviceWorker).toContain("data?.protocol !== UPDATE_PROTOCOL");
+    expect(serviceWorker).toContain("const UPDATE_PROTOCOL = 'BILLSPLIT_UPDATE_V1'");
+    expect(serviceWorker).not.toContain("'SKIP_WAITING'");
   });
 
   it('does not start authenticated work at outbox import time and gates foreground recovery', () => {

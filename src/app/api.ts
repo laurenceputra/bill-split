@@ -11,6 +11,7 @@ import { expenseFilterQuery, hasExpenseFilters } from './expense-filters';
 import { hasTransactionFilters, readTransactionFilters, transactionFilterKey, transactionFilterQuery, type TransactionFilters } from './transaction-filters';
 import { CSRF_COOKIE, CSRF_HEADER } from '../worker/application-session';
 import { persistActivityResponse, persistBalanceResponse, persistCategoriesResponse, persistExpenseDetailsResponse, persistExpenseResponse, persistGroupResponse, persistGroupsResponse, persistSettlementResponse, persistTransactionResponse } from './persisted-resources';
+import { assertReloadOperationAllowed, createReloadBlocker, getReloadSafetyState, runProtectedOperation } from './reload-safety';
 
 export type CurrentUser = { id: string; email: string; personId: string; name: string; avatarMode?: 'initials' | 'gravatar'; avatarHash?: string; profileRevision?: number; updatedAt?: string; idleExpiresAt?: string };
 export type CachedResult<T> = T & { offline?: boolean; stale?: boolean; authoritative?: boolean };
@@ -57,10 +58,12 @@ export class ClerkSignOutFailure extends Error {
  * defensive so an older client can clearly report account-management
  * deferral without claiming that Clerk was deleted. */
 export async function deleteClerkUserIfSupported(user: unknown): Promise<'deleted' | 'unsupported'> {
+  return runProtectedOperation(async () => {
   const candidate = user as { delete?: unknown } | null;
   if (!candidate || typeof candidate.delete !== 'function') return 'unsupported';
   await (candidate.delete as () => Promise<void>)();
   return 'deleted';
+  }, 'Deleting provider account');
 }
 
 const PENDING_ACCOUNT_DELETION_KEY = 'billsplit-pending-account-deletion';
@@ -103,12 +106,14 @@ export const hasInvalidPendingAccountDeletion = () => {
 export const getPendingAccountDeletionPhase = () => readPendingAccountDeletion()?.phase;
 export const getPendingAccountDeletionClerkUserId = () => readPendingAccountDeletion()?.clerkUserId;
 export const markAccountDeletionPending = (clerkUserId: string) => {
+  assertReloadOperationAllowed();
   writePendingAccountDeletion('server-pending', requireClerkUserId(clerkUserId));
   broadcastSessionCoordination({ type: 'account-deletion', reason: 'account-deletion', clerkUserId, phase: 'server-pending' });
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-account-deletion-pending'));
 };
 /** Discard only an unreadable legacy marker; this never performs account cleanup or binds it to an identity. */
 export const discardInvalidPendingAccountDeletion = () => {
+  assertReloadOperationAllowed();
   if (!hasInvalidPendingAccountDeletion() || typeof localStorage === 'undefined') return false;
   localStorage.removeItem(PENDING_ACCOUNT_DELETION_KEY);
   return true;
@@ -144,7 +149,7 @@ export function completePendingAccountDeletion(user: unknown, signOut: (options?
     if (hasPendingAccountDeletion()) return Promise.reject(new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before continuing.'));
     return Promise.resolve({ clerkStatus: 'unsupported' as const });
   }
-  const request = (async () => {
+  const request = runProtectedOperation(async () => {
     let pending = readPendingAccountDeletion();
     if (!pending) throw new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before continuing.');
     const currentClerkUserId = clerkUserIdFromUser(user);
@@ -223,7 +228,7 @@ export function completePendingAccountDeletion(user: unknown, signOut: (options?
     // cleared only after local cleanup and provider deletion are complete.
     bestEffortClearPendingAccountDeletion();
     return { clerkStatus: 'deleted' as const };
-  })();
+  }, 'Completing account deletion');
   const tracked = request.finally(() => { if (pendingAccountDeletionRequest?.promise === tracked) pendingAccountDeletionRequest = undefined; });
   pendingAccountDeletionRequest = { clerkUserId: initialPending.clerkUserId, promise: tracked };
   return tracked;
@@ -236,6 +241,7 @@ export function completePendingAccountDeletion(user: unknown, signOut: (options?
  * server-pending marker can never be discarded this way.
  */
 export async function finishLocalCleanupAfterExternalProviderDeletion(options: { confirmed: boolean; clearLocal?: () => Promise<void>; clerkEvidence?: ClerkAuthEvidence }) {
+  return runProtectedOperation(async () => {
   if (options.confirmed !== true) throw new Error('Confirm that the original Clerk account was deleted externally before finishing local cleanup.');
   const pending = readPendingAccountDeletion();
   if (!pending || (pending.phase !== 'server-deleted' && pending.phase !== 'local-cleared')) throw new Error('Only a server-confirmed account deletion can finish local cleanup while signed out.');
@@ -243,6 +249,7 @@ export async function finishLocalCleanupAfterExternalProviderDeletion(options: {
   if (pending.phase === 'server-deleted') await (options.clearLocal || clearAllPrivateData)();
   clearPendingAccountDeletion();
   return { clerkStatus: 'externally-deleted' as const };
+  }, 'Clearing deleted account data');
 }
 
 let authState: AuthState = { required: false };
@@ -580,8 +587,9 @@ const recoveryIdentityIsCurrent = (clerkUserId: string) => !clerkEvidenceKnown |
  * account deletion: the server still requires both headers for that route.
  */
 const runAuthenticatedMutation = <T>(path: string, init: RequestInit | undefined, requestEpoch: number, transport: (nextInit: RequestInit) => Promise<ApiResponse<T>>, options?: ApiMutationOptions) => {
-  // Preserve the stronger logout error even when the caller is no longer
-  // authenticated.  The quiescence barrier must remain the first gate.
+  assertReloadOperationAllowed();
+  // Logout remains a separate session gate. An update rejection must never
+  // be translated into authentication invalidation or destructive cleanup.
   if (getSessionLogoutInProgress() || isMutationBarrierActive()) return runMutation(() => Promise.reject(mutationBlockedError()));
   const recovery = isBoundAccountDeletionRecovery(path, init, options) ? options?.accountDeletionRecovery : undefined;
   if (recovery) {
@@ -615,7 +623,7 @@ const cacheRead = async <T>(read: () => Promise<T | undefined>) => {
   }
 };
 const cacheWrite = async <T>(write: () => Promise<T>) => {
-  try { return await write(); }
+  try { return await runProtectedOperation(write, 'Saving offline data'); }
   catch (error) {
     if (error instanceof SessionGenerationMismatchError) throw error;
     /* Private cache is an enhancement, not a request failure. */
@@ -740,6 +748,7 @@ async function apiWithMetaTransport<T>(path: string, init?: RequestInit, expecte
 
 type SessionResponse = { idleExpiresAt: string; user?: CurrentUser };
 async function directSessionRequest<T>(path: string, init: RequestInit = {}) {
+  return runProtectedOperation(async () => {
   const headers = new Headers(init.headers);
   headers.set('Content-Type', 'application/json');
   if (import.meta.env.DEV && !headers.has('X-Dev-Email')) headers.set('X-Dev-Email', devEmail());
@@ -748,6 +757,7 @@ async function directSessionRequest<T>(path: string, init: RequestInit = {}) {
   const body = await response.json().catch(() => null) as { error?: { message?: string; code?: string } } & T | null;
   if (!response.ok) throw new ApiError(body?.error?.message || `Request failed (${response.status})`, { status: response.status, code: body?.error?.code });
   return body as T;
+  }, 'Updating session');
 }
 
 /** Establish the application session using the still-live Clerk cookie. */
@@ -1546,7 +1556,7 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
   if ((isMutationBarrierActive() || getSessionLogoutInProgress()) && (authLifecycle.status === 'authenticated' || authLifecycle.status === 'trusted-offline')) throw new ApiError('Logout is in progress. Try again after signing in.', { status: 401, code: 'AUTH_REQUIRED' });
   const generation = captureSessionGeneration();
   const authInvalidationBaseline = captureAuthInvalidationNonce();
-  const request = (async () => {
+  const request = runProtectedOperation(async () => {
     const controller = new AbortController();
     clerkProbeControllers.add(controller);
     const signal = controller.signal;
@@ -1560,7 +1570,7 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
     try {
       assertAuthEvidence(authGeneration, evidenceGeneration);
       assertAuthCommitAllowed(generation, true);
-      transport = apiWithMeta<CurrentUser>('/me', { signal }, authGeneration);
+      transport = runProtectedOperation(() => apiWithMeta<CurrentUser>('/me', { signal }, authGeneration), 'Verifying session');
       const result = await deadline(transport, options.startupFallbackMs ?? AUTH_BOOTSTRAP_DEADLINE_MS, () => {
         throw new ApiError('Verification is taking too long. Check your connection and retry.', { networkFailure: true, code: 'NETWORK_TIMEOUT' });
       });
@@ -1683,13 +1693,14 @@ export async function getMe(options: { networkOnly?: boolean; signal?: AbortSign
       clerkProbeControllers.delete(controller);
       void transport?.catch(() => undefined);
     }
-  })();
+  }, 'Verifying session');
   const tracked = request.finally(() => { if (identityRequest?.promise === tracked) identityRequest = undefined; });
   identityRequest = { key, promise: tracked };
   return await awaitWithAbort(tracked, options.signal);
 }
 
 export async function updateDisplayName(name: string, avatarMode?: 'initials' | 'gravatar'): Promise<DisplayNameUpdateResult> {
+  return runProtectedOperation(async () => {
   const generation = captureSessionGeneration();
   const authEpoch = getAuthEpoch();
   const result = await api<{ user: CurrentUser }>('/me', { method: 'PUT', body: JSON.stringify({ name, avatarMode }) });
@@ -1712,9 +1723,15 @@ export async function updateDisplayName(name: string, avatarMode?: 'initials' | 
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => { seedResource('identity', '', result.user, Date.now(), { offline: false }); })) return authoritativeProfileAfterFence(result, generation, authEpoch);
   if (!applyCurrentProfile(result.user, generation, authEpoch, () => { broadcastSessionCoordination({ type: 'profile-changed', userId: result.user.id, personId: result.user.personId, name: result.user.name, ...avatarPreference(result.user), profileRevision: result.user.profileRevision, updatedAt: result.user.updatedAt, generation }); })) return authoritativeProfileAfterFence(result, generation, authEpoch);
   return result;
+  }, 'Saving profile');
 }
 
 export async function initializeAuthLifecycle(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number; clerkLoaded?: boolean; signedIn?: boolean; clerkEvidenceEpoch?: number; route?: AuthBootstrapRoute } = {}): Promise<AuthLifecycle> {
+  if (getReloadSafetyState().gated) return authLifecycle;
+  return runProtectedOperation(() => initializeAuthLifecycleOperation(options), 'Restoring session');
+}
+
+async function initializeAuthLifecycleOperation(options: { networkOnly?: boolean; clerkUserId?: string; startupFallbackMs?: number; clerkLoaded?: boolean; signedIn?: boolean; clerkEvidenceEpoch?: number; route?: AuthBootstrapRoute } = {}): Promise<AuthLifecycle> {
   // Keep this lower-level helper safe for recovery callers too. Direct local
   // test/dev callers may supply a Clerk ID, but production callers with no
   // provider evidence must go through coordinateAuthBootstrap.
@@ -1968,6 +1985,11 @@ export const finalizeSuccessfulClerkSignOut = () => {
 };
 
 export async function clearEverythingForLogout(broadcast = true, receivedGeneration?: number) {
+  // An adopted logout is already authoritative, not a new rejectable action.
+  // Cancel preparation synchronously before protecting its durable cleanup.
+  const releaseAdoptedLogout = receivedGeneration !== undefined && isSessionGenerationCurrent(receivedGeneration) && isSessionLogoutAdopted()
+    ? createReloadBlocker('Clearing session data from another tab') : undefined;
+  try { return await runProtectedOperation(async () => {
   const generation = receivedGeneration ?? startSessionLogout(broadcast);
   if (completedLogoutCleanupGeneration !== undefined && completedLogoutCleanupGeneration !== generation) completedLogoutCleanupGeneration = undefined;
   if (!logoutRecoveryContext || logoutRecoveryContext.generation !== generation) logoutRecoveryContext = { generation, adoptedSessionId: clerkEvidence.sessionId, cleanupCompleted: false };
@@ -2021,6 +2043,8 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
   }
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('billsplit-cache-cleared', { detail: { clearOutbox: true, generation } }));
   broadcastSessionCoordination({ type: 'cache-clear', reason: 'cache-clear', generation, clearOutbox: true });
+  }, 'Clearing session data'); }
+  finally { releaseAdoptedLogout?.(); }
 }
 
 export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ groups: Group[] }>> {
@@ -2103,6 +2127,7 @@ export async function deleteGroup(id: string) {
 }
 
 export async function deleteAccount(clerkUserId: string, options: { recovery?: boolean } = {}) {
+  return runProtectedOperation(async () => {
   const currentClerkUserId = requireClerkUserId(clerkUserId);
   const pending = readPendingAccountDeletion();
   if (hasPendingAccountDeletion() && !pending) throw new Error('The pending account deletion marker is invalid and was not used. Explicitly discard it before starting a new deletion.');
@@ -2120,6 +2145,7 @@ export async function deleteAccount(clerkUserId: string, options: { recovery?: b
   writePendingAccountDeletion('server-deleted', currentClerkUserId);
   broadcastSessionCoordination({ type: 'account-deletion', reason: 'account-deletion', clerkUserId: currentClerkUserId, phase: 'server-deleted' });
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('billsplit-account-deletion-pending'));
+  }, 'Deleting account');
 }
 
 export async function getPendingInvitations(signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
@@ -2306,6 +2332,7 @@ export async function getTransactions(groupId: string, signal?: AbortSignal, fil
  * global endpoint can contain rows from several groups, so each group must be
  * reconciled independently before its pending outbox rows are removed. */
 async function reconcileTransactionExpenses(userId: string, expenses: Array<Pick<Expense, 'groupId' | 'createdBy'> & { clientOperationId?: string | null }>, requestedGroupId: string | undefined, generation: number, authEpoch: number): Promise<boolean | undefined> {
+  return runProtectedOperation(async () => {
   const expensesByGroup = new Map<string, typeof expenses>();
   for (const expense of expenses) {
     if (!expense.groupId || expense.createdBy !== userId || requestedGroupId && expense.groupId !== requestedGroupId) continue;
@@ -2324,6 +2351,7 @@ async function reconcileTransactionExpenses(userId: string, expenses: Array<Pick
     changed = true;
   }
   return changed;
+  }, 'Reconciling queued expenses');
 }
 
 /** Canonical history API. A selected group remains scoped to its snapshot;
@@ -2765,5 +2793,9 @@ subscribeSessionCoordination((message) => {
 });
 subscribeSessionLogout((generation) => {
   if (isSessionLogoutAdopted()) logoutRecoveryContext = { generation, adoptedSessionId: clerkEvidence.sessionId, cleanupCompleted: false };
-  void clearEverythingForLogout(false, generation);
+  void clearEverythingForLogout(false, generation).catch((error) => {
+    // Storage failure must remain a masked, retryable session state, not an
+    // unhandled rejection from a BroadcastChannel/storage event listener.
+    if (isSessionGenerationCurrent(generation)) setVerificationUnavailable(error);
+  });
 });

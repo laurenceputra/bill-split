@@ -1,4 +1,5 @@
 import { captureSessionGeneration, getSessionLogoutInProgress, isSessionGenerationCurrent, subscribeSessionLogout } from './session';
+import { assertReloadOperationAllowed, runProtectedOperation } from './reload-safety';
 
 /** All state-changing API requests share this lock; logout takes it exclusively. */
 export const MUTATION_LOCK_NAME = 'billsplit-api-mutations';
@@ -52,8 +53,9 @@ export const releaseMutationBarrier = (generation?: number) => {
 };
 
 export const runMutation = <T>(operation: () => Promise<T>) => {
+  assertReloadOperationAllowed();
   const capturedGeneration = captureSessionGeneration();
-  return track(async () => {
+  return runProtectedOperation(() => track(async () => {
     const lockManager = locks();
     if (!lockManager) {
       assertMutationAllowed(capturedGeneration);
@@ -63,7 +65,7 @@ export const runMutation = <T>(operation: () => Promise<T>) => {
       assertMutationAllowed(capturedGeneration);
       return operation();
     });
-  });
+  }), 'Sending changes');
 };
 
 /**
@@ -73,9 +75,9 @@ export const runMutation = <T>(operation: () => Promise<T>) => {
  */
 export const withExclusiveMutationLock = async <T>(operation: () => Promise<T>) => {
   const lockManager = locks();
-  const wait = lockManager
+  const wait = runProtectedOperation(async () => lockManager
     ? lockManager.request(MUTATION_LOCK_NAME, { mode: 'exclusive' }, operation)
-    : Promise.allSettled([...activeMutations]).then(operation);
+    : Promise.allSettled([...activeMutations]).then(operation), 'Finishing account changes');
   void wait.catch(() => undefined);
   const timeout = new Promise<undefined>((resolve) => setTimeout(resolve, MUTATION_QUIESCE_DEADLINE_MS));
   return Promise.race([wait, timeout]) as Promise<T | undefined>;

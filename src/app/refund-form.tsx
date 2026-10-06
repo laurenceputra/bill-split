@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useReloadBlocker } from './reload-safety-react';
+import { runProtectedOperation } from './reload-safety';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Currency, Credit, Expense, GroupResponse, HistoricalParticipant } from '../shared/types';
 import { currencyOptions, type CreditInput } from '../shared/schemas';
@@ -306,6 +308,14 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const loadingCursorRef = useRef<string>();
   scopeKeyRef.current = routeKey;
   const [operationController] = useState(createRefundOperationController);
+  // Capture the initialized values before the first user edit, excluding row
+  // identities and validation/provenance bookkeeping from the comparison.
+  const draft = JSON.stringify({ mode, subtype, currency, amount, date, note, adjustBenefits,
+    applications: applications.map(({ expenseId, amount }) => ({ expenseId, amount })),
+    allocations: allocations.map(({ personId, allocationType, amount }) => ({ personId, allocationType, amount })) });
+  const draftBaseline = useRef<{ routeKey: string; value: string }>();
+  const captureDraft = () => { if (!initializing && draftBaseline.current?.routeKey !== routeKey) draftBaseline.current = { routeKey, value: draft }; };
+  useReloadBlocker(draftBaseline.current?.routeKey === routeKey && draftBaseline.current.value !== draft, 'Unsaved refund');
 
   useEffect(() => {
     if (previousRouteKey.current === routeKey) return;
@@ -491,7 +501,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) { setAmount(money(capacity)); setAmountTouched(true); setAmountProvenance('user'); }
   };
 
-  const submit = async (event: FormEvent) => {
+  const submit = (event: FormEvent) => runProtectedOperation(async () => {
     event.preventDefault(); setSubmitAttempted(true);
     if (submitDisabled || !group) return;
     setBusy(true); setError(undefined);
@@ -507,7 +517,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       navigate(`/groups/${groupId}/credits/${result.credit.id}`);
     } catch (cause) { setError(cause); }
     finally { setBusy(false); }
-  };
+  }, 'Saving refund');
 
   if ((me.error && !me.data) || (groupResource.error && !group) || (creditId && editResource.error && !editCreditReady)) return <Layout><p role="alert">{refundErrorText(me.error || groupResource.error || editResource.error)}</p><Link className="back" to={`/groups/${groupId}`}>← Group</Link></Layout>;
   if (!group) return <Layout><Loading /></Layout>;
@@ -524,7 +534,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       <Link to={`/groups/${groupId}`} className="back">← Group</Link>
        <PageHeader className="page-title" headingId="refund-form-title" eyebrow="Online-only ledger action" title={loadedCredit ? 'Edit refund or reimbursement' : 'Record money back'} />
       {!online ? <ConnectionBanner detail="Refunds and payments require a connection. New expenses remain available offline." /> : null}
-       <FormSurface className="refund-form__surface"><form onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
+       <FormSurface className="refund-form__surface"><form onChangeCapture={captureDraft} onClickCapture={captureDraft} onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
         <p id="refund-form-help" className="muted">Start with an expense when possible. The original payment or bill adjustment derives payer and affected shares; a member reimbursement requires a confirmed recipient.</p>
           <fieldset><legend>How should this money be recorded?</legend>
            <Field label="Apply this to"><select value={linked ? 'linked' : 'standalone'} onChange={(event) => { const nextPath = event.target.value as 'linked' | 'standalone'; setApplications(refundApplicationsForPath(nextPath, applications)); if (nextPath === 'standalone' && mode === 'direct_provider_offset') setMode('member_reimbursement'); }}><option value="linked">One or more expenses</option><option value="standalone">No specific expense</option></select></Field>
