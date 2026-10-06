@@ -1586,12 +1586,31 @@ export class Repository {
       if (trendOnly) {
         return { summaries: [], trendRows: await rows(`SELECT group_id,currency,substr(expense_date,1,7) AS bucket,COALESCE(NULLIF(TRIM(category),''),'Uncategorized') AS category,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency,bucket,category ORDER BY currency,bucket,category,group_id`) };
       }
-      const summaryRows = await rows(`SELECT group_id,MAX(group_name) AS group_name,currency,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,SUM(you_paid_minor) AS you_paid_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency ORDER BY group_id,currency`);
+      const summarySql = `SELECT group_id,MAX(group_name) AS group_name,currency,SUM(amount_minor) AS group_spend_minor,SUM(your_share_minor) AS allocated_spend_minor,SUM(your_share_minor) AS your_share_minor,SUM(you_paid_minor) AS you_paid_minor,COUNT(*) AS expense_count FROM ${source} GROUP BY group_id,currency ORDER BY group_id,currency`;
+      // D1 batches are transactional: headline and participant totals share a snapshot.
+      // Keep global reads unchanged and aggregate child tables independently.
+      const peopleSql = `SELECT allocation.currency,allocation.person_id,MAX(p.name) AS name,
+        SUM(allocation.share_minor) AS share_minor,SUM(allocation.paid_minor) AS paid_minor
+        FROM (
+          SELECT e.currency,s.person_id,s.amount_minor AS share_minor,0 AS paid_minor FROM authorized_expenses e JOIN splits s ON s.expense_id=e.id
+          UNION ALL
+          SELECT e.currency,p.person_id,0 AS share_minor,p.amount_minor AS paid_minor FROM authorized_expenses e JOIN payers p ON p.expense_id=e.id
+        ) allocation LEFT JOIN people p ON p.id=allocation.person_id
+        GROUP BY allocation.currency,allocation.person_id ORDER BY name,allocation.person_id`;
+      const snapshot = groupId ? await this.db.batch<Row>([summarySql, peopleSql].map((sql) => this.db.prepare(`${cte} ${sql}`).bind(...args))) : undefined;
+      const summaryRows = snapshot ? snapshot[0].results : await rows(summarySql);
       const add = (left: number, right: unknown) => checkedAddMinor(left, minor(right));
       const summaries = new Map<string, SpendingInsightSummaryResponse['summaries'][number]>();
       for (const row of summaryRows) {
         const key = text(row.currency), current = summaries.get(key) || { currency: currency(row.currency), groupSpendMinor: 0, allocatedSpendMinor: 0, yourShareMinor: 0, youPaidMinor: 0, expenseCount: 0 };
         current.groupSpendMinor = add(current.groupSpendMinor, row.group_spend_minor); current.allocatedSpendMinor = add(current.allocatedSpendMinor, row.allocated_spend_minor); current.yourShareMinor = add(current.yourShareMinor, row.your_share_minor); current.youPaidMinor = add(current.youPaidMinor, row.you_paid_minor); current.expenseCount = checkedAddMinor(current.expenseCount, minor(row.expense_count)); summaries.set(key, current);
+      }
+      if (groupId) {
+        const people = snapshot![1].results;
+        for (const row of people) {
+          const summary = summaries.get(text(row.currency));
+          if (summary) (summary.people ||= []).push({ personId: text(row.person_id), name: text(row.name) || 'Former participant', shareMinor: minor(row.share_minor), paidMinor: minor(row.paid_minor) });
+        }
       }
       return { summaries: [...summaries.values()].map((summary) => groupId ? summary : { ...summary, groupSpendMinor: summary.allocatedSpendMinor }), trendRows: [] as Row[] };
     };

@@ -874,6 +874,8 @@ class PreferenceDb {
 }
 
 class InsightsDb {
+  batchCalls = 0;
+  async batch(statements: Array<{ all: () => Promise<unknown> }>) { this.batchCalls++; return Promise.all(statements.map((statement) => statement.all())); }
   sql: string[] = [];
   args: unknown[][] = [];
   overflowGroups = false;
@@ -886,7 +888,7 @@ class InsightsDb {
         if (sql.includes('SELECT group_id,MAX(group_name)')) return { results: (this.overflowGroups ? [{ group_id: 'group-1', group_name: 'One', currency: 'USD', group_spend_minor: Number.MAX_SAFE_INTEGER, allocated_spend_minor: Number.MAX_SAFE_INTEGER, your_share_minor: Number.MAX_SAFE_INTEGER, you_paid_minor: 0, expense_count: 1 }, { group_id: 'group-2', group_name: 'Two', currency: 'USD', group_spend_minor: 1, allocated_spend_minor: 1, your_share_minor: 1, you_paid_minor: 0, expense_count: 1 }] : [{ group_id: 'group-1', group_name: 'Group', currency: 'USD', group_spend_minor: 1000, allocated_spend_minor: 400, your_share_minor: 400, you_paid_minor: 600, expense_count: 2 }]) as T[] };
          if (sql.includes('SELECT group_id,currency,substr(expense_date')) return { results: this.trendRows as T[] };
          if (sql.includes('category_rows') || sql.includes('substr(expense_date')) return { results: [{ currency: 'USD', bucket: '2026-01', category: 'Food', group_spend_minor: 1000, allocated_spend_minor: 400, expense_count: 2 }] as T[] };
-        return { results: [{ currency: 'USD', person_id: 'person-1', person_name: 'Former member', share_minor: 400 }] as T[] };
+        return { results: [{ currency: 'USD', person_id: 'person-1', name: 'Former member', share_minor: 400, paid_minor: 600 }] as T[] };
       },
     };
     return statement;
@@ -918,7 +920,10 @@ describe('repository spending insights', () => {
     const db = new InsightsDb();
     const result = await new Repository(db as never).spendingInsights('user-1', 'group-1', { from: '2026-01-01', to: '2026-01-31', currency: 'USD', comparisonFrom: '2025-12-01', comparisonTo: '2025-12-31' });
     expect(result).toMatchObject({ scope: 'group', summaries: [{ groupSpendMinor: 1000, allocatedSpendMinor: 400, yourShareMinor: 400, youPaidMinor: 600, expenseCount: 2 }], previous: { from: '2025-12-01', to: '2025-12-31', summaries: [{ allocatedSpendMinor: 400 }] } });
-    expect(db.sql.filter((sql) => sql.includes('GROUP BY')).length).toBe(2);
+    expect(result.summaries[0].people).toEqual([{ personId: 'person-1', name: 'Former member', shareMinor: 400, paidMinor: 600 }]);
+    expect(db.sql.filter((sql) => sql.includes('GROUP BY')).length).toBe(4);
+    expect(db.sql.some((sql) => sql.includes('UNION ALL'))).toBe(true);
+    expect(db.batchCalls).toBe(2);
     expect(db.sql.every((sql) => sql.includes('gm.user_id=?') && sql.includes('gm.deleted_at IS NULL') && sql.includes('e.deleted_at IS NULL'))).toBe(true);
     expect(db.sql.some((sql) => sql.includes('FROM settlements'))).toBe(false);
     expect(db.sql.some((sql) => sql.includes('scheduled'))).toBe(false);
@@ -942,6 +947,7 @@ describe('repository spending insights', () => {
     const result = await new Repository(db as never).spendingInsights('user-1', undefined, { from: '2026-01-01', to: '2026-01-31' });
     expect(result.summaries[0]).toMatchObject({ groupSpendMinor: 400, allocatedSpendMinor: 400, yourShareMinor: 400, expenseCount: 2 });
     expect(db.sql.some((sql) => sql.includes('your_share_minor>0'))).toBe(true);
+    expect(db.batchCalls).toBe(0);
   });
 
   it('maps checked cross-group aggregate overflow to BALANCE_OVERFLOW', async () => {

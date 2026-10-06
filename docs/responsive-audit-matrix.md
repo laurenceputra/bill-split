@@ -1,5 +1,25 @@
 # Warm Ledger responsive audit matrix
 
+## Compact person totals and secondary split control follow-up
+
+| View/state | 320 / 390px | 639px (below person breakpoint) | 640 / 768px | 895 / 896px | 1440px |
+| --- | --- | --- | --- | --- | --- |
+| Spending by person / loaded, positive ties | Identity groups name and winner badge; share and paid retain visible labels and right-aligned amounts | Labeled stacked metrics | Person / Allocated share / Paid headings align with three compact columns; numbers right-aligned | Same columns across shell breakpoint | Person block capped at 48rem without narrowing summary or charts |
+| Spending by person / long names, large amounts | Names and amounts wrap without clipping or overflow | Stress wrapping contained | Three columns wrap within their cells | Same containment | Reading-width block stays contained |
+| Group overview / chevron closed, hovered, focused, open | Shared purple secondary background and border match default link at rest/hover; shared 3px focus ring; joined 44px geometry | No overview change at person breakpoint | Same treatment and native in-flow panel | Same treatment across shell breakpoint | Stable header positions; panel spans joined control |
+
+`insight-people.spec.ts` covers person layout at 320, 390, 639, 640, 768, 895, 896, 1440px and computed secondary rest/hover colors, borders and focus alongside existing six-width overview geometry. Period/currency, zero/no winner, old-response compatibility, empty, failed-refresh and same-session offline/cache cases remain covered. Seeded all-time USD, font-ready reference captures support `GROUP_SCREENSHOTS_SKIP_HISTORY=1` to refresh only the eight affected overview/insights images without history churn.
+
+## Group history, person insights, and top actions
+
+Focused browser coverage in `tests/e2e/insight-people.spec.ts` verifies the Spending insights default destination and native More group actions chevron closed/open, Enter/Space activation and visible keyboard focus, primary-before-admin order, matching 44px control/chevron geometry, stable title/action positions and in-flow panel containment at all six audit widths. At 320px it verifies distinct exact share/paid amounts, USD/EUR selection, positive ties, all-zero/no winner, custom-period selection, empty suppression, compatibility with responses missing people, and cached totals retained after a failed refresh and while offline. A long unbroken historical name and large amounts are checked for both page overflow and person-row clipping. Cached persistence here is same-session resource-cache persistence, not a cold offline reload test.
+
+At **320, 390, 768, 895, 896, 1440px**, audit the overview with **More group actions closed and open**: Add expense and Settle up precede the Spending insights default link and separate admin chevron; the native in-flow disclosure contains only history and settings without duplicating the default action or Record credit. Links and summary retain 44px touch targets and wrap without horizontal overflow. Opening moves cards down without shifting the title or action tops; the panel spans the entire joined secondary control.
+
+At the same widths, audit group Changes, Transactions, and Insights: the authorized selected group's Back to group link precedes filters, updates on selection, and disappears for All groups or unavailable groups. Cached authorized group data retains this context. Person insights show allocated share and paid independently for the selected summary period/currency, including tied highest payers and no highest payer for all-zero data. Names and amounts wrap at narrow widths.
+
+State checks for these views: loading shows no invented person totals; cached/offline summaries retain person totals and notices; empty periods show no person list; cold errors show retry rather than totals; stale errors retain cached totals with notices. Overview loading/unavailable states do not expose management actions without group data. Older cached summaries without person details omit the list until refreshed. These are audit requirements, not claims of completed browser coverage; focused seeded checks cover context and person lists at 320/1440 and global insights at all six widths.
+
 Canonical audit widths are **320, 390, 768, 895, 896, and 1440px**. The
 private shell keeps the mobile bottom navigation through 895px and switches to
 the desktop top navigation and two-column group overview at 896px.
@@ -18,7 +38,7 @@ sections, accessible tabs and chart are checked at 390 and 1440px; other Insight
 widths and Home loading/cached/offline/empty/error states remain in the existing
 route audit and targeted fixtures, not this focused geometry spec.
 
-Loaded local-browser references from the merged-main UI with these fixes:
+Loaded local-browser references (Home/global references retain their earlier capture):
 `docs/screenshots/home-mobile.png` (390px, full page) and `home-desktop.png`
 (1440px viewport) show seeded Home; `home-sgd-stress-mobile.png` (390px,
 full page) and `home-sgd-stress-desktop.png` (1440px viewport) show the
@@ -32,6 +52,35 @@ summary and chart surfaces; `warm-ledger-insights-desktop.png` is the same
 1440px group Insights view. The mobile bottom navigation was confirmed live
 and hidden only for full-page capture to avoid a repeated fixed stripe. These
 references do not depict loading, cached, offline, empty, or error states.
+
+### Repeatable group references
+
+`tests/e2e/group-reference-screenshots.spec.ts` uses the authenticated seeded
+Europe trip group without API mocks. Regenerate only these group references:
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright UPDATE_GROUP_SCREENSHOTS=1 npm run test:e2e:local -- tests/e2e/group-reference-screenshots.spec.ts --project=chromium --workers=1
+```
+
+To refresh only the five overview references without history/insight churn, prefix the command with `GROUP_SCREENSHOTS_OVERVIEW_ONLY=1`.
+
+Without the opt-in, captures are test attachments and do not overwrite tracked
+images. Fonts are ready and screenshot animations disabled. Mobile uses 390×844
+and desktop 1440×900 viewports; references are full-page except the explicitly
+named viewport image. Fixed bottom navigation is verified live and hidden only
+for full-page captures, not the viewport reference.
+
+- Closed overview: [mobile](screenshots/warm-ledger-mobile.png),
+  [desktop](screenshots/warm-ledger-desktop.png), and
+  [mobile viewport with fixed navigation](screenshots/group-overview-mobile-viewport.png).
+- More group actions chevron expanded beside Spending insights: [mobile](screenshots/group-overview-more-actions-open-mobile.png)
+  and [desktop](screenshots/group-overview-more-actions-open-desktop.png).
+- Group Changes with Back to group: [mobile](screenshots/warm-ledger-history-mobile.png)
+  and [desktop](screenshots/warm-ledger-history-desktop.png).
+- Loaded group Insights (`period=all&currency=USD`) with real allocated share,
+  paid totals, and highest payer: [mobile](screenshots/spending-insights-group-mobile.png),
+  [desktop](screenshots/spending-insights-group-desktop.png), and the same
+  [Warm Ledger desktop reference](screenshots/warm-ledger-insights-desktop.png).
 
 The refund/reimbursement matrix below remains the release checklist for the
 dedicated online-only refund flow. The Warm Ledger states cover the newer
@@ -238,12 +287,12 @@ captures are distinct group-overview, refund-form, and focused-helper states.
 | Credit detail, deleted/restore | Restore is the only available mutation and is disabled offline | Tombstone copy remains visible | Tombstone copy remains visible | Restore remains a clear recovery action | Restore and error states remain readable without modal-only context | Restore and error states remain readable without modal-only context |
 | Group home / invitations | Financial status leads each group card; invitation actions remain reachable; empty-state actions stack without overlap; spending snapshot stays borderless | Empty and populated states retain separate, touch-sized creation actions; group cards precede the divider-separated spending snapshot | Group cards use a denser two-column grid; snapshot currency rows remain aligned | Check group-card-to-snapshot boundary without a second painted snapshot surface | Group cards align amount columns and participant metadata; snapshot remains borderless | Group cards align amount columns and participant metadata; snapshot remains borderless |
 | Home / compact insight, populated | Spending snapshot is a transparent, single-column ledger with divider rows | Same flattened metric reading order and no metric-card paint | Currency rows remain aligned without an enclosing card | Verify the compact snapshot remains flat at the breakpoint | Compact insight remains a secondary, borderless module after group cards | Compact insight remains a secondary, borderless module after group cards |
-| Group overview | Four compact macro-cards appear in DOM order: balances, transactions, schedules, people; More group actions follows collapsed | Same order with two-up full-width header actions, 44px controls, flat internal rows, and native lists | Single-column financial reading order; overview transaction rows stay concise | Verify no premature column reflow and no nested painted rows | Transparent structural columns contain balances→transactions and schedules→people; actions remain below all modules | Two-column columns are centered within the 68rem route and avoid implicit-grid whitespace |
+| Group overview | Add expense and Settle up precede the Spending insights default link and More group actions chevron; four macro-cards follow in DOM order: balances, transactions, schedules, people | Same order with 44px controls, flat internal rows, and native lists | Single-column financial reading order; overview transaction rows stay concise | Verify no premature column reflow and no nested painted rows | Top actions precede transparent structural columns containing balances→transactions and schedules→people | Two-column columns are centered within the 68rem route and avoid implicit-grid whitespace |
 | Group overview / balances loaded | Balance macro-card uses transparent divider-separated rows; sage/coral state is carried by amount text and a restrained accent edge, never a full-row band | Amounts remain prominent at roughly 30–32px without row borders or radii | Balance disclosure remains available and readable | Verify state accents do not become nested cards at the boundary | Main column begins with the balance macro-card | Main-column balance card aligns with the recent-transactions card |
 | Group overview / balance loading, error, or offline variants | Focused browser fixture covers the uncached card at 320px | Focused browser fixture covers the uncached card at 390px | Not separately exercised | Not separately exercised | Focused browser fixture covers the uncached card at 896px | Not separately exercised |
 | Group overview / fully cached reload | Focused browser fixture reloads cached group, balances, and transactions offline; schedules explicitly remain uncached | Not separately exercised | Not separately exercised | Not separately exercised | Not separately exercised | Not separately exercised |
 | Group overview / schedules and people | Populated preview and up to four person rows are visible; uncached-offline copy is announced after reload | Preview rows remain flat and overflow count is explicit; focused loading/error/empty/uncached-offline fixtures run here | Verify schedule actions remain in the disclosure, not the preview | Verify the disclosure remains keyboard and touch usable | Context column places schedules above people without changing focus order | Context cards align with the main column while preserving the mobile DOM order |
-| Group overview / secondary actions | More group actions is collapsed after people; quiet links remain discoverable | Disclosure keeps insights, credit, history, and settings below primary content | Verify no large tools surface competes with the four modules | Verify summary target and link rows remain at least 44px | Actions stay below both structural columns | Secondary actions remain progressively disclosed and visually quiet |
+| Group overview / secondary actions | Spending insights is the default link after primary actions; the adjacent More group actions chevron is collapsed and opens in flow | Disclosure exposes only history and settings, with no duplicate Spending insights or Record credit | Verify expanded links wrap without competing with modules | Verify chevron summary target and link rows remain at least 44px | Disclosure stays above both structural columns and after primary actions | History and settings remain progressively disclosed and visually quiet beside the Spending insights default |
 | Expense and schedule forms | Amount hero, split controls, and payer sheet fit without zoom | Payer sheet is bottom anchored and targets remain 44px | Verify form grouping and recurring preview | Verify 895/896 transition without focus loss | Payer dialog is centered; amount remains first | Payer dialog and schedule preview remain readable |
 | History and insights | Segmented tabs remain single-line with touch-safe links and contained horizontal overflow when needed; filter disclosure stays in flow; transaction/activity results use divider-separated ledger rows; history and insight outer containers remain flat | Same no-wrap tab treatment; transaction amounts align at row end without painted list containers | Chart/table fallback remains accessible; semantic insight sections remain structural | Verify boundary tab, search behavior, and no painted history/insights ancestor | Desktop rows align like a ledger; filters remain in flow; summary/chart modules are the intentional painted surfaces | Desktop rows align like a ledger; filters remain in flow; summary/chart modules are the intentional painted surfaces |
 | Management/settings | Editorial sections remain single-column; deletion is last and is the only tinted contained region; owner, unlinked, and linked member slots fit without overflow | People/invitations/defaults precede exports and destructive actions; member rows keep identity → optional email/invitation → actions order, with one shared action gap | Verify long names and disabled states | Verify boundary spacing and justified form/admin containment | Compact editorial sections preserve hierarchy without stacked cards; Export → Group settings has one stack-owned divider | Compact editorial sections preserve hierarchy without stacked cards |
@@ -264,8 +313,10 @@ full-width: schedule loading, API-error, empty, and uncached-offline states are
 exercised at 390px, while balance loading, API-error, and uncached-offline
 states are exercised at 320px, 390px, and 896px. The fully cached offline
 reload runs at 320px. Populated overview geometry runs at all six canonical
-widths; More group actions and View all schedules screenshots/disclosure
-geometry run at **320, 895, 896, and 1440px**.
+widths; Spending insights default and More group actions chevron closed/open behavior runs at all six widths in
+`insight-people.spec.ts`, with loaded references at 390 and 1440px above.
+View all schedules screenshots/disclosure geometry run at **320, 895, 896,
+and 1440px**.
 
 The chooser is loaded online first and then switched offline at **320, 895,
 896, and 1440px**. Its Expense action remains enabled from the loaded group
