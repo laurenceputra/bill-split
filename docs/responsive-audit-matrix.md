@@ -1,5 +1,41 @@
 # Warm Ledger responsive audit matrix
 
+## Compact Add transaction chooser
+
+| View/state | 320 / 390px | 768px | 895 / 896px | 1440px |
+| --- | --- | --- | --- | --- |
+| Global `/add`, multiple groups, no selection | One labeled native Group / person dropdown with Choose a group; one disabled action set, expense first; full labels stack with 44px targets | Wrapping action row | Same across navigation boundary | One compact action set, no repeated group headings |
+| Global selected / switched, long names | Alphabetical display names; all three destinations follow selection without overflow | Same, row wraps as needed | Same | Same |
+| Global exactly one group | Automatically selected, immediate actions | Same | Same | Same |
+| Scoped chooser / unavailable group | Group heading and immediate actions, no dropdown; unavailable group has no action set | Same | Same | Same |
+| Loaded to offline / cached refresh error | Expense stays available for selected group; refund/payment disabled; offline and cached notices shown once | Same | Same | Same |
+| Loading / empty / cold error / removed selection | Loading has no invented choices; empty retains create-group/add-friend links; cold error retains retry; removed selection clears and disables actions, never redirects to another group | Same | Same | Same |
+
+Additional chooser layout boundary: **599px stacks actions; 600px uses a wrapping
+row**. At both widths, check unselected, selected and offline labels for complete
+containment, non-overlap and minimum 44px dropdown/action targets. The same checks
+apply at 320, 390, 768, 895, 896 and 1440px.
+
+Recorded Chromium outcomes (2026-10-07): **7 focused tests passed**, comprising
+the six `transaction-chooser.spec.ts` tests plus the existing scoped offline audit.
+Unselected, selected long-name and offline geometry passed at all eight widths,
+including 599/600. At 320px, deterministic gated requests verified selected-group
+removal leaves the placeholder/all actions disabled even with one remaining group;
+cached API refresh failure retains selection and all destinations with one notice;
+global delayed loading, empty, cold error/retry; scoped delayed lookup without a
+false unavailable alert and retained actions during refresh; single-group and
+completed-unavailable scoped states. Refresh tests use the existing successful-auth
+resource-refresh event, without expiring identity or relying on sleeps. Cached
+failure uses HTTP 400 so connection rules remain online; server/network failures
+can additionally disable online-only actions under the existing connection rules.
+Cold offline reload and other-browser chooser coverage were not added.
+
+The separate existing split-transaction navigation accessibility test failed on
+rerun at its offline-disabled assertion (line 876). The identical failure was
+reproduced against an untouched `git archive HEAD` baseline (6039f3a), not merely
+inferred from the chooser diff. Its SW/auth/navigation root cause remains outside
+this chooser change; no navigation code or assertions were changed.
+
 ## Compact person totals and secondary split control follow-up
 
 | View/state | 320 / 390px | 639px (below person breakpoint) | 640 / 768px | 895 / 896px | 1440px |

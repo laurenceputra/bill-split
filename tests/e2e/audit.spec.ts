@@ -518,7 +518,7 @@ const routeReadySelectors: Record<string, string> = {
   'large-group': '.group-overview-card--transactions .transaction-row--overview',
   'group-management': '.management-sections',
   'member-management': '.management-sections',
-  'global-add-chooser': '.chooser-groups > section',
+  'global-add-chooser': '.chooser-groups',
   'group-add-chooser': '.chooser-options',
   'transaction-history': '.transaction-list .transaction-row',
   'activity': '.activity-list > li',
