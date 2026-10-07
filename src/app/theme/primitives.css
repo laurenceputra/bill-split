@@ -380,13 +380,7 @@ form > :is(.cache-status, .warning) {
   gap: var(--flow-section);
 }
 
-.chooser-groups > section {
-  display: grid;
-  min-width: 0;
-  gap: var(--flow-content);
-}
-
-.chooser-groups > section > h2 {
+.chooser-groups > h2 {
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -398,10 +392,18 @@ form > :is(.cache-status, .warning) {
   gap: var(--space-2);
 }
 
-.chooser-options > .muted,
-.chooser-options > .cache-status {
-  flex: 1 1 100%;
-  margin: 0;
+.chooser-options > .button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  min-height: 44px;
+}
+
+@media (max-width: 599px) {
+  .chooser-options {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 form > label,
