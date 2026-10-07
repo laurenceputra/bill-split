@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { AuthLoadingShell, AvatarStack, Disclosure, Field, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
+import { AuthLoadingShell, AvatarStack, Disclosure, Field, GroupInsightsControl, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
 
 describe('Field', () => {
   it('de-duplicates an error ID already present in aria-describedby', () => {
@@ -77,6 +77,19 @@ describe('SplitTransactionControl', () => {
     expect(markup).not.toContain('nav-add-icon');
     expect(markup).toContain('aria-label="Add expense"');
     expect(markup).toContain('aria-label="Choose transaction type"');
+  });
+});
+
+describe('GroupInsightsControl', () => {
+  it('keeps insights direct and exposes only navigation options in an enabled native select', () => {
+    const markup = renderToStaticMarkup(createElement(MemoryRouter, {}, createElement(GroupInsightsControl, { groupId: 'group & 1' })));
+    expect(markup).toContain('href="/activity?group=group%20%26%201&amp;view=insights&amp;period=all"');
+    expect(markup).toContain('aria-label="More group actions"');
+    expect(markup).toContain('data-flow-region="admin"');
+    expect(markup).toContain('<option value="" selected="">More group actions</option>');
+    expect(markup).toContain('<option value="history">Group history</option>');
+    expect(markup).toContain('<option value="settings">Group settings</option>');
+    expect(markup).not.toMatch(/disabled|<details|<summary|<nav/);
   });
 });
 

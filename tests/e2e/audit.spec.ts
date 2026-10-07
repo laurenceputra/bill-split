@@ -1103,13 +1103,13 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
            if (scenario.name === 'rich-group' && disclosureAuditWidths.has(viewport.width)) {
              try {
                const tools = page.locator('.group-overview-tools');
-               await tools.locator('summary').click();
-               await expect(tools).toHaveJSProperty('open', true);
-                 for (const linkName of ['Spending insights', 'Group history', 'Group settings']) await expect(page.getByRole('link', { name: linkName, exact: true })).toBeVisible();
-                const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-open', context: 'GroupOverview / More group actions disclosure open', expected: { ...scenario.expected, content: 'Group history' } };
+                await tools.focus();
+                await expect(tools).toHaveValue('');
+                await expect(tools.locator('option')).toHaveText(['More group actions', 'Group history', 'Group settings']);
+                 const toolsScenario: Scenario = { ...scenario, name: 'group-overview-more-actions-focused', context: 'GroupOverview / native More group actions select focused', expected: scenario.expected };
                await assertRendered(page, toolsScenario, observations, viewport);
-               coverage.push({ scenarioName: toolsScenario.name, authState: authState(toolsScenario.auth), route: `${scenario.path} [More group actions open]`, viewport, context: toolsScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
-               await reportForPage(page, toolsScenario, `${scenario.path} [More group actions open]`, viewport, artifactDirectory, findings, failures);
+                coverage.push({ scenarioName: toolsScenario.name, authState: authState(toolsScenario.auth), route: `${scenario.path} [More group actions focused]`, viewport, context: toolsScenario.context, rendered: true, apiSuccesses: observations.filter((observation) => observation.status >= 200 && observation.status < 300).map((observation) => observation.path) });
+                await reportForPage(page, toolsScenario, `${scenario.path} [More group actions focused]`, viewport, artifactDirectory, findings, failures);
 
                const schedules = page.locator('.group-overview-card--schedules');
                const scheduleDisclosure = schedules.locator('details');
@@ -1401,7 +1401,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     await expect(page.locator('.transaction-row--overview').first()).toBeVisible();
     await expect(page.locator('.group-overview-card--balances .balance-card--positive').first()).toBeVisible();
     await expect(page.locator('.group-overview-card--balances .balance-card--debt').first()).toBeVisible();
-    await expect(page.locator('.group-overview-tools')).toHaveJSProperty('open', false);
+    await expect(page.locator('.group-overview-tools')).toHaveValue('');
 
     const structure = await page.locator('.group-overview-columns').evaluate((element) => {
       const order = Array.from(element.querySelectorAll(':scope .group-overview-card')).map((card) => card.className);
@@ -1454,7 +1454,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
         const style = getComputedStyle(category);
         return { background: style.backgroundColor, radius: parseFloat(style.borderTopLeftRadius), fontSize: parseFloat(style.fontSize) };
       }));
-      const overviewLinks = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card a,.group-overview-card summary,.group-overview-tools summary')).filter(visible);
+      const overviewLinks = Array.from(route.querySelectorAll<HTMLElement>('.group-overview-card a,.group-overview-card summary,.group-overview-tools')).filter(visible);
       const firstCard = cards[0];
       const firstAction = route.querySelector<HTMLElement>('.group-overview-header .button');
       return {
@@ -1477,7 +1477,7 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
       nestedPaint: cards.reduce((count, card) => count + Array.from(card.querySelectorAll('.ui-card-surface,.ui-surface,.ui-form-surface,.group-overview-card')).length, 0),
         firstActionBeforeCard: Boolean(firstAction && firstCard && firstAction.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING),
         toolsAfterCards: Boolean(tools && cards.at(-1) && cards.at(-1)!.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING),
-        focusableOrder: overviewLinks.map((element) => element.matches('.group-overview-tools summary') ? 'tools' : element.closest('.group-overview-card')?.className.includes('balances') ? 'balances' : element.closest('.group-overview-card')?.className.includes('transactions') ? 'transactions' : element.closest('.group-overview-card')?.className.includes('schedules') ? 'schedules' : element.closest('.group-overview-card')?.className.includes('people') ? 'people' : 'other'),
+        focusableOrder: overviewLinks.map((element) => element.matches('.group-overview-tools') ? 'tools' : element.closest('.group-overview-card')?.className.includes('balances') ? 'balances' : element.closest('.group-overview-card')?.className.includes('transactions') ? 'transactions' : element.closest('.group-overview-card')?.className.includes('schedules') ? 'schedules' : element.closest('.group-overview-card')?.className.includes('people') ? 'people' : 'other'),
       };
     });
     expect(geometry.titleFontSize).toBeGreaterThanOrEqual(28);
@@ -1516,11 +1516,10 @@ test('group overview keeps storyboard modules flat, ordered, and responsive', as
     if (viewport.width < 896) expect(geometry.columns).toBe(1);
     else expect(geometry.columns).toBe(2);
 
-    await page.locator('.group-overview-tools summary').click();
+    await page.locator('.group-overview-tools').focus();
     await expect(page.getByRole('link', { name: 'Spending insights', exact: true })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Record credit' })).toHaveCount(0);
-    await expect(page.getByRole('link', { name: 'Group history' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Group settings' })).toBeVisible();
+    await expect(page.locator('.group-overview-tools option')).toHaveText(['More group actions', 'Group history', 'Group settings']);
   }
 });
 

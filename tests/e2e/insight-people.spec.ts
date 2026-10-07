@@ -5,34 +5,37 @@ const path = `/activity?group=${groupId}&view=insights&period=all&currency=USD`;
 const person = (personId: string, name: string, shareMinor: number, paidMinor: number) => ({ personId, name, shareMinor, paidMinor });
 const summary = (currency: string, people?: ReturnType<typeof person>[]) => ({ currency, groupSpendMinor: 1000, allocatedSpendMinor: 200, yourShareMinor: 200, youPaidMinor: 600, expenseCount: 1, ...(people ? { people } : {}) });
 
-test('Spending insights split actions stay aligned and in-flow at every audit width', async ({ authenticatedPage: page }) => {
+test('Spending insights native split actions stay aligned at every audit width', async ({ authenticatedPage: page }) => {
   await page.goto(`/groups/${groupId}`);
   const tools = page.locator('.group-overview-tools');
   await expect(tools).toHaveAttribute('data-flow-region', 'admin');
-  await expect(tools.locator('summary')).toHaveAccessibleName('More group actions');
+  await expect(tools).toHaveAccessibleName('More group actions');
+  await expect(tools).toHaveRole('combobox');
+  await expect(tools.locator('option')).toHaveText(['More group actions', 'Group history', 'Group settings']);
   const insights = page.getByRole('link', { name: 'Spending insights', exact: true });
   await expect(insights).toHaveAttribute('href', `/activity?group=${groupId}&view=insights&period=all`);
   const positions = () => page.evaluate(() => {
     const box = (selector: string) => { const r = document.querySelector(selector)!.getBoundingClientRect(); return { top: r.top, height: r.height, width: r.width, left: r.left, right: r.right }; };
-    return { title: box('.group-overview-header h1'), add: box('.group-overview-header .split-transaction-control'), addMenu: box('.group-overview-header .split-transaction-control__menu'), settle: box('.group-overview-header .expense-heading__actions > .button'), insights: box('.group-insights-control__primary'), menu: box('.group-overview-tools summary'), cards: box('.group-overview-columns') };
+    return { title: box('.group-overview-header h1'), add: box('.group-overview-header .split-transaction-control'), addMenu: box('.group-overview-header .split-transaction-control__menu'), settle: box('.group-overview-header .expense-heading__actions > .button'), insights: box('.group-insights-control__primary'), menu: box('.group-overview-tools'), cards: box('.group-overview-columns') };
   });
   for (const width of [320, 390, 768, 895, 896, 1440]) {
     await page.setViewportSize({ width, height: 844 });
-    await expect(tools).toHaveJSProperty('open', false);
+    await expect(tools).toHaveValue('');
+    await tools.evaluate((element) => (element as HTMLSelectElement).blur());
     await page.mouse.move(0, 0);
     const colors = (selector: string) => page.locator(selector).evaluate((element) => {
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, border: style.borderTopColor };
     });
     const rest = await colors('.group-insights-control__primary');
-    expect(await colors('.group-overview-tools summary')).toEqual(rest);
+    expect(await colors('.group-overview-tools')).toEqual(rest);
     await insights.hover();
     const hover = await colors('.group-insights-control__primary');
     expect(hover.background).not.toBe(rest.background);
-    await tools.locator('summary').hover();
-    expect(await colors('.group-overview-tools summary')).toEqual(hover);
+    await tools.hover();
+    expect(await colors('.group-overview-tools')).toEqual(hover);
     await page.mouse.move(0, 0);
-    const geometry = await tools.locator('summary').evaluate((element) => {
+    const geometry = await tools.evaluate((element) => {
       const primary = document.querySelector('.group-overview-header .expense-heading__actions')!;
       const style = getComputedStyle(element);
        return { height: element.getBoundingClientRect().height, border: parseFloat(style.borderTopWidth), radius: parseFloat(style.borderTopRightRadius), followsPrimary: Boolean(primary.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) };
@@ -47,35 +50,61 @@ test('Spending insights split actions stay aligned and in-flow at every audit wi
     expect(closed.menu.top).toBe(closed.insights.top);
     expect(closed.settle.top).toBe(closed.add.top);
     if (Math.abs(closed.insights.top - closed.add.top) < 1) expect(closed.menu.top).toBe(closed.addMenu.top);
-    await tools.locator('summary').focus();
-    await expect(tools.locator('summary')).toBeFocused();
-    expect(await tools.locator('summary').evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none');
-    expect(await tools.locator('summary').evaluate((element) => {
+    await tools.focus();
+    await expect(tools).toBeFocused();
+    expect(await tools.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe('none');
+    expect(await tools.evaluate((element) => {
       const style = getComputedStyle(element);
       return { width: style.outlineWidth, offset: style.outlineOffset };
     })).toEqual({ width: '3px', offset: '3px' });
-    await page.keyboard.press('Enter');
-    for (const name of ['Group history', 'Group settings']) await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
-    await expect(tools.getByRole('link', { name: /insights/i })).toHaveCount(0);
+    // Native popup chrome is outside the DOM: exercise keyboard opening/cancel,
+    // then verify it does not expand an inline panel or move the overview.
+    await page.keyboard.press('Alt+ArrowDown');
+    await page.keyboard.press('Escape');
     const opened = await positions();
     for (const key of ['title', 'add', 'settle', 'insights', 'menu'] as const) expect(opened[key]).toEqual(closed[key]);
-    expect(opened.cards.top).toBeGreaterThan(closed.cards.top);
-    const panel = await tools.locator('nav').boundingBox();
-    expect(panel!.x).toBeCloseTo(closed.insights.left, 0);
-    expect(panel!.width).toBeCloseTo(closed.menu.right - closed.insights.left, 0);
-    expect(panel!.y).toBeGreaterThanOrEqual(closed.menu.top + closed.menu.height);
+    expect(opened.cards).toEqual(closed.cards);
+    await expect(page.locator('.group-insights-control details,.group-insights-control nav')).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Record credit', exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.keyboard.press('Space');
-    await expect(tools).toHaveJSProperty('open', false);
-    await expect(tools.locator('summary')).toBeFocused();
+    await expect(tools).toHaveValue('');
+    await expect(tools).toBeFocused();
   }
   await page.setViewportSize({ width: 320, height: 844 });
   await page.locator('.group-overview-header h1').evaluate((element) => { element.textContent = 'GroupWithAnExtremelyLongUnbrokenName'.repeat(3); });
-  await tools.locator('summary').click();
-  await tools.locator('nav a').first().evaluate((element) => { element.textContent = 'GroupHistoryWithAnExtremelyLongUnbrokenLabel'.repeat(3); });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-  expect(await page.locator('.group-insights-control').evaluate((element) => [...element.querySelectorAll<HTMLElement>('a, nav')].every((child) => child.scrollWidth <= child.clientWidth + 1))).toBe(true);
+  expect(await insights.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await page.emulateMedia({ forcedColors: 'active' });
+  await tools.hover();
+  await tools.focus();
+  expect(await tools.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { appearance: style.appearance, background: style.backgroundImage, indent: style.textIndent };
+  })).toEqual({ appearance: 'auto', background: 'none', indent: '0px' });
+});
+
+test('group action destinations reset the native picker and remain reachable offline', async ({ authenticatedPage: page }) => {
+  await page.goto(`/groups/${groupId}`);
+  const tools = page.getByRole('combobox', { name: 'More group actions' });
+  await expect(tools).toBeEnabled();
+  await tools.selectOption('history');
+  await expect(page).toHaveURL(`/activity?group=${groupId}&view=changes`);
+  await page.goBack();
+  await expect(tools).toHaveValue('');
+  await tools.selectOption('settings');
+  await expect(page).toHaveURL(`/groups/${groupId}/manage#settings`);
+  await page.goBack();
+  await expect(tools).toHaveValue('');
+  await page.context().setOffline(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+  await expect(tools).toBeEnabled();
+  await tools.selectOption('history');
+  await expect(page).toHaveURL(`/activity?group=${groupId}&view=changes`);
+  await page.goBack();
+  await expect(tools).toHaveValue('');
+  await tools.selectOption('settings');
+  await expect(page).toHaveURL(`/groups/${groupId}/manage#settings`);
+  await page.context().setOffline(false);
 });
 
 test('person totals follow currency and period; ties, zero, old cache and empty are distinct', async ({ authenticatedPage: page }) => {

@@ -70,7 +70,7 @@ test('group page keeps primary actions, balances, and transactions before manage
   await expect(page.getByRole('heading', { name: 'Recent transactions' })).toBeVisible();
   await expect(page.getByRole('list', { name: 'People in this group' })).toBeVisible();
   await expect(page.locator('.schedule-overview-list')).toBeVisible();
-  await expect(page.locator('.group-overview-tools')).toHaveJSProperty('open', false);
+  await expect(page.getByRole('combobox', { name: 'More group actions' })).toHaveValue('');
   await expect(page.getByRole('link', { name: '+ Add expense' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Settle up' })).toBeVisible();
   const headings = await page.locator('main h2').allTextContents();
@@ -97,6 +97,7 @@ test('group overview keeps transaction loading, error, and cached states truthfu
     const card = loadingPage.locator('.group-overview-card--transactions');
     await expect(card).toBeVisible();
     await expect(card.getByRole('status').filter({ hasText: 'Loading recent transactions…' })).toBeVisible();
+    await expect(loadingPage.getByRole('combobox', { name: 'More group actions' })).toBeEnabled();
     await expect(card).not.toContainText('Recent transactions are unavailable until this group’s transaction data is loaded.');
   } finally {
     releaseLoading();
@@ -111,6 +112,7 @@ test('group overview keeps transaction loading, error, and cached states truthfu
     const card = errorPage.locator('.group-overview-card--transactions');
     await expect(card).toBeVisible();
     await expect(card.locator('.error')).toContainText('Transaction fixture outage');
+    await expect(errorPage.getByRole('combobox', { name: 'More group actions' })).toBeEnabled();
     await expect(card).toContainText('Recent transactions are unavailable until this group’s transaction data is loaded.');
   } finally {
     await errorContext.close();
@@ -154,6 +156,7 @@ test('group overview keeps transaction loading, error, and cached states truthfu
     await expect(card).toContainText('Dinner by the canal (edited)');
     await expect.poll(() => refreshFailures).toBeGreaterThan(0);
     await expect(card).toContainText('Showing cached transactions; it may be out of date.');
+    await expect(cachedPage.getByRole('combobox', { name: 'More group actions' })).toBeEnabled();
     await expect(card.locator('.error')).toHaveCount(0);
   } finally {
     await cachedContext.close();
@@ -187,6 +190,7 @@ test('group overview reloads fully cached financial data while schedules remain 
     await expect(page.locator('.transaction-row--overview').filter({ hasText: 'Dinner by the canal (edited)' })).toBeVisible();
     const scheduleCard = page.locator('.group-overview-card--schedules');
     await expect(scheduleCard).toContainText('Scheduled expenses need a connection and are not cached on this device.');
+    await expect(page.getByRole('combobox', { name: 'More group actions' })).toBeEnabled();
     await expect(scheduleCard.locator('details')).toHaveCount(0);
     await expect(scheduleCard.locator('.schedule-overview-row')).toHaveCount(0);
     expect(scheduleRequests).toBe(0);

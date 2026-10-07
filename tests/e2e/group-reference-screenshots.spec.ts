@@ -26,21 +26,18 @@ for (const [device, width, height] of [['mobile', 390, 844], ['desktop', 1440, 9
     await expect(page.getByText('Dinner by the canal (edited)', { exact: true }).first()).toBeVisible();
     await expect(page.locator('.skeleton')).toHaveCount(0);
     const tools = page.locator('.group-overview-tools');
-    await expect(tools).toHaveJSProperty('open', false);
+    await expect(tools).toHaveValue('');
     await expect(page.getByRole('link', { name: 'Settle up', exact: true })).toBeVisible();
     if (device === 'mobile') {
       await expect(page.locator('.bottom-nav')).toBeVisible();
       await capture(page, testInfo, 'group-overview-mobile-viewport', false);
     }
     await capture(page, testInfo, `warm-ledger-${device}`);
-    await tools.locator('summary').click();
-    for (const name of ['Group history', 'Group settings']) {
-      await expect(tools.getByRole('link', { name, exact: true })).toBeVisible();
-    }
-    await capture(page, testInfo, `group-overview-more-actions-open-${device}`);
+    await tools.focus();
+    await capture(page, testInfo, `group-overview-more-actions-focused-${device}`);
     if (process.env.GROUP_SCREENSHOTS_OVERVIEW_ONLY === '1') return;
 
-    await tools.getByRole('link', { name: 'Group history', exact: true }).click();
+    await tools.selectOption('history');
     const back = page.getByRole('link', { name: '← Back to group', exact: true });
     await expect(back).toHaveAttribute('href', `/groups/${groupId}`);
     await expect(page.getByRole('combobox', { name: 'Filter history by group' })).toHaveValue(groupId);
