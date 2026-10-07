@@ -1,4 +1,5 @@
 import type { Expense } from '../shared/types';
+import { parseMoney } from '../domain/money';
 
 export type CreditApplicationDraft = { id: string; expenseId: string; amount: string; touched?: boolean; provenance?: 'user' | 'default' };
 export type CreditAllocationDraft = { id: string; personId: string; allocationType: 'recipient' | 'beneficiary'; amount: string };
@@ -21,8 +22,8 @@ export function remainingRefundableMinor(expense: RefundCapacityExpense, editing
 /** Defaults only untouched rows. User-entered amounts are never overwritten. */
 export function defaultRefundApplications(rows: CreditApplicationDraft[], expenses: RefundCapacityExpense[], totalMinor: number, editingCreditId?: string): CreditApplicationDraft[] {
   const touchedTotal = rows.filter((row) => row.touched).reduce((sum, row) => {
-    const value = Number(row.amount);
-    return Number.isFinite(value) ? sum + Math.round(value * 100) : sum;
+    const expense = expenses.find((candidate) => candidate.id === row.expenseId);
+    try { return sum + parseMoney(row.amount, expense?.currency || 'USD'); } catch { return sum; }
   }, 0);
   let unallocated = Math.max(0, totalMinor - touchedTotal);
   return rows.map((row) => {

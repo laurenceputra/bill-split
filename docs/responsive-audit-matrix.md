@@ -1,5 +1,104 @@
 # Warm Ledger responsive audit matrix
 
+## Refund recipient defaults and allocation editing
+
+### Receipt, benefit and settlement clarity follow-up
+
+Final reviewer regressions: linked edits continuously validate inactive derived
+shares against saved exact amounts even after a supported original-split reset.
+An unsupported change blocks submission with actionable help and Money flow
+section focus; restoring applied amounts or reopening the preserved custom
+snapshot recovers without silent overwrites. Saved edit recipients remain manual
+until Use full total explicitly resumes amount following (person defaults remain
+new-only). Removing every manual beneficiary shows a stable aggregate error and
+focuses Money flow on submit, with Add affected member / original split recovery.
+The empty-section browser state covers all nine audit widths, no credit mutation,
+focus, overflow and recovery. Curated screenshots additionally include
+`refund-improvements-empty-beneficiaries-{mobile,desktop}.png`.
+
+Audit widths: **320, 390, 480/481, 767/768, 895/896, 1440px**. The focused
+refund browser suite covers blank validation/focus, editable default hint,
+beneficiary disclosure/reset, multiple recipients and very-long decimal values
+at every width. All refund decimal inputs share the expense amount shell with
+an unfocused border, 0.00 placeholder, focus/error treatment and length classes.
+Standalone currency is editable inside the total control; linked/allocation
+currencies are static. Person → amount → remove DOM order stacks below 896px;
+desktop has two spacious columns with remove on its own row, not a reserved
+third column. Inspect help/action spacing and unfocused allocation borders.
+
+Settlement wording appears only for complete valid drafts. Insurer-to-wife
+coverage checks positive original-payer and negative recipient deltas, zero
+effects, invalid-preview suppression, and separate-payment help hidden for
+standalone/provider modes. No total balance or pairwise transfer is inferred.
+Existing loading/cached/offline/empty/error and historical edit/reset checks
+remain applicable; the follow-up does not change their accounting or guards.
+
+Curated artifacts: `docs/screenshots/refund-improvements-{default,validation,
+insurer-wife,allocations}-{mobile,desktop}.png`. Generate with
+`REFUND_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:e2e:local -- tests/e2e/linked-refund.spec.ts`.
+These capture actual UI at 390/1440px with unfocused controls, using isolated
+seed data and read-only response overrides for the named wife/medical-bill
+scenario; no financial mutations or production data are captured.
+
+Follow-up verification: 57 targeted refund/credit/form-helper unit tests passed,
+including retained historical reset guards. Typecheck and production build
+passed (existing large-chunk warning). Focused Chromium tests passed; the
+geometry assertions also require each visible decimal input to retain >100px
+of width and its composite shell to keep a 1px unfocused border. Screenshots
+were visually inspected on desktop and mobile after correcting shared-grid
+and preview-flex sizing conflicts. Full matrix/integration suites were not run
+for this follow-up; this is not a claim of full-suite coverage.
+
+Reviewer follow-up: Supported Use original expense split resets return to read-only,
+server-derived benefits (no explicit historical beneficiary overrides); reopening
+retains custom snapshots. New manual adjustment is unavailable with contextual
+help when an original split includes ineligible former members, whose historical
+names remain visible. Application aggregate errors are separate from total-money
+validity, and blank expense/invalid applied amounts receive save-attempt focus.
+Add recipient requires the existing blank row to be completed and respects the
+eligible-member row limit. At all six widths the focused browser scenario checks
+overflow and scroll reachability of Save at blank/positive-total validation,
+invalid applied amount, beneficiary disclosure, original-split reset and added
+recipient states.
+
+Edit reset eligibility mirrors `creditParticipantGuard` in
+`src/db/repository.ts:1709–1726` and its update use at 2031: every inactive derived
+beneficiary must match a saved allocation's exact person, beneficiary type and
+minor-unit amount. Unlike create (2012), update does not exempt newly derived
+historical allocations. Unsupported edit resets are disabled with contextual
+help and guarded in the handler; active shares and unchanged saved historical
+shares allow reset. This condition is verified through focused UI/helper tests,
+not a new repository integration test. No repository/config changes were made.
+Blur validation is control-local; unrelated note/source blur does not expose
+untouched required errors. Submit attempts still reveal all errors and focus the
+first invalid control. Full-total reset resumes automatic following on the next
+total change. Browser scenarios cover unrelated blur and automatic following at
+all six widths; historical edit eligibility is covered in mounted/helper tests.
+
+At **320, 390, 768, 895, 896, 1440px**, audit new member reimbursement with
+the editable current-member default and hint (sole active member fallback;
+otherwise blank), blank-submit field errors and first-invalid focus, corrected
+fields, automatic full amount after recipient/total changes, manual override,
+explicit full/remaining reset, multiple recipients and remaining/overallocated
+status. Added rows remain blank and Add recipient disables when choices run out.
+Audit Adjust who benefits populated from the current split and Use original
+expense split reset, plus saved custom/historical edit allocations unchanged.
+Primary save remains reachable for invalid drafts; offline/loading/busy save
+remains unavailable. Cached expense refresh must update capacity/shares; empty
+choices retain actionable local errors without fabricated participants. Check
+labels/errors/actions wrap without horizontal overflow at all widths. Focused
+`linked-refund.spec.ts` scenarios cover blank errors/focus, amount following,
+beneficiary disclosure/reset and added-recipient geometry; fallback, cached,
+offline and historical edit variants require additional manual verification.
+
+Focused Chromium verification passed both linked-refund scenarios and the
+existing online/offline submission audit (three tests), including all six
+widths, using the repository's local cached-browser wrapper. Typecheck
+and 35 targeted refund/helper unit tests passed, including sole/no-current
+fallback, supported/unsupported historical edit reset payloads, repeated blank Add and same-count expense
+capacity refresh regressions. The full unit-suite attempt
+exceeded a 120-second execution limit; it is not reported as passing.
+
 ## Compact Add transaction chooser
 
 | View/state | 320 / 390px | 768px | 895 / 896px | 1440px |
