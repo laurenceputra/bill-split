@@ -1,7 +1,9 @@
 /* One responsive layer keeps breakpoint ownership auditable. */
 
 @media (forced-colors: active) {
-.split-transaction-control__menu {
+.split-transaction-control__menu,
+  select.group-overview-tools:not(:disabled):not([aria-invalid="true"]):hover,
+  .group-overview-tools:focus-visible {
     -webkit-appearance: menulist;
     appearance: auto;
     background-color: ButtonFace;

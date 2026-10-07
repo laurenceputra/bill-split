@@ -283,6 +283,23 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   </div>;
 }
 
+export function GroupInsightsControl({ groupId }: { groupId: string }) {
+  const navigate = useNavigate();
+  return <div className="group-insights-control" role="group" aria-label="Group insights and actions">
+    <Link className="button button--secondary group-insights-control__primary" to={`/activity?group=${encodeURIComponent(groupId)}&view=insights&period=all`}>Spending insights</Link>
+    <select className="split-transaction-control__menu group-overview-tools" data-flow-region="admin" aria-label="More group actions" title="More group actions" value="" onChange={(event) => {
+      const value = event.target.value;
+      event.target.value = '';
+      if (value === 'history') navigate(`/activity?group=${encodeURIComponent(groupId)}&view=changes`);
+      if (value === 'settings') navigate(`/groups/${groupId}/manage#settings`);
+    }}>
+      <option value="">More group actions</option>
+      <option value="history">Group history</option>
+      <option value="settings">Group settings</option>
+    </select>
+  </div>;
+}
+
 export function TopBar() {
   const connection = useConnectionState();
   const outbox = useOutbox();

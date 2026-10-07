@@ -212,30 +212,17 @@
 
 .group-overview-tools {
   margin: 0;
-  min-width: 0;
-  /* Span the joined control so the native in-flow panel gets its full width.
-     The default link occupies the left cell over the summary's empty space. */
-  grid-column: 1 / -1;
-  grid-row: 1;
+  border-color: var(--color-border-strong);
+  background-color: var(--color-primary-subtle);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='m4 6 4 4 4-4' stroke='%235F43C5' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 .group-heading-actions { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-2); min-width: 0; }
-.group-overview-tools > summary {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--control-min-height);
-  margin-left: auto;
-  min-height: var(--control-min-height);
-  padding: 0;
-  border-radius: 0 var(--radius-control) var(--radius-control) 0;
-  cursor: pointer;
-  color: var(--color-primary-hover);
-  font-weight: 600;
-  list-style: none;
+select.group-overview-tools:not(:disabled):not([aria-invalid="true"]):hover,
+.group-overview-tools:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-primary-subtle-hover);
 }
-
-.group-overview-tools > summary::-webkit-details-marker { display: none; }
 
 .group-insights-control {
   display: grid;
@@ -260,26 +247,3 @@
 
 .group-overview-header .expense-heading__actions { align-items: flex-start; }
 .group-overview-header .expense-heading__actions > .button { min-height: var(--control-min-height); line-height: 1.2; }
-
-.group-overview-tools .group-tools {
-  display: grid;
-  min-width: 0;
-  margin: 0;
-}
-
-.group-overview-tools:not([open]) .group-tools { display: none; }
-
-.group-tool-row {
-  display: flex;
-  min-height: var(--control-min-height);
-  align-items: center;
-  border-bottom: 1px solid var(--color-divider);
-  color: var(--color-primary-hover);
-  padding: var(--space-2) 0;
-  text-decoration: none;
-  overflow-wrap: anywhere;
-}
-
-.group-tool-row:last-child {
-  border-bottom: 0;
-}
