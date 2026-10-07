@@ -1,5 +1,39 @@
 # Reliable update core: integration contract
 
+## Historical upgrade transport and activation
+
+Finalized installs fetch `/__billsplit_shell__.bin`, an octet-stream asset containing
+the exact identified `index.html` bytes. The Worker retrieves the actual binary
+through ASSETS with a fresh GET and serves `no-cache, no-transform`; missing assets,
+SPA HTML fallbacks, redirects and partial responses fail closed. The SW validates
+network provenance before constructing the HTML response, retains security/CSP
+headers, and verifies exact SHA-256/length and the complete dependency manifest.
+Transformed ordinary `/` HTML is never a production install fallback.
+
+Historical pages may explicitly send the bare `{ type: 'SKIP_WAITING' }` message.
+Only a verified sole scoped window (including uncontrolled windows), confirmed
+by two membership enumerations, may activate this way. Checks are bounded and
+serialized against modern attempts; rejected requests are not deferred. This
+arbitration begins only after source scope and message identity validation. A
+validated modern request arriving during a legacy check receives its matching
+`RELEASE`; invalid competing messages cannot veto a legacy request. Duplicate
+legacy requests do not disturb the in-progress check.
+Legacy activation relies on the historical page's explicit local form/mutation guard, **not** modern
+persistent dirty-draft or cross-tab protection. Enumeration and activation cannot
+atomically prevent a newly opened window race.
+
+For multi-window legacy recovery, save drafts and finish writes, close **all**
+BillSplit tabs and standalone windows, then reopen. Never clear the outbox or
+site data to apply an update.
+
+Deployment smoke check: compare the deployed binary's SHA-256 and byte length to
+the final local `dist/index.html` and generated SW fingerprint; confirm HTTP 200,
+octet-stream, `no-cache, no-transform`, CSP and no redirect. Check GET with Range
+and conditional headers still yields the full body, and HEAD is bodyless. Ordinary
+HTML may include edge scripts, but canonical bytes must not. Exercise an old
+controlled page's explicit update in one window and rejection with another window
+open; verify cached `/` and `/index.html` retain original bytes and HTML MIME.
+
 The integrated flow supplies discovery, local reload barriers, waiting-worker
 coordination, persistent draft/dialog ownership, full API/IndexedDB/outbox and
 authentication operation protection, and live Settings/Header update controls.
@@ -105,15 +139,18 @@ action, and checking while dirty never bypasses reload protection.
 
 ## Waiting-worker authority
 
-Only `BILLSPLIT_UPDATE_V1` messages are accepted. The actual waiting worker
+Modern coordination accepts `BILLSPLIT_UPDATE_V1` messages. The actual waiting worker
 enumerates all same-origin window clients in its registration scope, including
 uncontrolled clients. Each must acknowledge preparation after five seconds of
 local inactivity, hold a leased gate, and acknowledge a final validation round.
 Membership is checked between rounds and again before `skipWaiting`. A dirty,
 hidden, legacy, missing, or unresponsive client blocks activation. Source IDs,
 attempt IDs, targets, and ACK rounds are matched. Cancellation, timeout, or
-coordinator disappearance releases all participating gates. Bare legacy
-`SKIP_WAITING` no longer bypasses this protocol.
+coordinator disappearance releases all participating gates. The narrowly scoped
+historical exception accepts only bare `{ type: 'SKIP_WAITING' }` from a verified
+sole scoped window, confirmed by two membership checks and serialized against
+modern attempts. It relies on the historical page's local guards, not modern
+cross-tab preparation or persistent dirty-draft protection.
 
 `controllerchange` queries the actual controller identity, ignores first
 installation, and reloads at most once, only if local safety still holds.
@@ -132,10 +169,12 @@ The finalizer now emits per-file SHA-256 fingerprints and exact byte lengths
 for HTML, all manifest/icons, and all generated JS/CSS/font/lazy assets. Worker
 policy is also included in the generation hash. It injects an immutable
 `billsplit-build` meta tag into **the generated index.html**, then fingerprints
-those final HTML bytes. Fixtures and deployments must serve the finalizer's
-worker **and its final index.html** together, not the pre-finalization HTML.
-Byte hashing intentionally rejects HTML rewritten after finalization, including
-edge-injected or minified HTML; deployments must preserve the finalized bytes.
+those final HTML bytes and emits an identical canonical binary shell. Fixtures
+and deployments must publish matching finalized **index.html, canonical binary,
+and sw.js** artifacts together, not pre-finalization HTML or mixed generations.
+The binary transport must preserve the exact finalized bytes: hashing rejects
+any injection or minification of that transport. Ordinary HTML responses may be
+transformed by edge scripts; production installation never uses them as a fallback.
 Installation verifies fetched bytes using WebCrypto with bounded body reads
 and hash completion. Matching entry filenames alone are insufficient. A failed
 install removes its newly created partial cache after outstanding underlying
@@ -176,24 +215,31 @@ is not a claim of absolute distributed atomicity. Real A/B lifecycle and
 responsive browser validation have been executed within the scopes below, not
 as an authenticated full-application A/B migration audit. During the one-time
 rollout from the legacy worker/page protocol, legacy open tabs cannot acknowledge
-preparation and therefore block coordinated activation until users safely close
-or refresh them. There is no legacy-message activation bypass.
+modern preparation and therefore block coordinated activation. The sole verified
+legacy-window exception described above permits an explicit historical request.
+For multi-window legacy recovery, save drafts and finish writes, close **all**
+BillSplit tabs and standalone windows, then reopen; refreshing individual tabs
+is not the recovery procedure. Never clear site data or the outbox.
 
 ## Executed verification and scope
 
-Current verification passed **898 unit tests, 26 integration tests, and 1
+Current PR verification passed **929 unit tests, 27 integration tests, and 1
 migration test**, plus typecheck and production build.
 
-- **6 Chromium lifecycle tests** use a real same-origin server switching coherent
+- **9 standalone Chromium lifecycle tests** use a real same-origin server switching coherent
   production worker/shell artifacts and the actual core modules. This verifies
   service-worker A/B lifecycle behavior in a dedicated production-core fixture,
-  **not an authenticated full-App A/B deployment**.
-- **11 Chromium update-settings/avatar/user-feedback tests** include the live
+  **not an authenticated full-App A/B deployment**. These run without Wrangler;
+  the main e2e configuration also passed the same nine tests plus **1 Chromium
+  Worker/ASSETS endpoint integration test**.
+- **Previous-work evidence, not rerun in this PR:** **11 Chromium
+  update-settings/avatar/user-feedback tests** include the live
   Settings order and blurred drafts, plus shared production-component status
   presentation at 320, 390, 767, 768, 895, 896, and 1440px. The status fixtures
   cover 98 phase/reason/width configurations; injected presentation states do not
   themselves prove worker lifecycle behavior.
-- **7 Chromium date-control tests** passed as focused responsive regressions.
+- **Previous-work evidence, not rerun in this PR:** **7 Chromium date-control
+  tests** passed as focused responsive regressions.
 
 Local browser runs used the existing executable resolver and `/ms-playwright`
 cache. WebKit was unavailable locally; its browser verification remains pending
