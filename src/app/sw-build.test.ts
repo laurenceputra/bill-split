@@ -40,6 +40,8 @@ describe('production service-worker finalizer', () => {
     expect(output).toContain(`const SHELL_INTEGRITY = ${JSON.stringify(result.integrity)};`);
     expect(await readFile(resolve(root, 'index.html'), 'utf8')).toContain(`<meta name="billsplit-build" content="${result.version}">`);
     expect(result.integrity['/']).toEqual(result.integrity['/index.html']);
+    expect(result.integrity['/__billsplit_shell__.bin']).toEqual(result.integrity['/']);
+    expect(await readFile(resolve(root, '__billsplit_shell__.bin'))).toEqual(await readFile(resolve(root, 'index.html')));
   });
 
   it('changes the version when a shell asset changes', async () => {

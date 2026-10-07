@@ -21,12 +21,121 @@ function workerHarness(cacheMatch: (request: Request | string) => Promise<Respon
   class WorkerRequest extends Request {
     constructor(input: RequestInfo | URL, init?: RequestInit) { super(typeof input === 'string' && input.startsWith('/') ? new URL(input, 'https://split.test').toString() : input, init); }
   }
-  const context = { self, caches, fetch: networkFetch, Request: WorkerRequest, Response, URL, Promise, AbortController, Symbol, Uint8Array, Date, setTimeout, clearTimeout };
+  const context = { self, caches, fetch: networkFetch, Request: WorkerRequest, Response, Headers, URL, Promise, AbortController, Symbol, Uint8Array, Date, setTimeout, clearTimeout };
   vm.runInNewContext(workerSource, context);
   return { fetchHandler: handlers.get('fetch')!, installHandler: handlers.get('install')!, activateHandler: handlers.get('activate')!, syncHandler: handlers.get('sync')!, messageHandler: handlers.get('message')!, waitUntilPromises, windows, self };
 }
 
 describe('service-worker runtime policy', () => {
+  it.each(['wrong-target', 'bad-attempt', 'out-of-scope', 'bare-outsider', 'duplicate', 'modern'])('validates competing authority during legacy checks: %s', async (competitor) => {
+    const harness = workerHarness(async () => undefined);
+    const postMessage = vi.fn();
+    const client = { id: 'legacy', type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage };
+    const outsider = { ...client, id: 'outsider', url: 'https://other.test/' };
+    harness.windows.push(client, outsider);
+    let finish!: (clients: typeof harness.windows) => void;
+    harness.self.clients.matchAll = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; })).mockResolvedValue([client]);
+    let legacy!: Promise<unknown>;
+    harness.messageHandler({ source: client, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { legacy = promise; } });
+    for (let index = 0; index < 30 && !finish; index += 1) await Promise.resolve();
+    expect(finish).toBeDefined();
+    let competing: Promise<unknown> | undefined;
+    const bare = competitor === 'duplicate' || competitor === 'bare-outsider';
+    harness.messageHandler({ source: competitor === 'out-of-scope' || competitor === 'bare-outsider' ? outsider : client,
+      data: bare ? { type: 'SKIP_WAITING' } : { protocol: 'BILLSPLIT_UPDATE_V1', type: 'REQUEST', target: competitor === 'wrong-target' ? 'wrong' : 'bill-split-shell-test', attempt: competitor === 'bad-attempt' ? 'x' : 'modern-attempt' },
+      waitUntil: (promise: Promise<unknown>) => { competing = promise; },
+    });
+    await competing;
+    if (competitor === 'modern') expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'RELEASE', target: 'bill-split-shell-test', attempt: 'modern-attempt' }));
+    else expect(postMessage).not.toHaveBeenCalled();
+    finish([client]);
+    await legacy;
+    expect(harness.self.skipWaiting).toHaveBeenCalledTimes(1);
+  });
+
+  it('a modern attempt holds arbitration before a validated legacy request arrives', async () => {
+    const harness = workerHarness(async () => undefined);
+    const client = { id: 'modern', type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage: vi.fn() };
+    harness.windows.push(client);
+    let finish!: (clients: typeof harness.windows) => void;
+    harness.self.clients.matchAll = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    let modern!: Promise<unknown>;
+    const data = { protocol: 'BILLSPLIT_UPDATE_V1', type: 'REQUEST', target: 'bill-split-shell-test', attempt: 'modern-attempt' };
+    harness.messageHandler({ source: client, data, waitUntil: (promise: Promise<unknown>) => { modern = promise; } });
+    for (let index = 0; index < 30 && !finish; index += 1) await Promise.resolve();
+    let legacy!: Promise<unknown>;
+    harness.messageHandler({ source: client, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { legacy = promise; } });
+    await legacy;
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+    harness.messageHandler({ source: client, data: { ...data, type: 'CANCEL' } });
+    finish([client]);
+    await modern;
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('legacy membership timeout fails closed and releases arbitration for an explicit retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = workerHarness(async () => undefined);
+      const client = { id: 'legacy', type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage: () => undefined };
+      harness.windows.push(client);
+      let late!: (clients: typeof harness.windows) => void;
+      harness.self.clients.matchAll = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { late = resolve; })).mockResolvedValue([client]);
+      const request = () => { let work!: Promise<unknown>; harness.messageHandler({ source: client, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { work = promise; } }); return work; };
+      const failed = request();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await failed;
+      late([client]);
+      await Promise.resolve();
+      expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+      await request();
+      expect(harness.self.skipWaiting).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([1, 2])('legacy activation requires exactly one scoped window (%s windows)', async (count) => {
+    const harness = workerHarness(async () => undefined);
+    for (let index = 0; index < count; index += 1) harness.windows.push({ id: `tab-${index}`, type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage: () => undefined });
+    let work!: Promise<unknown>;
+    harness.messageHandler({ source: harness.windows[0], data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { work = promise; } });
+    await work;
+    expect(harness.self.skipWaiting).toHaveBeenCalledTimes(count === 1 ? 1 : 0);
+  });
+
+  it.each(['missing', 'cross-origin', 'outside-scope', 'non-window'])('rejects an invalid legacy requester: %s', async (fault) => {
+    const harness = workerHarness(async () => undefined);
+    harness.self.registration.scope = 'https://split.test/app/';
+    const source = { id: 'requester', type: fault === 'non-window' ? 'worker' : 'window', url: fault === 'cross-origin' ? 'https://other.test/app/' : fault === 'outside-scope' ? 'https://split.test/elsewhere' : 'https://split.test/app/', focus: async () => undefined, navigate: async () => undefined, postMessage: () => undefined };
+    if (fault !== 'missing') harness.windows.push(source);
+    let work!: Promise<unknown>;
+    harness.messageHandler({ source, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { work = promise; } });
+    await work;
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('includes uncontrolled mixed-version windows in legacy membership checks', async () => {
+    const harness = workerHarness(async () => undefined);
+    const source = { id: 'legacy', type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage: () => undefined };
+    harness.windows.push(source, { ...source, id: 'uncontrolled-modern' });
+    const matchAll = vi.spyOn(harness.self.clients, 'matchAll');
+    let work!: Promise<unknown>;
+    harness.messageHandler({ source, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { work = promise; } });
+    await work;
+    expect(matchAll).toHaveBeenCalledWith({ type: 'window', includeUncontrolled: true });
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('rejects legacy activation when membership changes before activation', async () => {
+    const harness = workerHarness(async () => undefined);
+    const client = { id: 'legacy', type: 'window', url: 'https://split.test/', focus: async () => undefined, navigate: async () => undefined, postMessage: () => undefined };
+    harness.windows.push(client);
+    harness.self.clients.matchAll = vi.fn().mockResolvedValueOnce([client]).mockResolvedValueOnce([]);
+    let work!: Promise<unknown>;
+    harness.messageHandler({ source: client, data: { type: 'SKIP_WAITING' }, waitUntil: (promise: Promise<unknown>) => { work = promise; } });
+    await work;
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
   it('parses the unfinalized worker served by Vite development', () => {
     expect(() => new vm.Script(readFileSync(new URL('../../public/sw.js', import.meta.url), 'utf8'))).not.toThrow();
   });
@@ -343,10 +452,10 @@ describe('worker byte fingerprints and generation reclamation', () => {
   const metadataPath = '/__billsplit_shell_metadata__';
   const shell = '<div id="root"></div><script src="/assets/app-123.js"></script>';
   const paths = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-16.png', '/icons/icon-32.png', '/icons/logo-400.png', '/icons/apple-touch-icon.png', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-192.png', '/icons/icon-maskable-512.png', '/assets/app-123.js'];
-  const files = () => new Map(paths.map((path) => [path, path === '/' || path === '/index.html' ? shell : `bytes:${path}`]));
+  const files = () => new Map([...paths, '/__billsplit_shell__.bin'].map((path) => [path, path === '/' || path === '/index.html' || path.endsWith('.bin') ? shell : `bytes:${path}`]));
   const network = (bodies: Map<string, string>) => async (request?: Request) => {
     const path = new URL(request!.url).pathname;
-    const type = path === '/' ? 'text/html' : path.endsWith('.webmanifest') ? 'application/json' : path.endsWith('.svg') ? 'image/svg+xml' : path.endsWith('.png') ? 'image/png' : 'text/javascript';
+    const type = path.endsWith('.bin') ? 'application/octet-stream' : path === '/' ? 'text/html' : path.endsWith('.webmanifest') ? 'application/json' : path.endsWith('.svg') ? 'image/svg+xml' : path.endsWith('.png') ? 'image/png' : 'text/javascript';
     return Object.defineProperty(new Response(bodies.get(path), { headers: { 'Content-Type': type } }), 'url', { value: `https://split.test${path}` });
   };
   const fingerprintedSource = async (bodies: Map<string, string>) => {
@@ -397,7 +506,7 @@ describe('worker byte fingerprints and generation reclamation', () => {
     harness.windows.push(client);
   };
 
-  it.each(['/', '/manifest.webmanifest', '/icons/icon.svg', '/assets/app-123.js'])('rejects changed bytes at %s even when entry filenames are identical', async (changedPath) => {
+  it.each(['/__billsplit_shell__.bin', '/manifest.webmanifest', '/icons/icon.svg', '/assets/app-123.js'])('rejects changed bytes at %s even when entry filenames are identical', async (changedPath) => {
     const bodies = files();
     const workerSource = await fingerprintedSource(bodies);
     bodies.set(changedPath, `${bodies.get(changedPath)!.slice(0, -1)}X`);
@@ -413,13 +522,29 @@ describe('worker byte fingerprints and generation reclamation', () => {
 
   it('validates every dependency and completes the coherent offline shell', async () => {
     const bodies = files(); const store = storage();
-    const harness = workerHarness(async () => undefined, network(bodies), undefined, store.caches, await fingerprintedSource(bodies));
+    const workerSource = await fingerprintedSource(bodies);
+    bodies.set('/', `${shell}<script>edge injection</script>`);
+    const harness = workerHarness(async () => undefined, network(bodies), undefined, store.caches, workerSource);
     let install!: Promise<unknown>;
     harness.installHandler({ waitUntil: (promise: Promise<unknown>) => { install = promise; } });
     await install;
     const cache = await store.caches.open('bill-split-shell-test');
     expect(await (await cache.match('/'))!.text()).toBe(shell);
+    expect((await cache.match('/'))!.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect((await (await cache.match(metadataPath))!.json() as { complete: boolean }).complete).toBe(true);
+  });
+
+  it.each(['mime', 'origin', 'redirect', 'partial', 'private'])('rejects unsafe canonical transport: %s', async (fault) => {
+    const bodies = files(); const store = storage(); await store.add(1);
+    const response = Object.defineProperties(new Response(shell, { status: fault === 'partial' ? 206 : 200, headers: { 'Content-Type': fault === 'mime' ? 'text/html' : 'application/octet-stream', 'Cache-Control': fault === 'private' ? 'private' : 'no-cache, no-transform' } }), {
+      url: { value: `${fault === 'origin' ? 'https://other.test' : 'https://split.test'}/__billsplit_shell__.bin` }, redirected: { value: fault === 'redirect' },
+    });
+    const harness = workerHarness(async () => undefined, async () => response, undefined, store.caches, await fingerprintedSource(bodies));
+    let work!: Promise<unknown>;
+    harness.installHandler({ waitUntil: (promise: Promise<unknown>) => { work = promise; } });
+    await expect(work).rejects.toThrow('Unsafe canonical');
+    expect(store.data.has(store.generation(1))).toBe(true);
+    expect(harness.self.skipWaiting).not.toHaveBeenCalled();
   });
 
   it('cleans a failed partial installation without deleting the active generation', async () => {
@@ -445,7 +570,7 @@ describe('worker byte fingerprints and generation reclamation', () => {
     vi.useFakeTimers();
     try {
       const store = storage(); await store.add(1);
-      const response = Object.defineProperty(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/html' } }), 'url', { value: 'https://split.test/' });
+      const response = Object.defineProperty(new Response(new ReadableStream(), { headers: { 'Content-Type': 'application/octet-stream' } }), 'url', { value: 'https://split.test/__billsplit_shell__.bin' });
       const harness = workerHarness(async () => undefined, async () => response, undefined, store.caches, workerSource);
       let install!: Promise<unknown>;
       harness.installHandler({ waitUntil: (promise: Promise<unknown>) => { install = promise; } });

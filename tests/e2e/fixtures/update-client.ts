@@ -1,8 +1,10 @@
 // Deliberately a core integration fixture, not the authenticated application.
 import { configureServiceWorkerUpdates, observeServiceWorkerRegistration, checkForUpdates, getServiceWorkerUpdateState } from '../../../src/app/service-worker';
 import { createReloadBlocker, runProtectedOperation, getReloadSafetyState } from '../../../src/app/reload-safety';
+import { legacyUpdates } from './legacy-update-client';
 
 declare const __BUILD__: string;
+declare const __LEGACY__: boolean;
 const loads = Number(sessionStorage.getItem('loads') || 0) + 1;
 sessionStorage.setItem('loads', String(loads));
 document.querySelector('#build')!.textContent = __BUILD__;
@@ -31,9 +33,10 @@ async function outbox(write = false) {
     });
   } finally { db.close(); }
 }
-configureServiceWorkerUpdates({ safetyIntegrated: true, autoApply: true });
+if (!__LEGACY__) configureServiceWorkerUpdates({ safetyIntegrated: true, autoApply: true });
 const registration = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
-observeServiceWorkerRegistration(registration);
+if (!__LEGACY__) observeServiceWorkerRegistration(registration);
+const legacy = __LEGACY__ ? legacyUpdates(registration, () => getReloadSafetyState().operations > 0) : undefined;
 Object.assign(window, {
   fixture: {
     check: () => checkForUpdates(),
@@ -46,5 +49,6 @@ Object.assign(window, {
       void runProtectedOperation(() => new Promise<void>((resolve) => { finishMutation = resolve; }), 'Held fixture write');
     },
     releaseMutation: () => finishMutation?.(),
+    ...legacy,
   },
 });

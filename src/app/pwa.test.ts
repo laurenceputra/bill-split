@@ -51,7 +51,7 @@ describe('standalone PWA contract', () => {
     expect(serviceWorker).toContain("const CACHE = '__BILLSPLIT_CACHE_VERSION__';");
     expect(serviceWorker).toContain("const DEV_SHELL_FILES = ['/'");
     expect(serviceWorker).toContain("typeof __BILLSPLIT_SHELL_ASSETS__ === 'undefined'");
-    expect(serviceWorker).toContain("requiredFetch(new Request('/', { cache: 'no-store' })");
+    expect(serviceWorker).toContain("const path = SHELL_INTEGRITY ? SHELL_TRANSPORT : '/'");
     expect(serviceWorker).toContain('const cachedNavigation = (async () =>');
     for (const path of ["pathname === '/api'", "pathname === '/cdn-cgi'", "pathname === '/sign-in'", "pathname === '/sign-up'"]) expect(serviceWorker).toContain(path);
     expect(main).toContain("register('/sw.js', { updateViaCache: 'none' })");
@@ -68,7 +68,7 @@ describe('standalone PWA contract', () => {
     expect(app).toContain('configureServiceWorkerUpdates({ safetyIntegrated: false })');
     expect(serviceWorker).toContain("data?.protocol !== UPDATE_PROTOCOL");
     expect(serviceWorker).toContain("const UPDATE_PROTOCOL = 'BILLSPLIT_UPDATE_V1'");
-    expect(serviceWorker).not.toContain("'SKIP_WAITING'");
+    expect(serviceWorker).toContain("data?.type === 'SKIP_WAITING' && Object.keys(data).length === 1");
   });
 
   it('does not start authenticated work at outbox import time and gates foreground recovery', () => {

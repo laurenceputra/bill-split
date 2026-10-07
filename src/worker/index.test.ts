@@ -89,6 +89,32 @@ class SummaryGroupsDb {
   prepare(sql: string) { return new SummaryGroupsStatement(sql); }
 }
 const env = (extra: Record<string, unknown> = {}) => ({ ENVIRONMENT: 'development', DB: { prepare: (sql: string) => new Statement(sql) }, ASSETS: { fetch: () => new Response('asset') }, ...extra }) as any;
+
+describe('canonical shell endpoint', () => {
+  it.each(['GET', 'HEAD'])('serves the binary with a fresh asset GET for %s', async (method) => {
+    const fetch = vi.fn(async (_request: Request) => new Response('exact shell', { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const response = await worker.fetch(new Request('https://split.example/__billsplit_shell__.bin', { method, headers: { Range: 'bytes=0-1', 'If-None-Match': 'old' } }), env({ ASSETS: { fetch } }), {} as ExecutionContext);
+    const request = fetch.mock.calls[0][0];
+    expect(request.method).toBe('GET');
+    expect([...request.headers]).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-cache, no-transform');
+    expect(response.headers.has('Content-Security-Policy')).toBe(true);
+    expect(await response.text()).toBe(method === 'HEAD' ? '' : 'exact shell');
+  });
+
+  it.each([404, 206, 302])('rejects non-complete asset status %s', async (status) => {
+    const response = await worker.fetch(new Request('https://split.example/__billsplit_shell__.bin'), env({ ASSETS: { fetch: async () => new Response('bad', { status, headers: { 'Content-Type': 'application/octet-stream' } }) } }), {} as ExecutionContext);
+    expect(response.status).toBe(503);
+  });
+
+  it('rejects an HTML SPA fallback and unsupported methods', async () => {
+    const fetch = vi.fn(async () => new Response('<html>', { headers: { 'Content-Type': 'text/html' } }));
+    expect((await worker.fetch(new Request('https://split.example/__billsplit_shell__.bin'), env({ ASSETS: { fetch } }), {} as ExecutionContext)).status).toBe(503);
+    expect((await worker.fetch(new Request('https://split.example/__billsplit_shell__.bin', { method: 'POST' }), env({ ASSETS: { fetch } }), {} as ExecutionContext)).status).toBe(405);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
 const sameOriginHeaders = { Origin: 'https://split.example', 'Sec-Fetch-Site': 'same-origin' };
 
 class GoneOnUpdateDb {

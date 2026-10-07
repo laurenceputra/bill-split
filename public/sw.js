@@ -8,6 +8,7 @@ const ENTRY_ASSETS = typeof __BILLSPLIT_ENTRY_ASSETS__ === 'undefined' ? undefin
 const SHELL_INTEGRITY = typeof __BILLSPLIT_SHELL_INTEGRITY__ === 'undefined' ? undefined : __BILLSPLIT_SHELL_INTEGRITY__;
 const CACHE_PREFIX = 'bill-split-shell-';
 const CACHE_METADATA = '/__billsplit_shell_metadata__';
+const SHELL_TRANSPORT = '/__billsplit_shell__.bin';
 const CLIENT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_ASSETS = 80;
 const NAVIGATION_TIMEOUT_MS = 3000;
@@ -140,10 +141,10 @@ const replaceShell = async (cache, response) => {
   }
 };
 
-async function refreshCompleteShell(navigationResponse, requestedPath) {
+async function refreshCompleteShell(navigationResponse, requestedPath, canonical = false) {
   await verifyShellBytes('/', navigationResponse);
   const html = await requiredOperation(navigationResponse.clone().text(), INSTALL_TIMEOUT_MS);
-  if (!validShellHtml(navigationResponse, html, requestedPath)) throw new Error('The current app shell is not safe to cache.');
+  if (canonical ? !/id=["']root["']/.test(html) || !extractAssets(html).length : !validShellHtml(navigationResponse, html, requestedPath)) throw new Error('The current app shell is not safe to cache.');
   const entryAssets = extractAssets(html);
   if (ENTRY_ASSETS && (entryAssets.length !== ENTRY_ASSETS.length || entryAssets.some((path) => !ENTRY_ASSETS.includes(path)))) throw new Error('The deployed shell does not match this worker build.');
   const assets = ENTRY_ASSETS ? SHELL_FILES.filter((path) => path.startsWith('/assets/')) : entryAssets;
@@ -167,6 +168,12 @@ async function refreshCompleteShell(navigationResponse, requestedPath) {
   await trimAssets(cache, true);
   // Keep the shell swap last: a failed dependency write or maintenance pass
   // therefore cannot expose a partially updated navigation response.
+  if (canonical) {
+    const headers = new Headers(navigationResponse.headers);
+    headers.set('Content-Type', 'text/html; charset=utf-8');
+    for (const name of ['Content-Encoding', 'Content-Length', 'Content-Disposition', 'Content-Range', 'Accept-Ranges', 'ETag', 'Digest']) headers.delete(name);
+    navigationResponse = new Response(navigationResponse.body, { status: 200, headers });
+  }
   await replaceShell(cache, navigationResponse);
   await installOperation(cache.put(CACHE_METADATA, new Response(JSON.stringify({ version: CACHE, created: Date.now(), complete: true, clients: {} }))));
 }
@@ -174,11 +181,16 @@ async function refreshCompleteShell(navigationResponse, requestedPath) {
 async function installCompleteShell() {
   const existing = await requiredOperation(caches.keys(), CACHE_TIMEOUT_MS);
   const created = !existing.includes(CACHE);
-  // ASSETS can canonicalize /index.html to /. Fetch the canonical navigation
-  // URL so a strict redirect check cannot strand a newly installed worker.
+  // Production uses exact binary shell bytes, not HTML that edge scripts can
+  // transform. Only unfinalized development fetches the navigation URL.
   try {
-    const shellResponse = await requiredFetch(new Request('/', { cache: 'no-store' }), INSTALL_TIMEOUT_MS);
-    await refreshCompleteShell(shellResponse, '/');
+    const path = SHELL_INTEGRITY ? SHELL_TRANSPORT : '/';
+    const shellResponse = await requiredFetch(new Request(path, { cache: 'no-store' }), INSTALL_TIMEOUT_MS);
+    if (SHELL_INTEGRITY) {
+      if (shellResponse.status !== 200 || !sameOriginFinal(shellResponse, path) || new URL(shellResponse.url).search || shellResponse.headers.has('Content-Range') || shellResponse.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream' || !cacheControlAllowsStorage(shellResponse)) throw new Error('Unsafe canonical shell transport.');
+      await verifyShellBytes(SHELL_TRANSPORT, shellResponse);
+    }
+    await refreshCompleteShell(shellResponse, '/', Boolean(SHELL_INTEGRITY));
   } catch (error) {
     // A timeout does not finish an underlying Cache write/open. Delete only
     // after those settle, and never remove a pre-existing/active generation.
@@ -204,6 +216,7 @@ self.addEventListener('activate', (event) => event.waitUntil(
 const UPDATE_PROTOCOL = 'BILLSPLIT_UPDATE_V1';
 const UPDATE_ACK_TIMEOUT_MS = 2500;
 let updateAttempt;
+let legacyAttempt;
 const retiredUpdateAttempts = new Set();
 const retireUpdateAttempt = (id) => {
   retiredUpdateAttempts.add(id);
@@ -354,6 +367,24 @@ async function coordinateUpdate(source, data) {
 }
 self.addEventListener('message', (event) => {
   const data = event.data;
+  if (data?.type === 'SKIP_WAITING' && Object.keys(data).length === 1 && event.source?.id) {
+    event.waitUntil((async () => {
+      let attempt;
+      try {
+        const source = await requiredOperation(self.clients.get(event.source.id), CACHE_TIMEOUT_MS);
+        if (!source || !scopeClient(source)) return;
+        if (legacyAttempt || updateAttempt) return;
+        attempt = { cancelled: false };
+        legacyAttempt = attempt;
+        const soleRequester = (clients) => clients.length === 1 && clients[0].id === source.id;
+        if (!soleRequester(await updateClients())) return;
+        if (!soleRequester(await updateClients()) || attempt.cancelled || legacyAttempt !== attempt || updateAttempt) return;
+        await requiredOperation(self.skipWaiting(), CACHE_TIMEOUT_MS);
+      } catch { /* Legacy requests fail closed and are never deferred. */ }
+      finally { if (attempt && legacyAttempt === attempt) legacyAttempt = undefined; }
+    })());
+    return;
+  }
   if (data?.protocol !== UPDATE_PROTOCOL || !event.source?.id) return;
   if (data.type === 'BUILD_REPORT') {
     const scan = buildScan;
@@ -384,6 +415,11 @@ self.addEventListener('message', (event) => {
       else if (!current || current.id !== data.attempt) retireUpdateAttempt(data.attempt);
       return;
     }
+    if (legacyAttempt) {
+      retireUpdateAttempt(data.attempt);
+      updateMessage(source, 'RELEASE', data.attempt, { reason: 'A historical tab is preparing the update' });
+      return;
+    }
     await coordinateUpdate(source, data);
   })().catch(() => undefined));
 });
@@ -401,7 +437,7 @@ self.addEventListener('sync', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin || isPrivatePath(url.pathname)) return;
+  if (event.request.method !== 'GET' || url.origin !== self.location.origin || isPrivatePath(url.pathname) || url.pathname === SHELL_TRANSPORT) return;
   if (event.request.mode === 'navigate') {
     event.waitUntil?.(pruneShellCaches());
     const cachedNavigation = (async () => {

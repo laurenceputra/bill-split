@@ -53,6 +53,7 @@ export async function finalizeServiceWorker(distDirectory = resolve('dist')) {
   const identifiedBytes = Buffer.from(identifiedHtml);
   contents.set('/', identifiedBytes);
   contents.set('/index.html', identifiedBytes);
+  contents.set('/__billsplit_shell__.bin', identifiedBytes);
   const integrity = Object.fromEntries([...contents].map(([path, bytes]) => [path, { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }]));
   const generated = source
     .replaceAll(`'${CACHE_PLACEHOLDER}'`, JSON.stringify(version))
@@ -64,6 +65,7 @@ export async function finalizeServiceWorker(distDirectory = resolve('dist')) {
   }
   await writeFile(workerPath, generated);
   await writeFile(indexPath, identifiedHtml);
+  await writeFile(resolve(distDirectory, '__billsplit_shell__.bin'), identifiedBytes);
   return { version, assets: shellAssets, integrity };
 }
 

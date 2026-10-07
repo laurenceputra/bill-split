@@ -484,6 +484,22 @@ export default { async fetch(request: Request, env: Env['Bindings'], ctx: Execut
   const requestId = requestIdFor(request);
   const url = new URL(request.url);
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return api.fetch(request, env, ctx);
+  if (url.pathname === '/__billsplit_shell__.bin') {
+    const headers = new Headers();
+    setSecurityHeaders(headers, requestId, false, env.CLERK_PUBLISHABLE_KEY);
+    headers.set('Cache-Control', 'no-cache, no-transform');
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      headers.set('Allow', 'GET, HEAD');
+      return new Response(null, { status: 405, headers });
+    }
+    // A fresh GET cannot inherit conditional/range headers or SPA navigation metadata.
+    const asset = await env.ASSETS.fetch(new Request(`${url.origin}/__billsplit_shell__.bin`));
+    if (asset.status !== 200 || asset.redirected || asset.headers.has('Content-Range') || asset.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream') {
+      return new Response(null, { status: 503, headers });
+    }
+    headers.set('Content-Type', 'application/octet-stream');
+    return new Response(request.method === 'HEAD' ? null : asset.body, { headers });
+  }
   const response = await env.ASSETS.fetch(request);
   const headers = new Headers(response.headers);
   setSecurityHeaders(headers, requestId, false, env.CLERK_PUBLISHABLE_KEY);
