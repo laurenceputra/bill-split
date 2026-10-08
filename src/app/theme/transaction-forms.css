@@ -207,9 +207,11 @@ text-align: right;
 }
 
 .allocation-row.refund-allocation-row {
-  grid-template-columns: minmax(0, 1fr) minmax(7rem, 10rem) auto;
-  grid-template-areas: "person amount remove";
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 1fr);
+  grid-template-areas: "person amount" "remove remove";
   align-items: start;
+  gap: var(--space-3) var(--space-5);
+  margin-block: var(--space-4);
 }
 
 .refund-allocation-row__person {
@@ -222,11 +224,43 @@ text-align: right;
 
 .refund-allocation-row__remove {
   grid-area: remove;
-  align-self: end;
+  justify-self: start;
 }
 
-.refund-preview-person > span {
+.refund-allocation-actions {
+  margin-block: var(--space-4) var(--space-5);
+}
+
+.amount-control__currency {
+  display: flex;
+  align-items: center;
+  padding-inline: var(--space-3);
+  border-right: 1px solid var(--color-control-border);
+}
+
+.amount-control.amount-field {
+  display: block;
+}
+
+.refund-allocation-row .expense-amount-control {
+  grid-template-columns: 4rem minmax(0, 1fr);
+}
+
+.refund-allocation-row .expense-amount-control > input.amount-input {
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.amount-field--very-long .expense-amount-control > .amount-control__currency {
+  border-right: 0;
+  border-bottom: 1px solid var(--color-control-border);
+  padding-block: var(--space-2);
+}
+
+.refund-preview-person > span:last-child {
+  flex: 1 1 0;
   gap: var(--space-1);
+  overflow-wrap: anywhere;
 }
 
 .refund-preview-component,
@@ -753,17 +787,6 @@ input[inputmode="decimal"] {
 .route-view--credit :is(.ui-form-surface, .ui-surface) > p:first-child {
   margin-bottom: var(--space-2);
   color: var(--color-text-secondary);
-}
-
-.route-view--credit :is(.ui-form-surface, .ui-surface) input[inputmode="decimal"] {
-  min-height: 4.5rem;
-  border: 0;
-  border-bottom: 1px solid var(--color-divider);
-  background: transparent;
-  font-size: clamp(2rem, 8vw, 3rem);
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  text-align: right;
 }
 
 .route-view--credit :is(.ui-form-surface, .ui-surface) fieldset {

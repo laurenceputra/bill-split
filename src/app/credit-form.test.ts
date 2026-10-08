@@ -15,6 +15,13 @@ describe('refund form defaults and capacity', () => {
     expect(defaultRefundApplications([{ id: 'a', expenseId: 'one', amount: '', touched: false }], [capacityExpense], 500, 'editing')[0].amount).toBe('5.00');
   });
 
+  it('does not treat exponent notation or extra decimal places as money when distributing defaults', () => {
+    for (const amount of ['1e2', '1.001']) {
+      const rows: CreditApplicationDraft[] = [{ id: 'a', expenseId: 'one', amount: '', touched: false }, { id: 'b', expenseId: 'two', amount, touched: true }];
+      expect(defaultRefundApplications(rows, [expense('one', 500), expense('two', 1000)], 500).map((row) => row.amount)).toEqual(['5.00', amount]);
+    }
+  });
+
   it('keeps derived payer and beneficiary rounding aligned', () => {
     const source = { amountMinor: 10, expense: { id: 'expense-a', amountMinor: 100, splits: [{ personId: 'b', amountMinor: 67 }, { personId: 'a', amountMinor: 33 }], payers: [{ personId: 'b', amountMinor: 67 }, { personId: 'a', amountMinor: 33 }] } };
     expect(derivedBeneficiaryShares([source])).toEqual([{ personId: 'a', amountMinor: 4 }, { personId: 'b', amountMinor: 6 }]);

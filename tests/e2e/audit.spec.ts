@@ -799,6 +799,7 @@ async function assertCustomInsightAccessibility(page: Page, invalidFromUrl: bool
 }
 
 async function populateRefundAuditState(page: Page) {
+  await expect(page.getByText('Defaults to you. Change this if someone else received the money.', { exact: true })).toBeVisible();
   const expenseSelect = page.locator('.refund-application-row select').first();
   await expect(expenseSelect).toBeVisible();
   await expenseSelect.selectOption(ids.dinner);
@@ -808,12 +809,14 @@ async function populateRefundAuditState(page: Page) {
   await amountInput.fill('42.00');
   await expect(appliedAmountInput).toHaveValue('42.00');
   await page.locator('select[name="allocation-recipient-1-person"]').selectOption('00000000-0000-4000-8000-000000002003');
-  await page.locator('input[name="allocation-recipient-1-amount"]').fill('42.00');
+  await expect(page.locator('input[name="allocation-recipient-1-amount"]')).toHaveValue('42.00');
   await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
   await expect(page.locator('.refund-preview-person')).toHaveCount(3);
   await expect(page.locator('.refund-preview-list')).toContainText('Received');
   await expect(page.locator('.refund-preview-list')).toContainText('Cost reduction');
   await expect(page.locator('.refund-preview-list')).toContainText('Net balance effect');
+  await expect(page.getByRole('heading', { name: 'How this affects settlement', exact: true })).toBeVisible();
+  await expect(page.locator('.refund-preview-list')).toContainText('The amount you owe');
 }
 
 async function populateStandaloneRefundAuditState(page: Page) {
