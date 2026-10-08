@@ -13,6 +13,14 @@ test('mobile refund applies a linked expense and previews its balance effect', a
     await page.locator('select[name="allocation-recipient-1-person"]').selectOption('00000000-0000-4000-8000-000000002003');
     await expect(page.locator('input[name="allocation-recipient-1-amount"]')).toHaveValue('42.00');
     await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
+    const recipientStatus = page.locator('.refund-form output:not(.refund-application-status)');
+    await expect(recipientStatus).toHaveText('Fully allocated');
+    await page.locator('input[name="allocation-recipient-1-amount"]').fill('40.00');
+    await expect(recipientStatus).toHaveText('Remaining to allocate: 2.00 USD');
+    await page.locator('input[name="allocation-recipient-1-amount"]').fill('43.00');
+    await expect(recipientStatus).toHaveText('Overallocated by 1.00 USD');
+    await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
+    await page.locator('input[name="allocation-recipient-1-amount"]').fill('42.00');
     await expect(page.locator('.refund-preview-list')).toContainText('Net balance effect');
   } finally {
     await context.close();

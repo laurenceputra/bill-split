@@ -7,7 +7,7 @@ import { AllocationRows, beneficiaryRowsComplete, beneficiarySnapshotMatches, bu
 import { ApiError } from './api';
 import * as api from './api';
 import * as ui from './ui';
-import { refundOriginalSplitAllowed, refundSettlementEffect } from './refund-form';
+import { refundOriginalSplitAllowed, refundRecipientStatus, refundSettlementEffect } from './refund-form';
 import { resourceKeys, seedResource } from './resource-cache';
 import { getReloadSafetyState } from './reload-safety';
 
@@ -174,9 +174,15 @@ describe('refund expense picker behavior', () => {
     expect(refundApplicationFillAmount(rows, 'first', 500, 400, 'USD')).toBe(400);
     expect(refundApplicationFillAmount(rows, 'first', 0, 400, 'USD')).toBe(400);
     expect(refundApplicationFillAmount([{ id: 'first', amount: '10.00' }, { id: 'second', amount: '' }], 'second', 1000, 500, 'USD')).toBe(0);
-    expect(refundApplicationStatus(500, 300, 'USD').label).toBe('Remaining to apply: 2.00 USD');
-    expect(refundApplicationStatus(500, 500, 'USD').label).toBe('Fully applied');
-    expect(refundApplicationStatus(500, 650, 'USD').label).toBe('Overallocated by 1.50 USD');
+  });
+
+  it.each([
+    [500, 'Fully allocated', 'Fully applied'],
+    [300, 'Remaining to allocate: 2.00 USD', 'Remaining to apply: 2.00 USD'],
+    [650, 'Overallocated by 1.50 USD', 'Overallocated by 1.50 USD'],
+  ])('uses recipient allocation wording for %i minor units without changing expense labels', (allocatedMinor, recipientLabel, expenseLabel) => {
+    expect(refundRecipientStatus(500, allocatedMinor, 'USD').label).toBe(recipientLabel);
+    expect(refundApplicationStatus(500, allocatedMinor, 'USD').label).toBe(expenseLabel);
   });
 
   it('rejects zero and invalid application or allocation rows before payload construction', () => {

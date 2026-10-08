@@ -98,6 +98,16 @@ export function refundApplicationStatus(totalMinor: number, appliedMinor: number
   return { kind: 'overallocated' as const, label: `Overallocated by ${money(Math.abs(remainingMinor))} ${currency}`, remainingMinor, currency };
 }
 
+export function refundRecipientStatus(totalMinor: number, allocatedMinor: number, currency: Currency) {
+  const status = refundApplicationStatus(totalMinor, allocatedMinor, currency);
+  const labels = {
+    'fully-applied': 'Fully allocated',
+    remaining: `Remaining to allocate: ${money(status.remainingMinor)} ${currency}`,
+    overallocated: `Overallocated by ${money(Math.abs(status.remainingMinor))} ${currency}`,
+  };
+  return { ...status, label: labels[status.kind] };
+}
+
 export function refundApplicationRowsHavePositiveAmounts(rows: Array<Pick<Application, 'amount'>>, currency: Currency) {
   return rows.every((row) => {
     try { return parseMoney(row.amount, currency) > 0; } catch { return false; }
@@ -647,7 +657,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
              <h2>Who actually received the money?</h2>
              <p className="muted">Choose the person whose account received the money, even if someone else paid the original expense.</p>
             <AllocationRows rows={recipientRows} label="Recipient" currency={currency} people={people} currentPersonId={currentPersonId} onChange={updateAllocation} onRemove={(rowId) => removeAllocation(rowId, 'recipient')} minimumRows={1} showErrors={showValidation} error={showValidation && recipientsMinor !== amountMinor ? 'Recipient amounts must total the refund.' : undefined} />
-             <output aria-live="polite">{amountMinor > 0 ? refundApplicationStatus(amountMinor, recipientsMinor, currency).label.replace('apply', 'allocate') : 'Enter a total to allocate.'}</output>
+             <output aria-live="polite">{amountMinor > 0 ? refundRecipientStatus(amountMinor, recipientsMinor, currency).label : 'Enter a total to allocate.'}</output>
               <div className="refund-allocation-actions">{recipientRows.map((row) => <Button key={row.id} type="button" variant="secondary" disabled={amountMinor <= 0} onClick={() => updateAllocation(row.id, { amount: money(refundApplicationFillAmount(recipientRows, row.id, amountMinor, amountMinor, currency)), touched: recipientRows.length > 1 })}>{recipientRows.length === 1 ? 'Use full total' : `Use remaining total for recipient ${recipientRows.indexOf(row) + 1}`}</Button>)}<Button type="button" variant="secondary" disabled={!canAddRecipient} onClick={() => { if (canAddRecipient) setAllocations((current) => [...current.map((row) => row.allocationType === 'recipient' ? { ...row, touched: true } : row), { ...emptyAllocation('recipient'), personTouched: true }]); }}>Add recipient</Button></div>
              <h2>Whose expense shares should decrease?</h2>
              <p className="muted">Choose who benefits from the refund. Their expense shares decrease independently of who actually received the money.</p>
