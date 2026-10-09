@@ -45,6 +45,26 @@ describe('E2E startup classification', () => {
       expect(Number.isNaN(Date.parse(failure.recordedAt))).toBe(false);
       expect(log).toHaveBeenCalledTimes(2);
       expect(log.mock.calls[1][0]).toContain('code=0, signal=none, ready=true');
+      recordServerFailure(marker, setupFailure(), 'Demo replacement');
+      expect(JSON.parse(readFileSync(marker, 'utf8')).type).toBe('setup-failure');
+      expect(readdirSync(directory)).toEqual(['failure.json']);
+    } finally {
+      log.mockRestore();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('swallows publication failures and cleans completed temporary files', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'e2e-lifecycle-'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      // An existing directory cannot be replaced by either publication mode.
+      for (const preserve of [false, true]) {
+        expect(() => recordServerFailure(directory, setupFailure(), 'Demo unavailable marker', { preserve })).not.toThrow();
+      }
+      const prefix = `${path.basename(directory)}.`;
+      expect(readdirSync(path.dirname(directory)).filter((file) => file.startsWith(prefix))).toEqual([]);
+      expect(log).toHaveBeenCalledTimes(2);
     } finally {
       log.mockRestore();
       rmSync(directory, { recursive: true, force: true });
