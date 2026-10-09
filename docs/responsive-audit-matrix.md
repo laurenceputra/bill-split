@@ -1,5 +1,41 @@
 # Warm Ledger responsive audit matrix
 
+## Home sorting
+
+Focused coverage: `tests/e2e/home-insights-surfaces.spec.ts`, at **320, 390,
+768, 895, 896, 1440px**. Primary Add friend / New group actions precede the
+labelled native Sort control, which precedes the combined friend/group cards.
+
+| State | Checks at all six widths |
+| --- | --- |
+| Name (A–Z), default | Compact labelled control, numeric case-insensitive display-name order, existing balance/card geometry and navigation boundary; no contextual help |
+| Outstanding first | Reordered cards, visible default/fallback and no-conversion help, no horizontal overflow |
+| Reload / cached refresh failure | Per-account local preference retained; cached cards remain sortable after failed group refresh |
+| Offline, already loaded | Both modes usable without a network request; name mode hides help |
+| Cold loading | Existing skeleton, no sort control before cards exist |
+| Empty / uncached error | Existing empty/error notices, no irrelevant sort control |
+
+Pure helper and hook tests cover all summaries (not display-truncated), default
+currency zero fallback, absent/empty/zero summaries, absolute positive/negative
+minor amounts across currencies without FX, unknown before settled, name/ID
+ties, immutability, invalid/unavailable/throwing storage and account switches.
+
+Reference captures: `docs/screenshots/home-{mobile,desktop}.png`,
+`home-sgd-stress-{mobile,desktop}.png`, and `home-outstanding-{mobile,desktop}.png`.
+Captures await fonts and disable animations; mobile bottom navigation is hidden
+only for full-page capture after live layout/navigation checks. Regenerate with:
+
+```sh
+UPDATE_HOME_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-home-sorting npm run test:e2e:local -- tests/e2e/home-insights-surfaces.spec.ts --project=chromium --workers=1
+```
+
+Verification: `npm run test:unit -- --maxWorkers=2` passed (65 files, 946 tests);
+`npm run build` passed with the existing large-chunk warning. An independent
+focused Chromium rerun passed all eight tests despite a runtime broken-pipe
+warning. Reviewer approved with no findings. Mobile outstanding and desktop name
+captures were visually inspected. Full integration and full responsive audits
+were not run.
+
 ## Refund recipient defaults and allocation editing
 
 ### Receipt, benefit and settlement clarity follow-up

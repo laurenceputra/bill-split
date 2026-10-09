@@ -1,3 +1,16 @@
+.home-sort {
+  margin-bottom: var(--space-4);
+}
+
+.home-sort .field {
+  max-width: 14rem;
+}
+
+.home-sort p {
+  max-width: 42rem;
+  margin-top: var(--space-2);
+}
+
 .public-sign-in {
   display: inline-flex;
   min-height: var(--control-min-height);

@@ -1,10 +1,21 @@
-import { test, expect, newAuthenticatedContext, BASE_URL, DEV_EMAIL } from './fixtures';
+import path from 'node:path';
+import type { Page, TestInfo } from '@playwright/test';
+import { test, expect, newAuthenticatedContext, seedOfflineTrust, BASE_URL, DEV_EMAIL } from './fixtures';
+
+async function captureHome(page: Page, testInfo: TestInfo, name: string) {
+  await page.evaluate(() => document.fonts.ready);
+  const destination = process.env.UPDATE_HOME_SCREENSHOTS === '1'
+    ? path.join(process.cwd(), 'docs', 'screenshots', `${name}.png`)
+    : testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path: destination, fullPage: true, animations: 'disabled', style: '.bottom-nav { visibility: hidden !important; }' });
+  await testInfo.attach(name, { path: destination, contentType: 'image/png' });
+}
 
 const shortId = '00000000-0000-4000-8000-000000003001';
 const longId = '00000000-0000-4000-8000-000000003003';
 const insightsId = '00000000-0000-4000-8000-000000003002';
 
-test('Home cards retain compact, accessible balance geometry across the navigation boundary', async ({ browser }) => {
+test('Home cards retain compact, accessible balance geometry across the navigation boundary', async ({ browser }, testInfo) => {
   for (const width of [320, 390, 768, 895, 896, 1440]) {
     const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
     try {
@@ -72,9 +83,80 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       expect(geometry.actions).toEqual(['/friends/new', '/groups/new']);
       expect(geometry.nav.mobile === 'none').toBe(width >= 896);
       expect(geometry.nav.desktop === 'none').toBe(width < 896);
+      const sort = page.getByRole('combobox', { name: 'Sort', exact: true });
+      await expect(sort).toHaveValue('name');
+      expect(await page.locator('.home-actions').evaluate((actions) => Boolean(actions.compareDocumentPosition(document.querySelector('.home-sort')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+      const device = width === 390 ? 'mobile' : width === 1440 ? 'desktop' : undefined;
+      if (device) await captureHome(page, testInfo, `home-sgd-stress-${device}`);
+      await sort.selectOption('outstanding');
+      await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await expect(page.locator('#home-sort-help')).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      if (device) await captureHome(page, testInfo, `home-outstanding-${device}`);
+      await page.reload();
+      await expect(sort).toHaveValue('outstanding');
+      await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await page.unroute('**/api/groups');
+      await page.route('**/api/groups', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Unavailable' }) }));
+      await page.reload();
+      await expect(sort).toHaveValue('outstanding');
+      await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await seedOfflineTrust(page);
+      await context.setOffline(true);
+      await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+      await expect(sort).toHaveValue('outstanding');
+      await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await sort.selectOption('name');
+      await expect(cards.first()).toHaveAttribute('href', `/groups/${shortId}`);
+      await expect(page.locator('#home-sort-help')).toHaveCount(0);
     } finally {
       await context.close();
     }
+  }
+});
+
+for (const [device, width] of [['mobile', 390], ['desktop', 1440]] as const) {
+  test(`Home reference screenshots at ${device} size`, async ({ authenticatedPage: page }, testInfo) => {
+    await page.setViewportSize({ width, height: device === 'mobile' ? 844 : 900 });
+    await page.goto('/');
+    await expect(page.locator('.group-card').first()).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toHaveValue('name');
+    await expect(page.locator('.skeleton')).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    if (device === 'mobile') await expect(page.locator('.bottom-nav')).toBeVisible();
+    await captureHome(page, testInfo, `home-${device}`);
+  });
+}
+
+test('Home sort is absent during cold loading, empty and uncached error states', async ({ browser }) => {
+  for (const width of [320, 390, 768, 895, 896, 1440]) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
+    try {
+      const page = await context.newPage();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let failed = false;
+      await page.route('**/api/groups', async (route) => {
+        await gate;
+        await route.fulfill({ status: failed ? 503 : 200, contentType: 'application/json', body: JSON.stringify(failed ? { error: 'Unavailable' } : { groups: [] }) });
+      });
+      await page.goto('/');
+      await expect(page.locator('.skeleton').first()).toBeVisible();
+      await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+      release();
+      await expect(page.getByText('No groups yet', { exact: true })).toBeVisible();
+      await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+      failed = true;
+      // A fresh context avoids a verified empty cache masking the uncached error state.
+      const errorContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
+      try {
+        const errorPage = await errorContext.newPage();
+        await errorPage.route('**/api/groups', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Unavailable' }) }));
+        await errorPage.goto('/');
+        await expect(errorPage.getByRole('alert').first()).toBeVisible();
+        await expect(errorPage.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+      } finally { await errorContext.close(); }
+    } finally { await context.close(); }
   }
 });
 
