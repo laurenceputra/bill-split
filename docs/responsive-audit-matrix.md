@@ -209,12 +209,16 @@ sections, accessible tabs and chart are checked at 390 and 1440px; other Insight
 widths and Home loading/cached/offline/empty/error states remain in the existing
 route audit and targeted fixtures, not this focused geometry spec.
 
-Loaded local-browser references (Home/global references retain their earlier capture):
+Loaded local-browser references (all six Home images regenerated with anonymous,
+fully synthetic demo groups, balances and spending summaries; identity is Demo user
+and avatars use only demo initials, with no inherited names or avatar hashes):
 `docs/screenshots/home-mobile.png` (390px, full page) and `home-desktop.png`
-(1440px viewport) show seeded Home; `home-sgd-stress-mobile.png` (390px,
+(1440px viewport) show Demo friend and Sample project; `home-sgd-stress-mobile.png` (390px,
 full page) and `home-sgd-stress-desktop.png` (1440px viewport) show the
-two-group API overlay (Li Ling, SGD 42.16; nine-person Maternity household
-and shared care expenses, SGD 5,439.72 and EUR 123.45 owed). The loaded
+two-group synthetic API fixture (Demo friend, SGD 42.16; nine-person Shared project
+with a long sample name for responsive testing, SGD 5,439.72 and EUR 123.45 owed).
+`home-outstanding-mobile.png` and `home-outstanding-desktop.png` show the same
+demo scenario sorted outstanding-first. The loaded
 all-time USD references `spending-insights-global-mobile.png`,
 `spending-insights-group-mobile.png` (390px full page),
 `spending-insights-global-desktop.png`, and
