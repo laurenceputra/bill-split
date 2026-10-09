@@ -9,6 +9,8 @@ import { expect, it } from 'vitest';
 const root = path.resolve(import.meta.dirname, '..');
 const cli = createRequire(import.meta.url).resolve('@playwright/test/cli');
 const wrapper = pathToFileURL(path.join(root, 'tests/e2e/web-server-wrapper.mjs')).href;
+const lifecycle = pathToFileURL(path.join(root, 'tests/e2e/server-lifecycle.mjs')).href;
+const classification = pathToFileURL(path.join(root, 'tests/e2e/startup-classification.mjs')).href;
 const reporter = path.join(root, 'tests/e2e/environment-reporter.mjs');
 
 function run(args: string[], cwd: string) {
@@ -28,7 +30,7 @@ it.each(['timeout', 'teardown', 'runtime', 'zero', 'nonzero', 'signal', 'spawn-e
   try {
     // No browser fixture: only the actual Playwright webServer lifecycle runs.
     writeFileSync(path.join(directory, 'smoke.spec.cjs'), `const { test } = require(${JSON.stringify(path.join(root, 'node_modules/@playwright/test'))}); test('smoke', async () => { ${scenario === 'runtime' ? `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ type: 'runtime-failure' }));` : ''} });`);
-    const source = scenario === 'zero' ? 'process.exit(0)' : scenario === 'nonzero' ? 'process.exit(7)' : scenario === 'signal' ? "process.kill(process.pid, 'SIGTERM')" : scenario === 'timeout' ? `setInterval(() => {}, 1000); process.on('SIGTERM', () => { require('node:fs').mkdirSync('test-results', { recursive: true }); if (!require('node:fs').existsSync(${JSON.stringify(marker)})) require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({type:'setup-failure'})); process.exit(1); });` : "require('node:http').createServer((req, res) => res.end('ok')).listen(0, '127.0.0.1', function() { require('node:fs').writeFileSync('port', String(this.address().port)); });";
+    const source = scenario === 'zero' ? 'process.exit(0)' : scenario === 'nonzero' ? 'process.exit(7)' : scenario === 'signal' ? "process.kill(process.pid, 'SIGTERM')" : scenario === 'timeout' ? `Promise.all([import(${JSON.stringify(lifecycle)}), import(${JSON.stringify(classification)})]).then(([{recordServerFailure}, {setupFailure}]) => { setInterval(() => {}, 1000); process.on('SIGTERM', () => { recordServerFailure(${JSON.stringify(marker)}, setupFailure(), 'Demo setup contender', {preserve:true}); process.exit(1); }); });` : "require('node:http').createServer((req, res) => res.end('ok')).listen(0, '127.0.0.1', function() { require('node:fs').writeFileSync('port', String(this.address().port)); });";
     // Ready cases use stdout readiness, with the wrapper probing the published port.
     const ready = ['teardown', 'runtime'].includes(scenario);
     const url = ready ? undefined : 'http://127.0.0.1:1';
