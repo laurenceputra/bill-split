@@ -456,7 +456,7 @@ export function disposeServiceWorkerUpdates() {
   cancelServiceWorkerUpdate();
   cleanups.splice(0).forEach((cleanup) => cleanup());
   clearTimeout(idleTimer); clearTimeout(retryTimer); clearTimeout(waitingIdentity?.timer); clearTimeout(controllerIdentity?.timer); clearTimeout(attemptTimer);
-   idleTimer = undefined; retryTimer = undefined; waitingIdentity = undefined; controllerIdentity = undefined; attemptTimer = undefined;
+  idleTimer = undefined; retryTimer = undefined; waitingIdentity = undefined; controllerIdentity = undefined; attemptTimer = undefined;
   registration = undefined; waiting = undefined; waitingTarget = undefined;
   requested = undefined; activationIntent = undefined; deferredTarget = undefined; verifyingController = undefined; checkPromise = undefined;
   expectedControllerTarget = undefined;
