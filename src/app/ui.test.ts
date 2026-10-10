@@ -2,7 +2,30 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
-import { AuthLoadingShell, AvatarStack, Disclosure, Field, GroupInsightsControl, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
+import { AuthLoadingShell, AvatarStack, Button, Disclosure, Field, GroupInsightsControl, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
+import { AuthBannerAction, InstallButton, PublicAuthAction } from './control-actions';
+
+describe('Button feedback enrollment', () => {
+  it('forwards provider activation props to native authentication actions', () => {
+    const onClick = () => undefined;
+    expect(PublicAuthAction({ onClick }).props.onClick).toBe(onClick);
+    expect(PublicAuthAction({ signUp: true, onClick }).props.onClick).toBe(onClick);
+    expect(AuthBannerAction({ state: 'sign-in', onClick }).props.onClick).toBe(onClick);
+  });
+
+  it('keeps prompting install disabled and busy with contextual secondary enrollment', () => {
+    const markup = renderToStaticMarkup(createElement(InstallButton, { label: 'Install', secondary: true, busy: true }));
+    expect(markup).toContain('button button--secondary install-action');
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('aria-busy="true"');
+  });
+
+  it.each(['primary', 'secondary', 'danger', 'quiet'] as const)('keeps the %s variant on the shared UI button', (variant) => {
+    const markup = renderToStaticMarkup(createElement(Button, { variant }, 'Demo action'));
+    expect(markup).toContain('ui-button');
+    if (variant !== 'primary') expect(markup).toContain(`button--${variant}`);
+  });
+});
 
 describe('Field', () => {
   it('de-duplicates an error ID already present in aria-describedby', () => {

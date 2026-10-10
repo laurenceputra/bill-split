@@ -11,6 +11,8 @@ import { runProtectedOperation } from './reload-safety';
 import { UpdateStatus } from './update-status';
 import { accountAvatar, avatarUrl, type AvatarPreference } from '../shared/avatar';
 import { RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
+import { AuthBannerAction, Button, InstallButton, PublicAuthAction } from './control-actions';
+export { Button } from './control-actions';
 
 export type IconName = 'groups' | 'activity' | 'settings' | 'add' | 'more' | 'check' | 'warning' | 'close';
 const SERVER_INSTALL_STATE = Object.freeze({ mode: 'installed' as const, installed: true, canPrompt: false, showIosHelp: false });
@@ -35,10 +37,6 @@ export function LogoMark({ className = '' }: { className?: string }) {
 function Brand({ link = false }: { link?: boolean }) {
   const content = <><LogoMark /><span>BillSplit</span></>;
   return link ? <Link className="brand" to="/">{content}</Link> : <span className="brand">{content}</span>;
-}
-
-export function Button({ children, variant = 'primary', loading = false, className = '', ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'quiet'; loading?: boolean }) {
-  return <button {...props} className={`ui-button ${variant === 'primary' ? '' : `button--${variant}`} ${className}`.trim()} aria-busy={loading || undefined} disabled={loading || props.disabled}>{loading ? <span className="button__loading" aria-hidden="true" /> : null}{children}</button>;
 }
 
 export function Avatar({ name, src, avatarMode, avatarHash, email, size = 'md' }: AvatarPreference & { name: string; src?: string; email?: string; size?: 'sm' | 'md' | 'lg' }) {
@@ -154,7 +152,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 export function PublicShell({ children, returnTo = '/', showAuthActions = true }: { children: ReactNode; returnTo?: string; showAuthActions?: boolean }) {
   const safeReturnTo = sanitizeReturnTo(returnTo);
-  return <div className="public-shell shell-frame shell-frame--public"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header shell-header"><Brand link />{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-in" type="button">Sign in</button></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><button className="public-sign-up" type="button">Sign up</button></SignUpButton></span> : null}</header><main className="public-main shell-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
+  return <div className="public-shell shell-frame shell-frame--public"><a className="skip-link" href="#public-main-content">Skip to main content</a><header className="public-header shell-header"><Brand link />{showAuthActions ? <span className="public-auth-actions"><SignInButton mode="modal" fallbackRedirectUrl={safeReturnTo}><PublicAuthAction /></SignInButton><SignUpButton mode="modal" fallbackRedirectUrl={safeReturnTo}><PublicAuthAction signUp /></SignUpButton></span> : null}</header><main className="public-main shell-main" id="public-main-content" tabIndex={-1}>{children}</main></div>;
 }
 
 export function useConnectionState(): ConnectionState {
@@ -202,7 +200,7 @@ export function ServiceWorkerUpdate({ settings = false }: { settings?: boolean }
   return <UpdateStatus update={update} settings={settings} onCheck={() => void checkForUpdates()} onApply={() => applyServiceWorkerUpdate(true)} />;
 }
 
-export function InstallAction({ showStatus = false, label = 'Install' }: { showStatus?: boolean; label?: string } = {}) {
+export function InstallAction({ showStatus = false, label = 'Install', secondary = false }: { showStatus?: boolean; label?: string; secondary?: boolean } = {}) {
   const install = useInstall();
   const [showHelp, setShowHelp] = useState(false);
   useReloadBlocker(showHelp || install.mode === 'prompting', 'Installing app');
@@ -210,7 +208,7 @@ export function InstallAction({ showStatus = false, label = 'Install' }: { showS
   if (install.mode === 'prompting') {
     return showStatus
       ? <p className="muted install-status" role="status">Opening the browser install prompt…</p>
-      : <div className="install-control"><button className="install-action" type="button" disabled aria-busy="true">{label}</button></div>;
+      : <InstallButton label={label} secondary={secondary} busy />;
   }
   if (!shouldShowTopbarInstall(install)) {
     if (!showStatus) return null;
@@ -226,7 +224,7 @@ export function InstallAction({ showStatus = false, label = 'Install' }: { showS
 
   const ios = install.mode === 'ios-manual';
   return <>
-    <div className="install-control"><button className="install-action" type="button" onClick={() => { if (install.mode === 'native-prompt-available') void runProtectedOperation(() => consumeInstallPrompt(), 'Installing app'); else setShowHelp(true); }}>{label}</button></div>
+    <InstallButton label={label} secondary={secondary} onClick={() => { if (install.mode === 'native-prompt-available') void runProtectedOperation(() => consumeInstallPrompt(), 'Installing app'); else setShowHelp(true); }} />
     {ios && showHelp ? <Modal title="Install BillSplit" description="Add BillSplit to your Home Screen for a faster, app-like experience." onClose={() => setShowHelp(false)}><ol className="install-instructions"><li>Open the <strong>Share</strong> menu in your browser.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Confirm by tapping <strong>Add</strong>.</li></ol></Modal> : null}
   </>;
 }
@@ -248,7 +246,7 @@ function AuthBanner() {
   const message = auth.required ? 'Your secure session has expired. Sign in again to continue syncing; queued expenses remain on this device.' : checking ? 'Checking connection before resuming sync; queued expenses remain on this device.' : 'Connection issue. Retry to revalidate; queued expenses remain on this device.';
   const returnTo = sanitizeReturnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`);
    const retry = () => { void requestAuthProbe({ networkOnly: true }); };
-  return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><button type="button">Sign in</button></SignInButton> : checking ? <Button type="button" variant="secondary" onClick={retry}>Retry connection</Button> : <Button type="button" onClick={retry}>Retry connection</Button>}</div>;
+  return <div className={`auth-banner${checking ? ' auth-banner--checking' : ''}`} role={checking ? 'status' : 'alert'}><span>{message}</span>{auth.required ? <SignInButton mode="modal" fallbackRedirectUrl={returnTo}><AuthBannerAction state="sign-in" /></SignInButton> : <AuthBannerAction state={checking ? 'checking' : 'error'} onRetry={retry} />}</div>;
 }
 
 export function SplitTransactionControl({ groupId, online, compact = false, mobileNav = false, className = '', active = false, primaryCurrent = false, primaryAriaLabel }: { groupId?: string; online?: boolean; compact?: boolean; mobileNav?: boolean; className?: string; active?: boolean; primaryCurrent?: boolean; primaryAriaLabel?: string }) {
