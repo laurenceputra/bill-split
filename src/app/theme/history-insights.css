@@ -257,6 +257,11 @@ border: 0;
   color: var(--color-primary-hover);
 }
 
+.insight-currency-tab:is(:hover, :active) {
+  background: var(--color-primary-subtle-hover);
+  color: var(--color-primary-hover);
+}
+
 .insight-currency-panel {
   display: grid;
   min-width: 0;

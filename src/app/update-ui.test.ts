@@ -12,6 +12,7 @@ describe('App update controls', () => {
   it.each(['ready', 'blocked'] as const)('disables offline discovery independently of %s installed application', (phase) => {
     const update: ServiceWorkerUpdateState = { phase, updateReady: true, applying: false, blocked: phase === 'blocked', offline: true };
     const markup = renderToStaticMarkup(createElement(UpdateStatus, { update, settings: true, onCheck: () => undefined, onApply: () => undefined }));
+    expect(markup.match(/class="button button--secondary update-action"/g)).toHaveLength(2);
     expect(markup).toMatch(/<button[^>]*>Update now<\/button>/);
     expect(markup).toMatch(/<button[^>]*disabled[^>]*>Check for updates<\/button>/);
     expect(markup).toContain('The installed update can still use Update now.');

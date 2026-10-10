@@ -281,13 +281,11 @@ button {
   cursor: pointer;
 }
 
-.button:hover,
-button:hover {
+:is(.button, .ui-button):hover {
   background: var(--color-primary-hover);
 }
 
-.button:not(.button--secondary):not(.button--danger):not(.button--quiet):active,
-button:not(.button--secondary):not(.button--danger):not(.button--quiet):active,
+:is(.button, .ui-button):where(:not(.button--secondary, .secondary, .button--danger, .danger, .button--quiet)):active,
 .desktop-nav__add:active,
 .nav-item--add:not([aria-current="page"]):active .nav-item__capsule {
   background: var(--color-primary-pressed);
@@ -556,7 +554,9 @@ form > button {
   word-break: break-word;
 }
 
-.auth-banner button:hover {
+.auth-banner button:is(:hover, :active) {
+  background: var(--color-debt-fg);
+  color: var(--color-debt-bg);
   opacity: 0.85;
 }
 
@@ -740,6 +740,11 @@ form > button {
 .inline-action:hover {
   background: transparent;
   color: var(--color-primary);
+}
+
+.inline-action:active {
+  background: transparent;
+  color: var(--color-primary-pressed);
 }
 
 details:not([open]) > :not(summary) {

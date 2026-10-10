@@ -383,6 +383,12 @@ text-align: right;
   background: var(--color-primary-subtle);
 }
 
+.summary-row:active,
+.participant-row:active,
+.participant-row[aria-pressed="true"]:active {
+  background: var(--color-primary-subtle-hover);
+}
+
 .participant-list {
   display: grid;
   width: 100%;
@@ -763,6 +769,10 @@ input[inputmode="decimal"] {
 .route-view--expense .summary-row {
   border-color: var(--color-divider);
   background: var(--color-primary-subtle);
+}
+
+.route-view--expense .summary-row:is(:hover, :active) {
+  background: var(--color-primary-subtle-hover);
 }
 
 .route-view--expense .summary-row > strong {
