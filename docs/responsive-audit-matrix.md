@@ -9,11 +9,23 @@ labelled native Sort control, which precedes the combined friend/group cards.
 | State | Checks at all six widths |
 | --- | --- |
 | Name (A–Z), default | Compact labelled control, numeric case-insensitive display-name order, existing balance/card geometry and navigation boundary; no contextual help |
-| Outstanding first | Reordered cards, visible default/fallback and no-conversion help, no horizontal overflow |
-| Reload / cached refresh failure | Per-account local preference retained; cached cards remain sortable after failed group refresh |
-| Offline, already loaded | Both modes usable without a network request; name mode hides help |
+| Outstanding first, tooltip closed | Reordered cards; small info icon beside Sort with a separate 44×44px button target outside the label; explanatory paragraph no longer occupies the page |
+| Outstanding first, tooltip open | Exact default/fallback and no-conversion text in a text-only `role=tooltip`, described by the trigger; hover (including tooltip), keyboard focus and click/tap open; repeated activation toggles pinned help closed even with existing focus. Hover, focus and pinned state combine: blur while hovering text retains it, and clicking/selecting text does not dismiss. Escape/outside pointer dismiss and suppress existing hover/focus until fresh pointer entry, fresh focus, or explicit trigger activation; contained bounds and no horizontal overflow |
+| Reload / cached refresh failure | Per-account local preference retained; tooltip resets closed on reload and remains usable with cached cards after failed group refresh |
+| Offline, already loaded | Both modes and tooltip usable without a network request; name mode removes trigger and tooltip |
 | Cold loading | Existing skeleton, no sort control before cards exist |
 | Empty / uncached error | Existing empty/error notices, no irrelevant sort control |
+
+Tooltip follow-up verification (2026-10-10): typecheck, five focused sorting/hook
+unit tests, and all nine focused Chromium Home/Insights tests passed. A touch-enabled
+390px context verifies consecutive trigger taps open/close, text taps retain help,
+and outside taps dismiss. Combined focus/hover blur and text selection are checked
+at all six widths. Tooltip
+closed/open, hover persistence, keyboard dismissal/reopening, outside click,
+44px target and viewport bounds were checked at all six widths, together with
+existing loading/empty/error and cached/offline sorting checks. Screenshots are
+test attachments only; tracked references were not regenerated. Full route audit,
+other browser engines, screen-reader and real-device touch checks were not run.
 
 Pure helper and hook tests cover all summaries (not display-truncated), default
 currency zero fallback, absent/empty/zero summaries, absolute positive/negative
