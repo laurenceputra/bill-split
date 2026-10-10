@@ -6,7 +6,7 @@ export const DEV_EMAIL = 'dev@example.com';
 export const EMPTY_EMAIL = 'empty@example.com';
 export const REGISTERED_EMAIL = 'registered@example.com';
 
-export async function newAuthenticatedContext(browser: Browser, email = DEV_EMAIL, viewport?: { width: number; height: number }, options?: Pick<BrowserContextOptions, 'serviceWorkers'>) {
+export async function newAuthenticatedContext(browser: Browser, email = DEV_EMAIL, viewport?: { width: number; height: number }, options?: Pick<BrowserContextOptions, 'serviceWorkers' | 'hasTouch'>) {
   return browser.newContext({
     viewport,
     extraHTTPHeaders: { 'X-Dev-Email': email },
