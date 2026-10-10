@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyServiceWorkerUpdate, cancelServiceWorkerUpdate, checkForUpdates, configureServiceWorkerUpdates, disposeServiceWorkerUpdates, getServiceWorkerUpdateState, observeServiceWorkerRegistration } from './service-worker';
-import { createReloadBlocker, getReloadSafetyState, recordReloadInteraction } from './reload-safety';
+import { beginProtectedOperation, createReloadBlocker, getReloadSafetyState, recordReloadInteraction } from './reload-safety';
 
 const protocol = 'BILLSPLIT_UPDATE_V1';
 const target = 'bill-split-shell-next';
@@ -87,6 +87,114 @@ describe('service-worker discovery', () => {
   });
 });
 describe('page-side update preparation', () => {
+  it.each([false, true])('keeps activation applying when pending discovery settles (reject: %s)', async (reject) => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    let resolve!: () => void; let fail!: (error: Error) => void;
+    f.registration.update.mockImplementation(() => new Promise<void>((done, rejected) => { resolve = done; fail = rejected; }));
+    const check = checkForUpdates();
+    expect(applyServiceWorkerUpdate(true)).toBe(true);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    if (reject) fail(new Error('Discovery failed')); else resolve();
+    await check;
+    expect(getServiceWorkerUpdateState()).toMatchObject({ phase: 'applying', applying: true, updateReady: true });
+    expect(getReloadSafetyState().gated).toBe(true);
+  });
+
+  it('manual unverified waiting identity gives durable guidance and restarts retries without a waiver', async () => {
+    const f = fixture(true, true, true); await checkForUpdates();
+    const count = () => f.worker.postMessage.mock.calls.filter(([data]) => data.type === 'IDENTIFY').length;
+    const before = count();
+    expect(applyServiceWorkerUpdate(true)).toBe(false);
+    const guidance = getServiceWorkerUpdateState().manualError;
+    expect(guidance).toContain('Verifying the installed update');
+    expect(count()).toBeGreaterThan(before);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(getServiceWorkerUpdateState().manualError).toBe(guidance);
+    recordReloadInteraction(); // Identity retry backoff exceeds the automatic idle deadline.
+    f.message({ type: 'IDENTITY' });
+    f.message({ type: 'PREPARE', attempt: 'identity-attempt', leaseMs: 10_000 });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false }));
+    expect(getServiceWorkerUpdateState().manualError).toBe(guidance);
+  });
+
+  it.each(['input', 'blocker'])('manual prepared gates fail closed after new %s', async (change) => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    expect(applyServiceWorkerUpdate(true)).toBe(true);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    const release = change === 'blocker' ? createReloadBlocker('Unsaved new draft') : undefined;
+    if (change === 'input') f.document.dispatchEvent(new Event('input'));
+    f.message({ type: 'VALIDATE', attempt: 'test-attempt-123' });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ round: 'final', ready: false }));
+    await Promise.resolve();
+    expect(getReloadSafetyState().gated).toBe(false);
+    f.message({ type: 'ACTIVATING', attempt: 'test-attempt-123' });
+    expect(f.window.location.reload).not.toHaveBeenCalled();
+    release?.();
+  });
+
+  it.each(['activity', 'blocker'])('%s during pending controller identity invalidates the manual reload waiver', async (change) => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    applyServiceWorkerUpdate(true);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    f.message({ type: 'ACTIVATING', attempt: 'test-attempt-123' });
+    f.serviceWorker.controller = f.worker; f.serviceWorker.dispatchEvent(new Event('controllerchange'));
+    expect(applyServiceWorkerUpdate(true)).toBe(false);
+    expect(getServiceWorkerUpdateState().manualError).toContain('Verifying the activated update');
+    const release = change === 'blocker' ? createReloadBlocker('Unsaved controller draft') : undefined;
+    if (change === 'activity') f.document.dispatchEvent(new Event('keydown'));
+    await Promise.resolve();
+    f.message({ type: 'IDENTITY' });
+    expect(f.window.location.reload).not.toHaveBeenCalled();
+    release?.();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.window.location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('failed attempts do not donate a waiver to later automatic preparation or erase manual help', async () => {
+    const f = fixture(true, true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    applyServiceWorkerUpdate(true);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    f.message({ type: 'RELEASE', attempt: 'test-attempt-123' });
+    const guidance = getServiceWorkerUpdateState().manualError;
+    expect(guidance).toContain('other open tabs');
+    f.message({ type: 'PREPARE', attempt: 'next-auto-attempt', leaseMs: 10_000 });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false }));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(getServiceWorkerUpdateState().manualError).toBe(guidance);
+  });
+
+  it('worker replacement and disposal remove manual ownership and old idle timers', async () => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    applyServiceWorkerUpdate(true);
+    const replacement = Object.assign(new EventTarget(), { postMessage: vi.fn(), state: 'installed' });
+    f.registration.waiting = replacement;
+    await checkForUpdates(); f.message({ type: 'IDENTITY' }, replacement);
+    f.message({ type: 'PREPARE', attempt: 'replacement-attempt', leaseMs: 10_000 }, replacement);
+    expect(replacement.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false }));
+    disposeServiceWorkerUpdates();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(replacement.postMessage.mock.calls.some(([data]) => data.type === 'REQUEST')).toBe(false);
+    recordReloadInteraction();
+    observeServiceWorkerRegistration(f.registration as unknown as ServiceWorkerRegistration, { safetyIntegrated: true, autoApply: true });
+    await checkForUpdates(); f.message({ type: 'IDENTITY' }, replacement);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(replacement.postMessage.mock.calls.some(([data]) => data.type === 'REQUEST')).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(replacement.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'REQUEST' }));
+  });
+
+  it('represents offline connectivity independently of an installed update and tailors save guidance', async () => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    Object.assign(navigator, { onLine: false }); f.window.dispatchEvent(new Event('offline'));
+    await checkForUpdates();
+    expect(getServiceWorkerUpdateState()).toMatchObject({ phase: 'ready', offline: true, updateReady: true });
+    const release = beginProtectedOperation('Export in progress');
+    expect(applyServiceWorkerUpdate(true)).toBe(false);
+    expect(getServiceWorkerUpdateState().manualError).toContain('ongoing operations');
+    expect(getServiceWorkerUpdateState().manualError).not.toContain('discard');
+    release();
+  });
   it('never reloads activation intent before controller verification, including a failed skipWaiting release', async () => {
     const f = fixture(true, true); await checkForUpdates();
     f.message({ type: 'IDENTITY' }); await vi.advanceTimersByTimeAsync(5_000);
@@ -118,12 +226,14 @@ describe('page-side update preparation', () => {
     expect(getReloadSafetyState().gated).toBe(false);
   });
 
-  it('passive hide cancellation leaves a truthful non-applying state even when RELEASE arrives late', async () => {
+  it('a clean passive tab remains prepared when hidden and releases truthfully', async () => {
     const f = fixture(true, true); await checkForUpdates();
     f.message({ type: 'IDENTITY' }); await vi.advanceTimersByTimeAsync(5_000);
     f.message({ type: 'PREPARE', attempt: 'hidden-passive', leaseMs: 10_000 });
     f.document.visibilityState = 'hidden'; f.document.dispatchEvent(new Event('visibilitychange'));
-    expect(getServiceWorkerUpdateState().phase).toBe('blocked');
+    expect(getReloadSafetyState().gated).toBe(true);
+    f.message({ type: 'VALIDATE', attempt: 'hidden-passive' });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', round: 'final', ready: true }));
     f.message({ type: 'RELEASE', attempt: 'hidden-passive' });
     expect(getServiceWorkerUpdateState().applying).toBe(false);
     f.document.visibilityState = 'visible'; f.document.dispatchEvent(new Event('visibilitychange'));
@@ -213,17 +323,21 @@ describe('page-side update preparation', () => {
     release();
   });
 
-  it('all prepare requests require local five-second inactivity, including passive tabs', async () => {
+  it('all prepare requests require local two-second inactivity, including passive tabs', async () => {
     const f = fixture(true, true); await checkForUpdates();
     f.message({ type: 'IDENTITY' });
     f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: false }));
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(1_999);
+    f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: false }));
+    await vi.advanceTimersByTimeAsync(1);
     f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: true }));
     expect(getReloadSafetyState().gated).toBe(true);
     f.document.dispatchEvent(new Event('input'));
     expect(getReloadSafetyState().gated).toBe(false);
+    await Promise.resolve();
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'CANCEL', attempt: 'remote-attempt' }));
     f.message({ type: 'VALIDATE', attempt: 'remote-attempt' });
     expect(f.worker.postMessage).not.toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: true, round: 'final' }));
@@ -286,5 +400,63 @@ describe('page-side update preparation', () => {
     f.serviceWorker.dispatchEvent(new Event('controllerchange'));
     await vi.advanceTimersByTimeAsync(30_000);
     expect(f.window.location.reload).not.toHaveBeenCalled();
+  });
+
+  it('automatically requests at the idle deadline and promptly when a draft clears', async () => {
+    const release = createReloadBlocker('Unsaved expense');
+    const f = fixture(true, true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(f.worker.postMessage.mock.calls.some(([data]) => data.type === 'REQUEST')).toBe(false);
+    release(); await Promise.resolve();
+    expect(f.worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'REQUEST' }));
+  });
+
+  it('manual captured clicks waive inactivity through validation and verified offline reload only', async () => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    f.document.dispatchEvent(new Event('pointerdown'));
+    f.document.dispatchEvent(new Event('focusin'));
+    expect(applyServiceWorkerUpdate(true)).toBe(true);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    expect(getReloadSafetyState().gated).toBe(true);
+    Object.assign(navigator, { onLine: false }); f.window.dispatchEvent(new Event('offline'));
+    f.message({ type: 'VALIDATE', attempt: 'test-attempt-123' });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ round: 'final', ready: true }));
+    f.message({ type: 'ACTIVATING', attempt: 'test-attempt-123' });
+    f.serviceWorker.controller = f.worker; f.serviceWorker.dispatchEvent(new Event('controllerchange'));
+    f.message({ type: 'IDENTITY' });
+    expect(f.window.location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('subsequent activity cancels a manual waiver before preparation', async () => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    expect(applyServiceWorkerUpdate(true)).toBe(true);
+    f.document.dispatchEvent(new Event('keydown'));
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false }));
+    await Promise.resolve();
+    expect(getReloadSafetyState().gated).toBe(false);
+  });
+
+  it('hidden idle tabs ACK both rounds but refresh only when visible', async () => {
+    const f = fixture(true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    f.document.visibilityState = 'hidden'; await vi.advanceTimersByTimeAsync(5_000);
+    f.message({ type: 'PREPARE', attempt: 'hidden-attempt', leaseMs: 10_000 });
+    f.message({ type: 'VALIDATE', attempt: 'hidden-attempt' });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ round: 'final', ready: true }));
+    f.message({ type: 'ACTIVATING', attempt: 'hidden-attempt' });
+    f.serviceWorker.controller = f.worker; f.serviceWorker.dispatchEvent(new Event('controllerchange')); f.message({ type: 'IDENTITY' });
+    expect(f.window.location.reload).not.toHaveBeenCalled();
+    f.document.visibilityState = 'visible'; f.document.dispatchEvent(new Event('visibilitychange'));
+    expect(f.window.location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('release publications do not cause automatic request storms', async () => {
+    const f = fixture(true, true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    f.message({ type: 'PREPARE', attempt: 'test-attempt-123', leaseMs: 10_000 });
+    f.message({ type: 'RELEASE', attempt: 'test-attempt-123' }); await Promise.resolve();
+    const requests = () => f.worker.postMessage.mock.calls.filter(([data]) => data.type === 'REQUEST').length;
+    expect(requests()).toBe(1);
+    await vi.advanceTimersByTimeAsync(14_999); expect(requests()).toBe(1);
   });
 });

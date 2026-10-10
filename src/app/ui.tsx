@@ -5,7 +5,7 @@ import { getNavigationContext, getTransactionNavigation } from './navigation';
 import { consumeInstallPrompt, getInstallState, initializeInstallUX, shouldShowTopbarInstall, subscribeInstall } from './install';
 import { getOutboxSnapshot, initializeOutbox, subscribeOutbox } from './outbox';
 import { getAuthLifecycle, getAuthState, getConnectionState, getMe, hydrateIdentity, requestAuthProbe, sanitizeReturnTo, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, type AuthLifecycle, type ConnectionState } from './api';
-import { checkForUpdates, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
+import { applyServiceWorkerUpdate, checkForUpdates, getServiceWorkerUpdateState, subscribeServiceWorkerUpdate } from './service-worker';
 import { useReloadBlocker } from './reload-safety-react';
 import { runProtectedOperation } from './reload-safety';
 import { UpdateStatus } from './update-status';
@@ -199,7 +199,7 @@ function useServiceWorkerUpdate() {
 
 export function ServiceWorkerUpdate({ settings = false }: { settings?: boolean }) {
   const update = useServiceWorkerUpdate();
-  return <UpdateStatus update={update} settings={settings} onCheck={() => void checkForUpdates()} />;
+  return <UpdateStatus update={update} settings={settings} onCheck={() => void checkForUpdates()} onApply={() => applyServiceWorkerUpdate(true)} />;
 }
 
 export function InstallAction({ showStatus = false, label = 'Install' }: { showStatus?: boolean; label?: string } = {}) {

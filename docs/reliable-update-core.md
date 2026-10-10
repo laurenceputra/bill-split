@@ -128,23 +128,33 @@ Failures back off; a check deadline cannot be mistaken for installation.
 - `phase`: initializing, unsupported, idle, checking, installing, no-update,
   ready, blocked, applying, check-error, install-error, offline, or deferred;
 - `blockerReason`, `error`, `lastCheck`, and `lastSuccess`;
+- `offline` independently disables discovery without disabling installed application;
 - compatible `updateReady`, `applying`, and `blocked` booleans.
 
-`applyServiceWorkerUpdate()` remains a compatibility adapter. It never bypasses
-idle/draft/operation gates. `cancelServiceWorkerUpdate()` retires the local
+`applyServiceWorkerUpdate(true)` (the default) starts a manual attempt. It waives
+only the initiating tab's inactivity requirement, using the captured safety
+revision through REQUEST, PREPARE, VALIDATE, ACTIVATING and verified reload.
+Subsequent interaction or semantic safety changes invalidate the waiver; it is
+never a sticky force flag. Drafts, operations, identity and other tabs' automatic
+inactivity requirements remain mandatory. `applyServiceWorkerUpdate(false)` is
+automatic. `cancelServiceWorkerUpdate()` retires the local
 attempt and releases its barrier. Settings Device, after Profile, provides live
-manual checking, error retry, contextual status, and the last successful check.
-The compact Header uses the same state. Neither offers a force-refresh/discard
-action, and checking while dirty never bypasses reload protection.
+manual checking, Update now, error retry, and the last successful check.
+The compact Header silently offers Update now when available; automatic blockers
+do not announce persistent waiting messages. Manual failures expose actionable
+draft/save/other-tab help separately from automatic blocker state.
+Installed, identity-verified waiting updates may apply offline; discovery still
+requires connectivity. No update action discards work or clears local storage.
 
 ## Waiting-worker authority
 
 Modern coordination accepts `BILLSPLIT_UPDATE_V1` messages. The actual waiting worker
 enumerates all same-origin window clients in its registration scope, including
-uncontrolled clients. Each must acknowledge preparation after five seconds of
+uncontrolled clients. Each must acknowledge preparation after two seconds of
 local inactivity, hold a leased gate, and acknowledge a final validation round.
 Membership is checked between rounds and again before `skipWaiting`. A dirty,
-hidden, legacy, missing, or unresponsive client blocks activation. Source IDs,
+busy, legacy, missing, or unresponsive client blocks activation. Clean idle hidden
+clients acknowledge both rounds but defer their own refresh until visible. Source IDs,
 attempt IDs, targets, and ACK rounds are matched. Cancellation, timeout, or
 coordinator disappearance releases all participating gates. The narrowly scoped
 historical exception accepts only bare `{ type: 'SKIP_WAITING' }` from a verified
@@ -159,6 +169,11 @@ Otherwise it keeps a protected deferred refresh and retries without spinning.
 target. A matching `RELEASE` clears that intent. Losing simultaneous requests
 are released independently of a different attempt's held gate. A participating
 tab does not start another request, and retry timing includes jitter.
+One idle-deadline timer wakes automatic application at last interaction plus two
+seconds. Coalesced safety notifications wake promptly when local blockers clear;
+gate publications cannot recursively start requests. Remote failure cooldowns
+remain bounded and jittered, and gate release does not bypass those cooldowns.
+Visibility resume does not itself fabricate interaction or delay a safe refresh.
 Lost waiting/controller identity replies are retried with exponential backoff
 (3 seconds up to 60 seconds); a manual check can restart identity verification.
 Unknown identity remains a verifying/blocked state, never an applicable target.
