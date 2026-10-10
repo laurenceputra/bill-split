@@ -1,5 +1,7 @@
 .home-sort {
   position: relative;
+  /* Leave clearance for the upward 44px help target without a tall label row. */
+  margin-top: 28px;
   margin-bottom: var(--space-4);
 }
 
@@ -8,14 +10,23 @@
 }
 
 .home-sort__label {
+  position: relative;
   display: flex;
   align-items: center;
-  min-height: 44px;
+  gap: 2px;
   font-size: var(--text-sm);
   font-weight: 600;
 }
 
+.home-sort-help {
+  width: 44px;
+  align-self: stretch;
+}
+
 .home-sort-help__trigger {
+  /* Use the existing space above the label, never the select below it. */
+  position: absolute;
+  bottom: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -25,13 +36,30 @@
   border: 0;
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 18px;
+  font-size: 11px;
+}
+
+.home-sort-help__trigger > span {
+  position: absolute;
+  left: 0;
+  bottom: 10px;
+  line-height: 1;
+}
+
+.home-sort-help__trigger:focus-visible {
+  outline: 3px solid var(--color-primary-focus-ring);
+  outline-offset: -3px;
+}
+
+.home-sort-help__trigger:focus-visible > span {
+  /* Keep the superscript inside its inset focus ring, not underneath it. */
+  left: 6px;
 }
 
 .home-sort-help__tooltip {
   position: absolute;
   z-index: 10;
-  top: 44px;
+  top: 100%;
   left: 0;
   width: min(100%, 24rem);
   border: 1px solid var(--color-border);
