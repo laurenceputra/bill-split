@@ -99,6 +99,7 @@ describe('scheduled completion migration integration', () => {
       await writeFile(seedPath, seed);
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--file', seedPath]);
+      expect(querySets('PRAGMA foreign_key_check;')).toEqual([[]]);
 
       await Promise.all(compatibilityNames.map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
       run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
@@ -110,7 +111,24 @@ describe('scheduled completion migration integration', () => {
         run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at) VALUES('upgrade-generic','group-ownerless','upgrade@example.com','user-1','2026-01-02','9999-01-01'); INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) VALUES('upgrade-targeted','group-ownerless','fourth@example.com','user-1','2026-01-02','9999-01-01','person-4');", '--yes']);
         await cp(join(root, 'migrations', '0029_bidirectional_group_kind_guards.sql'), join(migrationsDir, '0029_bidirectional_group_kind_guards.sql'));
-        run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
+         run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
+
+      const [payerForeignKeys, scheduleColumns, retainedIndexes, namedGroup, initialTotals, upgradedForeignKeys, lifecycleTables] = querySets(`
+        PRAGMA foreign_key_list(scheduled_payers);
+        SELECT name FROM pragma_table_info('scheduled_expenses') WHERE name='category';
+        SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_expenses_group_date','idx_settlements_group_date','idx_audit_entity') ORDER BY name;
+        SELECT kind FROM groups WHERE id='group-1';
+        SELECT group_id,currency,gross_minor FROM ledger_totals;
+        PRAGMA foreign_key_check;
+        SELECT name FROM sqlite_master WHERE type='table' AND name IN ('audit_events','group_invitations','group_membership_events') ORDER BY name;
+      `);
+      expect(payerForeignKeys).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
+      expect(scheduleColumns).toEqual([{ name: 'category' }]);
+      expect(retainedIndexes).toEqual([{ name: 'idx_audit_entity' }, { name: 'idx_expenses_group_date' }, { name: 'idx_settlements_group_date' }]);
+      expect(namedGroup).toEqual([{ kind: 'named' }]);
+      expect(initialTotals).toEqual([]);
+      expect(upgradedForeignKeys).toEqual([]);
+      expect(lifecycleTables).toEqual([{ name: 'audit_events' }, { name: 'group_invitations' }, { name: 'group_membership_events' }]);
 
       const [scheduled, cursor, preferences, owners, projection, summary, legacy, auditColumns, userColumns, targetColumns, targetIndexes, occurrenceForeignKeys, suggestionPlan, purgePlan, groupKinds, peerTriggers, legacyInvitation, upgradeWindowInvitations] = querySets(`
         SELECT id,status,generation_claim_id,next_occurrence_date,
@@ -178,10 +196,18 @@ describe('scheduled completion migration integration', () => {
          const blockedPeerKindConversion = runRaw(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE groups SET kind='peer' WHERE id='group-multiple';", '--yes']);
          expect(blockedPeerKindConversion.status).not.toBe(0);
          const [preservedNamedGroup] = querySets("SELECT kind FROM groups WHERE id='group-multiple';");
-         expect(preservedNamedGroup).toEqual([{ kind: 'named' }]);
+          expect(preservedNamedGroup).toEqual([{ kind: 'named' }]);
+          // Keep the pre-credit compatibility contract at its original stage.
+          run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET currency='EUR' WHERE id='expense-2'; UPDATE expenses SET deleted_at='2026-01-03' WHERE id='expense-1'; UPDATE expenses SET deleted_at=NULL WHERE id='expense-1'; DELETE FROM expenses WHERE id='expense-2';", '--yes']);
+          const [preCreditSummary, preCreditProjection, preCreditTotals] = querySets("SELECT status,maintenance_due FROM ledger_summary_state WHERE group_id='group-1'; SELECT status,ledger_totals_ready,reconciliation_due FROM projection_state WHERE group_id='group-1'; SELECT group_id,currency,gross_minor FROM ledger_totals;");
+          expect(preCreditSummary).toEqual([{ status: 'dirty', maintenance_due: 1 }]);
+          expect(preCreditProjection).toEqual([{ status: 'ready', ledger_totals_ready: 0, reconciliation_due: 0 }]);
+          expect(preCreditTotals).toEqual([]);
          await cp(join(root, 'migrations', creditNames[0]), join(migrationsDir, creditNames[0]));
          run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
-         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,created_by,created_at,updated_at) VALUES('credit-upgrade','group-1','refund','direct_provider_offset',25,'USD','2026-01-03','user-1','2026-01-03','2026-01-03'); INSERT INTO credit_applications(credit_id,expense_id,amount_minor) VALUES('credit-upgrade','credit-expense',25); INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES('credit-upgrade','person-1','recipient',25); UPDATE ledger_summary_state SET status='ready',discovery_complete=1,maintenance_due=0,checkpoint_through='2026-01-01' WHERE group_id='group-1'; INSERT INTO ledger_period_state(group_id,month,status,source_generation,applied_generation,build_generation,active_build_id,updated_at) VALUES('group-1','2026-01-01','ready',1,1,1,'upgrade-build','2026-01-03'); INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) VALUES('group-1','2026-01-01','upgrade-build','USD','person-1',100,'2026-01-03'); INSERT INTO ledger_checkpoint_balances(group_id,currency,person_id,net_minor,updated_at) VALUES('group-1','USD','person-1',100,'2026-01-03');`, '--yes']);
+         // Earlier mutation checks may already have created this period. Seed
+         // the same ready generation for the credit-upgrade transition either way.
+         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,created_by,created_at,updated_at) VALUES('credit-upgrade','group-1','refund','direct_provider_offset',25,'USD','2026-01-03','user-1','2026-01-03','2026-01-03'); INSERT INTO credit_applications(credit_id,expense_id,amount_minor) VALUES('credit-upgrade','credit-expense',25); INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES('credit-upgrade','person-1','recipient',25); UPDATE ledger_summary_state SET status='ready',discovery_complete=1,maintenance_due=0,checkpoint_through='2026-01-01' WHERE group_id='group-1'; INSERT INTO ledger_period_state(group_id,month,status,source_generation,applied_generation,build_generation,active_build_id,updated_at) VALUES('group-1','2026-01-01','ready',1,1,1,'upgrade-build','2026-01-03') ON CONFLICT(group_id,month) DO UPDATE SET status=excluded.status,source_generation=excluded.source_generation,applied_generation=excluded.applied_generation,build_generation=excluded.build_generation,active_build_id=excluded.active_build_id,updated_at=excluded.updated_at; INSERT INTO ledger_period_balances(group_id,month,build_id,currency,person_id,net_minor,updated_at) VALUES('group-1','2026-01-01','upgrade-build','USD','person-1',100,'2026-01-03'); INSERT INTO ledger_checkpoint_balances(group_id,currency,person_id,net_minor,updated_at) VALUES('group-1','USD','person-1',100,'2026-01-03');`, '--yes']);
          await Promise.all(creditNames.slice(1).map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
          run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
          const [creditUpgradeState, periodUpgradeState] = querySets("SELECT status,discovery_complete,maintenance_due,credit_discovery_cursor,credit_discovery_high_water FROM ledger_summary_state WHERE group_id='group-1'; SELECT status,source_generation,credit_cursor,credit_high_water FROM ledger_period_state WHERE group_id='group-1' AND month='2026-01-01';");
@@ -190,7 +216,13 @@ describe('scheduled completion migration integration', () => {
          const blockedLinkedExpenseChange = runRaw(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET amount_minor=101 WHERE id='credit-expense';", '--yes']);
          expect(blockedLinkedExpenseChange.status).not.toBe(0);
          const blockedRecipient = runRaw(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES('credit-upgrade','person-2','recipient',1);", '--yes']);
-         expect(blockedRecipient.status).not.toBe(0);
+          expect(blockedRecipient.status).not.toBe(0);
+          // Assert the 0031/0032 transition above before applying the final
+          // aggregate guards, so later migrations cannot mask regressions.
+          await cp(join(root, 'migrations', '0033_credit_aggregate_guards.sql'), join(migrationsDir, '0033_credit_aggregate_guards.sql'));
+          run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
+          const [preservedCredit] = querySets("SELECT id,amount_minor,(SELECT SUM(amount_minor) FROM credit_applications WHERE credit_id=credits.id) AS applied_minor,(SELECT SUM(amount_minor) FROM credit_allocations WHERE credit_id=credits.id) AS allocated_minor FROM credits WHERE id='credit-upgrade';");
+          expect(preservedCredit).toEqual([{ id: 'credit-upgrade', amount_minor: 25, applied_minor: 25, allocated_minor: 25 }]);
         run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO users(id,email,created_at,updated_at) VALUES('user-linked','linked@example.com','2026-01-01','2026-01-01'); INSERT INTO people(id,name,email,user_id,created_at) VALUES('person-linked','Linked Account','linked@example.com','user-linked','2026-01-01');", '--yes']);
         const blockedTargetedInsert = runRaw(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO group_invitations(id,group_id,email_normalized,created_by,created_at,expires_at,target_person_id) VALUES('wrong-target','group-ownerless','wrong@example.com','user-1','2026-01-07','9999-01-01','person-linked');", '--yes']);
         expect(blockedTargetedInsert.status).not.toBe(0);
@@ -200,23 +232,36 @@ describe('scheduled completion migration integration', () => {
         const [acceptedTargetedInsert] = querySets("SELECT id,email_normalized,target_person_id FROM group_invitations WHERE id='right-target';");
         expect(acceptedTargetedInsert).toEqual([{ id: 'right-target', email_normalized: 'linked@example.com', target_person_id: 'person-linked' }]);
        expect(occurrenceForeignKeys).toEqual(expect.arrayContaining([expect.objectContaining({ table: 'scheduled_expenses' })]));
-      expect(JSON.stringify(suggestionPlan).toLowerCase()).toContain('idx_expenses_suggestion_lookup');
+       expect(JSON.stringify(suggestionPlan).toLowerCase()).toContain('idx_expenses_suggestion_lookup');
+       expect(JSON.stringify(suggestionPlan).toLowerCase()).toMatch(/expense_id=\?/);
       expect(JSON.stringify(purgePlan).toLowerCase()).toContain('idx_groups_deleted_purge');
 
-      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET currency='EUR' WHERE id='expense-2'; UPDATE expenses SET deleted_at='2026-01-03' WHERE id='expense-1'; UPDATE expenses SET deleted_at=NULL WHERE id='expense-1'; DELETE FROM expenses WHERE id='expense-2';", '--yes']);
-      const [mutationSummary, mutationTotals, mutationLegacy] = querySets(`
+      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE expenses SET deleted_at='2026-01-03' WHERE id='expense-1'; UPDATE expenses SET deleted_at=NULL WHERE id='expense-1';", '--yes']);
+      // Exercise unlinked currency changes and hard deletion with the final
+      // aggregate guards installed, independently of insertion/soft-delete dirtiness.
+      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO expenses(id,group_id,description,amount_minor,currency,expense_date,created_by,created_at,updated_at,version) VALUES('final-unlinked-expense','group-1','Final upgrade expense',50,'USD','2026-01-04','user-1','2026-01-04','2026-01-04',1); UPDATE ledger_summary_state SET status='ready',maintenance_due=0 WHERE group_id='group-1'; UPDATE expenses SET currency='EUR' WHERE id='final-unlinked-expense';", '--yes']);
+      const [currencySummary, currencyProjection, changedCurrency] = querySets("SELECT status,maintenance_due FROM ledger_summary_state WHERE group_id='group-1'; SELECT status,ledger_totals_ready,reconciliation_due FROM projection_state WHERE group_id='group-1'; SELECT currency FROM expenses WHERE id='final-unlinked-expense';");
+      expect(currencySummary).toEqual([{ status: 'dirty', maintenance_due: 1 }]);
+      expect(currencyProjection).toEqual([{ status: 'ready', ledger_totals_ready: 0, reconciliation_due: 0 }]);
+      expect(changedCurrency).toEqual([{ currency: 'EUR' }]);
+      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "UPDATE ledger_summary_state SET status='ready',maintenance_due=0 WHERE group_id='group-1'; DELETE FROM expenses WHERE id='final-unlinked-expense';", '--yes']);
+      expect(querySets("SELECT id FROM expenses WHERE id='final-unlinked-expense';")).toEqual([[]]);
+       const [mutationSummary, mutationTotals, mutationLegacy, mutationProjection] = querySets(`
         SELECT status,maintenance_due FROM ledger_summary_state WHERE group_id='group-1';
         SELECT group_id,currency,gross_minor FROM ledger_totals;
-        SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;
+         SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;
+         SELECT status,ledger_totals_ready,reconciliation_due FROM projection_state WHERE group_id='group-1';
       `);
       expect(mutationSummary).toEqual([{ status: 'dirty', maintenance_due: 1 }]);
       expect(mutationTotals).toEqual([]);
-      expect(mutationLegacy).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
+       expect(mutationLegacy).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
+       expect(mutationProjection).toEqual([{ status: 'ready', ledger_totals_ready: 0, reconciliation_due: 0 }]);
 
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at) VALUES('group-1','equal','["person-1"]',NULL,'2026-01-01'); UPDATE groups SET deleted_at='2026-02-01' WHERE id='group-1';`, '--yes']);
-      const [defaultRows, foreignKeyRows] = querySets("SELECT group_id FROM group_split_defaults WHERE group_id='group-1'; PRAGMA foreign_key_check;");
+       const [defaultRows, foreignKeyRows, deletedLegacy] = querySets("SELECT group_id FROM group_split_defaults WHERE group_id='group-1'; PRAGMA foreign_key_check; SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;");
       expect(defaultRows).toEqual([]);
-      expect(foreignKeyRows).toEqual([]);
+       expect(foreignKeyRows).toEqual([]);
+       expect(deletedLegacy).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
 
       const invalidChild = spawnSync(execPath, ['--no-warnings', '--experimental-vm-modules', wrangler, 'd1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', "INSERT INTO scheduled_payers(scheduled_expense_id,person_id,amount_minor) VALUES('missing-schedule','person-1',1);", '--yes'], { cwd: tempRoot, encoding: 'utf8' });
       expect(invalidChild.status).not.toBe(0);

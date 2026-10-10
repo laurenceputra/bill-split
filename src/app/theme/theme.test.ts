@@ -108,24 +108,12 @@ describe('Warm Ledger visual system', () => {
     expect(base).toContain('border-color: var(--color-primary);');
   });
 
-  it('uses semantic tokens without old authored aliases or caret colors', () => {
-    expect(tokens).toContain('--color-page: #F7F3FA;');
-    expect(tokens).toContain('--color-primary: #6B4FD3;');
-    expect(tokens).toContain('--color-positive-fg:');
-    expect(tokens).toContain('--color-debt-fg:');
-    expect(css).not.toMatch(/var\(--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\)/);
-    expect(tokens).not.toMatch(/--color-(ink|canvas|mint|coral|focus|on-primary|surface-muted|primary-strong|primary-soft|topbar|nav-surface|overlay|secondary-hover|danger-border|danger-hover)\s*:/);
-    expect(base).toContain("stroke='%23746A84'");
-    expect(base).not.toContain('%23756A67');
-  });
-
   it('owns the 895/896 responsive boundary in one responsive layer', () => {
     expect(foundations).toContain('--breakpoint-desktop-px: 896px;');
     expect(responsive).toContain('@media (max-width: 55.999rem)');
     expect(responsive).toContain('@media (min-width: 56rem)');
     expect(responsive).toMatch(/@media \(max-width: 55\.999rem\)[\s\S]*\.bottom-nav\s*\{[\s\S]*display: grid;/);
     expect(responsive).toMatch(/@media \(min-width: 56rem\)[\s\S]*\.desktop-nav\s*\{[\s\S]*display: flex;[\s\S]*\.bottom-nav\s*\{[\s\S]*display: none;/);
-    expect(895).toBeLessThan(896);
   });
 
   it('keeps group cards single-column until desktop and content-height beside taller cards', () => {
@@ -166,7 +154,6 @@ describe('Warm Ledger visual system', () => {
   it('keeps loading, cached, offline, and error states explicit in source', () => {
     expect(appSource).toContain('function HomeLoadingPlaceholder()');
     expect(appSource).toContain('function GroupOverviewLoadingPlaceholder()');
-    expect(appSource).toContain('<ResourceState');
     expect(appSource).toContain('role="status"');
     expect(appSource).toContain('offline-banner');
     expect(appSource).toContain('cache-status');

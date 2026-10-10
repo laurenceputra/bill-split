@@ -107,6 +107,8 @@ export function ActionGroup({ children, className = '', region }: { children: Re
   return <div className={`ui-action-group ${className}`.trim()} data-flow-region={region}>{children}</div>;
 }
 
+export function Loading() { return <ResourceState state="loading" className="muted">Loading…</ResourceState>; }
+
 export function ResourceState({ state, children, label, action, className = '' }: { state: 'loading' | 'cached' | 'offline' | 'empty' | 'error'; children?: ReactNode; label?: string; action?: ReactNode; className?: string }) {
   const message = state === 'loading' ? `Loading${label ? ` ${label}` : ''}…` : state === 'cached' ? `Showing cached${label ? ` ${label}` : ''}; it may be out of date.` : state === 'offline' ? `${label || 'This resource'} is unavailable offline.` : state === 'empty' ? `No ${label || 'items'} yet.` : `Could not load${label ? ` ${label}` : ''}.`;
   return <div className={`ui-resource-state ui-resource-state--${state} ${className}`.trim()} role={state === 'error' ? 'alert' : 'status'} aria-live="polite"><span>{children || message}</span>{action ? <span className="ui-action-group">{action}</span> : null}</div>;

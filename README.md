@@ -68,9 +68,17 @@ an explicit executable remains an opt-in and is validated before Playwright
 starts. The override may be incompatible with the installed Playwright
 revision, so CI should continue to use the strict command.
 
-The runtime image currently provides Chromium only (`/ms-playwright`); no
-WebKit project is enabled in default CI. Add a separately provisioned,
-optional WebKit project only when that browser/runtime is available.
+The runtime image currently provides Chromium only (`/ms-playwright`). CI
+installs Chromium and WebKit with host dependencies and runs the focused date
+suite in both projects; the other browser suites remain Chromium-only. Linux
+WebKit is not a substitute for real iOS Safari verification.
+
+The date suite checks all 13 route/disclosure behaviors once per browser at
+390px, then checks eight representative geometries at seven widths: 69 route
+visits per browser, 138 across both (about 24% fewer than the former 182).
+
+See [verification tiers](docs/verification-tiers.md) for suite ownership and
+opt-in synthetic screenshot regeneration commands.
 
 For the reusable Playwright browser audit (production client build plus a
 local Worker and isolated D1 fixture), run:

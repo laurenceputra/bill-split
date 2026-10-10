@@ -2,16 +2,17 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useReloadBlocker } from './reload-safety-react';
 import { runProtectedOperation } from './reload-safety';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { Currency, Credit, Expense, GroupResponse, HistoricalParticipant } from '../shared/types';
+import type { Currency, Credit, Expense, GroupResponse } from '../shared/types';
 import { type CreditInput } from '../shared/schemas';
 import { AmountControl } from './amount-control';
 import { parseMoney } from '../domain/money';
 import { createCredit, getCreditDetails, getExpenseDetails, getExpensePage, getGroup, getMe, hydrateExpenses, updateCredit, type ExpensePage, ApiError } from './api';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 import { invalidateForMutation, revalidate, RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
-import { ActionGroup, Button, Field, FormSurface, Layout, LedgerList, LedgerRow, Money, PageHeader, ResourceState, SectionHeader, useOnlineStatus } from './ui';
+import { ActionGroup, Button, Field, FormSurface, Layout, LedgerList, LedgerRow, Loading, Money, PageHeader, SectionHeader, useOnlineStatus } from './ui';
 import { defaultRefundApplications, derivedBeneficiaryShares, derivedPayerShares, localBrowserDate, remainingRefundableMinor, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
 import { createPageRequestScope } from './pagination';
+import { historicalParticipantName as historicalName, minorToInput as money } from './form-display';
 
 type Application = CreditApplicationDraft;
 type Allocation = CreditAllocationDraft & { touched?: boolean; personTouched?: boolean; defaultHint?: string };
@@ -30,7 +31,6 @@ export function refundModeOptions(linked: boolean) {
 }
 
 const id = () => crypto.randomUUID();
-const money = (minor: number) => (minor / 100).toFixed(2);
 export const refundErrorText = (error: unknown) => error instanceof ApiError ? error.message : error instanceof Error ? error.message : 'Something went wrong. Retry when the connection is available.';
 const emptyApplication = (expenseId = ''): Application => ({ id: id(), expenseId, amount: '', touched: false, provenance: 'default' });
 const emptyAllocation = (allocationType: AllocationType): Allocation => ({ id: id(), personId: '', allocationType, amount: '', touched: false });
@@ -224,10 +224,6 @@ export function refundAllocationPeople(group: Pick<GroupResponse, 'members' | 'h
   return [...active, ...historical];
 }
 
-function historicalName(participant: HistoricalParticipant) {
-  return participant.status === 'deleted' ? `${participant.name} · Deleted account` : participant.status === 'removed' ? `${participant.name} · Removed` : participant.name;
-}
-
 function personName(people: Array<{ personId: string; name: string }>, personId: string, currentPersonId?: string | null) {
   return personId === currentPersonId ? 'You' : people.find((person) => person.personId === personId)?.name || 'Removed participant';
 }
@@ -253,7 +249,6 @@ export function RefundExpensePickerOptions({ expenses, rows, rowId, editingCredi
   return <>{refundExpenseOptions(expenses, rows, rowId, editingCreditId, search).map((expense) => <option key={expense.id} value={expense.id}>{expense.date} · {expense.description} · {expense.currency}</option>)}</>;
 }
 
-function Loading() { return <ResourceState state="loading" className="muted">Loading…</ResourceState>; }
 function ConnectionBanner({ detail }: { detail: string }) { return <p className="offline-banner" role="status">Offline · {detail}</p>; }
 
 export function AllocationRows({ rows, label, currency, people, currentPersonId, onChange, onRemove, minimumRows, showErrors, error }: {
@@ -300,7 +295,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const online = useOnlineStatus();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses);
   const groupResource = useResource<GroupResponse>(resourceKeys.group(me.data?.id || 'pending', groupId || 'missing'), me.data?.id, (signal) => getGroup(groupId, signal), RESOURCE_FRESHNESS.group);
-  const editResource = useResource<{ credit: Credit }>(resourceKeys.creditDetail(me.data?.id || 'pending', creditId || 'new'), me.data?.id, (signal) => creditId ? getCreditDetails(creditId, signal) : Promise.resolve({ credit: undefined as unknown as Credit }), RESOURCE_FRESHNESS.expenseDetail);
+  const editResource = useResource<{ credit: Credit }>(creditId ? resourceKeys.creditDetail(me.data?.id || 'pending', creditId) : null, me.data?.id, (signal) => getCreditDetails(creditId!, signal), RESOURCE_FRESHNESS.expenseDetail);
   const loadedCredit = initialCredit || editResource.data?.credit;
   const expenseResourceKey = resourceKeys.expenses(me.data?.id || 'pending', groupId || 'missing');
   const expenseResource = useResource<ExpensePage>(expenseResourceKey, me.data?.id, (signal) => getExpensePage(groupId, { limit: 50 }, signal), RESOURCE_FRESHNESS.expenses, me.data?.id ? () => hydrateExpenses(me.data!.id, groupId) : undefined);

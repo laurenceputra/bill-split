@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { invalidateCachedGroups, updateGroupSnapshot, updateGroupsSnapshot } from './idb';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
 import type { Group, GroupResponse } from '../shared/types';
@@ -133,20 +133,25 @@ export function subscribeResource<T>(key: ResourceKey, listener: () => void, use
   };
 }
 
-export function useResource<T>(key: ResourceKey, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>, options: ResourceOptions = {}) {
-  const resolvedUser = isIdentityKey(key) ? 'identity' : userId || activeUserId || '';
-  const resource = entry<T>(key, resolvedUser, ttl);
-  if (!resource.visible) resource.evicted = false;
-  resource.loader = loader;
-  resource.hydrate = hydrate;
-  resource.ttl = Math.max(MIN_RESOURCE_FRESHNESS_MS, ttl);
+/** A null key disables this consumer without registering or changing a shared resource. */
+export function useResource<T>(key: ResourceKey | null, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>, options: ResourceOptions = {}) {
+  const resolvedUser = key !== null && isIdentityKey(key) ? 'identity' : userId || activeUserId || '';
+  const disabledOffline = !online();
+  const disabledSnapshot = useMemo(() => idleSnapshot<T>(resolvedUser), [resolvedUser, disabledOffline]);
+  const resource = key === null ? undefined : entry<T>(key, resolvedUser, ttl);
+  if (resource) {
+    if (!resource.visible) resource.evicted = false;
+    resource.loader = loader;
+    resource.hydrate = hydrate;
+    resource.ttl = Math.max(MIN_RESOURCE_FRESHNESS_MS, ttl);
+  }
   const snapshot = useSyncExternalStore(
-    (listener) => subscribeResource<T>(key, listener, resolvedUser),
-    () => resource.snapshot,
-    () => resource.snapshot,
+    (listener) => key === null ? () => undefined : subscribeResource<T>(key, listener, resolvedUser),
+    () => resource?.snapshot ?? disabledSnapshot,
+    () => resource?.snapshot ?? disabledSnapshot,
   );
   useEffect(() => {
-    if (!resolvedUser || !isVisible()) return;
+    if (key === null || !resource || !resolvedUser || !isVisible()) return;
     if (!isIdentityKey(key)) {
       const identity = entries.get('identity');
       if (identity && (identity.snapshot.status === 'idle' || identity.snapshot.revalidating || identity.snapshot.stale || !isResourceFresh(identity.snapshot, identity.ttl))) return;
@@ -164,13 +169,13 @@ export function useResource<T>(key: ResourceKey, userId: string | undefined, loa
         const missed = resource.snapshot.status === 'idle';
         if (missed) resource.snapshot = stable({ ...resource.snapshot });
         notify(resource);
-        if (missed && isVisible() && !options.skipWhenOffline) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
+        if (missed && resource.visible > 0 && isVisible() && !options.skipWhenOffline) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
       });
     }
     if (resource.hydrationPromise || options.skipWhenOffline) return;
     const due = snapshot.fetchedAt !== undefined && !isResourceFresh(snapshot, resource.ttl);
     if (snapshot.status !== 'auth-blocked' && (snapshot.status === 'idle' || (due || snapshot.stale) && !snapshot.revalidating && !snapshot.error && (!snapshot.offline || online()))) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
-  }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource.ttl, options.skipWhenOffline]);
+  }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource?.ttl, options.skipWhenOffline]);
   return snapshot;
 }
 

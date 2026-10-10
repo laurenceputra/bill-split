@@ -1,46 +1,72 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error Node types are not shipped to the browser build.
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
 
-const baseConfig = readFileSync(new URL('../playwright.config.ts', import.meta.url), 'utf8');
-const localConfig = readFileSync(new URL('../playwright.local.config.ts', import.meta.url), 'utf8');
-const workflow = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8');
-const dateSuite = readFileSync(new URL('../tests/e2e/date-controls.spec.ts', import.meta.url), 'utf8');
-const fixtures = readFileSync(new URL('../tests/e2e/fixtures.ts', import.meta.url), 'utf8');
-
-describe('Playwright config isolation', () => {
-  it('keeps the default config independent of all local browser override variables', () => {
-    expect(baseConfig).not.toContain('BILLSPLIT_');
-    expect(baseConfig).not.toContain('launchOptions');
-  });
-
-  it('makes the local config require the wrapper handoff', () => {
-    expect(localConfig).toContain('requireValidatedPlaywrightLaunchOptions');
-    expect(localConfig).toContain('./playwright.config');
-  });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
 });
 
-describe('Date-control CI isolation experiment', () => {
-  it('runs both browser projects in independent single-worker jobs and retains both diagnostics', () => {
-    const dateJob = workflow.split('\n  date-controls:\n')[1];
-    expect(dateJob).toBeDefined();
-    expect(dateJob).toContain('fail-fast: false');
-    expect(dateJob).toMatch(/- project: chromium\s+browser: chromium/);
-    expect(dateJob).toMatch(/- project: date-controls-webkit\s+browser: webkit/);
-    expect(dateJob).toContain('npm run test:e2e -- tests/e2e/date-controls.spec.ts --project=${{ matrix.project }} --workers=1');
-    expect(dateJob).toContain('if: failure()');
-    expect(dateJob).toContain('name: date-controls-diagnostics-${{ matrix.project }}');
-    expect(dateJob).toContain('wrangler-logs/');
-    expect(baseConfig).toContain("{ name: 'chromium', use: { browserName: 'chromium' } }");
-    expect(baseConfig).toContain("{ name: 'date-controls-webkit', testMatch: '**/date-controls.spec.ts', use: { browserName: 'webkit' } }");
-    expect(baseConfig).toContain("command: 'node tests/e2e/web-server-wrapper.mjs'");
-    expect(baseConfig).toContain('reuseExistingServer: false');
+describe('Playwright config contracts', () => {
+  it('keeps CI browser failures independent and uploads server diagnostics', () => {
+    const workflow = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8');
+    const job = workflow.match(/^  date-controls:\s*\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/m)?.[1] ?? '';
+    expect(job).toMatch(/fail-fast:\s*false/);
+    const matrixEntries = [...job.matchAll(/^\s*-\s*project:\s*([^\s]+)\s*\n\s*browser:\s*([^\s]+)/gm)]
+      .map((entry) => ({ project: entry[1], browser: entry[2] }));
+    expect(matrixEntries).toEqual(expect.arrayContaining([
+      { project: 'chromium', browser: 'chromium' },
+      { project: 'date-controls-webkit', browser: 'webkit' },
+    ]));
+    const dateCommand = job.split('\n').find((line) => /^\s*-\s*run:/.test(line) && /tests\/e2e\/date-controls\.spec\.ts/.test(line)) ?? '';
+    expect(dateCommand).toMatch(/(?:test:e2e|playwright\s+test)\s/);
+    expect(dateCommand).toMatch(/--project(?:=|\s+)\$\{\{\s*matrix\.project\s*\}\}/);
+    expect(dateCommand).toMatch(/--workers(?:=|\s+)1(?:\s|$)/);
+    expect(job).toMatch(/if:\s*(?:\$\{\{\s*)?failure\(\)/);
+    expect(job).toMatch(/name:\s*date-controls-diagnostics-.*matrix\.project/);
+    expect(job).toContain('wrangler-logs/');
   });
 
-  it('does not disable service workers for the date suite', () => {
-    expect(baseConfig).not.toContain('serviceWorkers:');
-    expect(dateSuite).not.toContain('serviceWorkers:');
-    expect(fixtures).not.toMatch(/serviceWorkers:\s*['"]block['"]/);
-    expect(workflow.split('\n  date-controls:\n')[1]).not.toMatch(/serviceWorkers|--config[= ]/);
+  it('ignores unvalidated local browser overrides in the default config', async () => {
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_EXECUTABLE_PATH', '/unvalidated/browser');
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_VALIDATED_EXECUTABLE_PATH', '/validated/browser');
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_VALIDATED_OVERRIDE', '1');
+    const { default: config } = await import('../playwright.config');
+    expect(config.use?.launchOptions).toBeUndefined();
+    for (const project of config.projects ?? []) {
+      expect(project.use?.launchOptions).toBeUndefined();
+    }
+  });
+
+  it('requires a validated wrapper handoff for the local config', async () => {
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_VALIDATED_OVERRIDE', '');
+    await expect(import('../playwright.local.config')).rejects.toThrow(/validated browser handoff/);
+  });
+
+  it('applies the validated override only to Chromium', async () => {
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_VALIDATED_EXECUTABLE_PATH', '/validated/browser');
+    vi.stubEnv('BILLSPLIT_PLAYWRIGHT_VALIDATED_OVERRIDE', '1');
+    const { default: config } = await import('../playwright.local.config');
+    expect(config.projects?.find((project) => project.name === 'chromium')?.use?.launchOptions)
+      .toEqual({ executablePath: '/validated/browser' });
+    expect(config.projects?.find((project) => project.name === 'date-controls-webkit')?.use?.launchOptions).toBeUndefined();
+  });
+
+  it('covers date controls in Chromium and scoped WebKit with failure diagnostics', async () => {
+    const { default: config } = await import('../playwright.config');
+    expect(config.projects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'chromium', use: expect.objectContaining({ browserName: 'chromium' }) }),
+      expect.objectContaining({ name: 'date-controls-webkit', testMatch: '**/date-controls.spec.ts', use: expect.objectContaining({ browserName: 'webkit' }) }),
+    ]));
+    expect(config.use).toMatchObject({ trace: 'retain-on-failure', screenshot: 'only-on-failure' });
+    expect(config.use?.serviceWorkers).not.toBe('block');
+    for (const project of config.projects ?? []) expect(project.use?.serviceWorkers).not.toBe('block');
+    const fixtures = readFileSync(new URL('../tests/e2e/fixtures.ts', import.meta.url), 'utf8');
+    expect(fixtures).not.toMatch(/(?:['"]serviceWorkers['"]|\bserviceWorkers)\s*:\s*['"]block['"]/);
+    expect(config.webServer).toMatchObject({
+      reuseExistingServer: false,
+      gracefulShutdown: { signal: 'SIGTERM', timeout: expect.any(Number) },
+      stdout: 'pipe', stderr: 'pipe',
+    });
   });
 });

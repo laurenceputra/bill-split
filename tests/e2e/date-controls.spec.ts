@@ -33,11 +33,21 @@ async function expectContained(input: Locator, context: string) {
   expect(violations, `${context} must fit every containing layer`).toEqual([]);
 }
 
-for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
-  test(`date controls stay contained and retain values at ${width}px`, async ({ authenticatedPage: page }) => {
+// Every route/disclosure gets behavior coverage; geometry samples distinct
+// containers rather than repeating aliases and create/edit variants.
+const geometryNames = new Set(['expense create', 'repeat start/end', 'schedule edit', 'refund create', 'settlement create', 'settlement edit', 'group filters expanded', 'global custom insights']);
+const cases = [
+  { width: 390, geometry: false, locations },
+  ...[320, 390, 767, 768, 895, 896, 1440].map((width) => ({
+    width, geometry: true, locations: locations.filter((location) => geometryNames.has(location.name)),
+  })),
+];
+
+for (const { width, geometry, locations: selectedLocations } of cases) {
+  test(`date controls ${geometry ? 'stay contained' : 'retain values and route wiring'} at ${width}px`, async ({ authenticatedPage: page }) => {
     await page.setViewportSize({ width, height: 900 });
     page.on('dialog', (dialog) => void dialog.accept());
-    for (const location of locations) {
+    for (const location of selectedLocations) {
       await test.step(location.name, async () => {
         await page.goto(location.path);
         if (location.repeat) await page.getByLabel('Repeat this expense').check();
@@ -47,7 +57,8 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
         await expect(dates).toHaveCount(location.count);
         for (let index = 0; index < location.count; index += 1) {
           const input = dates.nth(index);
-          await expectContained(input, `${location.name}: initial date ${index}`);
+          if (geometry) await expectContained(input, `${location.name}: initial date ${index}`);
+          else await expect(input).toBeVisible();
           // Schedule preview assumes a valid start date. Test its native empty
           // rendering without sending an invalid draft to that unrelated preview.
           if ((location.repeat || location.schedule) && index === 0) {
@@ -56,20 +67,19 @@ for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
             await input.fill('');
           }
           await expect(input).toHaveValue('');
-          await expectContained(input, `${location.name}: empty date ${index}`);
+          if (geometry) await expectContained(input, `${location.name}: empty date ${index}`);
           const value = index === 0 ? '2030-01-02' : '2030-02-03';
           await input.fill(value);
           await input.blur();
           await expect(input).toHaveValue(value);
-          await expectContained(input, `${location.name}: populated date ${index}`);
+          if (geometry) await expectContained(input, `${location.name}: populated date ${index}`);
         }
-        if (location.repeat || location.schedule) {
+        if (!geometry && (location.repeat || location.schedule)) {
           await expect(dates.nth(1)).toHaveAttribute('min', '2030-01-02');
           await dates.nth(1).fill('');
           await expect(dates.nth(1)).toHaveValue('');
-          await expectContained(dates.nth(1), `${location.name}: cleared optional end`);
         }
-        if (location.insights) {
+        if (!geometry && location.insights) {
           await page.getByRole('button', { name: 'Apply range', exact: true }).click();
           await expect(page).toHaveURL(/from=2030-01-02&to=2030-02-03/);
           await expect(dates.nth(0)).toHaveValue('2030-01-02');
