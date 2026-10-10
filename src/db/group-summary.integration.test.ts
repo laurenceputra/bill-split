@@ -123,6 +123,48 @@ function databaseWithCreditDefaultRace(expenseId: string) {
 }
 
 describe('group summaries with the in-process local D1 binding', () => {
+  it('excludes deleted-group credits from global timelines without changing groupwide visibility or pagination', async () => {
+    const active = await createFixture('timeline-active');
+    const deleted = await createFixture('timeline-deleted');
+    const repo = new Repository(db);
+    await exec("INSERT INTO group_members(group_id,person_id,user_id,joined_at,role) VALUES(?,?,?,'2026-01-01','member')", deleted.groupId, active.personA, active.userA);
+    const creditIds = [`${active.groupId}-new`, `${active.groupId}-old`, `${deleted.groupId}-credit`];
+    for (const [index, id] of creditIds.entries()) {
+      const fixture = index === 2 ? deleted : active;
+      const date = ['2026-01-03', '2026-01-01', '2026-01-04'][index];
+      await exec("INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,created_by,created_at,updated_at) VALUES(?,?,'refund','member_reimbursement',25,'USD',?,?,?,?)", id, fixture.groupId, date, fixture.userB, date, date);
+      // The viewer is not a credit recipient: timeline access is groupwide.
+      await exec("INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES(?,?,'recipient',25)", id, fixture.personB);
+    }
+    const expenseId = `${active.groupId}-expense`;
+    await addExpense(active, expenseId, 100, '2026-01-02');
+    await exec('UPDATE groups SET deleted_at=? WHERE id=?', '2026-01-05', deleted.groupId);
+    await expect(db.prepare('SELECT deleted_at FROM credits WHERE id=?').bind(creditIds[2]).first()).resolves.toEqual({ deleted_at: null });
+    await expect(db.prepare('SELECT deleted_at FROM group_members WHERE group_id=? AND user_id=?').bind(deleted.groupId, active.userA).first()).resolves.toEqual({ deleted_at: null });
+
+    for (const kind of [undefined, 'credit'] as const) {
+      const expected = kind ? creditIds.slice(0, 2) : [creditIds[0], expenseId, creditIds[1]];
+      for (const groupId of [undefined, active.groupId]) {
+        const page = await repo.globalTransactionPage(active.userA, groupId, { kind });
+        expect(page.items.map((item) => item.id)).toEqual(expected);
+        expect(page.nextCursor).toBeUndefined();
+        const pagedIds: string[] = [];
+        let cursor: string | undefined;
+        for (let index = 0; index < expected.length; index += 1) {
+          const next = await repo.globalTransactionPage(active.userA, groupId, { kind, limit: 1, cursor });
+          expect(next.items).toHaveLength(1);
+          pagedIds.push(next.items[0].id);
+          cursor = next.nextCursor;
+          if (index < expected.length - 1) expect(cursor).toBeDefined();
+        }
+        expect(pagedIds).toEqual(expected);
+        expect(cursor).toBeUndefined();
+      }
+      await expect(repo.globalTransactionPage(active.userA, deleted.groupId, { kind, limit: 1 })).resolves.toEqual({ items: [], nextCursor: undefined });
+    }
+    expect((await repo.transactionPage(active.groupId, { kind: 'credit' })).items.map((item) => item.id)).toEqual(creditIds.slice(0, 2));
+  });
+
   it('uses authoritative fallback, publishes a ready projection, and selects the branch from one read snapshot', async () => {
     const fixture = await createFixture('fallback');
     await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');

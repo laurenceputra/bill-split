@@ -61,7 +61,7 @@ describe('frontend API errors and cache fallback', () => {
       await expect(lateResult).resolves.toMatchObject({ code: 'AUTH_REQUIRED' });
       await expect(saveGroups({ userId: 'mutation-user', groups: [], cachedAt: '' }, generation)).rejects.toThrow('local session changed');
       expect(await readGroups('mutation-user')).toBeUndefined();
-      expect(await listOutbox('mutation-user')).toHaveLength(1);
+      expect(await listOutbox('mutation-user')).toHaveLength(0);
       expect(getAuthLifecycle().status).toBe('unauthenticated');
       expect(getAuthState()).toMatchObject({ required: true, code: 'AUTH_REQUIRED' });
       expect(finalizeSuccessfulClerkSignOut()).toBe(true);

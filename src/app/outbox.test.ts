@@ -643,6 +643,7 @@ describe('durable expense outbox', () => {
     await queue('logout-in-flight');
     const flush = flushOutbox();
     await vi.waitFor(() => expect(expenseCalls).toBe(1));
+    const lateClaim = await readOutboxItem('logout-in-flight');
     const logout = clearEverythingForLogout(false);
     await vi.waitFor(() => expect(abortObserved).toBe(true));
     let logoutSettled = false;
@@ -655,7 +656,11 @@ describe('durable expense outbox', () => {
     await flushOutbox();
     expect(abortObserved).toBe(true);
     expect(expenseCalls).toBe(1);
-    expect(await listOutbox('user-a')).toHaveLength(1);
+    expect(await listOutbox()).toHaveLength(0);
+    // Even a stale completion trying to release its old lease cannot recreate
+    // the deleted durable operation after cleanup.
+    expect(await updateOutboxIfOwned('logout-in-flight', lateClaim!.leaseOwner!, { status: 'pending', deliveryUncertain: true })).toBeUndefined();
+    expect(await listOutbox()).toEqual([]);
   });
 
   it('does not release an in-flight lease when auth downgrades before transport settles', async () => {

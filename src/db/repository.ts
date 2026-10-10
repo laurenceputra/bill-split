@@ -1470,7 +1470,7 @@ export class Repository {
        UNION ALL
        SELECT c.id,c.group_id,${groupName},NULL,c.amount_minor,c.currency,c.credit_date,NULL,NULL,c.note,NULL,NULL,NULL,NULL,c.created_by,c.created_at,c.client_operation_id,'credit' AS kind,c.subtype,c.delivery_mode
         FROM credits c JOIN groups g ON g.id=c.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=c.group_id AND authorized_member.user_id=?1 AND authorized_member.deleted_at IS NULL'}
-       WHERE ${userId === undefined ? 'c.group_id=?1' : `EXISTS (SELECT 1 FROM group_members credit_member WHERE credit_member.group_id=c.group_id AND credit_member.user_id=?1 AND credit_member.deleted_at IS NULL${groupId ? ' AND credit_member.group_id=?3' : ''})`} AND c.deleted_at IS NULL
+       WHERE ${userId === undefined ? 'c.group_id=?1' : `EXISTS (SELECT 1 FROM group_members credit_member WHERE credit_member.group_id=c.group_id AND credit_member.user_id=?1 AND credit_member.deleted_at IS NULL${groupId ? ' AND credit_member.group_id=?3' : ''})`} AND c.deleted_at IS NULL AND g.deleted_at IS NULL
      ) SELECT * FROM transaction_rows tr WHERE 1=1`;
     if (opts.kind) { sql += ' AND tr.kind=?'; args.push(opts.kind); }
     if (opts.q) { const escaped = escapedLike(opts.q); assertLikeSearch(escaped); const pattern = `%${escaped}%`; sql += " AND (tr.description LIKE ? ESCAPE '\\' OR tr.notes LIKE ? ESCAPE '\\' OR tr.note LIKE ? ESCAPE '\\')"; args.push(pattern, pattern, pattern); }
