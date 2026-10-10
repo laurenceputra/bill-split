@@ -122,17 +122,17 @@ test('multiple historical pages stay waiting; close-all and reopen recovers with
   } finally { await historical.close(); }
 });
 
-test('clean clients automatically activate B only after five seconds idle and reload once', async ({ page, context }) => {
+test('clean clients automatically activate B only after two seconds idle and reload once', async ({ page, context }) => {
   await open(page);
   const second = await context.newPage();
   await open(second);
   await page.locator('#blur').click();
   const start = Date.now();
   await update(page);
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(500);
   await expect(page.locator('#build')).toHaveText('A');
   await expect(page.locator('#build')).toHaveText('B');
-  expect(Date.now() - start).toBeGreaterThanOrEqual(5_000);
+  expect(Date.now() - start).toBeGreaterThanOrEqual(2_000);
   await expect(second.locator('#build')).toHaveText('B');
   expect(await fixture(page, 'loads()')).toBe(2);
   expect(await fixture(second, 'loads()')).toBe(2);
@@ -154,7 +154,7 @@ test('a dirty second client remains protected after blur until its semantic draf
   await second.locator('#draft').fill('');
   await second.locator('#blur').click();
   // RELEASE schedules the core's existing 15–20s jittered retry, then the
-  // five-second idle barrier. The global 8s assertion deadline is too short.
+  // two-second idle barrier. The global 8s assertion deadline is too short.
   await expect(page.locator('#build')).toHaveText('B', { timeout: 30_000 });
   await expect(second.locator('#build')).toHaveText('B', { timeout: 30_000 });
 });

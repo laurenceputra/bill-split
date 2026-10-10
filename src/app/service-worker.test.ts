@@ -110,6 +110,7 @@ describe('page-side update preparation', () => {
     expect(count()).toBeGreaterThan(before);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(getServiceWorkerUpdateState().manualError).toBe(guidance);
+    recordReloadInteraction(); // Identity retry backoff exceeds the automatic idle deadline.
     f.message({ type: 'IDENTITY' });
     f.message({ type: 'PREPARE', attempt: 'identity-attempt', leaseMs: 10_000 });
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false }));
@@ -176,7 +177,7 @@ describe('page-side update preparation', () => {
     recordReloadInteraction();
     observeServiceWorkerRegistration(f.registration as unknown as ServiceWorkerRegistration, { safetyIntegrated: true, autoApply: true });
     await checkForUpdates(); f.message({ type: 'IDENTITY' }, replacement);
-    await vi.advanceTimersByTimeAsync(4_999);
+    await vi.advanceTimersByTimeAsync(1_999);
     expect(replacement.postMessage.mock.calls.some(([data]) => data.type === 'REQUEST')).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(replacement.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'REQUEST' }));
@@ -322,12 +323,15 @@ describe('page-side update preparation', () => {
     release();
   });
 
-  it('all prepare requests require local five-second inactivity, including passive tabs', async () => {
+  it('all prepare requests require local two-second inactivity, including passive tabs', async () => {
     const f = fixture(true, true); await checkForUpdates();
     f.message({ type: 'IDENTITY' });
     f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: false }));
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(1_999);
+    f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
+    expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: false }));
+    await vi.advanceTimersByTimeAsync(1);
     f.message({ type: 'PREPARE', attempt: 'remote-attempt', leaseMs: 10_000 });
     expect(f.worker.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'ACK', ready: true }));
     expect(getReloadSafetyState().gated).toBe(true);
@@ -401,7 +405,7 @@ describe('page-side update preparation', () => {
   it('automatically requests at the idle deadline and promptly when a draft clears', async () => {
     const release = createReloadBlocker('Unsaved expense');
     const f = fixture(true, true, true); await checkForUpdates(); f.message({ type: 'IDENTITY' });
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(f.worker.postMessage.mock.calls.some(([data]) => data.type === 'REQUEST')).toBe(false);
     release(); await Promise.resolve();
     expect(f.worker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'REQUEST' }));

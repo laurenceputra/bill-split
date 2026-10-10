@@ -150,7 +150,7 @@ requires connectivity. No update action discards work or clears local storage.
 
 Modern coordination accepts `BILLSPLIT_UPDATE_V1` messages. The actual waiting worker
 enumerates all same-origin window clients in its registration scope, including
-uncontrolled clients. Each must acknowledge preparation after five seconds of
+uncontrolled clients. Each must acknowledge preparation after two seconds of
 local inactivity, hold a leased gate, and acknowledge a final validation round.
 Membership is checked between rounds and again before `skipWaiting`. A dirty,
 busy, legacy, missing, or unresponsive client blocks activation. Clean idle hidden
@@ -169,7 +169,7 @@ Otherwise it keeps a protected deferred refresh and retries without spinning.
 target. A matching `RELEASE` clears that intent. Losing simultaneous requests
 are released independently of a different attempt's held gate. A participating
 tab does not start another request, and retry timing includes jitter.
-One idle-deadline timer wakes automatic application at last interaction plus five
+One idle-deadline timer wakes automatic application at last interaction plus two
 seconds. Coalesced safety notifications wake promptly when local blockers clear;
 gate publications cannot recursively start requests. Remote failure cooldowns
 remain bounded and jittered, and gate release does not bypass those cooldowns.

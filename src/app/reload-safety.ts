@@ -1,5 +1,5 @@
 /** Dependency-light, synchronous reload barrier. No session or storage imports. */
-export const RELOAD_IDLE_MS = 5_000;
+export const RELOAD_IDLE_MS = 2_000;
 export const MAX_RELOAD_GATE_MS = 10_000;
 export type ReloadSafetyState = Readonly<{ reason?: string; operations: number; gated: boolean; lastInteraction: number; revision: number }>;
 const blockers = new Map<symbol, string>();
