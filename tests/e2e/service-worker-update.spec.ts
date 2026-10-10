@@ -54,6 +54,26 @@ test('canonical installs ignore transformed HTML and preserve cached CSP and exa
   }
 });
 
+test('real Update now clicks honor drafts and writes, then apply an installed update offline without idle delay', async ({ page, context }) => {
+  await open(page);
+  await page.locator('#draft').fill('Demo draft');
+  await update(page);
+  await expect.poll(() => fixture(page, 'state().updateReady')).toBe(true);
+  await page.locator('#update-now').click();
+  expect(await fixture(page, 'state().manualError')).toContain('Unsaved');
+  await page.locator('#draft').fill('');
+  await fixture(page, 'holdMutation()');
+  await page.locator('#update-now').click();
+  expect(await fixture(page, 'state().manualError')).toContain('Held fixture write');
+  await fixture(page, 'releaseMutation()');
+  await context.setOffline(true);
+  const start = Date.now();
+  await page.locator('#update-now').click();
+  await expect(page.locator('#build')).toHaveText('B', { timeout: 4_000 });
+  expect(Date.now() - start).toBeLessThan(5_000);
+  expect(await fixture(page, 'loads()')).toBe(2);
+});
+
 test('historical sole page uses local guards and explicitly activates the modern worker', async ({ page }) => {
   const historical = await createUpdateServer({ historical: true });
   try {
@@ -102,17 +122,17 @@ test('multiple historical pages stay waiting; close-all and reopen recovers with
   } finally { await historical.close(); }
 });
 
-test('clean clients automatically activate B only after five seconds idle and reload once', async ({ page, context }) => {
+test('clean clients automatically activate B only after two seconds idle and reload once', async ({ page, context }) => {
   await open(page);
   const second = await context.newPage();
   await open(second);
   await page.locator('#blur').click();
   const start = Date.now();
   await update(page);
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(500);
   await expect(page.locator('#build')).toHaveText('A');
   await expect(page.locator('#build')).toHaveText('B');
-  expect(Date.now() - start).toBeGreaterThanOrEqual(5_000);
+  expect(Date.now() - start).toBeGreaterThanOrEqual(2_000);
   await expect(second.locator('#build')).toHaveText('B');
   expect(await fixture(page, 'loads()')).toBe(2);
   expect(await fixture(second, 'loads()')).toBe(2);
@@ -134,7 +154,7 @@ test('a dirty second client remains protected after blur until its semantic draf
   await second.locator('#draft').fill('');
   await second.locator('#blur').click();
   // RELEASE schedules the core's existing 15–20s jittered retry, then the
-  // five-second idle barrier. The global 8s assertion deadline is too short.
+  // two-second idle barrier. The global 8s assertion deadline is too short.
   await expect(page.locator('#build')).toHaveText('B', { timeout: 30_000 });
   await expect(second.locator('#build')).toHaveText('B', { timeout: 30_000 });
 });
@@ -149,7 +169,7 @@ test('held writes block activation; durable idle outbox and unrelated caches sur
   await expect(page.locator('#build')).toHaveText('A');
   expect(await fixture(page, 'safety().operations')).toBe(1);
   await fixture(page, 'releaseMutation()');
-  // Local safety notifications use the same bounded 15–20s retry policy.
+  // Local safety notifications wake promptly once the idle deadline has passed.
   await expect(page.locator('#build')).toHaveText('B', { timeout: 30_000 });
   expect(await fixture(page, 'outbox()')).toEqual([{ id: 'queued-operation', status: 'queued', amount: 123 }]);
   expect(await page.evaluate(async () => (await (await caches.open('unrelated-test-cache')).match('/unrelated'))?.text())).toBe('preserved');

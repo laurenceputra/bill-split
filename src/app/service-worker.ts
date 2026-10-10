@@ -1,5 +1,5 @@
 import { hasActiveMutations } from './mutation-quiescence';
-import { acquireReloadGate, getReloadBlockReason, isReloadSafe, observeReloadInteractions, ownsReloadGate, recordReloadInteraction, releaseReloadGate, subscribeReloadSafety } from './reload-safety';
+import { acquireReloadGate, getReloadBlockReason, getReloadSafetyState, RELOAD_IDLE_MS, observeReloadInteractions, ownsReloadGate, releaseReloadGate, subscribeReloadSafety } from './reload-safety';
 
 const PROTOCOL = 'BILLSPLIT_UPDATE_V1';
 const CHECK_INTERVAL_MS = 30 * 60_000;
@@ -10,6 +10,8 @@ export type UpdatePhase = 'initializing' | 'unsupported' | 'idle' | 'checking' |
 export type ServiceWorkerUpdateState = Readonly<{
   phase: UpdatePhase; updateReady: boolean; applying: boolean; blocked: boolean;
   blockerReason?: string; lastCheck?: number; lastSuccess?: number; error?: string;
+  manualError?: string;
+  offline?: boolean;
 }>;
 const initialState: ServiceWorkerUpdateState = Object.freeze({ phase: 'initializing', updateReady: false, applying: false, blocked: false });
 let state = initialState;
@@ -35,6 +37,10 @@ let nextCheck = 0;
 let failures = 0;
 let checkPromise: Promise<void> | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let manualRevision: number | undefined;
+let manualExpires = 0;
+let safetyQueued = false;
 type IdentityCheck = { worker: ServiceWorker; tries: number; timer?: ReturnType<typeof setTimeout> };
 let waitingIdentity: IdentityCheck | undefined;
 let controllerIdentity: IdentityCheck | undefined;
@@ -57,7 +63,8 @@ const visible = () => typeof document !== 'undefined' && document.visibilityStat
 const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
 /** Compatibility helper; focus is activity, not persistent draft ownership. */
 export const hasActiveForm = () => typeof document !== 'undefined' && Boolean((document.activeElement as Element | null)?.closest?.('form'));
-const localReason = () => !safetyIntegrated ? 'Waiting for reload protection to initialize' : !visible() ? 'Waiting for this tab to be visible' : getReloadBlockReason() ?? (hasActiveMutations() ? 'Saving changes' : undefined);
+const preparationReason = (manual = false) => !safetyIntegrated ? 'Waiting for reload protection to initialize' : (manual && Date.now() < manualExpires && manualRevision === getReloadSafetyState().revision ? getReloadSafetyState().reason : getReloadBlockReason()) ?? (hasActiveMutations() ? 'Saving changes' : undefined);
+const localReason = () => !visible() ? 'Waiting for this tab to be visible' : preparationReason(manualRevision !== undefined);
 export const canApplyServiceWorkerUpdate = () => !localReason();
 const send = (worker: ServiceWorker, type: string, extra: Record<string, unknown> = {}) => worker.postMessage({ protocol: PROTOCOL, type, ...extra });
 const matchesAttempt = (attempt: Attempt | undefined, worker: ServiceWorker, data: { target: string; attempt: string }) => attempt?.worker === worker && attempt.target === data.target && attempt.attempt === data.attempt;
@@ -67,9 +74,22 @@ const settledPhase = (reason?: string) => {
   else if (waiting) phase(reason || localReason() || !waitingTarget ? 'blocked' : 'ready', { updateReady: true, blockerReason: reason || (!waitingTarget ? 'Verifying the waiting update' : localReason()) });
   else phase('idle', { updateReady: false });
 };
+// Discovery is independent of activation: a late network result cannot hide
+// an actual held/requested update or its protected controller verification.
+const discoveryPhase = (value: UpdatePhase, extra: Partial<ServiceWorkerUpdateState> = {}) => {
+  if (requested || prepared || verifyingController || deferredTarget) { settledPhase(); setState(extra); }
+  else phase(value, extra);
+};
+const manualBlockHelp = (reason?: string) => {
+  const safety = getReloadSafetyState();
+  if (safety.operations || hasActiveMutations()) return `${reason || 'Saving changes'}. Let ongoing operations finish, then try Update now again.`;
+  if (safety.reason) return `${reason || safety.reason}. Save or discard this unfinished work, then try Update now again.`;
+  return `${reason || 'The update cannot apply yet'}. Try Update now again when this tab is ready.`;
+};
 const cancelPrepared = () => {
   const old = prepared;
   prepared = undefined;
+  manualRevision = undefined;
   if (old) {
     if (matchesAttempt(requested, old.worker, old)) clearRequest();
     if (matchesAttempt(activationIntent, old.worker, old)) activationIntent = undefined;
@@ -82,6 +102,7 @@ const cancelPrepared = () => {
 const clearRequest = (cancel = false) => {
   const old = requested;
   requested = undefined;
+  if (cancel) manualRevision = undefined;
   clearTimeout(attemptTimer);
   attemptTimer = undefined;
   if (old) {
@@ -96,7 +117,7 @@ const scheduleRetry = (delay = RETRY_MS + Math.floor(Math.random() * 5_000)) => 
 const reloadSafely = () => {
   if (!deferredTarget || verifyingController || reloaded) return;
   const reason = localReason();
-  if (reason) { phase('deferred', { updateReady: false, blockerReason: reason }); scheduleRetry(); return; }
+  if (reason) { phase('deferred', { updateReady: false, blockerReason: reason }); scheduleIdle(); return; }
   reloaded = true;
   window.location.reload();
 };
@@ -105,13 +126,20 @@ function considerApply() {
   if (verifyingController) { identify(verifyingController, 'controller'); return; }
   if (deferredTarget) { reloadSafely(); return; }
   if (!waiting || !autoApply || requested || prepared) return;
+  if (retryTimer) return;
   if (!canApplyServiceWorkerUpdate()) {
     phase('blocked', { updateReady: true, blockerReason: localReason() });
-    scheduleRetry();
+    scheduleIdle();
     return;
   }
-  applyServiceWorkerUpdate();
+  applyServiceWorkerUpdate(false);
 }
+const scheduleIdle = () => {
+  clearTimeout(idleTimer);
+  idleTimer = undefined;
+  const remaining = getReloadSafetyState().lastInteraction + RELOAD_IDLE_MS - Date.now();
+  if (remaining > 0) idleTimer = setTimeout(() => { idleTimer = undefined; considerApply(); }, remaining);
+};
 const identify = (worker: ServiceWorker, kind: 'waiting' | 'controller', force = false) => {
   let check = kind === 'waiting' ? waitingIdentity : controllerIdentity;
   if (check?.worker !== worker) {
@@ -140,6 +168,7 @@ const reconcileWaiting = (show = true, forceIdentity = false) => {
   const next = candidate && candidate !== navigator.serviceWorker.controller && candidate.state !== 'redundant' && candidate.state !== 'activated' ? candidate : undefined;
   if (waiting !== next) {
     const old = waiting;
+    if (old && next !== old && !activationIntent) manualRevision = undefined;
     if (requested?.worker === old) clearRequest(true);
     if (prepared?.worker === old && (!activationIntent || old?.state === 'redundant')) cancelPrepared();
     waiting = next;
@@ -154,22 +183,23 @@ const reconcileWaiting = (show = true, forceIdentity = false) => {
   }
   if (!waitingTarget) identify(next, 'waiting', forceIdentity);
   if (show) settledPhase();
-  if (show && !prepared && !requested) scheduleRetry(5_000);
+  if (show && !prepared && !requested) scheduleIdle();
 };
 const observeWaiting = () => reconcileWaiting();
 
 /** Manual checks bypass discovery throttle, never the reload safety barrier. */
 export function checkForUpdates(manual = true): Promise<void> {
+  setState({ offline: offline() });
   if (!registration) { phase(typeof navigator === 'undefined' || !navigator.serviceWorker ? 'unsupported' : 'initializing'); return Promise.resolve(); }
   reconcileWaiting(false, manual);
   if (verifyingController) identify(verifyingController, 'controller', manual);
   if (checkPromise) return checkPromise;
   if (!manual && Date.now() < nextCheck) return Promise.resolve();
-  if (offline()) { phase('offline', { updateReady: Boolean(waiting) }); return Promise.resolve(); }
+  if (offline()) { if (waiting || requested || prepared || verifyingController || deferredTarget) settledPhase(); else phase('offline', { updateReady: false }); return Promise.resolve(); }
   const current = registration;
   const captured = generation;
   nextCheck = Date.now() + CLUSTER_THROTTLE_MS;
-  phase('checking', { lastCheck: Date.now(), updateReady: Boolean(waiting) });
+  discoveryPhase('checking', { lastCheck: Date.now(), updateReady: Boolean(waiting || requested || prepared) });
   checkPromise = (async () => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let removeInstallListener: (() => void) | undefined;
@@ -183,7 +213,7 @@ export function checkForUpdates(manual = true): Promise<void> {
         const installing = current.installing;
         if (installing && installing.state !== 'installed' && installing.state !== 'activated') {
           installingStarted = true;
-          phase('installing');
+          discoveryPhase('installing');
           await new Promise<void>((resolve, reject) => {
             const changed = () => {
               if (installing.state === 'redundant') reject(new Error('The update could not be installed.'));
@@ -208,7 +238,7 @@ export function checkForUpdates(manual = true): Promise<void> {
       failures += 1;
       reconcileWaiting(false);
       nextCheck = Date.now() + Math.min(CHECK_INTERVAL_MS, CLUSTER_THROTTLE_MS * 2 ** Math.min(failures, 6));
-      phase(offline() ? 'offline' : installingStarted ? 'install-error' : 'check-error', { error: error instanceof Error ? error.message : 'Could not check for updates', updateReady: Boolean(current.waiting) });
+      discoveryPhase(offline() ? 'offline' : installingStarted ? 'install-error' : 'check-error', { error: error instanceof Error ? error.message : 'Could not check for updates', offline: offline(), updateReady: Boolean(waiting || requested || prepared) });
     } finally {
       clearTimeout(timeout);
       expired = true;
@@ -219,13 +249,29 @@ export function checkForUpdates(manual = true): Promise<void> {
   return checkPromise;
 }
 
-export function applyServiceWorkerUpdate() {
+export function applyServiceWorkerUpdate(manual = true) {
+  if (manual && !requested && !prepared) { manualRevision = getReloadSafetyState().revision; manualExpires = Date.now() + 10_000; setState({ manualError: undefined }); }
   reconcileWaiting(false);
-  if (verifyingController) { identify(verifyingController, 'controller'); return false; }
-  if (deferredTarget) { reloadSafely(); return reloaded; }
-  if (!waiting || !waitingTarget || requested || prepared || offline()) return false;
-  if (!canApplyServiceWorkerUpdate()) { phase('blocked', { updateReady: true, blockerReason: localReason() }); scheduleRetry(); return false; }
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') { phase('blocked', { blockerReason: 'Safe update coordination is unavailable' }); return false; }
+  if (verifyingController) {
+    if (manual) setState({ manualError: 'Verifying the activated update before refreshing. Verification will retry automatically; try Update now again if it does not finish.' });
+    identify(verifyingController, 'controller', manual);
+    return false;
+  }
+  if (deferredTarget) {
+    reloadSafely();
+    if (!reloaded && manual) { setState({ manualError: manualBlockHelp(localReason()) }); manualRevision = undefined; }
+    return reloaded;
+  }
+  if (!waiting || !waitingTarget || requested || prepared) {
+    if (!requested && !prepared) {
+      manualRevision = undefined;
+      if (manual) setState({ manualError: waiting ? 'Verifying the installed update before applying it. Verification will retry automatically; try Update now again if it does not finish.' : 'No installed update is available. Check for updates when connected.' });
+      if (waiting) identify(waiting, 'waiting', manual);
+    }
+    return false;
+  }
+  if (!canApplyServiceWorkerUpdate()) { const reason = localReason(); manualRevision = undefined; phase('blocked', { updateReady: true, blockerReason: reason, ...(manual ? { manualError: manualBlockHelp(reason) } : {}) }); scheduleIdle(); return false; }
+  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') { manualRevision = undefined; phase('blocked', { blockerReason: 'Safe update coordination is unavailable', manualError: manual ? 'Safe update coordination is unavailable' : undefined }); return false; }
   requested = { worker: waiting, target: waitingTarget, attempt: crypto.randomUUID() };
   const attempt = requested;
   phase('applying', { updateReady: true });
@@ -236,12 +282,14 @@ export function applyServiceWorkerUpdate() {
       clearRequest(true);
       if (matchesAttempt(prepared, attempt.worker, attempt)) cancelPrepared();
       settledPhase('Other tabs did not finish preparing the update');
+      if (manual) setState({ manualError: 'Finish work in other open tabs, then try Update now again.' });
       scheduleRetry();
     }, 9_000);
     return true;
   } catch {
     clearRequest();
-    phase('blocked', { blockerReason: 'Could not contact the update worker', updateReady: true });
+    manualRevision = undefined;
+    phase('blocked', { blockerReason: 'Could not contact the update worker', updateReady: true, ...(manual ? { manualError: 'Could not contact the update worker. Try Update now again.' } : {}) });
     scheduleRetry();
     return false;
   }
@@ -251,6 +299,7 @@ export function cancelServiceWorkerUpdate() {
   const active = Boolean(requested || prepared || activationIntent);
   clearRequest(true);
   cancelPrepared();
+  manualRevision = undefined;
   if (active || state.applying) settledPhase();
 }
 
@@ -285,7 +334,8 @@ const onMessage = (event: MessageEvent) => {
     }
     if (data.target !== waitingTarget && waiting === worker) return;
     const token = `${data.target}:${data.attempt}`;
-    const ready = !localReason() && !prepared && typeof data.leaseMs === 'number' && data.leaseMs > 0 && data.leaseMs <= 10_000 && acquireReloadGate(token, data.leaseMs);
+    const ownManual = matchesAttempt(requested, worker, data) && manualRevision !== undefined;
+    const ready = !preparationReason(ownManual) && !prepared && typeof data.leaseMs === 'number' && data.leaseMs > 0 && data.leaseMs <= 10_000 && acquireReloadGate(token, data.leaseMs, ownManual ? manualRevision : undefined);
     if (ready) {
       prepared = { worker, target: data.target, attempt: data.attempt, token };
       phase('applying', { updateReady: true });
@@ -295,16 +345,20 @@ const onMessage = (event: MessageEvent) => {
   }
   const matches = prepared?.worker === worker && prepared.target === data.target && prepared.attempt === data.attempt;
   if (data.type === 'VALIDATE' && matches) {
-    const ready = ownsReloadGate(prepared!.token) && !localReason();
+    const ready = ownsReloadGate(prepared!.token) && !preparationReason(manualRevision !== undefined);
     try { send(worker, 'ACK', { target: data.target, attempt: data.attempt, round: 'final', ready }); } catch { cancelPrepared(); }
   } else if (data.type === 'RELEASE' && (matches || matchesAttempt(requested, worker, data))) {
+    const manual = manualRevision !== undefined;
     retire(data.attempt);
     if (matchesAttempt(requested, worker, data)) clearRequest();
     if (matches) cancelPrepared();
     if (matchesAttempt(activationIntent, worker, data)) activationIntent = undefined;
     settledPhase(data.reason || 'Another tab is not ready');
+    manualRevision = undefined;
+    if (manual) setState({ manualError: 'Finish work in other open tabs, then try Update now again.' });
     scheduleRetry();
   } else if (data.type === 'ACTIVATING' && matches) {
+    if (!ownsReloadGate(prepared!.token) || preparationReason(manualRevision !== undefined)) { cancelServiceWorkerUpdate(); return; }
     // The controller identity is verified again on controllerchange.
     activationIntent = { worker, target: data.target, attempt: data.attempt };
   }
@@ -359,25 +413,34 @@ export function observeServiceWorkerRegistration(next: ServiceWorkerRegistration
   };
   cleanups.push(observeReloadInteractions(document));
   cleanups.push(subscribeReloadSafety(() => {
-    if (prepared && (!ownsReloadGate(prepared.token) || !isReloadSafe())) { cancelPrepared(); phase('blocked', { updateReady: true, blockerReason: localReason() }); }
-    scheduleRetry();
+    if (safetyQueued) return;
+    safetyQueued = true;
+    const captured = generation;
+    queueMicrotask(() => {
+      safetyQueued = false;
+      if (captured !== generation) return;
+      if (manualRevision !== undefined && manualRevision !== getReloadSafetyState().revision) cancelServiceWorkerUpdate();
+      if (prepared && !ownsReloadGate(prepared.token)) { if (!preparationReason()) scheduleRetry(); cancelServiceWorkerUpdate(); }
+      scheduleIdle();
+      considerApply();
+    });
   }));
   listen(navigator.serviceWorker, 'message', onMessage as EventListener);
   listen(navigator.serviceWorker, 'controllerchange', onControllerChange);
-  const resume = () => { if (visible()) { recordReloadInteraction(); void checkForUpdates(false); considerApply(); } };
+  const resume = () => { if (visible()) { void checkForUpdates(false); considerApply(); } };
   listen(window, 'focus', resume);
   listen(window, 'pageshow', resume);
-  listen(window, 'online', () => { void checkForUpdates(false); considerApply(); });
-  listen(window, 'offline', () => { cancelServiceWorkerUpdate(); phase('offline', { updateReady: Boolean(waiting) }); });
+  listen(window, 'online', () => { setState({ offline: false }); void checkForUpdates(false); considerApply(); });
+  listen(window, 'offline', () => { setState({ offline: true }); if (!waiting && !prepared && !requested && !verifyingController && !deferredTarget) phase('offline'); });
   listen(window, 'pagehide', cancelServiceWorkerUpdate);
-  listen(document, 'visibilitychange', () => { if (visible()) resume(); else cancelServiceWorkerUpdate(); });
+  listen(document, 'visibilitychange', () => { if (visible()) resume(); });
   listen(next, 'updatefound', () => {
     const installing = next.installing;
     if (!installing) return;
-    phase('installing');
+    discoveryPhase('installing');
     const changed = () => {
       if (installing.state === 'installed') observeWaiting();
-      else if (installing.state === 'redundant') phase('install-error', { error: 'The update could not be installed.' });
+      else if (installing.state === 'redundant') discoveryPhase('install-error', { error: 'The update could not be installed.' });
     };
     listen(installing, 'statechange', changed);
     changed();
@@ -392,11 +455,13 @@ export function disposeServiceWorkerUpdates() {
   generation += 1;
   cancelServiceWorkerUpdate();
   cleanups.splice(0).forEach((cleanup) => cleanup());
-  clearTimeout(retryTimer); clearTimeout(waitingIdentity?.timer); clearTimeout(controllerIdentity?.timer); clearTimeout(attemptTimer);
-  retryTimer = undefined; waitingIdentity = undefined; controllerIdentity = undefined; attemptTimer = undefined;
+  clearTimeout(idleTimer); clearTimeout(retryTimer); clearTimeout(waitingIdentity?.timer); clearTimeout(controllerIdentity?.timer); clearTimeout(attemptTimer);
+  idleTimer = undefined; retryTimer = undefined; waitingIdentity = undefined; controllerIdentity = undefined; attemptTimer = undefined;
   registration = undefined; waiting = undefined; waitingTarget = undefined;
   requested = undefined; activationIntent = undefined; deferredTarget = undefined; verifyingController = undefined; checkPromise = undefined;
   expectedControllerTarget = undefined;
+  manualRevision = undefined; manualExpires = 0;
+  retiredAttempts.clear();
   nextCheck = 0; failures = 0; reloaded = false; autoApply = false; safetyIntegrated = false;
   state = initialState;
   listeners.forEach((listener) => listener());

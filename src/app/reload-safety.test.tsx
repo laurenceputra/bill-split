@@ -4,9 +4,9 @@ import { acquireReloadGate, assertReloadOperationAllowed, beginProtectedOperatio
 import { useReloadBlocker } from './reload-safety-react';
 
 afterEach(() => vi.useRealTimers());
-const idle = async () => { recordReloadInteraction(); await vi.advanceTimersByTimeAsync(5_000); };
+const idle = async () => { recordReloadInteraction(); await vi.advanceTimersByTimeAsync(2_000); };
 describe('reload safety', () => {
-  it('requires five seconds of inactivity and invalidates prepared gates synchronously', async () => {
+  it('requires two seconds of inactivity and invalidates prepared gates synchronously', async () => {
     vi.useFakeTimers();
     await idle();
     expect(acquireReloadGate('first', 10_000)).toBe(true);
@@ -16,7 +16,10 @@ describe('reload safety', () => {
     expect(ownsReloadGate('first')).toBe(false);
     expect(isReloadSafe()).toBe(false);
     expect(acquireReloadGate('second', 10_000)).toBe(false);
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(isReloadSafe()).toBe(false);
+    expect(acquireReloadGate('second', 10_000)).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     expect(isReloadSafe()).toBe(true);
     dispose();
   });

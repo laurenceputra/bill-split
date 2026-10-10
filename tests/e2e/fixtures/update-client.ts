@@ -1,5 +1,5 @@
 // Deliberately a core integration fixture, not the authenticated application.
-import { configureServiceWorkerUpdates, observeServiceWorkerRegistration, checkForUpdates, getServiceWorkerUpdateState } from '../../../src/app/service-worker';
+import { applyServiceWorkerUpdate, configureServiceWorkerUpdates, observeServiceWorkerRegistration, checkForUpdates, getServiceWorkerUpdateState } from '../../../src/app/service-worker';
 import { createReloadBlocker, runProtectedOperation, getReloadSafetyState } from '../../../src/app/reload-safety';
 import { legacyUpdates } from './legacy-update-client';
 
@@ -36,6 +36,13 @@ async function outbox(write = false) {
 if (!__LEGACY__) configureServiceWorkerUpdates({ safetyIntegrated: true, autoApply: true });
 const registration = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
 if (!__LEGACY__) observeServiceWorkerRegistration(registration);
+if (!__LEGACY__) {
+  const button = document.createElement('button');
+  button.id = 'update-now';
+  button.textContent = 'Update now';
+  button.addEventListener('click', () => applyServiceWorkerUpdate(true));
+  document.body.append(button);
+}
 const legacy = __LEGACY__ ? legacyUpdates(registration, () => getReloadSafetyState().operations > 0) : undefined;
 Object.assign(window, {
   fixture: {
