@@ -109,12 +109,58 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       if (device) await captureHome(page, testInfo, `home-sgd-stress-${device}`);
       await sort.selectOption('outstanding');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
-      await expect(page.locator('#home-sort-help')).toBeVisible();
+      const help = page.getByRole('button', { name: 'About Outstanding first sorting' });
+      const tooltip = page.getByRole('tooltip');
+      await expect(tooltip).toHaveCount(0);
+      await expect(help).toBeVisible();
+      expect(await help.evaluate((button) => button.closest('label'))).toBeNull();
+      await help.hover();
+      await expect(tooltip).toHaveText('Largest absolute balance first: default currency, otherwise the first non-zero currency alphabetically. Amounts are compared without currency conversion.');
+      await tooltip.hover();
+      await expect(tooltip).toBeVisible();
+      await page.mouse.move(0, 0);
+      await expect(tooltip).toHaveCount(0);
+      await sort.focus();
+      await page.keyboard.press('Shift+Tab');
+      await expect(help).toBeFocused();
+      await expect(help).toHaveAttribute('aria-describedby', 'home-sort-help');
+      await tooltip.hover();
+      await page.keyboard.press('Tab');
+      await expect(sort).toBeFocused();
+      await expect(tooltip).toBeVisible();
+      await tooltip.click();
+      await expect(tooltip).toBeVisible();
+      await tooltip.dblclick();
+      expect(await page.evaluate(() => window.getSelection()?.toString().length)).toBeGreaterThan(0);
+      await expect(tooltip).toBeVisible();
+      await page.mouse.move(0, 0);
+      await expect(tooltip).toHaveCount(0);
+      await help.focus();
+      await tooltip.hover();
+      await page.keyboard.press('Escape');
+      await expect(tooltip).toHaveCount(0);
+      await expect(help).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(tooltip).toBeVisible();
+      const bounds = await tooltip.boundingBox();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+      const target = await help.boundingBox();
+      expect(target!.width).toBeGreaterThanOrEqual(44);
+      expect(target!.height).toBeGreaterThanOrEqual(44);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       if (device) await captureHome(page, testInfo, `home-outstanding-${device}`);
+      await page.getByRole('heading', { name: 'Friends & groups' }).click();
+      await expect(tooltip).toHaveCount(0);
+      await help.click();
+      await expect(tooltip).toBeVisible();
       await page.reload();
       await expect(sort).toHaveValue('outstanding');
+      await expect(tooltip).toHaveCount(0);
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await help.click();
+      await expect(tooltip).toBeVisible();
+      await page.keyboard.press('Escape');
       await seedOfflineTrust(page);
       await page.unroute('**/api/groups');
       await page.route('**/api/groups', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Unavailable' }) }));
@@ -126,13 +172,40 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
       await expect(sort).toHaveValue('outstanding');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
+      await help.click();
+      await expect(tooltip).toBeVisible();
       await sort.selectOption('name');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${shortId}`);
       await expect(page.locator('#home-sort-help')).toHaveCount(0);
+      await expect(help).toHaveCount(0);
     } finally {
       await context.close();
     }
   }
+});
+
+test('Home sort tooltip toggles on touch and dismisses on outside tap', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block', hasTouch: true });
+  try {
+    const page = await context.newPage();
+    await mockAnonymousHome(page);
+    await page.goto('/');
+    await page.getByRole('combobox', { name: 'Sort', exact: true }).selectOption('outstanding');
+    const help = page.getByRole('button', { name: 'About Outstanding first sorting' });
+    const tooltip = page.getByRole('tooltip');
+    await help.tap();
+    await expect(tooltip).toBeVisible();
+    await expect(help).toBeFocused();
+    await help.tap();
+    await expect(tooltip).toHaveCount(0);
+    await expect(help).toBeFocused();
+    await help.tap();
+    await expect(tooltip).toBeVisible();
+    await tooltip.tap();
+    await expect(tooltip).toBeVisible();
+    await page.getByRole('heading', { name: 'Friends & groups' }).tap();
+    await expect(tooltip).toHaveCount(0);
+  } finally { await context.close(); }
 });
 
 for (const [device, width] of [['mobile', 390], ['desktop', 1440]] as const) {

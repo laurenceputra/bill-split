@@ -288,6 +288,31 @@ function GroupExports({ groupId, online }: { groupId: string; online: boolean })
   return <section className="export-controls" data-flow-region="admin"><SectionHeader title="Export" description="Paged, connection required" /><p className="muted">Exports fetch bounded pages and can be cancelled before download.</p><ActionGroup className="actions"><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportJson()}>{busy === 'json' ? 'Exporting JSON…' : 'Export JSON'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportCsv()}>{busy === 'csv' ? 'Exporting expenses CSV…' : 'Export expenses CSV'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportSettlements()}>{busy === 'settlements' ? 'Exporting settlements CSV…' : 'Export settlements CSV'}</Button><Button type="button" variant="secondary" disabled={!online || Boolean(busy)} onClick={() => void exportCredits()}>{busy === 'credits' ? 'Exporting credits CSV…' : 'Export credits CSV'}</Button>{busy ? <Button type="button" variant="danger" onClick={cancel}>Cancel</Button> : null}</ActionGroup>{progress ? <p className="cache-status" role="status">{progress}</p> : null}{error ? <ErrorBox error={error} id="export-error" /> : null}</section>;
 }
 
+function HomeSortHelp() {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  const pinned = useRef(false);
+  const hovered = useRef(false);
+  const focused = useRef(false);
+  const dismissed = useRef(false);
+  const syncOpen = () => setOpen(!dismissed.current && (hovered.current || focused.current || pinned.current));
+  // Dismissal suppresses existing hover/focus; a new entry, focus, or activation resets it.
+  const show = () => { dismissed.current = false; syncOpen(); };
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = () => { dismissed.current = true; pinned.current = false; setOpen(false); };
+    const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss(); };
+    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) dismiss(); };
+    document.addEventListener('keydown', keydown);
+    document.addEventListener('pointerdown', outside);
+    return () => { document.removeEventListener('keydown', keydown); document.removeEventListener('pointerdown', outside); };
+  }, [open]);
+  return <span className="home-sort-help" ref={root} onPointerEnter={(event) => { if (event.pointerType === 'mouse') { hovered.current = true; show(); } }} onPointerLeave={() => { hovered.current = false; syncOpen(); }}>
+    <button type="button" className="home-sort-help__trigger" aria-label="About Outstanding first sorting" aria-describedby={open ? 'home-sort-help' : undefined} onFocus={() => { focused.current = true; show(); }} onBlur={() => { focused.current = false; syncOpen(); }} onClick={() => { dismissed.current = pinned.current; pinned.current = !pinned.current; syncOpen(); }}><span aria-hidden="true">ⓘ</span></button>
+    {open ? <span role="tooltip" id="home-sort-help" className="home-sort-help__tooltip">Largest absolute balance first: default currency, otherwise the first non-zero currency alphabetically. Amounts are compared without currency conversion.</span> : null}
+  </span>;
+}
+
 function Home() {
    const online = useOnlineStatus();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
@@ -305,7 +330,7 @@ function Home() {
      return <Layout>
        <PageHeader className="page-title" eyebrow="Private expenses" title="Friends & groups" actions={<ActionGroup className="home-actions"><Link className="button" to="/friends/new">Add friend</Link><Link className="button button--secondary" to="/groups/new">New group</Link></ActionGroup>} />
         <PendingInvitations userId={me.data?.id} online={online && !offline} />
-        {groups.length ? <div className="home-sort"><Field label="Sort" className="field--compact"><select value={homeSort} onChange={(event) => setHomeSort(parseHomeSort(event.target.value))} aria-describedby={homeSort === 'outstanding' ? 'home-sort-help' : undefined}><option value="name">Name (A–Z)</option><option value="outstanding">Outstanding first</option></select></Field>{homeSort === 'outstanding' ? <p className="muted" id="home-sort-help">Largest absolute balance first: default currency, otherwise the first non-zero currency alphabetically. Amounts are compared without currency conversion.</p> : null}</div> : null}
+        {groups.length ? <div className="home-sort"><div className="home-sort__label"><label htmlFor="home-sort">Sort</label>{homeSort === 'outstanding' ? <HomeSortHelp /> : null}</div><select id="home-sort" value={homeSort} onChange={(event) => setHomeSort(parseHomeSort(event.target.value))}><option value="name">Name (A–Z)</option><option value="outstanding">Outstanding first</option></select></div> : null}
        {!online || offline ? <ConnectionBanner detail="showing your last verified groups. Friend and group creation require a connection; Add Expense remains available from cached groups." /> : null}{groupsResource.data !== undefined ? <CachedIdentityNotice resource={me} id="groups-identity-error" /> : null}{groupsResource.data === undefined && me.error ? <ErrorBox error={me.error} onRetry={retryFor(resourceKeys.identity(), '')} id="identity-error" retryLabel="Retry identity check" /> : null}
         {groupsResource.data === undefined && !me.error ? <ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} /> : groupsResource.data !== undefined ? <><ResourceNotice resource={groupsResource} label="groups" retry={retryFor(resourceKeys.groups(me.data?.id || 'pending'), me.data?.id)} />{groups.length ? <div className="cards group-cards">{groups.map((group) => { const people = [{ name: me.data?.name || '', avatarMode: me.data?.avatarMode, avatarHash: me.data?.avatarHash }, ...(group.counterpartName ? [{ name: group.counterpartName, ...group.counterpartAvatar }] : [])]; return <Link className="card group-card ui-card-surface" to={`/groups/${group.id}`} key={group.id}><div className="group-card__identity"><div className="group-card__heading"><AvatarStack people={people} /><strong className="card__name">{groupDisplayName(group)}</strong></div><span className="group-card__meta">{group.memberCount ? `${group.memberCount} ${group.memberCount === 1 ? 'person' : 'people'}` : group.kind === 'peer' ? 'Friend ledger' : 'Shared ledger'} · {group.currency}</span></div><div className="card__balances">{groupBalanceDisplays(group.balanceSummaries, group.currency).map((display, index) => display.kind === 'balance' ? <span className="card__balance" key={`${display.currency}-${index}`}><span className="card__balance-label">{display.label}</span><span className="card__balance-money"><Money amountMinor={display.amountMinor} currency={display.currency} currencyDisplay="code" tone={display.label === 'You are owed' ? 'positive' : 'debt'} /></span></span> : <span className={`card__balance card__balance--${display.kind}`} key={`${display.label}-${index}`}><span className="card__balance-label">{display.label}</span><small>{display.currency}</small></span>)}</div></Link>; })}</div> : <EmptyState title="No groups yet"><p className="empty-state__copy">Start a friend ledger for a quick one-to-one split, or create a shared group for a trip or household.</p><div className="empty-state__actions"><Link className="button" to="/friends/new">Add a friend</Link><Link className="button button--secondary" to="/groups/new">Create a group</Link></div></EmptyState>}</> : null}
        <CompactInsights userId={me.data?.id} global title="Spending snapshot" />

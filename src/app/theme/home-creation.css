@@ -1,14 +1,47 @@
 .home-sort {
+  position: relative;
   margin-bottom: var(--space-4);
 }
 
-.home-sort .field {
+.home-sort select {
   max-width: 14rem;
 }
 
-.home-sort p {
-  max-width: 42rem;
-  margin-top: var(--space-2);
+.home-sort__label {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.home-sort-help__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+}
+
+.home-sort-help__tooltip {
+  position: absolute;
+  z-index: 10;
+  top: 44px;
+  left: 0;
+  width: min(100%, 24rem);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-3);
+  color: var(--color-text);
+  font-weight: 400;
+  overflow-wrap: anywhere;
 }
 
 .public-sign-in {
