@@ -114,6 +114,33 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await expect(tooltip).toHaveCount(0);
       await expect(help).toBeVisible();
       expect(await help.evaluate((button) => button.closest('label'))).toBeNull();
+      const sortGeometry = await page.evaluate(() => {
+        const box = (selector: string) => {
+          const { left, right, top, bottom, width, height } = document.querySelector(selector)!.getBoundingClientRect();
+          return { left, right, top, bottom, width, height };
+        };
+        return {
+          row: box('.home-sort__label'), label: box('label[for="home-sort"]'),
+          target: box('.home-sort-help__trigger'), glyph: box('.home-sort-help__trigger > span'),
+          select: box('#home-sort'), actions: box('.home-actions'),
+          fontSize: parseFloat(getComputedStyle(document.querySelector('.home-sort-help__trigger')!).fontSize),
+        };
+      });
+      const { row, label, target, glyph, select, actions } = sortGeometry;
+      expect(row.height, JSON.stringify({ width, sortGeometry })).toBeLessThan(25);
+      expect(target.width).toBeGreaterThanOrEqual(44);
+      expect(target.height).toBeGreaterThanOrEqual(44);
+      expect(target.left).toBeGreaterThanOrEqual(label.right);
+      expect(target.bottom).toBeLessThanOrEqual(select.top);
+      expect(target.top).toBeGreaterThanOrEqual(actions.bottom);
+      expect(target.right).toBeLessThanOrEqual(width);
+      expect(glyph.left - label.right).toBeGreaterThanOrEqual(1);
+      expect(glyph.left - label.right).toBeLessThanOrEqual(3);
+      expect(glyph.top).toBeLessThan(label.top + 2);
+      expect(glyph.bottom).toBeLessThan(label.bottom - 5);
+      expect(sortGeometry.fontSize).toBeGreaterThanOrEqual(10);
+      expect(sortGeometry.fontSize).toBeLessThanOrEqual(12);
+      if (device) await captureHome(page, testInfo, `home-outstanding-closed-${device}`);
       await help.hover();
       await expect(tooltip).toHaveText('Largest absolute balance first: default currency, otherwise the first non-zero currency alphabetically. Amounts are compared without currency conversion.');
       await tooltip.hover();
@@ -123,6 +150,22 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await sort.focus();
       await page.keyboard.press('Shift+Tab');
       await expect(help).toBeFocused();
+      const focusRing = await help.evaluate((button) => {
+        const style = getComputedStyle(button);
+        const target = button.getBoundingClientRect();
+        const glyph = button.querySelector('span')!.getBoundingClientRect();
+        const label = document.querySelector('label[for="home-sort"]')!.getBoundingClientRect();
+        const tooltip = document.querySelector('[role="tooltip"]')!.getBoundingClientRect();
+        return {
+          visible: button.matches(':focus-visible'), style: style.outlineStyle,
+          thickness: parseFloat(style.outlineWidth), offset: parseFloat(style.outlineOffset),
+          labelClear: target.left >= label.right,
+          tooltipClear: target.bottom <= tooltip.top,
+          glyphInset: Math.min(glyph.left - target.left, target.right - glyph.right, glyph.top - target.top, target.bottom - glyph.bottom),
+        };
+      });
+      expect(focusRing).toMatchObject({ visible: true, style: 'solid', thickness: 3, offset: -3, labelClear: true, tooltipClear: true });
+      expect(focusRing.glyphInset).toBeGreaterThanOrEqual(6);
       await expect(help).toHaveAttribute('aria-describedby', 'home-sort-help');
       await tooltip.hover();
       await page.keyboard.press('Tab');
@@ -145,9 +188,6 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       const bounds = await tooltip.boundingBox();
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-      const target = await help.boundingBox();
-      expect(target!.width).toBeGreaterThanOrEqual(44);
-      expect(target!.height).toBeGreaterThanOrEqual(44);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       if (device) await captureHome(page, testInfo, `home-outstanding-${device}`);
       await page.getByRole('heading', { name: 'Friends & groups' }).click();
