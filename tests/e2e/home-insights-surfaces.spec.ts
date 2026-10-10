@@ -23,6 +23,68 @@ const shortId = '00000000-0000-4000-8000-000000003001';
 const longId = '00000000-0000-4000-8000-000000003003';
 const insightsId = '00000000-0000-4000-8000-000000003002';
 
+for (const width of [320, 390, 895, 896, 1440]) {
+  test(`Synthetic expense controls own hover and pressed feedback at ${width}px`, async ({ browser }, testInfo) => {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 900 }, { serviceWorkers: 'block' });
+    try {
+      const page = await context.newPage();
+      await mockAnonymousHome(page);
+      await page.route(`**/api/groups/${shortId}`, async (route) => {
+        const response = await route.fetch();
+        const { currentPersonId } = await response.json();
+        await route.fulfill({ response, json: {
+          group: { id: shortId, name: 'Sample project', currency: 'USD', kind: 'named', role: 'owner', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+          currentPersonId, historicalParticipants: [], splitDefault: null,
+          members: [
+            { personId: currentPersonId, name: 'Demo user', role: 'owner', joinedAt: '2026-01-01', avatarMode: 'initials' },
+            { personId: '00000000-0000-4000-8000-000000009999', name: 'Demo friend', role: 'member', joinedAt: '2026-01-01', avatarMode: 'initials' },
+          ],
+        } });
+      });
+      await page.goto(`/groups/${shortId}/expense/new`);
+      await expect(page.locator('.participant-row')).toHaveCount(2);
+      for (const selector of ['.summary-row', '.participant-row[aria-pressed="true"]']) {
+        const control = page.locator(selector).first();
+        await control.hover();
+        const hover = await control.evaluate((node) => getComputedStyle(node).backgroundColor);
+        await page.mouse.down();
+        const pressed = await control.evaluate((node) => {
+          const probe = document.createElement('div');
+          probe.style.background = 'var(--color-primary-subtle-hover)';
+          document.body.append(probe);
+          const expected = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return { background: getComputedStyle(node).backgroundColor, expected };
+        });
+        expect(pressed.background).toBe(pressed.expected);
+        expect(hover).not.toBe('rgba(0, 0, 0, 0)');
+        if (width === 390 || width === 1440) {
+          const text = await page.locator('body').innerText();
+          expect(text).not.toMatch(/[\w.+-]+@[\w.-]+\.[a-z]{2,}|Dev User|Alex|Priya|\b[a-f0-9]{64}\b/i);
+          await expect(page.locator('.avatar img')).toHaveCount(0);
+          const name = `control-feedback-${selector.startsWith('.summary') ? 'summary' : 'participant'}-${width === 390 ? 'mobile' : 'desktop'}`;
+          const destination = process.env.UPDATE_HOME_SCREENSHOTS === '1' ? path.join(process.cwd(), 'docs', 'screenshots', `${name}.png`) : testInfo.outputPath(`${name}.png`);
+          await control.screenshot({ path: destination, animations: 'disabled' });
+          await testInfo.attach(name, { path: destination, contentType: 'image/png' });
+        }
+        // Release outside the control: inspect :active without opening or changing it.
+        await page.mouse.move(0, 0);
+        await page.mouse.up();
+      }
+      await page.locator('.participant-row').last().click();
+      const unselected = page.locator('.participant-row[aria-pressed="false"]');
+      await unselected.hover();
+      await page.mouse.down();
+      await expect(unselected).toHaveCSS('background-color', await page.locator('.participant-row[aria-pressed="true"]').evaluate((node) => {
+        const probe = document.createElement('div'); probe.style.background = 'var(--color-primary-subtle-hover)'; node.append(probe); const color = getComputedStyle(probe).backgroundColor; probe.remove(); return color;
+      }));
+      await page.mouse.move(0, 0);
+      await page.mouse.up();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    } finally { await context.close(); }
+  });
+}
+
 // Construct screenshot data rather than inheriting backend names or avatar preferences.
 async function mockAnonymousHome(page: Page, stress = false) {
   await page.route('**/api/me', async (route) => {
@@ -142,6 +204,12 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       expect(sortGeometry.fontSize).toBeLessThanOrEqual(12);
       if (device) await captureHome(page, testInfo, `home-outstanding-closed-${device}`);
       await help.hover();
+      await expect(help).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await page.mouse.down();
+      await expect(help).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await page.mouse.up();
+      await page.getByRole('heading', { name: 'Friends & groups' }).click();
+      await help.hover();
       await expect(tooltip).toHaveText('Largest absolute balance first: default currency, otherwise the first non-zero currency alphabetically. Amounts are compared without currency conversion.');
       await tooltip.hover();
       await expect(tooltip).toBeVisible();
@@ -151,7 +219,7 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await page.keyboard.press('Shift+Tab');
       await expect(help).toBeFocused();
       const focusRing = await help.evaluate((button) => {
-        const style = getComputedStyle(button);
+        const style = getComputedStyle(button.querySelector('span')!);
         const target = button.getBoundingClientRect();
         const glyph = button.querySelector('span')!.getBoundingClientRect();
         const label = document.querySelector('label[for="home-sort"]')!.getBoundingClientRect();
@@ -162,10 +230,14 @@ test('Home cards retain compact, accessible balance geometry across the navigati
           labelClear: target.left >= label.right,
           tooltipClear: target.bottom <= tooltip.top,
           glyphInset: Math.min(glyph.left - target.left, target.right - glyph.right, glyph.top - target.top, target.bottom - glyph.bottom),
+          glyphLeft: glyph.left,
+          targetOutline: getComputedStyle(button).outlineStyle,
+          background: getComputedStyle(button).backgroundColor,
         };
       });
-      expect(focusRing).toMatchObject({ visible: true, style: 'solid', thickness: 3, offset: -3, labelClear: true, tooltipClear: true });
-      expect(focusRing.glyphInset).toBeGreaterThanOrEqual(6);
+      expect(focusRing).toMatchObject({ visible: true, style: 'solid', thickness: 1, offset: 0, labelClear: true, tooltipClear: true, targetOutline: 'none', background: 'rgba(0, 0, 0, 0)' });
+      expect(focusRing.glyphLeft).toBe(glyph.left);
+      if (device) await captureHome(page, testInfo, `home-outstanding-focus-${device}`);
       await expect(help).toHaveAttribute('aria-describedby', 'home-sort-help');
       await tooltip.hover();
       await page.keyboard.press('Tab');
@@ -208,6 +280,12 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await expect(sort).toHaveValue('outstanding');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
       await seedOfflineTrust(page);
+      const retry = page.getByRole('button', { name: 'Retry', exact: true }).first();
+      await retry.hover();
+      await page.mouse.down();
+      await expect(retry).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await page.mouse.move(0, 0);
+      await page.mouse.up();
       await context.setOffline(true);
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
       await expect(sort).toHaveValue('outstanding');
@@ -224,7 +302,7 @@ test('Home cards retain compact, accessible balance geometry across the navigati
   }
 });
 
-test('Home sort tooltip toggles on touch and dismisses on outside tap', async ({ browser }) => {
+test('Home sort tooltip toggles on touch and dismisses on outside tap', async ({ browser }, testInfo) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block', hasTouch: true });
   try {
     const page = await context.newPage();
@@ -235,6 +313,8 @@ test('Home sort tooltip toggles on touch and dismisses on outside tap', async ({
     const tooltip = page.getByRole('tooltip');
     await help.tap();
     await expect(tooltip).toBeVisible();
+    await expect(help).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+    await captureHome(page, testInfo, 'home-mobile-tapped');
     await expect(help).toBeFocused();
     await help.tap();
     await expect(tooltip).toHaveCount(0);
@@ -301,6 +381,23 @@ for (const width of [390, 1440]) {
       await page.goto(`/activity?${scope === 'group' ? `group=${insightsId}&` : ''}view=insights&period=all&currency=USD`);
       await expect(page.getByRole('navigation', { name: 'History views' }).getByRole('link', { name: 'Insights' })).toHaveAttribute('aria-current', 'page');
       await expect(page.getByRole('tablist', { name: 'Spending insight currencies' }).getByRole('tab', { name: 'USD' })).toHaveAttribute('aria-selected', 'true');
+      await expect(page.getByRole('group', { name: 'USD category spending chart' })).toBeVisible();
+      for (const currency of await page.locator('.insight-currency-tab').allTextContents()) {
+        // Currency data may add earlier alphabetic tabs: use identity, not nth().
+        const tab = page.getByRole('tab', { name: currency, exact: true });
+        const border = await tab.evaluate((node) => getComputedStyle(node).borderColor);
+        await tab.hover();
+        await page.mouse.down();
+        const colors = await tab.evaluate((node) => {
+          const probe = document.createElement('div'); probe.style.background = 'var(--color-primary-subtle-hover)'; document.body.append(probe);
+          const expected = getComputedStyle(probe).backgroundColor; probe.remove();
+          return { background: getComputedStyle(node).backgroundColor, expected, border: getComputedStyle(node).borderColor };
+        });
+        expect(colors.background).toBe(colors.expected);
+        expect(colors.border).toBe(border);
+        await page.mouse.move(0, 0);
+        await page.mouse.up();
+      }
       await expect(page.getByLabel('Selected-period spending summary')).toBeVisible();
       await expect(page.getByRole('group', { name: 'USD category spending chart' })).toBeVisible();
       const geometry = await page.evaluate(() => {

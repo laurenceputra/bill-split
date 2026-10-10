@@ -29,12 +29,78 @@ closed-tooltip mobile/desktop references so the small superscript is unobscured.
 Closed/open outstanding mobile/desktop captures were visually inspected. Full route audit,
 other browser engines, screen-reader and real-device touch checks were not run.
 
-Keyboard-focus follow-up: the trigger uses a 3px inset outline contained entirely
-within its 44px target, clear of Sort text and the tooltip. Only while keyboard
-focused, the 11px glyph moves 6px inside the target so the ring surrounds rather
-than crosses it. Six-width browser assertions check focus visibility, ring width
-and inset, glyph clearance, and label/tooltip separation; open references refresh
-this keyboard-focused state with the same sanitized synthetic fixture.
+Control-feedback follow-up (2026-10-10): the 44px trigger remains transparent
+on hover, pointer-down, keyboard focus and touch activation (including sticky touch
+hover). Only the small glyph paints hover/pressed feedback and a 1px rounded focus
+outline; its position never changes. Six-width assertions check the glyph ring,
+unchanged position, transparent target and label/tooltip separation. Tooltip
+interaction behavior is unchanged.
+
+## Control-state feedback
+
+Native primary hover/pressed paint is enrolled by `.button` / `.ui-button`, not
+every native `button`. Existing secondary, danger and quiet variants retain their
+own feedback. Reload, public authentication, install and update actions are
+explicitly enrolled; landing install is secondary and updates keep compact sizing.
+
+| Surface / state | Responsive verification |
+| --- | --- |
+| Home Sort help: closed, hover, pointer-down, keyboard focus, open, touch-pinned | 320, 390, 768, 895, 896, 1440px; target transparent, glyph stationary, focus ring on glyph; hover/text selection/blur/Escape/outside dismissal unchanged; touch at 390px |
+| Home cached Retry: hover / pointer-down | All six widths; transparent inline target; offline action not offered |
+| Expense payer summary and selected / unselected participants | 320, 390, 895, 896, 1440px; real expense route with constructed Sample project / Demo user / Demo friend data; subtle pressed surface, no primary fill, selection retained; no overflow |
+| Global / group Insight currency tabs, selected / unselected | 390 and 1440px; hover / pointer-down uses subtle surface and retains selected / unselected borders |
+| Standard Button variants, including disabled / busy; legacy `.secondary` / `.danger` | Production-component computed hover / pointer-down background and foreground checks at 320, 390, 895, 896, 1440px; legacy semantic compatibility samples use real class rules; busy / disabled remain disabled with native opacity |
+| Public sign-in/up; install (landing / top bar / settings / prompting) | Same five-width production presentation suite; primary pressed paint, secondary subtle feedback and disabled / busy install state; provider-injected activation props forwarded to native auth controls and covered by unit tests |
+| Both update actions; checking / downloading / applying / offline | Same five-width production UpdateStatus presentation suite checks hover / pressed paint and foreground, compact secondary actions and disabled checks; live Settings and all 13 update phases also pass at 320, 390, 767, 768, 895, 896, 1440px |
+| Auth-banner Sign in / checking Retry / error Retry | Same five widths; all three production action states retain debt foreground background and debt background foreground while hovered / pressed; the primary error Retry no longer inherits primary pressed paint |
+| ErrorBoundary Reload | Source/style review; enrolled in shared primary class rule tested above, not independently mounted |
+| Loading / empty / uncached error / cached error / offline | Existing six-width Home checks retained; primary Home actions precede sorting; no new loading or impossible actions |
+
+Repeatable evidence: the eight existing `home-*` references were regenerated
+(unchanged PNGs remain byte-identical), plus `home-outstanding-focus-{mobile,desktop}`,
+`home-mobile-tapped`, and cropped production expense controls
+`control-feedback-{summary,participant}-{mobile,desktop}` in `docs/screenshots`.
+All capture data is constructed/anonymized before rendering, with text and avatar
+checks before capture. No group-reference generator or personal fixtures regenerated.
+Mobile focused help and desktop payer-summary captures were visually inspected.
+Reviewer follow-up adds `control-feedback-{public,install,updates,banners}-{mobile,desktop}.png`,
+captured with representative actions pressed. Mobile banner and update captures
+were visually inspected. The new `tests/e2e/control-feedback.spec.ts` renders the
+exact pure production controls extracted into `src/app/control-actions.tsx`, and
+the existing production `UpdateStatus`, with deterministic props and the built
+application theme. Provider/native prompt wrappers are not simulated. Fixture-only
+layout arranges sections, makes the normally fixed banners static, and wraps the
+update gallery; it does not override control paint. These captures prove control
+feedback, not complete live-route layout. Only legacy classes / inline compatibility
+samples use directly constructed semantic buttons; Home also verifies live inline Retry.
+
+The primary pressed selector now puts variant exclusions inside `:where`, so
+custom ownership is not defeated by accumulated exclusion specificity. Banner
+hover / active explicitly own background and foreground as well as opacity.
+Public Sign in explicitly owns its primary pressed state after its hover rule.
+
+Exact successful verification:
+
+```sh
+npm run typecheck
+npm run test:unit -- src/app/ui.test.ts src/app/update-ui.test.ts
+UPDATE_HOME_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-control-feedback npm run test:e2e:local -- tests/e2e/control-feedback.spec.ts tests/e2e/home-insights-surfaces.spec.ts tests/e2e/update-settings.spec.ts --project=chromium --workers=1
+```
+
+Results after reviewer follow-up: typecheck passed; 32 unit tests passed; all 21
+Chromium browser tests passed (five control-presentation, fourteen Home/Insights,
+two Settings/update-state tests).
+Earlier iterations caught a test pinning help during pointer-down inspection and
+an expense-route summary surface overriding its pressed rule; both corrected.
+The new suite caught public Sign in's later hover rule masking the lowered
+primary pressed specificity; its explicit pressed rule fixes that. Currency
+feedback tests now locate by currency identity after chart data loads, avoiding
+unstable numeric tab positions while additional currency data arrives. An
+intermediate combined run hit a recorded Wrangler/workerd runtime failure;
+the final combined run passed completely on restart.
+Limitations: no full route audit, Firefox/WebKit, real-device touch or screen-reader
+run; provider modal flows, actual native install prompting and worker activation
+are not exercised by these deterministic presentation tests.
 
 Pure helper and hook tests cover all summaries (not display-truncated), default
 currency zero fallback, absent/empty/zero summaries, absolute positive/negative
