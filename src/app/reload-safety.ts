@@ -7,7 +7,7 @@ const operations = new Map<symbol, string>();
 const listeners = new Set<() => void>();
 let lastInteraction = Date.now();
 let revision = 0;
-let gate: { token: string; expires: number } | undefined;
+let gate: { token: string; expires: number; interactionRevision?: number } | undefined;
 let gateTimer: ReturnType<typeof setTimeout> | undefined;
 let snapshot: ReloadSafetyState;
 const publish = () => {
@@ -63,16 +63,16 @@ export const runProtectedOperation = async <T>(operation: () => Promise<T>, reas
 export const getReloadBlockReason = (now = Date.now()) => snapshot.reason ?? (now - lastInteraction < RELOAD_IDLE_MS ? 'Waiting for you to finish' : undefined);
 export const isReloadSafe = () => !getReloadBlockReason();
 /** Token ownership makes cancellation unable to release a newer attempt's gate. */
-export const acquireReloadGate = (token: string, leaseMs: number) => {
+export const acquireReloadGate = (token: string, leaseMs: number, interactionRevision?: number) => {
   if (gate && Date.now() >= gate.expires) releaseReloadGate(gate.token);
-  if (!isReloadSafe() || (gate && gate.token !== token) || !Number.isFinite(leaseMs) || leaseMs <= 0 || leaseMs > MAX_RELOAD_GATE_MS) return false;
+  if (snapshot.reason || (interactionRevision === undefined ? !isReloadSafe() : interactionRevision !== revision) || (gate && gate.token !== token) || !Number.isFinite(leaseMs) || leaseMs <= 0 || leaseMs > MAX_RELOAD_GATE_MS) return false;
   if (gate) return gate.token === token && Date.now() < gate.expires;
-  gate = { token, expires: Date.now() + leaseMs };
+  gate = { token, expires: Date.now() + leaseMs, interactionRevision };
   gateTimer = setTimeout(() => releaseReloadGate(token), leaseMs);
   publish();
   return true;
 };
-export const ownsReloadGate = (token: string) => gate?.token === token && Date.now() < gate.expires && isReloadSafe();
+export const ownsReloadGate = (token: string) => gate?.token === token && Date.now() < gate.expires && !snapshot.reason && (gate.interactionRevision === undefined ? isReloadSafe() : gate.interactionRevision === revision);
 
 /** Capture phase runs before React handlers/effects and invalidates prepared ACKs. */
 export const observeReloadInteractions = (target: Document) => {

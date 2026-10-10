@@ -537,3 +537,26 @@ That dedicated production-core fixture is not an authenticated full-App A/B
 audit. The focused date-control run passed 7 Chromium tests. WebKit was unavailable
 locally; its verification remains pending CI, with no claim of real iOS Safari
 or native-picker coverage from these Chromium runs.
+# Consistent update controls
+
+Audit at **320, 390, 767, 768, 895, 896, 1440px** in Settings Device and
+the contextual header. Profile and frequent tasks remain before management.
+
+| State | Required presentation at every width |
+| --- | --- |
+| Automatic ready / blocked / deferred | Header offers only Update now, no persistent waiting announcement; Settings uses neutral availability copy |
+| Manual draft / ongoing-save failure | Full reason and save/discard guidance readable, no clipping; action never discards work |
+| Manual other-tab / contact failure | Actionable retry help separate from automatic blocker state; long explanation wraps |
+| Applying | Updating… only during actual preparation/application; no competing apply action |
+| Loading / unsupported / checking / installing | Discovery disabled appropriately; no invented ready action |
+| Empty / no update / cached last success | Check action and timestamp remain distinct from availability |
+| Offline | Discovery unavailable; installed verified update still offers Update now |
+| Ready-offline / blocked-offline | Check for updates disabled independently of availability; installed Update now enabled, connectivity explanation readable |
+| Manual identity verification | Waiting/controller verification guidance and retry explanation readable without unrelated draft-discard advice |
+| Check / install error | Discovery retry available; available installed update remains independent |
+
+`update-settings.spec.ts` supplies responsive presentation fixtures; production
+lifecycle tests cover real captured manual clicks, draft/save refusal and offline
+installed application. Verification completed: both focused
+Settings tests passed across all seven widths, including all phase fixtures and
+short/long manual failure feedback in header and Settings (Chromium).

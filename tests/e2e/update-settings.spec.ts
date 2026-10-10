@@ -41,8 +41,9 @@ test('update status presentation fits Settings and the contextual header in ever
       // These are presentation fixtures using the exact production component,
       // not simulated worker activation. The A/B suite owns lifecycle behavior.
       for (const phase of phases) {
-        for (const blockerReason of phase === 'blocked' ? ['Unsaved profile', 'Another tab has unsaved work; finish that entry before updating'] : [undefined]) {
-          const update = { phase, updateReady: ['ready', 'blocked'].includes(phase), blocked: phase === 'blocked', applying: phase === 'applying', blockerReason, lastSuccess: Date.UTC(2026, 0, 1) } as ServiceWorkerUpdateState;
+         for (const variant of phase === 'blocked' ? [{ blockerReason: 'Unsaved profile' }, { blockerReason: 'Another tab has unsaved work; finish that entry before updating' }, { offline: true }] : phase === 'ready' ? [{}, { offline: true }] : phase === 'deferred' ? [{}, { manualError: 'Verifying the activated update before refreshing. Verification will retry automatically; try Update now again if it does not finish.' }] : [{}]) {
+           const { blockerReason, offline, manualError } = variant as { blockerReason?: string; offline?: boolean; manualError?: string };
+           const update = { phase, updateReady: ['ready', 'blocked'].includes(phase), blocked: phase === 'blocked', applying: phase === 'applying', blockerReason, offline, manualError: manualError ?? blockerReason, lastSuccess: Date.UTC(2026, 0, 1) } as ServiceWorkerUpdateState;
           const settings = renderToStaticMarkup(createElement(UpdateStatus, { update, settings: true, onCheck: () => undefined }));
           const header = renderToStaticMarkup(createElement(UpdateStatus, { update, onCheck: () => undefined }));
           await page.evaluate(({ settings, header }) => {
@@ -50,11 +51,15 @@ test('update status presentation fits Settings and the contextual header in ever
             document.querySelector('.top-bar__actions > .update-control')?.remove();
             document.querySelector('.top-bar__actions')!.insertAdjacentHTML('afterbegin', header);
           }, { settings, header });
-          const button = page.locator('main .update-control button');
-          if (['initializing', 'unsupported', 'checking', 'installing', 'applying', 'offline'].includes(phase)) await expect(button).toBeDisabled();
+           const button = page.locator('main .update-control button').last();
+           if (offline || ['initializing', 'unsupported', 'checking', 'installing', 'applying', 'offline'].includes(phase)) await expect(button).toBeDisabled();
           else await expect(button).toBeEnabled();
-          await expect(page.locator('main .update-control [role="status"]')).not.toBeEmpty();
-          await expect(page.getByRole('button', { name: /Apply when ready|Force refresh/ })).toHaveCount(0);
+           await expect(page.locator('main .update-control [role="status"]').first()).not.toBeEmpty();
+           await expect(page.getByRole('button', { name: /Apply when ready|Force refresh/ })).toHaveCount(0);
+           if (offline) {
+             await expect(page.locator('main').getByRole('button', { name: 'Update now', exact: true })).toBeEnabled();
+             await expect(page.getByText('Offline: checking for new updates requires a connection. The installed update can still use Update now.')).toBeVisible();
+           }
           const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, clipped: [...document.querySelectorAll<HTMLElement>('.update-control')].some((node) => node.scrollWidth > node.clientWidth + 1) }));
           expect(overflow.scroll, `${width}px ${phase} ${blockerReason}`).toBeLessThanOrEqual(overflow.width);
           expect(overflow.clipped, `${width}px ${phase} ${blockerReason}`).toBe(false);
