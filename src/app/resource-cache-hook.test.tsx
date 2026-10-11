@@ -15,9 +15,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function Consumer({ resourceKey, loader, hydrate, capture, options }: { resourceKey: string | null; loader: ResourceLoader<string>; hydrate?: ResourceHydrator<string>; capture: (snapshot: ResourceSnapshot<string>) => void; options?: ResourceOptions }) {
-  capture(useResource(resourceKey, 'user-a', loader, undefined, hydrate, options));
-  return null;
+type ConsumerProps = { resourceKey: string | null; loader: ResourceLoader<string>; hydrate?: ResourceHydrator<string>; options?: ResourceOptions };
+async function mountConsumer(props: ConsumerProps, peer?: ConsumerProps) {
+  const snapshots: ResourceSnapshot<string>[] = [];
+  function Consumer({ index, resourceKey, loader, hydrate, options }: ConsumerProps & { index: number }) {
+    snapshots[index] = useResource(resourceKey, 'user-a', loader, undefined, hydrate, options);
+    return null;
+  }
+  const view = () => <><Consumer index={0} {...props} />{peer && <Consumer index={1} {...peer} />}</>;
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(view()); });
+  renderers.push(renderer);
+  return {
+    get current() { return snapshots[0]; },
+    get peer() { return snapshots[1]; },
+    update: async (changes: Partial<ConsumerProps>) => {
+      props = { ...props, ...changes };
+      await act(async () => { renderer.update(view()); });
+    },
+  };
 }
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -26,99 +42,82 @@ const deferred = <T,>() => {
 };
 
 describe('disabled resource consumers', () => {
-  it('loads after a shared hydration miss when its initiating consumer disables', async () => {
+  it.each([false, true])('handles a disabled hydration miss with enabled peer: %s', async (hasPeer) => {
     const hydration = deferred<{ data: string } | undefined>();
     const hydrate = vi.fn(() => hydration.promise);
     const loader = vi.fn(async () => 'server');
-    let first!: ResourceSnapshot<string>;
-    let second!: ResourceSnapshot<string>;
-    const captureFirst = (snapshot: ResourceSnapshot<string>) => { first = snapshot; };
-    const captureSecond = (snapshot: ResourceSnapshot<string>) => { second = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey="shared-hydration" loader={loader} hydrate={hydrate} capture={captureFirst} />); });
-    renderers.push(renderer);
-    const view = (enabled: boolean) => <><Consumer resourceKey={enabled ? 'shared-hydration' : null} loader={loader} hydrate={hydrate} capture={captureFirst} /><Consumer resourceKey="shared-hydration" loader={loader} hydrate={hydrate} capture={captureSecond} /></>;
-    await act(async () => { renderer.update(view(true)); });
+    const props = { resourceKey: 'hydration-miss', loader, hydrate };
+    const consumer = await mountConsumer(props, hasPeer ? props : undefined);
     expect(hydrate).toHaveBeenCalledTimes(1);
-    await act(async () => { renderer.update(view(false)); });
+    await consumer.update({ resourceKey: null });
     await act(async () => { hydration.resolve(undefined); });
+    expect(loader).toHaveBeenCalledTimes(hasPeer ? 1 : 0);
+    expect(consumer.current.data).toBeUndefined();
+    if (hasPeer) expect(consumer.peer.data).toBe('server');
+    else {
+      await act(async () => { await refreshVisiblePrivateResources(); });
+      expect(loader).not.toHaveBeenCalled();
+    }
+    await consumer.update({ resourceKey: 'hydration-miss' });
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(first.data).toBeUndefined();
-    expect(second.data).toBe('server');
+    expect(consumer.current.data).toBe('server');
   });
 
   it('fences pending hydration on account change without exposing old data on re-enable', async () => {
     const hydration = deferred<{ data: string } | undefined>();
-    const hydrate = vi.fn(() => hydration.promise);
     const loader = vi.fn(async () => 'server');
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey="account-hydration" loader={loader} hydrate={hydrate} capture={capture} />); });
-    renderers.push(renderer);
-    await act(async () => { renderer.update(<Consumer resourceKey={null} loader={loader} capture={capture} />); });
+    const consumer = await mountConsumer({ resourceKey: 'account-hydration', loader, hydrate: () => hydration.promise });
+    await consumer.update({ resourceKey: null, hydrate: undefined });
     await act(async () => { setResourceIdentity('user-b'); hydration.resolve({ data: 'old private cache' }); });
-    expect(current.data).toBeUndefined();
+    expect(consumer.current.data).toBeUndefined();
     expect(getResourceSnapshot('account-hydration', 'user-a').data).toBeUndefined();
     // Keep the new account's identity pending so the old account cannot load.
     getResourceSnapshot('identity');
-    await act(async () => { renderer.update(<Consumer resourceKey="account-hydration" loader={loader} capture={capture} />); });
-    expect(current.data).toBeUndefined();
+    await consumer.update({ resourceKey: 'account-hydration' });
+    expect(consumer.current.data).toBeUndefined();
     expect(loader).not.toHaveBeenCalled();
   });
 
   it('preserves offline hydration and skipWhenOffline across disable/re-enable and cold retries', async () => {
     const loader = vi.fn(async () => 'server');
     const hydrate = vi.fn(async () => ({ data: 'offline cached', offline: true }));
-    const options = { skipWhenOffline: true };
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey={null} loader={loader} hydrate={hydrate} options={options} capture={capture} />); });
-    renderers.push(renderer);
+    const consumer = await mountConsumer({ resourceKey: null, loader, hydrate, options: { skipWhenOffline: true } });
     await act(async () => { await revalidate('offline-optional', 'user-a', { force: true, reason: 'route' }); });
     expect(loader).not.toHaveBeenCalled();
     expect(hydrate).not.toHaveBeenCalled();
     vi.stubGlobal('navigator', { onLine: false });
-    const view = (enabled: boolean) => <Consumer resourceKey={enabled ? 'offline-optional' : null} loader={loader} hydrate={hydrate} options={options} capture={capture} />;
-    await act(async () => { renderer.update(view(true)); });
-    expect(current.data).toBe('offline cached');
-    expect(current.offline).toBe(true);
-    await act(async () => { renderer.update(view(false)); });
-    expect(current.data).toBeUndefined();
-    await act(async () => { await revalidate('offline-optional', 'user-a', { force: true, reason: 'route' }); renderer.update(view(true)); });
-    expect(current.data).toBe('offline cached');
+    await consumer.update({ resourceKey: 'offline-optional' });
+    expect(consumer.current.data).toBe('offline cached');
+    expect(consumer.current.offline).toBe(true);
+    await consumer.update({ resourceKey: null });
+    expect(consumer.current.data).toBeUndefined();
+    await act(async () => { await revalidate('offline-optional', 'user-a', { force: true, reason: 'route' }); });
+    await consumer.update({ resourceKey: 'offline-optional' });
+    expect(consumer.current.data).toBe('offline cached');
     expect(hydrate).toHaveBeenCalledTimes(1);
     expect(loader).not.toHaveBeenCalled();
     vi.stubGlobal('navigator', { onLine: true });
-    await act(async () => { renderer.update(<Consumer resourceKey="offline-optional" loader={loader} options={{ skipWhenOffline: false }} capture={capture} />); });
+    await consumer.update({ hydrate: undefined, options: { skipWhenOffline: false } });
     await act(async () => { await revalidate('offline-optional', 'user-a', { force: true, reason: 'route' }); });
-    expect(current.data).toBe('server');
+    expect(consumer.current.data).toBe('server');
     expect(loader).toHaveBeenCalledTimes(1);
   });
 
-  it('does not load, hydrate, or refresh while disabled, and hydrates when enabled', async () => {
+  it('does not load, hydrate, register, or refresh while disabled, and hydrates when enabled', async () => {
     const loader = vi.fn(async () => 'server');
     const hydrate = vi.fn(async () => ({ data: 'cached', fetchedAt: Date.now() }));
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey={null} loader={loader} hydrate={hydrate} capture={capture} />); });
-    renderers.push(renderer);
-    const disabled = current;
-    await act(async () => {
-      invalidateResource('optional', 'user-a');
-      await refreshVisiblePrivateResources();
-      renderer.update(<Consumer resourceKey={null} loader={loader} hydrate={hydrate} capture={capture} />);
-    });
-    expect(current).toBe(disabled);
-    expect(current).toMatchObject({ status: 'idle', loading: false, revalidating: false });
-    expect(current.data).toBeUndefined();
-    expect(resourceViewState(current)).not.toBe('ready');
+    const consumer = await mountConsumer({ resourceKey: null, loader, hydrate });
+    const disabled = consumer.current;
+    await act(async () => { invalidateResource('optional', 'user-a'); await refreshVisiblePrivateResources(); });
+    await consumer.update({ resourceKey: null });
+    expect(consumer.current).toBe(disabled);
+    expect(consumer.current).toMatchObject({ status: 'idle', loading: false, revalidating: false });
+    expect(consumer.current.data).toBeUndefined();
+    expect(resourceViewState(consumer.current)).not.toBe('ready');
     expect(loader).not.toHaveBeenCalled();
     expect(hydrate).not.toHaveBeenCalled();
-    await act(async () => { renderer.update(<Consumer resourceKey="optional" loader={loader} hydrate={hydrate} capture={capture} />); });
-    expect(current.data).toBe('cached');
+    await consumer.update({ resourceKey: 'optional' });
+    expect(consumer.current.data).toBe('cached');
     expect(hydrate).toHaveBeenCalledTimes(1);
     expect(loader).not.toHaveBeenCalled();
   });
@@ -126,83 +125,50 @@ describe('disabled resource consumers', () => {
   it('hides an in-flight result immediately on disable and reuses its cache on re-enable', async () => {
     const request = deferred<string>();
     const loader = vi.fn(() => request.promise);
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey="in-flight" loader={loader} capture={capture} />); });
-    renderers.push(renderer);
-    expect(current.loading).toBe(true);
-    await act(async () => { renderer.update(<Consumer resourceKey={null} loader={loader} capture={capture} />); });
+    const consumer = await mountConsumer({ resourceKey: 'in-flight', loader });
+    expect(consumer.current.loading).toBe(true);
+    await consumer.update({ resourceKey: null });
+    expect(consumer.current.data).toBeUndefined();
+    expect(consumer.current.status).toBe('idle');
     await act(async () => { request.resolve('completed'); });
-    expect(current.data).toBeUndefined();
-    expect(current.status).toBe('idle');
-    await act(async () => {
-      invalidateResource('in-flight', 'user-a', { revalidate: false });
-      await refreshVisiblePrivateResources();
-    });
+    expect(consumer.current.data).toBeUndefined();
+    await act(async () => { invalidateResource('in-flight', 'user-a', { revalidate: false }); await refreshVisiblePrivateResources(); });
     expect(loader).toHaveBeenCalledTimes(1);
-    await act(async () => { renderer.update(<Consumer resourceKey="in-flight" loader={loader} capture={capture} />); });
-    expect(current.data).toBe('completed');
+    await consumer.update({ resourceKey: 'in-flight' });
+    expect(consumer.current.data).toBe('completed');
     expect(loader).toHaveBeenCalledTimes(2);
   });
 
   it('does not overwrite or unsubscribe an enabled shared consumer', async () => {
     const enabledLoader = vi.fn(async () => 'enabled');
     const disabledLoader = vi.fn(async () => 'disabled');
-    let first!: ResourceSnapshot<string>;
-    let second!: ResourceSnapshot<string>;
-    const captureFirst = (snapshot: ResourceSnapshot<string>) => { first = snapshot; };
-    const captureSecond = (snapshot: ResourceSnapshot<string>) => { second = snapshot; };
-    const view = (enabled: boolean) => <><Consumer resourceKey="shared" loader={enabledLoader} capture={captureFirst} /><Consumer resourceKey={enabled ? 'shared' : null} loader={disabledLoader} capture={captureSecond} /></>;
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(view(false)); });
-    renderers.push(renderer);
-    expect(first.data).toBe('enabled');
-    expect(second.data).toBeUndefined();
+    const consumer = await mountConsumer({ resourceKey: null, loader: disabledLoader }, { resourceKey: 'shared', loader: enabledLoader });
+    expect(consumer.peer.data).toBe('enabled');
+    expect(consumer.current.data).toBeUndefined();
     expect(disabledLoader).not.toHaveBeenCalled();
-    await act(async () => { renderer.update(view(true)); });
-    expect(second.data).toBe(first.data);
-    await act(async () => { renderer.update(view(false)); });
+    await consumer.update({ resourceKey: 'shared' });
+    expect(consumer.current.data).toBe(consumer.peer.data);
+    await consumer.update({ resourceKey: null });
     await act(async () => { invalidateResource('shared', 'user-a'); });
     expect(enabledLoader).toHaveBeenCalledTimes(2);
     expect(disabledLoader).not.toHaveBeenCalled();
-    expect(second.data).toBeUndefined();
-  });
-
-  it('does not start a loader after disabled hydration misses, but recovers on re-enable', async () => {
-    const hydration = deferred<{ data: string } | undefined>();
-    const hydrate = vi.fn(() => hydration.promise);
-    const loader = vi.fn(async () => 'server');
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey="hydration-miss" loader={loader} hydrate={hydrate} capture={capture} />); });
-    renderers.push(renderer);
-    await act(async () => { renderer.update(<Consumer resourceKey={null} loader={loader} hydrate={hydrate} capture={capture} />); });
-    await act(async () => { hydration.resolve(undefined); await refreshVisiblePrivateResources(); });
-    expect(loader).not.toHaveBeenCalled();
-    expect(current.data).toBeUndefined();
-    await act(async () => { renderer.update(<Consumer resourceKey="hydration-miss" loader={loader} hydrate={hydrate} capture={capture} />); });
-    expect(loader).toHaveBeenCalledTimes(1);
-    expect(current.data).toBe('server');
+    expect(consumer.current.data).toBeUndefined();
   });
 
   it('keeps late hydration out of the current key and fences a disabled request on account change', async () => {
     const hydration = deferred<{ data: string } | undefined>();
     const request = deferred<string>();
     const loader = vi.fn(() => request.promise);
-    let current!: ResourceSnapshot<string>;
-    const capture = (snapshot: ResourceSnapshot<string>) => { current = snapshot; };
     seedResource('next', 'user-a', 'next cached');
-    let renderer!: ReactTestRenderer;
-    await act(async () => { renderer = create(<Consumer resourceKey="hydrating" loader={loader} hydrate={() => hydration.promise} capture={capture} />); });
-    renderers.push(renderer);
-    await act(async () => { renderer.update(<Consumer resourceKey="next" loader={loader} capture={capture} />); hydration.resolve({ data: 'old cached' }); });
-    expect(current.data).toBe('next cached');
+    const consumer = await mountConsumer({ resourceKey: 'hydrating', loader, hydrate: () => hydration.promise });
+    await consumer.update({ resourceKey: 'next', hydrate: undefined });
+    await act(async () => { hydration.resolve({ data: 'old cached' }); });
+    expect(consumer.current.data).toBe('next cached');
     expect(loader).not.toHaveBeenCalled();
-    await act(async () => { renderer.update(<Consumer resourceKey="account-request" loader={loader} capture={capture} />); });
-    await act(async () => { renderer.update(<Consumer resourceKey={null} loader={loader} capture={capture} />); setResourceIdentity('user-b'); request.resolve('private old result'); });
-    expect(current.data).toBeUndefined();
+    await consumer.update({ resourceKey: 'account-request' });
+    await consumer.update({ resourceKey: null });
+    await act(async () => { setResourceIdentity('user-b'); request.resolve('private old result'); });
+    expect(consumer.current.data).toBeUndefined();
     expect(getResourceSnapshot('account-request', 'user-a').data).toBeUndefined();
   });
 });

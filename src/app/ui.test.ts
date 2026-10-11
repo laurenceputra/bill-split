@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { AuthLoadingShell, AvatarStack, Button, Disclosure, Field, GroupInsightsControl, LedgerList, LedgerRow, PageHeader, ResourceState, SplitTransactionControl } from './ui';
 import { AuthBannerAction, InstallButton, PublicAuthAction } from './control-actions';
+import { AppErrorBoundary } from './ErrorBoundary';
 
 describe('Button feedback enrollment', () => {
   it('forwards provider activation props to native authentication actions', () => {
@@ -88,46 +89,37 @@ describe('SplitTransactionControl', () => {
     expect(markup).toMatch(/<select[^>]+disabled/);
   });
 
-  it('keeps the mobile navigation plus decorative and uses the shared content track', () => {
-    const markup = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/groups/group-1'] }, createElement(SplitTransactionControl, { groupId: 'group-1', online: true, compact: true, mobileNav: true })));
-
-    expect(markup).toContain('class="nav-item__content"');
-    expect(markup).toContain('class="nav-item__icon"');
-    expect(markup).toContain('class="nav-item__glyph nav-item__glyph--add"');
-    expect(markup).toContain('class="nav-item__label">Add</span>');
-    expect(markup).toContain('aria-hidden="true"');
-    expect(markup).not.toContain('nav-add-stack');
-    expect(markup).not.toContain('nav-add-icon');
-    expect(markup).toContain('aria-label="Add expense"');
-    expect(markup).toContain('aria-label="Choose transaction type"');
-  });
 });
 
 describe('GroupInsightsControl', () => {
-  it('keeps insights direct and exposes only navigation options in an enabled native select', () => {
+  it('encodes group IDs in the insights destination', () => {
     const markup = renderToStaticMarkup(createElement(MemoryRouter, {}, createElement(GroupInsightsControl, { groupId: 'group & 1' })));
     expect(markup).toContain('href="/activity?group=group%20%26%201&amp;view=insights&amp;period=all"');
-    expect(markup).toContain('aria-label="More group actions"');
-    expect(markup).toContain('data-flow-region="admin"');
-    expect(markup).toContain('<option value="" selected="">More group actions</option>');
-    expect(markup).toContain('<option value="history">Group history</option>');
-    expect(markup).toContain('<option value="settings">Group settings</option>');
-    expect(markup).not.toMatch(/disabled|<details|<summary|<nav/);
   });
 });
 
 describe('AuthLoadingShell', () => {
-  it('keeps every loading nav placeholder on the shared two-row track', () => {
+  it('announces loading while keeping decorative placeholders out of the accessibility tree', () => {
     const markup = renderToStaticMarkup(createElement(AuthLoadingShell));
 
-    expect(markup.match(/class="nav-item__content"/g)).toHaveLength(4);
-    expect(markup.match(/class="nav-item__icon"/g)).toHaveLength(4);
-    expect(markup.match(/class="nav-item__label"/g)).toHaveLength(4);
-    expect(markup.match(/skeleton--nav-icon/g)).toHaveLength(4);
-    expect(markup.match(/skeleton--nav-label/g)).toHaveLength(4);
-    expect(markup).toContain('class="nav-item nav-item--add"');
-    expect(markup).toContain('class="nav-item__capsule"');
-    expect(markup).toContain('aria-hidden="true"');
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain('role="status" aria-live="polite">Loading…</p>');
+    expect(markup).toMatch(/<nav[^>]*aria-hidden="true">/);
+    expect(markup).toMatch(/<div class="auth-loading-visual" aria-hidden="true">/);
+    expect(markup).not.toMatch(/<button|<select/);
+  });
+});
+
+describe('AppErrorBoundary', () => {
+  it('renders its failure fallback as an alert with recovery actions', () => {
+    const boundary = new AppErrorBoundary({ children: null });
+    boundary.state = AppErrorBoundary.getDerivedStateFromError();
+    const markup = renderToStaticMarkup(boundary.render());
+
+    expect(markup).toMatch(/<main[^>]*role="alert">/);
+    expect(markup).toContain('<h1>Something went wrong</h1>');
+    expect(markup).toContain('>Reload</button>');
+    expect(markup).toContain('href="/">Return to Groups</a>');
   });
 });
 

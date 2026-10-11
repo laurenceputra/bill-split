@@ -961,6 +961,18 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
   const page = await context.newPage();
   const addItem = page.locator('.bottom-nav .nav-item--add').filter({ has: page.locator('.split-transaction-control') });
   const mobileWidths = [320, 390, 399, 400, 430, 447, 448, 480, 481, 600, 767, 768, 895];
+  const readColors = () => addItem.locator('.split-transaction-control__primary, .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, divider: { width: style.borderLeftWidth, style: style.borderLeftStyle, color: style.borderLeftColor } };
+  }));
+  const themeColor = (token: string) => addItem.evaluate((item, token) => {
+    const probe = document.createElement('span');
+    probe.style.color = `var(${token})`;
+    item.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
   const readGeometry = async () => addItem.evaluate((item) => {
     const nav = item.closest<HTMLElement>('.bottom-nav');
     const capsule = item.querySelector<HTMLElement>('.nav-item__capsule');
@@ -1068,7 +1080,7 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
       });
       expect(focusStyle.outlineStyle, `${state} ${width}px ${selector} outline`).toBe('none');
       expect(focusStyle.outlineOffset, `${state} ${width}px ${selector} outline offset`).toBe('0px');
-      expect(focusStyle.boxShadow, `${state} ${width}px ${selector} visible focus`).toContain('rgb(255, 255, 255)');
+      expect(focusStyle.boxShadow, `${state} ${width}px ${selector} visible focus`).toContain(await themeColor('--color-primary-fg'));
       expect(focusStyle.sharedDivider, `${state} ${width}px ${focusState} shared divider`).toEqual({ width: '1px', style: 'solid', color: 'rgba(255, 255, 255, 0.45)' });
     }
   };
@@ -1107,24 +1119,15 @@ test('keeps the mobile Add tile raised, contained, and dimensionally stable acro
       const contentBottom = geometry.contentBottoms[0] || 0;
       expect(geometry.contentBottoms.every((bottom) => Math.abs(bottom - contentBottom) <= 0.5), `${state} ${width}px shared content anchor`).toBe(true);
 
-      const colors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => {
-        const style = getComputedStyle(element);
-        return { background: style.backgroundColor, divider: { width: style.borderLeftWidth, style: style.borderLeftStyle, color: style.borderLeftColor } };
-      }));
-      const background = state === 'active' ? 'rgb(84, 54, 220)' : 'rgb(109, 74, 255)';
-      expect(colors, `${state} ${width}px colors and divider`).toEqual([
-        { background, divider: { width: '1px', style: 'solid', color: 'rgb(109, 74, 255)' } },
+      const primaryColor = await themeColor('--color-primary');
+      const hoverColor = await themeColor('--color-primary-hover');
+      const expectedColors = (background: string) => [
+        { background, divider: { width: '1px', style: 'solid', color: primaryColor } },
         { background, divider: { width: '1px', style: 'solid', color: 'rgba(255, 255, 255, 0.45)' } },
-      ]);
+      ];
+      expect(await readColors(), `${state} ${width}px colors and divider`).toEqual(expectedColors(state === 'active' ? hoverColor : primaryColor));
       await addItem.hover();
-      const hoverColors = await page.locator('.bottom-nav .split-transaction-control__primary, .bottom-nav .split-transaction-control__menu').evaluateAll((elements) => elements.map((element) => {
-        const style = getComputedStyle(element);
-        return { background: style.backgroundColor, divider: { width: style.borderLeftWidth, style: style.borderLeftStyle, color: style.borderLeftColor } };
-      }));
-      expect(hoverColors, `${state} ${width}px hover colors and divider`).toEqual([
-        { background: 'rgb(84, 54, 220)', divider: { width: '1px', style: 'solid', color: 'rgb(109, 74, 255)' } },
-        { background: 'rgb(84, 54, 220)', divider: { width: '1px', style: 'solid', color: 'rgba(255, 255, 255, 0.45)' } },
-      ]);
+      expect(await readColors(), `${state} ${width}px hover colors and divider`).toEqual(expectedColors(hoverColor));
       await page.mouse.move(0, 0);
       await expectFocusIndicator(state, width);
     }
@@ -1210,7 +1213,9 @@ test('switches the Add navigation from mobile to desktop at the 896px boundary',
     await page.setViewportSize({ width: 896, height: 900 });
     await expect(page.locator('.bottom-nav')).toBeHidden();
     await expect(page.locator('.desktop-nav')).toBeVisible();
-    await expect(page.locator('.desktop-nav .split-transaction-control__primary')).toHaveText('Add');
+    const primary = page.locator('.desktop-nav').getByRole('link', { name: 'Add expense', exact: true });
+    await expect(primary).toBeVisible();
+    await expect(primary).toHaveAttribute('href', `/groups/${richGroupId}/expense/new`);
   } finally {
     await context.close();
   }

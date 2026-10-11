@@ -117,6 +117,8 @@ only for full-page capture after live layout/navigation checks. Regenerate with:
 UPDATE_HOME_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-home-superscript npm run test:e2e:local -- tests/e2e/home-insights-surfaces.spec.ts --project=chromium --workers=1
 ```
 
+Shortcut: `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:screenshots:home`; append `-- --grep 'Home reference|Home sort tooltip|Home cards retain'` for a bounded home-only refresh. The full command retains control-feedback checks; `UPDATE_HOME_SCREENSHOTS=1` gates tracked output, not normal behavior tests. Both screenshot wrappers validate Chromium and pass capture flags through; group output requires `UPDATE_GROUP_SCREENSHOTS=1`. Internal example.com authentication contracts must never be displayed.
+
 Verification: `npm run test:unit -- --maxWorkers=2` passed (65 files, 946 tests);
 `npm run build` passed with the existing large-chunk warning. An independent
 focused Chromium rerun passed all eight tests despite a runtime broken-pipe

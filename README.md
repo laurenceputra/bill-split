@@ -29,6 +29,8 @@ Cloudflare Workers Builds runs `npm run test:unit` before the production
 bundle build; it does not run the optional performance tier. GitHub Actions
 runs the unit/build and local-D1 integration jobs in parallel for pull requests
 and pushes to `main`. Playwright remains a separate E2E suite.
+The dedicated `vitest.migration.config.ts` suite solely owns migration application,
+upgrade, and schema/trigger integration regressions; summary tests own runtime queries, not duplicate migration assertions.
 
 For a Clerk-backed Vite build, copy `.env.example` to the mode-specific local
 file and set the publishable key from your Clerk instance:
@@ -73,12 +75,8 @@ installs Chromium and WebKit with host dependencies and runs the focused date
 suite in both projects; the other browser suites remain Chromium-only. Linux
 WebKit is not a substitute for real iOS Safari verification.
 
-The date suite checks all 13 route/disclosure behaviors once per browser at
-390px, then checks eight representative geometries at seven widths: 69 route
-visits per browser, 138 across both (about 24% fewer than the former 182).
-
-See [verification tiers](docs/verification-tiers.md) for suite ownership and
-opt-in synthetic screenshot regeneration commands.
+See the [responsive matrix](docs/responsive-audit-matrix.md) for date coverage and
+opt-in synthetic screenshot commands, and [update core](docs/reliable-update-core.md#executed-verification-and-scope) for lifecycle evidence ownership.
 
 For the reusable Playwright browser audit (production client build plus a
 local Worker and isolated D1 fixture), run:

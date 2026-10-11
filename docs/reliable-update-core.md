@@ -241,11 +241,11 @@ is not the recovery procedure. Never clear site data or the outbox.
 Current PR verification passed **929 unit tests, 27 integration tests, and 1
 migration test**, plus typecheck and production build.
 
-- **10 standalone Chromium lifecycle tests** in the current source use a real same-origin server switching coherent
+- **10 standalone Chromium lifecycle tests** in `service-worker-update.spec.ts` (eight direct cases and two installation-failure variants) use a real same-origin server switching coherent
   production worker/shell artifacts and the actual core modules. This verifies
   service-worker A/B lifecycle behavior in a dedicated production-core fixture,
   **not an authenticated full-App A/B deployment**. These run without Wrangler;
-  the main e2e configuration also passed the same nine tests plus **1 Chromium
+  the main e2e configuration also passed the then-current nine tests plus **1 Chromium
   Worker/ASSETS endpoint integration test**.
 - **Previous-work evidence, not rerun in this PR:** **11 Chromium
   update-settings/avatar/user-feedback tests** include the live

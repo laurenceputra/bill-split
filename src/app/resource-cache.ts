@@ -48,7 +48,6 @@ const entries = new Map<ResourceKey, Entry<unknown>>();
 const identityListeners = new Set<() => void>();
 let activeUserId: string | undefined;
 let identityEpoch = 0;
-let visible = typeof document === 'undefined' || document.visibilityState === 'visible';
 let coordinatorInstalled = false;
 let coordinatorTimer: ReturnType<typeof setTimeout> | undefined;
 let coordinatorIdentityCheck = false;
@@ -183,10 +182,6 @@ export function isResourceFresh<T>(snapshot: ResourceSnapshot<T>, ttl = MIN_RESO
   return snapshot.data !== undefined && snapshot.fetchedAt !== undefined && at - snapshot.fetchedAt < Math.max(MIN_RESOURCE_FRESHNESS_MS, ttl);
 }
 
-export function readResource<T>(key: ResourceKey, userId = activeUserId || ''): T | undefined {
-  return getResourceSnapshot<T>(key, userId).data;
-}
-
 export function seedResource<T>(key: ResourceKey, userId: string, data: T, fetchedAt = now(), options: { offline?: boolean } = {}) {
   const scopedUserId = isIdentityKey(key) ? 'identity' : userId;
   const resource = entry<T>(key, scopedUserId, MIN_RESOURCE_FRESHNESS_MS);
@@ -305,8 +300,7 @@ export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
     if (key === preserveKey) continue;
     if (userId && resource.snapshot.userId !== userId) continue;
     if (resource.snapshot.data !== undefined || resource.snapshot.status !== 'idle' || resource.promise || resource.hydrationPromise) {
-      const next = idleSnapshot(resource.snapshot.userId);
-      resource.snapshot = next;
+      resource.snapshot = idleSnapshot(resource.snapshot.userId);
       resource.controller?.abort();
       resource.generation += 1;
       resource.promise = undefined;
@@ -329,7 +323,6 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
   const force = options.force === true || (isIdentityKey(key) && options.reason === 'identity-check');
   if (!force && isResourceFresh(resource.snapshot, resource.ttl)) return resource.snapshot.data;
   if (resource.promise) { if (force) resource.forcePending = options; return resource.promise; }
-  if (!isVisible()) return resource.snapshot.data;
   const generation = resource.generation;
   const requestIdentityEpoch = identityEpoch;
   const requestSessionGeneration = captureSessionGeneration();
@@ -401,8 +394,7 @@ export function initializeForegroundCoordinator() {
   window.addEventListener('billsplit-auth-resumed', () => { authResumeSuppressedUntil = Date.now() + 500; });
   const schedule = (identityCheck = false) => { coordinatorIdentityCheck ||= identityCheck; if (coordinatorTimer) clearTimeout(coordinatorTimer); coordinatorTimer = setTimeout(() => { coordinatorTimer = undefined; const check = coordinatorIdentityCheck; coordinatorIdentityCheck = false; foregroundRefresh(check); }, 100); };
   document.addEventListener('visibilitychange', () => {
-    visible = isVisible();
-    if (!visible) {
+    if (!isVisible()) {
       for (const resource of entries.values()) if (resource.controller) {
         resource.controller.abort(); resource.generation += 1; resource.forcePending = resource.forcePending?.force ? resource.forcePending : { reason: 'visibility' };
         resource.snapshot = stable({ ...resource.snapshot, status: resource.snapshot.data === undefined ? 'idle' : 'ready', loading: false, revalidating: false, stale: true, error: undefined });
@@ -415,7 +407,6 @@ export function initializeForegroundCoordinator() {
   window.addEventListener('online', () => { if (isVisible()) schedule(); });
   window.addEventListener('billsplit-connection-restored', () => { if (isVisible()) schedule(); });
 }
-export const isDocumentVisible = () => visible && isVisible();
 
 export const resourceKey = (resource: string, scope = '') => `${resource}:${scope}`;
 export const resourceKeys = Object.freeze({
@@ -440,19 +431,6 @@ export const resourceKeys = Object.freeze({
   expenseDetail: (userId: string, expenseId: string) => resourceKey('expense-detail', `${userId}:${expenseId}`),
   settlementDetail: (userId: string, settlementId: string) => resourceKey('settlement-detail', `${userId}:${settlementId}`),
   creditDetail: (userId: string, creditId: string) => resourceKey('credit-detail', `${userId}:${creditId}`),
-});
-export const useCachedResource = useResource;
-export const resourceCache = Object.freeze({
-  getSnapshot: getResourceSnapshot,
-  subscribe: subscribeResource,
-  configure: configureResource,
-  seed: seedResource,
-  revalidate,
-  invalidate: invalidateResource,
-  invalidateMany: invalidateResources,
-  evict: evictResource,
-  evictPrefix: evictResourcePrefix,
-  clear: clearResourceCache,
 });
 const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; detailsGroupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) => {
   try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }

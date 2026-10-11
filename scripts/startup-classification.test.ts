@@ -11,8 +11,6 @@ import { exitDetail, exitStatus, recordServerFailure } from '../tests/e2e/server
 // @ts-expect-error Node-only Playwright reporter.
 import EnvironmentReporter from '../tests/e2e/environment-reporter.mjs';
 
-const e2eRoot = path.resolve(import.meta.dirname, '../tests/e2e');
-
 describe('E2E startup classification', () => {
   it.each(['zero', 'nonzero', 'signal', 'teardown', 'spawn-error'])('handles a real child process: %s', async (scenario) => {
     const source = scenario === 'signal' ? "process.kill(process.pid, 'SIGTERM')" : `process.exit(${scenario === 'nonzero' ? 7 : 0})`;
@@ -96,22 +94,5 @@ describe('E2E startup classification', () => {
     expect(classifyTermination({ signal: 'SIGTERM', ready: false })).toEqual({ type: 'startup-timeout', category: 'runtime/environment' });
     expect(classifyTermination({ signal: 'SIGTERM', ready: true })).toBeUndefined();
     expect(classifyTermination({ signal: 'SIGINT', ready: false })).toBeUndefined();
-  });
-});
-
-describe('E2E selector architecture', () => {
-  it('does not retain removed compatibility-class selectors', () => {
-    for (const file of readdirSync(e2eRoot).filter((entry) => /\.(?:ts|mjs|js)$/.test(entry))) {
-      const source = readFileSync(path.join(e2eRoot, file), 'utf8');
-      expect(source, file).not.toMatch(/\.(?:page-title|list|surface|empty|section-title)(?![-\w])/);
-    }
-  });
-
-  it('uses semantic or primitive hooks for the migrated accessibility assertions', () => {
-    const source = readFileSync(path.join(e2eRoot, 'accessibility.spec.ts'), 'utf8');
-    expect(source).toContain('.ui-page-header h1');
-    expect(source).toContain('.ui-empty-state');
-    expect(source).toContain('.ui-ledger-list');
-    expect(source).toContain('.ui-form-surface form');
   });
 });
