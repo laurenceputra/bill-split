@@ -117,6 +117,8 @@ only for full-page capture after live layout/navigation checks. Regenerate with:
 UPDATE_HOME_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-home-superscript npm run test:e2e:local -- tests/e2e/home-insights-surfaces.spec.ts --project=chromium --workers=1
 ```
 
+Shortcut: `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:screenshots:home`; append `-- --grep 'Home reference|Home sort tooltip|Home cards retain'` for a bounded home-only refresh. The full command retains control-feedback checks; `UPDATE_HOME_SCREENSHOTS=1` gates tracked output, not normal behavior tests. Both screenshot wrappers validate Chromium and pass capture flags through; group output requires `UPDATE_GROUP_SCREENSHOTS=1`. Internal example.com authentication contracts must never be displayed.
+
 Verification: `npm run test:unit -- --maxWorkers=2` passed (65 files, 946 tests);
 `npm run build` passed with the existing large-chunk warning. An independent
 focused Chromium rerun passed all eight tests despite a runtime broken-pipe
@@ -303,24 +305,27 @@ all-time USD references `spending-insights-global-mobile.png`,
 `spending-insights-group-mobile.png` (390px full page),
 `spending-insights-global-desktop.png`, and
 `spending-insights-group-desktop.png` (1440px full page) show separate filled
-summary and chart surfaces; `warm-ledger-insights-desktop.png` is the same
-1440px group Insights view. The mobile bottom navigation was confirmed live
+summary and chart surfaces; the canonical desktop group Insights reference is
+`spending-insights-group-desktop.png`. The mobile bottom navigation was confirmed live
 and hidden only for full-page capture to avoid a repeated fixed stripe. These
 references do not depict loading, cached, offline, empty, or error states.
 
 ### Repeatable group references
 
-`tests/e2e/group-reference-screenshots.spec.ts` uses the authenticated seeded
-Europe trip group without API mocks. Regenerate only these group references:
+`tests/e2e/group-reference-screenshots.spec.ts` uses authenticated local ledger
+data with API identity anonymization before rendering. Names become repeatable
+Demo labels, groups become Sample project, and emails/avatar metadata are removed.
+Every capture asserts generic avatar labels/initials and absence of identifying
+text and images. Regenerate only these group references:
 
 ```sh
-PLAYWRIGHT_BROWSERS_PATH=/ms-playwright UPDATE_GROUP_SCREENSHOTS=1 npm run test:e2e:local -- tests/e2e/group-reference-screenshots.spec.ts --project=chromium --workers=1
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:screenshots:group
 ```
 
 To refresh only the five overview references without history/insight churn, prefix the command with `GROUP_SCREENSHOTS_OVERVIEW_ONLY=1`.
 
-Without the opt-in, captures are test attachments and do not overwrite tracked
-images. Fonts are ready and screenshot animations disabled. Mobile uses 390×844
+Without the opt-in, this capture-only suite is skipped; normal navigation and
+state behavior suites remain enabled. Fonts are ready and screenshot animations disabled. Mobile uses 390×844
 and desktop 1440×900 viewports; references are full-page except the explicitly
 named viewport image. Fixed bottom navigation is verified live and hidden only
 for full-page captures, not the viewport reference.
@@ -328,13 +333,13 @@ for full-page captures, not the viewport reference.
 - Closed overview: [mobile](screenshots/warm-ledger-mobile.png),
   [desktop](screenshots/warm-ledger-desktop.png), and
   [mobile viewport with fixed navigation](screenshots/group-overview-mobile-viewport.png).
-- More group actions beside Spending insights: reference screenshot generation now captures the focused native select (browser/OS picker chrome requires manual inspection); old expanded-panel screenshots are obsolete.
+- More group actions beside Spending insights: [focused mobile](screenshots/group-overview-more-actions-focused-mobile.png) and [focused desktop](screenshots/group-overview-more-actions-focused-desktop.png). Browser/OS picker chrome requires manual inspection; obsolete expanded-panel images have been removed.
 - Group Changes with Back to group: [mobile](screenshots/warm-ledger-history-mobile.png)
   and [desktop](screenshots/warm-ledger-history-desktop.png).
 - Loaded group Insights (`period=all&currency=USD`) with real allocated share,
   paid totals, and highest payer: [mobile](screenshots/spending-insights-group-mobile.png),
-  [desktop](screenshots/spending-insights-group-desktop.png), and the same
-  [Warm Ledger desktop reference](screenshots/warm-ledger-insights-desktop.png).
+  [desktop](screenshots/spending-insights-group-desktop.png). This single canonical
+  desktop image replaces the exact duplicate Warm Ledger insights capture.
 
 The refund/reimbursement matrix below remains the release checklist for the
 dedicated online-only refund flow. The Warm Ledger states cover the newer
@@ -367,20 +372,30 @@ other user's preference rather than the current account's image.
 ### Shared native date controls
 
 `tests/e2e/date-controls.spec.ts` runs the same focused matrix in Chromium and
-the `date-controls-webkit` project. Every row below checks initial, empty, and
-populated date bounds against **every containing ancestor**, not just the page
+the `date-controls-webkit` project. Semantic/value/route wiring visits 13 routes
+once per browser at 390px; geometry visits eight representative layouts at seven widths.
+This is `13 + 8 × 7 = 69` route visits per browser, or **138 across both**
+(about 24% fewer than the former 182). Geometry
+checks initial, empty, and populated date bounds against **every containing ancestor**, not just the page
 (which can hide overflow), plus ISO value retention after editing and blur.
 No overflow clipping or replacement picker is used. Specialized amount grids
 retain their overrides of the shrinkable shared Field column.
 
-| Date location/state | 320 | 390 | 767 / 768 | 895 / 896 | 1440 |
-| --- | --- | --- | --- | --- | --- |
-| Expense create/edit, Repeat off | Date contained | Same | Same across form boundary | Same across navigation boundary | Same |
-| Repeat on, start/end; schedule edit | Both contained; optional end clears; end minimum follows start | Same | Same | Same | Same |
-| Refund create/edit and credit edit alias | Date fits fieldset and form surface | Same | Same | Same | Same |
-| Settlement create and edit open | Date fits shared field and form surface | Same | Same | Same | Same |
-| Transaction filters expanded, global/group | From/to fit disclosure and filter grid | Same | Same | Same | Same |
-| Custom insights, global/group | From/to fit insight grid; Apply range preserves values in URL | Same | Same | Same | Same |
+| Route/disclosure family | Representative geometry at 320, 390, 767, 768, 895, 896, 1440px | Route behavior once per browser at 390px |
+| --- | --- | --- |
+| Expense create/edit, Repeat off | Expense create: date contained | Create and edit each check date count, visibility, clearing and ISO value retention after blur |
+| Repeat on, start/end; schedule edit | Repeat-on create and schedule edit: both dates contained | Both routes check end minimum follows start and optional end clears |
+| Refund create/edit and credit edit alias | Refund create: date fits fieldset and form surface | Create, edit and credit edit alias each check date count, clearing and value retention; alias semantics are not repeated at every width |
+| Settlement create and edit open | Both create and opened edit: date fits shared field and form surface | Create and edit each check date count, clearing and value retention; edit explicitly opens Edit settlement |
+| Transaction filters expanded, global/group | Expanded group filters: from/to fit disclosure and filter grid | Global and group each open Search and filters and check both date values |
+| Custom insights, global/group | Global custom insights: from/to fit insight grid | Global and group each check both dates and Apply range URL/value preservation |
+
+The eight geometry representatives exercise initial, empty and populated native
+rendering and ISO value retention after blur at every listed width. Route-specific
+end-minimum and Apply range assertions belong only to the once-per-browser
+390px behavior pass, not to every route at every width. Create/edit variants and
+the credit alias retain distinct behavior coverage without duplicating shared
+geometry containers.
 
 For schedule starts only, empty native rendering is exercised without changing
 the React draft: the existing schedule preview assumes a valid start. Other

@@ -243,46 +243,19 @@ describe('resource cache', () => {
     expect(getResourceSnapshot<{ id: string }>('identity').data?.id).toBe('user-a');
   });
 
-  it('restores the identity block after an explicit network retry fails', async () => {
-    let calls = 0;
+  it.each([
+    Object.assign(new Error('network failed'), { networkFailure: true }),
+    Object.assign(new Error('server failed'), { status: 503 }),
+    ...[403, 429].map((status) => Object.assign(new Error(`request failed (${status})`), { status })),
+  ])('restores the identity block after an explicit retry fails: $message', async (error) => {
     blockResourceIdentity(new Error('AUTH_REQUIRED'));
-    configureResource('identity', 'identity', async () => {
-      calls += 1;
-      throw Object.assign(new Error('network failed'), { networkFailure: true });
-    });
+    const loader = vi.fn(async () => { throw error; });
+    configureResource('identity', 'identity', loader);
 
-    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow('network failed');
+    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toBe(error);
     expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
     await revalidate('identity', 'identity', { reason: 'identity-check' });
-    expect(calls).toBe(1);
-  });
-
-  it('restores the identity block after an explicit server-error retry fails', async () => {
-    let calls = 0;
-    blockResourceIdentity(new Error('AUTH_REQUIRED'));
-    configureResource('identity', 'identity', async () => {
-      calls += 1;
-      throw Object.assign(new Error('server failed'), { status: 503 });
-    });
-
-    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow('server failed');
-    expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
-    await revalidate('identity', 'identity', { reason: 'identity-check' });
-    expect(calls).toBe(1);
-  });
-
-  it.each([403, 429])('restores the identity block after an explicit %s retry fails', async (status) => {
-    let calls = 0;
-    blockResourceIdentity(new Error('AUTH_REQUIRED'));
-    configureResource('identity', 'identity', async () => {
-      calls += 1;
-      throw Object.assign(new Error(`request failed (${status})`), { status });
-    });
-
-    await expect(revalidate('identity', '', { force: true, reason: 'auth-restored' })).rejects.toThrow(`request failed (${status})`);
-    expect(getResourceSnapshot('identity').status).toBe('auth-blocked');
-    await revalidate('identity', 'identity', { reason: 'identity-check' });
-    expect(calls).toBe(1);
+    expect(loader).toHaveBeenCalledTimes(1);
   });
 
   it('keeps forced route retries scoped to the authenticated user', async () => {

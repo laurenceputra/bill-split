@@ -1,6 +1,6 @@
 import { test, expect, newAuthenticatedContext, BASE_URL, DEV_EMAIL } from './fixtures';
 
-test('group overview mobile viewport includes the fixed bottom navigation', async ({ browser }, testInfo) => {
+test('group overview mobile viewport includes the fixed bottom navigation', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
   try {
     const page = await context.newPage();
@@ -12,10 +12,7 @@ test('group overview mobile viewport includes the fixed bottom navigation', asyn
     await expect(nav.getByRole('link', { name: 'Settings' })).toBeVisible();
     await expect(nav.getByRole('link', { name: /Add expense/ })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Balances' })).toBeVisible();
-    await page.evaluate(() => document.fonts.ready);
-    const path = testInfo.outputPath('group-overview-mobile-viewport.png');
-    await page.screenshot({ path, fullPage: false, animations: 'disabled' });
-    await testInfo.attach('group-overview-mobile-viewport', { path, contentType: 'image/png' });
+    // The opt-in synthetic group reference generator owns this capture.
   } finally {
     await context.close();
   }

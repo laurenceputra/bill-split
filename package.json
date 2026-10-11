@@ -19,6 +19,8 @@
     "test:e2e": "playwright test",
     "test:e2e:local": "node scripts/test-e2e-local.mjs",
     "test:e2e:audit": "playwright test tests/e2e/audit.spec.ts",
+    "test:screenshots:group": "UPDATE_GROUP_SCREENSHOTS=1 npm run test:e2e:local -- tests/e2e/group-reference-screenshots.spec.ts --project=chromium --workers=1",
+    "test:screenshots:home": "UPDATE_HOME_SCREENSHOTS=1 npm run test:e2e:local -- tests/e2e/home-insights-surfaces.spec.ts --project=chromium --workers=1",
     "e2e:prepare": "node tests/e2e/prepare-db.mjs",
     "e2e:server": "node tests/e2e/start-server.mjs",
     "cf:build": "node scripts/prepare-cloudflare-build.mjs && npm run test:unit && npm run build",

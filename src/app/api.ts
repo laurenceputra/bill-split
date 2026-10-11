@@ -2152,14 +2152,10 @@ export async function getPendingInvitations(signal?: AbortSignal): Promise<{ inv
   return (await apiWithMeta<{ invitations: GroupInvitation[] }>('/invitations', { signal })).data;
 }
 
-export const getCurrentUserInvitations = getPendingInvitations;
-export const getInvitations = getPendingInvitations;
-
 export async function getOwnerInvitations(groupId: string, signal?: AbortSignal): Promise<{ invitations: GroupInvitation[] }> {
   try { return (await apiWithMeta<{ invitations: GroupInvitation[] }>(`/groups/${groupId}/invitations`, { signal })).data; }
   catch (error) { if (isGroupAuthorizationLoss(error)) await evictRevokedGroupForCurrentUser(groupId); throw error; }
 }
-export const getGroupInvitations = getOwnerInvitations;
 
 export async function createGroupInvitation(groupId: string, email: string) {
   return api<{ invitation: GroupInvitation }>(`/groups/${groupId}/invitations`, { method: 'POST', body: JSON.stringify({ email }) });
@@ -2167,12 +2163,10 @@ export async function createGroupInvitation(groupId: string, email: string) {
 export async function createTargetedGroupInvitation(groupId: string, personId: string, email: string) {
   return api<{ invitation: GroupInvitation }>(`/groups/${groupId}/members/${personId}/invitation`, { method: 'POST', body: JSON.stringify({ email }) });
 }
-export const createInvitation = createGroupInvitation;
 
 export async function revokeGroupInvitation(groupId: string, invitationId: string) {
   return api<void>(`/groups/${groupId}/invitations/${invitationId}`, { method: 'DELETE' });
 }
-export const revokeInvitation = revokeGroupInvitation;
 
 export async function acceptInvitation(invitationId: string) {
   return api<{ invitation: GroupInvitation }>(`/invitations/${invitationId}/accept`, { method: 'POST' });
@@ -2185,7 +2179,6 @@ export async function rejectInvitation(invitationId: string) {
 export async function removeGroupMember(groupId: string, personId: string) {
   return api<void>(`/groups/${groupId}/members/${personId}`, { method: 'DELETE' });
 }
-export const removeMember = removeGroupMember;
 
 export async function transferGroupOwnership(groupId: string, personId: string) {
   return api<void>(`/groups/${groupId}/transfer-ownership`, { method: 'POST', body: JSON.stringify({ person_id: personId }) });
@@ -2194,7 +2187,6 @@ export async function transferGroupOwnership(groupId: string, personId: string) 
 export async function leaveGroup(groupId: string) {
   return api<void>(`/groups/${groupId}/leave`, { method: 'POST' });
 }
-export const leaveGroupMember = leaveGroup;
 
 const pageParams = (options: { limit?: number; cursor?: string } = {}) => {
   const params = new URLSearchParams();
