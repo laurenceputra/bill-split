@@ -257,40 +257,25 @@ is not the recovery procedure. Never clear site data or the outbox.
 
 ## Executed verification and scope
 
-Recovery coverage adds a standalone endpoint test and a Chromium historical
-cache-first upgrade scenario. Historical worker sources are vendored verbatim from
-`f0cf823` (pre page protocol) and `53bda1d` (explicit update); the fixture's
-provenance manifest pins full commit IDs, SHA-256 and byte lengths. Only the historical worker's build
-placeholders are finalized. Explicit page update/mutation/session modules and
-their dependencies come from the latter Git tree, not a modern compatibility
-adapter. Full provenance pins are
-`f0cf823c93283ab0af780d3323eacd2f38128f3f` and
-`53bda1d93de0a886427a2a4f6fed48b9b8e8cddc`.
-Production-shaped pending expense storage is written by the actual
-v10 IDB module from `f0cf823`, then read/migrated by current v11 code after
-close-all/reopen. This tests storage preservation, not authenticated replay or
-a full historical App boot. Normal tests require neither Git/history nor network
-retrieval: the manifest is an explicit source path whitelist and every snapshot
-is verified before use. `tests/e2e/fixtures/historical/README.md` documents the
-10-file dependency closure and optional full-history regeneration procedure.
-The historical unsupported page is a minimal harness with no update action;
-it does not claim to render the full historical UI.
+Recovery coverage adds responsive standalone instructions and a focused network
+bypass test. `tests/e2e/fixtures/pinned-cache-first-sw.js` is the verbatim worker
+from `f0cf823c93283ab0af780d3323eacd2f38128f3f` (10509 bytes, SHA-256
+`63dbdab430451428ef9df2817bb6e30393cb6fba97575b1ae333006206751f4f`);
+only its build placeholders are substituted when served. It controls a static,
+script-free shell, not a historical App. Normal navigation demonstrably retains
+the cached old marker while `/api/app-update-recovery` reaches network instructions.
+The recovery page loads no scripts/application assets, makes no IndexedDB opens,
+and creates no database in a fresh context; offline recovery fails honestly.
+This does not test database migration, pending-expense preservation, authentication
+or replay. Runtime fixtures need neither Git history nor network retrieval.
+The two existing explicit legacy lifecycle cases retain their minimal synthetic
+worker/page adapter and fixture-owned queued row; they are not historical App tests.
 
-Recovery-focused local verification including review follow-up: **42 unit tests**
-(endpoint and page update core), **12 standalone Chromium lifecycle tests**,
-**4 focused Settings Chromium tests** on isolated port 8799, and
-`npm run typecheck` passed. Pending payloads are valid snake-case expense wire
-format with UUID participants and a client operation ID, parsed by both pinned
-historical/current schemas with financial-total checks; the exact nonempty pending
-row is asserted before and after migration. No full authentication/replay suite
-was run. Earlier totals below are previous-work evidence, not rerun here.
+Recovery verification and exact browser commands are consolidated in the recovery
+section of `docs/responsive-audit-matrix.md`. Earlier totals below are previous-work
+evidence, not a claim that the full application suite was rerun for this cleanup.
 
-Fixture-portability follow-up: **5 provenance unit tests** passed and all **12
-standalone Chromium lifecycle tests** plus typecheck were rerun successfully
-against the self-contained vendored snapshots. No production code changed for
-this follow-up; normal fixture loading no longer shells out to Git.
-
-Current PR verification passed **929 unit tests, 27 integration tests, and 1
+Earlier PR verification passed **929 unit tests, 27 integration tests, and 1
 migration test**, plus typecheck and production build.
 
 - **10 standalone Chromium lifecycle tests** in `service-worker-update.spec.ts` (eight direct cases and two installation-failure variants) use a real same-origin server switching coherent

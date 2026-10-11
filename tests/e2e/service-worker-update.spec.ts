@@ -150,41 +150,49 @@ test('multiple historical pages stay waiting; close-all and reopen recovers with
   } finally { await historical.close(); }
 });
 
-test('unsupported cache-first pages reach network recovery without upgrading storage or forcing tabs to reload', async ({ page, context }) => {
-  const historical = await createUpdateServer({ historical: true, unsupported: true });
+test('pinned cache-first worker serves old navigation but bypasses network-only script-free recovery', async ({ page, context, request }) => {
+  const historical = await createUpdateServer({ cacheFirst: true });
   try {
-    await open(page, historical.url);
-    expect(await fixture(page, 'enqueueProduction()')).toBe(true);
-    const before = await fixture(page, 'productionOutbox()');
-    expect(before).toEqual([{ clientOperationId: 'demo-operation', userId: 'demo-user', groupId: 'demo-group', payload: { description: 'Sample expense', amount_minor: 123, currency: 'USD', date: '2026-01-02', category: 'Other', client_operation_id: 'demo-operation', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }] }, display: { description: 'Sample expense', amountMinor: 123, currency: 'USD', date: '2026-01-02' }, createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', status: 'pending', attempts: 0, authEpoch: 0 }]);
-    const second = await context.newPage();
-    await open(second, historical.url);
+    await context.addInitScript(() => {
+      const original = indexedDB.open.bind(indexedDB);
+      Object.assign(window, { idbOpenCalls: 0 });
+      indexedDB.open = (...args: Parameters<IDBFactory['open']>) => {
+        (window as any).idbOpenCalls++;
+        return original(...args);
+      };
+    });
+    await page.goto(historical.url);
+    // Registration belongs to the test, not the static shell.
+    await page.evaluate(() => navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }));
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
     historical.publish('B');
-    await fixture(page, 'check()');
-    await expect.poll(() => fixture(page, 'state().updateReady')).toBe(true);
-    expect(await fixture(page, 'apply()')).toBe(false);
-    await page.reload();
-    await expect(page.locator('#build')).toHaveText('A');
+    expect(await (await request.get(historical.url)).text()).toContain('Network new shell');
+    const navigation = await page.goto(`${historical.url}/ordinary-navigation`);
+    expect(navigation?.fromServiceWorker()).toBe(true);
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
+    await expect(page.locator('script')).toHaveCount(0);
     const recovery = await context.newPage();
-    await recovery.goto(`${historical.url}/api/app-update-recovery`);
+    const requests: string[] = [];
+    recovery.on('request', (req) => requests.push(new URL(req.url()).pathname));
+    const response = await recovery.goto(`${historical.url}/api/app-update-recovery`);
+    expect(response?.fromServiceWorker()).toBe(false);
+    expect(response?.headers()['cache-control']).toBe('no-store');
     await expect(recovery.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+    await expect(recovery.getByText(/including this recovery page/)).toBeVisible();
+    await expect(recovery.getByText(/not an offline recovery tool/)).toBeVisible();
+    await expect(recovery.locator('script')).toHaveCount(0);
     expect(await recovery.evaluate(() => Boolean((window as any).fixture))).toBe(false);
-    expect(await recovery.evaluate(async () => (await indexedDB.databases()).find((db) => db.name === 'bill-split-local')?.version)).toBe(10);
-    await page.waitForTimeout(7_000);
-    await expect(second.locator('#build')).toHaveText('A');
-    expect(await fixture(page, 'productionOutbox()')).toEqual(before);
+    expect(await recovery.evaluate(() => (window as any).idbOpenCalls)).toBe(0);
+    expect(await recovery.evaluate(() => indexedDB.databases())).toEqual([]);
+    expect(requests).toEqual(['/api/app-update-recovery']);
+    expect(await recovery.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
     await context.setOffline(true);
+    await page.reload();
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
     const offline = await context.newPage();
     await expect(offline.goto(`${historical.url}/api/app-update-recovery`)).rejects.toThrow();
-    await offline.close();
-    await context.setOffline(false);
-    await page.close(); await second.close(); await recovery.close();
-    const reopened = await context.newPage();
-    await reopened.goto(historical.url);
-    await expect(reopened.locator('#build')).toHaveText('B');
-    await reopened.waitForFunction(() => Boolean((window as any).fixture));
-    expect(await fixture(reopened, 'productionOutbox()')).toEqual(before);
-    expect(await reopened.evaluate(async () => (await indexedDB.databases()).find((db) => db.name === 'bill-split-local')?.version)).toBe(11);
+    await expect(offline.getByRole('heading', { name: 'Recover a BillSplit update' })).toHaveCount(0);
   } finally { await historical.close(); }
 });
 

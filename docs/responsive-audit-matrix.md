@@ -48,52 +48,28 @@ were removed; no pre-existing reference was deleted.
 UPDATE_TABLET_SCREENSHOTS=1 UPDATE_HOME_SCREENSHOTS=1 UPDATE_GROUP_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-tablet npm run test:e2e:local -- tests/e2e/tablet-layout.spec.ts tests/e2e/home-insights-surfaces.spec.ts tests/e2e/insight-people.spec.ts tests/e2e/group-reference-screenshots.spec.ts --project=chromium --workers=1
 ```
 
-Verification: typecheck passed. Fourteen existing focused Home/Insights tests
-passed (including twelve-width loaded/cached/offline and loading/empty/error).
-Initial combined run passed **24 Chromium tests**: fourteen Home/Insights, four
-tablet tests, four person-insight tests and two reference generators. Existing
-group/history/insight references were refreshed too. New-test
-iterations caught a nested payer-summary identity before capture, an already-open
-currency filter toggled shut, and Insights' distinct results wrapper; corrected.
-The runner builds the app with the existing large-chunk warning. No full
-integration/route suite, other engines, real-device keyboard/touch, provider
-modal or screen-reader coverage is claimed.
-Final typecheck, 29 focused UI/balance/sorting unit tests, and `git diff --check`
-passed. The public-copy alignment and genuinely overflowing two-payer short
-sheet follow-up passed two focused Chromium tests and refreshed those captures.
-Expanded group breakdown and custom Insight-period checks/captures passed the
-focused twelve-width route rerun.
-Mobile large balances, 768px Home/skeleton, 820px Insights/payer, 834px
-public/offline help and short-mobile payer evidence were visually inspected.
+Recorded tablet verification: the initial combined run passed **24 Chromium
+tests** (fourteen Home/Insights, four tablet, four person-insight, two reference
+generators). Follow-up bounded runs passed all five tablet tests, twelve-width
+Home loading/empty/error, public alignment, overflowing short payer sheets,
+expanded breakdown and custom Insight dates. Two longer reruns ended in
+Wrangler/runtime exits and connection-refused failures, not successful combined
+runs. Typecheck, **31 focused unit tests** and whitespace checks passed.
+Existing group/history/insight references and curated captures were refreshed;
+mobile balances, 768px Home/skeleton, 820px Insights/payer, 834px public/offline
+help, short mobile payer and safe-limit evidence were visually inspected.
 
-Review follow-up: bounded Money scrolling replaces unbounded `nowrap`; complete
-text stays in the DOM, and an overflowing value's focus target supports ArrowRight
-and full end-of-value access. A one-child ledger row also bounds its copy to 100%
-so the shared non-shrinking last-child rule cannot grow long History text past
-the reading container. The new 320px safe-limit test passed Home, positive/negative
-group balances, signed positive/negative Transactions, and selected-currency
-Insights; it distinguishes actual internal overflow from hidden/clipped content.
-Typecheck, 29 focused unit tests and diff whitespace checks passed again.
-All five tablet tests and the twelve-width Home loading/empty/error test passed
-across bounded reruns; thirteen other Home/Insights tests and both existing
-reference generators passed before a longer runner's recorded Wrangler runtime
-exit. Two longer reruns ended in recorded runtime/environment exits and consequent
-connection-refused failures; neither is reported as a successful combined run.
-Curated captures were refreshed and the safe-limit image visually inspected.
-Focusability follow-up removes the numeric threshold entirely: Money measures
-`scrollWidth > clientWidth` on mount/value/type-size changes, ResizeObserver
-notifications, font readiness and window resize, with observer/listener cleanup
-and a disposed guard for asynchronous font callbacks. A focused 320px group test
-uses **999999999999 minor units**, below the former 1e12 threshold: it verifies
-actual overflow, explicit tabindex, ArrowRight, full end-of-value access, no page
-overflow, removal of tabindex at 1440px, and restoration on returning to 320px.
-The isolated Chromium run passed both this case and the safe-integer case;
-typecheck and **31 focused unit tests** passed. This changes keyboard eligibility,
-not money typography or the existing safe-limit reference's visual geometry;
-no additional tracked screenshot is introduced. Real Safari/screen-reader
-verification remains a release check, not a claim from Chromium.
-Recovery verification is recorded separately below; worker safety is not inferred
-from tablet layout evidence.
+Money focusability follows actual `scrollWidth > clientWidth`, with resize/font
+notifications and cleanup, not a numeric threshold. The focused group case uses
+**999999999999 minor units** at 320px and verifies tabindex, ArrowRight and full
+end-of-value access without page overflow, removal at 1440px and restoration at
+320px. The safe-integer case also passed Home, signed group/Transactions values
+and selected-currency Insights. Complete text stays in the DOM; a one-child
+ledger row bounds long History copy to its reading container.
+The build retains its existing large-chunk warning. No full integration/route
+audit, other engines, real-device keyboard/touch, provider modal or screen-reader
+coverage is claimed. Recovery verification is separate below; worker safety is
+not inferred from tablet layout evidence.
 
 ## Home sorting
 
@@ -778,17 +754,23 @@ Regenerate with:
 ```sh
 UPDATE_RECOVERY_SCREENSHOTS=1 node scripts/test-update-lifecycle-local.mjs
 UPDATE_RECOVERY_SCREENSHOTS=1 BILLSPLIT_E2E_PORT=8799 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-recovery-review npm run test:e2e:local -- tests/e2e/update-settings.spec.ts --project=chromium --workers=1
+npm run test:unit -- src/worker/app-update-recovery.test.ts src/app/service-worker.test.ts
+PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node scripts/test-update-lifecycle-local.mjs
+npm run build # includes typecheck
 ```
 
-Verification: **42 targeted unit tests**, **12 standalone Chromium lifecycle tests**,
-**4 focused Settings Chromium tests**, and typecheck passed. Initial focused run
-found 320px diagnostics/Settings-action overflow; Settings now stacks its update
-controls, wraps full status/help and bounds build strings. The final rerun passed.
-An initial server preflight rejected an unsupported persistence-directory path;
-the final command uses the repository's required `/tmp/bill-split-playwright-*` path.
-Historical v10/current v11 pending-expense preservation uses a nonempty exact row,
-wire-format payload validated by both pinned historical and current expense schemas
-and financial-total checks. Worker unit tests separately verify first-install
+Cleanup verification: **42 targeted unit tests**, **12 standalone Chromium
+lifecycle tests**, typecheck and production build passed (existing large-chunk
+warning). Final reruns passed the full **987-test unit suite**, **4 focused Settings
+Chromium tests** on port 8799 with the recovery-review persistence directory above,
+and `git diff --check`. Settings stacks update controls, wraps full guidance and
+bounds build strings at narrow widths.
+The focused pinned cache-first worker test uses a static script-free old shell:
+normal navigation retains the cached marker, recovery bypasses the worker to
+network instructions without scripts/app assets or IndexedDB opens/databases,
+and offline recovery rejects. It makes no database-migration or production
+pending-expense-preservation claim. Existing explicit legacy tests still use their
+synthetic adapter and fixture-owned queued row. Worker unit tests separately verify first-install
 identity without reload, controller handoff with late old replies ignored, and
 waiting-worker replacement diagnostics. No full authentication/replay suite,
 other browser engine, real-device touch, or screen-reader coverage is claimed.
