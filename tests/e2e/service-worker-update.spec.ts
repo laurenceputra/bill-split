@@ -54,6 +54,34 @@ test('canonical installs ignore transformed HTML and preserve cached CSP and exa
   }
 });
 
+test('standalone recovery has responsive instructions, a normal return link, and no app boot', async ({ browser }) => {
+  for (const width of [320, 390, 767, 768, 834, 895, 896, 1024, 1440]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 } });
+    try {
+      const page = await context.newPage();
+      const response = await page.goto(`${server.url}/api/app-update-recovery`);
+      expect(response?.headers()['cache-control']).toBe('no-store');
+      await expect(page.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+      await expect(page.getByText(/including this recovery page/)).toBeVisible();
+      await expect(page.getByText(/not an offline recovery tool/)).toBeVisible();
+      await expect(page.locator('script, button, input')).toHaveCount(0);
+      expect(await page.evaluate(async () => (await indexedDB.databases()).length)).toBe(0);
+      const link = page.getByRole('link', { name: 'Return to BillSplit to save work' });
+      await expect(link).toHaveAttribute('href', '/');
+      await link.focus();
+      await expect(link).toBeFocused();
+      const geometry = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+      expect(geometry.scroll).toBeLessThanOrEqual(geometry.width);
+      if (process.env.UPDATE_RECOVERY_SCREENSHOTS === '1' && [390, 834, 1440].includes(width)) {
+        await page.screenshot({ path: `docs/screenshots/update-recovery-${width}.png`, fullPage: true, animations: 'disabled' });
+      }
+      await page.keyboard.press('Enter');
+      await expect(page).toHaveURL(`${server.url}/`);
+      await expect(page.locator('#build')).toHaveText('A');
+    } finally { await context.close(); }
+  }
+});
+
 test('real Update now clicks honor drafts and writes, then apply an installed update offline without idle delay', async ({ page, context }) => {
   await open(page);
   await page.locator('#draft').fill('Demo draft');
@@ -119,6 +147,44 @@ test('multiple historical pages stay waiting; close-all and reopen recovers with
     await expect(reopened.locator('#build')).toHaveText('B');
     await reopened.waitForFunction(() => Boolean((window as any).fixture));
     expect(await fixture(reopened, 'outbox()')).toEqual([{ id: 'queued-operation', status: 'queued', amount: 123 }]);
+  } finally { await historical.close(); }
+});
+
+test('unsupported cache-first pages reach network recovery without upgrading storage or forcing tabs to reload', async ({ page, context }) => {
+  const historical = await createUpdateServer({ historical: true, unsupported: true });
+  try {
+    await open(page, historical.url);
+    expect(await fixture(page, 'enqueueProduction()')).toBe(true);
+    const before = await fixture(page, 'productionOutbox()');
+    expect(before).toEqual([{ clientOperationId: 'demo-operation', userId: 'demo-user', groupId: 'demo-group', payload: { description: 'Sample expense', amount_minor: 123, currency: 'USD', date: '2026-01-02', category: 'Other', client_operation_id: 'demo-operation', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }] }, display: { description: 'Sample expense', amountMinor: 123, currency: 'USD', date: '2026-01-02' }, createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', status: 'pending', attempts: 0, authEpoch: 0 }]);
+    const second = await context.newPage();
+    await open(second, historical.url);
+    historical.publish('B');
+    await fixture(page, 'check()');
+    await expect.poll(() => fixture(page, 'state().updateReady')).toBe(true);
+    expect(await fixture(page, 'apply()')).toBe(false);
+    await page.reload();
+    await expect(page.locator('#build')).toHaveText('A');
+    const recovery = await context.newPage();
+    await recovery.goto(`${historical.url}/api/app-update-recovery`);
+    await expect(recovery.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+    expect(await recovery.evaluate(() => Boolean((window as any).fixture))).toBe(false);
+    expect(await recovery.evaluate(async () => (await indexedDB.databases()).find((db) => db.name === 'bill-split-local')?.version)).toBe(10);
+    await page.waitForTimeout(7_000);
+    await expect(second.locator('#build')).toHaveText('A');
+    expect(await fixture(page, 'productionOutbox()')).toEqual(before);
+    await context.setOffline(true);
+    const offline = await context.newPage();
+    await expect(offline.goto(`${historical.url}/api/app-update-recovery`)).rejects.toThrow();
+    await offline.close();
+    await context.setOffline(false);
+    await page.close(); await second.close(); await recovery.close();
+    const reopened = await context.newPage();
+    await reopened.goto(historical.url);
+    await expect(reopened.locator('#build')).toHaveText('B');
+    await reopened.waitForFunction(() => Boolean((window as any).fixture));
+    expect(await fixture(reopened, 'productionOutbox()')).toEqual(before);
+    expect(await reopened.evaluate(async () => (await indexedDB.databases()).find((db) => db.name === 'bill-split-local')?.version)).toBe(11);
   } finally { await historical.close(); }
 });
 

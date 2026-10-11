@@ -4,6 +4,82 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { UpdateStatus } from '../../src/app/update-status';
 import type { ServiceWorkerUpdateState } from '../../src/app/service-worker';
 
+const recoveryWidths = [320, 390, 767, 768, 895, 896, 834, 1024, 1440];
+
+test('recovery opens separately and preserves an unsaved Settings profile', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block' });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${BASE_URL}/settings`);
+    const input = page.getByLabel('Display name', { exact: true });
+    await input.fill('Unsaved sample profile');
+    await page.getByText('Update diagnostics and recovery', { exact: true }).click();
+    const link = page.getByRole('link', { name: 'Open update recovery instructions' });
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    const popupPromise = page.waitForEvent('popup');
+    await link.click();
+    const recovery = await popupPromise;
+    await expect(recovery.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+    expect(await recovery.evaluate(() => window.opener === null)).toBe(true);
+    await expect(page).toHaveURL(`${BASE_URL}/settings`);
+    await expect(input).toHaveValue('Unsaved sample profile');
+    await expect(page.getByText(/Close the recovery tab too/)).toBeVisible();
+    await recovery.close();
+    await expect(input).toHaveValue('Unsaved sample profile');
+  } finally { await context.close(); }
+});
+
+test('diagnostics disclosure supports mouse and keyboard with contained builds and honest unavailable states', async ({ browser }) => {
+  const variants: ServiceWorkerUpdateState[] = [
+    { phase: 'ready', updateReady: true, applying: false, blocked: false, pageBuild: `bill-split-shell-${'a'.repeat(64)}`, activeBuild: `bill-split-shell-${'b'.repeat(64)}`, waitingBuild: `bill-split-shell-${'c'.repeat(64)}` },
+    { phase: 'unsupported', updateReady: false, applying: false, blocked: false },
+    { phase: 'blocked', updateReady: true, applying: false, blocked: true, manualError: 'Finish work in other open tabs, then try Update now again.' },
+    { phase: 'offline', offline: true, updateReady: false, applying: false, blocked: false },
+    { phase: 'check-error', updateReady: false, applying: false, blocked: false, manualError: 'Could not check for updates. Retry when connected.' },
+  ];
+  for (const width of recoveryWidths) {
+    const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${BASE_URL}/settings`);
+      await expect(page.getByRole('heading', { name: 'Device', exact: true })).toBeVisible();
+      for (const [index, update] of variants.entries()) {
+        const markup = renderToStaticMarkup(createElement(UpdateStatus, { update, settings: true, onCheck: () => undefined }));
+        await page.evaluate((markup) => { document.querySelector('main .update-control')!.outerHTML = markup; }, markup);
+        const details = page.locator('main .update-diagnostics');
+        const summary = details.locator('summary');
+        const recovery = details.getByRole('link', { name: 'Open update recovery instructions' });
+        await expect(recovery).not.toBeVisible();
+        await summary.click();
+        await expect(details).toHaveAttribute('open', '');
+        await expect(recovery).toBeVisible();
+        if (index === 0) {
+          await expect(details.locator('dd')).toHaveText([update.pageBuild!, update.activeBuild!, update.waitingBuild!]);
+        } else {
+          await expect(details.locator('dd')).toHaveText(['Unavailable', 'Unavailable (older workers may not report a build)', update.updateReady ? 'Not yet verified' : 'None reported']);
+        }
+        await summary.focus();
+        await page.keyboard.press('Space');
+        await expect(recovery).not.toBeVisible();
+        await page.keyboard.press('Enter');
+        await expect(recovery).toBeVisible();
+        const geometry = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, clipped: [...document.querySelectorAll<HTMLElement>('.update-control, .update-diagnostics, .update-diagnostics dd')].some((node) => node.scrollWidth > node.clientWidth + 1) }));
+        expect(geometry.scroll, `${width}px variant ${index}`).toBeLessThanOrEqual(geometry.width);
+        expect(geometry.clipped, `${width}px variant ${index}`).toBe(false);
+        if (process.env.UPDATE_RECOVERY_SCREENSHOTS === '1' && index === 0 && [390, 834, 1440].includes(width)) {
+          await page.evaluate(() => document.fonts.ready);
+          // Isolated production-component evidence: fixed navigation must not
+          // paint over the clipped component capture. Behavior runs with it visible.
+          await page.addStyleTag({ content: '.bottom-nav { visibility: hidden !important; }' });
+          await page.locator('main .update-control').screenshot({ path: `docs/screenshots/update-diagnostics-${width}.png`, animations: 'disabled' });
+          await page.locator('style').last().evaluate((node) => node.remove());
+        }
+      }
+    } finally { await context.close(); }
+  }
+});
+
 test('Settings keeps profile before app updates and destructive actions across responsive boundaries', async ({ browser }) => {
   for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
     const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });

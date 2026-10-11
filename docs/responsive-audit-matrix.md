@@ -1,5 +1,100 @@
 # Warm Ledger responsive audit matrix
 
+## Tablet layout follow-up (2026-10-11)
+
+Current layout audit widths: **320, 390, 767, 768, 820, 834, 895, 896,
+1024, 1180, 1194, 1440px**. Earlier six-width reports below are historical
+verification. Centering containers does not center text. Home/group overview use
+a centered 68rem maximum; History uses one centered 42rem reading container for
+its heading, back link, filters, tabs, notices and results, including Insights.
+Public copy is left aligned in the centered front. Mobile DOM/action order is
+unchanged. Home has exactly **one column below 768px, two from 768px**, including
+loading skeletons. Navigation and intentional group-detail stacking retain the
+independent **896px** boundary. Shared app sheets center from **768px**.
+
+| Changed view/state | Checks at all twelve widths |
+| --- | --- |
+| Home loaded, long names / multiple currencies | Primary actions before Sort; complete currency tokens; content-height cards; balance label/money stack based on their own container at 20rem or below, including narrower tablet cards; no collisions/clipping |
+| Home loading / empty / uncached error | One/two-column skeleton matches loaded grid; no invented Sort/links; distinct empty creation and error/retry states |
+| Home cached refresh error / already-loaded offline; Sort help closed/open | Cached cards and sorting usable; notices share centered route; tooltip behavior/order unchanged |
+| Group loaded, full breakdown closed/open, long generic names / large USD and EUR balances | Centered route, single macro-column through 895px, two from 896px; indivisible money; frequent transaction actions before People/management |
+| Home / group balances / History, positive and negative safe-integer-limit minor amounts at 320px | Entire currency/amount token retained; Money is bounded by its container with local horizontal scrolling, not hidden or ellipsized. Actual overflowing elements are keyboard-focusable regardless of amount; fitting values stay out of the tab order. ArrowRight and scrolling to the end expose the full text. Group's large typography must exercise actual internal overflow without page overflow |
+| Changes / Transactions / Insights, custom period disclosed | Heading/filter/tabs/results share one centerline; purposeful reading width; expanded Search and filters, selected-currency Insights and custom dates contained |
+| Public front | Centered container, left-aligned copy; primary sign-in before secondary actions; generic Demo labels in decorative ledger |
+| Shared modal: payer open / added payer / Escape / short height | Mobile bottom sheet, tablet center; dynamic viewport minus safe areas/padding bounds; actual overflow scrolling and Done reachable with multiple payer rows at 360px height; Escape closes |
+| Group/History loading, cached, offline, empty, cold/stale error | Existing guards/states unchanged; notices/results share container without impossible mutations. These remain release checks, not claims every permutation was rerun |
+| Other app sheets: install/help/allocation open / busy / error | Inherit centering/short-height scrolling; spot-check their content/focus states before release. Provider/native dialogs are not app sheets |
+| Legacy update recovery / Settings diagnostics | See the recovery section below for nine-width executed disclosure/containment checks and separate lifecycle evidence. Remaining tablet widths are release checks; layout evidence alone makes no activation/outbox-safety claim |
+
+Curated synthetic evidence is **23 new PNGs**, with the exact allowlist in
+`tests/e2e/tablet-evidence.ts`; exhaustive geometry/behavior still checks all twelve
+widths. Retained `tablet-*` references: Home at 320/768/834/1024/1440;
+Home loading at 768, empty/error at 320, cached-error/offline-help at 834;
+group at 834/1024, expanded breakdown at 320; Changes at 1024, expanded
+Transactions at 834, Insights at 834/custom dates at 768; payer at 320/768,
+short two-payer sheets at 320/834; public front at 1440; safe-limit group at 320.
+Short sheets use 360px height. New captures keep live navigation visible;
+expanded breakdown is scrolled into view. API identities, historical names,
+free text and avatars are sanitized before rendering and checked before capture.
+Normal stress values are synthetic 9,876,543.21; safe-limit evidence uses
+`Number.MAX_SAFE_INTEGER` minor amounts. No production data is used.
+`UPDATE_TABLET_SCREENSHOTS=1` writes only the curated allowlist. Optional
+`TABLET_SCREENSHOT_ARTIFACTS=1` captures all exercised states into Playwright
+test outputs/attachments, not `docs/screenshots`, unless also selected for an
+explicit reference refresh. The 170 redundant, newly generated untracked PNGs
+were removed; no pre-existing reference was deleted.
+
+```sh
+UPDATE_TABLET_SCREENSHOTS=1 UPDATE_HOME_SCREENSHOTS=1 UPDATE_GROUP_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright BILLSPLIT_E2E_PORT=8798 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-tablet npm run test:e2e:local -- tests/e2e/tablet-layout.spec.ts tests/e2e/home-insights-surfaces.spec.ts tests/e2e/insight-people.spec.ts tests/e2e/group-reference-screenshots.spec.ts --project=chromium --workers=1
+```
+
+Verification: typecheck passed. Fourteen existing focused Home/Insights tests
+passed (including twelve-width loaded/cached/offline and loading/empty/error).
+Initial combined run passed **24 Chromium tests**: fourteen Home/Insights, four
+tablet tests, four person-insight tests and two reference generators. Existing
+group/history/insight references were refreshed too. New-test
+iterations caught a nested payer-summary identity before capture, an already-open
+currency filter toggled shut, and Insights' distinct results wrapper; corrected.
+The runner builds the app with the existing large-chunk warning. No full
+integration/route suite, other engines, real-device keyboard/touch, provider
+modal or screen-reader coverage is claimed.
+Final typecheck, 29 focused UI/balance/sorting unit tests, and `git diff --check`
+passed. The public-copy alignment and genuinely overflowing two-payer short
+sheet follow-up passed two focused Chromium tests and refreshed those captures.
+Expanded group breakdown and custom Insight-period checks/captures passed the
+focused twelve-width route rerun.
+Mobile large balances, 768px Home/skeleton, 820px Insights/payer, 834px
+public/offline help and short-mobile payer evidence were visually inspected.
+
+Review follow-up: bounded Money scrolling replaces unbounded `nowrap`; complete
+text stays in the DOM, and an overflowing value's focus target supports ArrowRight
+and full end-of-value access. A one-child ledger row also bounds its copy to 100%
+so the shared non-shrinking last-child rule cannot grow long History text past
+the reading container. The new 320px safe-limit test passed Home, positive/negative
+group balances, signed positive/negative Transactions, and selected-currency
+Insights; it distinguishes actual internal overflow from hidden/clipped content.
+Typecheck, 29 focused unit tests and diff whitespace checks passed again.
+All five tablet tests and the twelve-width Home loading/empty/error test passed
+across bounded reruns; thirteen other Home/Insights tests and both existing
+reference generators passed before a longer runner's recorded Wrangler runtime
+exit. Two longer reruns ended in recorded runtime/environment exits and consequent
+connection-refused failures; neither is reported as a successful combined run.
+Curated captures were refreshed and the safe-limit image visually inspected.
+Focusability follow-up removes the numeric threshold entirely: Money measures
+`scrollWidth > clientWidth` on mount/value/type-size changes, ResizeObserver
+notifications, font readiness and window resize, with observer/listener cleanup
+and a disposed guard for asynchronous font callbacks. A focused 320px group test
+uses **999999999999 minor units**, below the former 1e12 threshold: it verifies
+actual overflow, explicit tabindex, ArrowRight, full end-of-value access, no page
+overflow, removal of tabindex at 1440px, and restoration on returning to 320px.
+The isolated Chromium run passed both this case and the safe-integer case;
+typecheck and **31 focused unit tests** passed. This changes keyboard eligibility,
+not money typography or the existing safe-limit reference's visual geometry;
+no additional tracked screenshot is introduced. Real Safari/screen-reader
+verification remains a release check, not a claim from Chromium.
+Recovery verification is recorded separately below; worker safety is not inferred
+from tablet layout evidence.
+
 ## Home sorting
 
 Focused coverage: `tests/e2e/home-insights-surfaces.spec.ts`, at **320, 390,
@@ -273,13 +368,13 @@ At the same widths, audit group Changes, Transactions, and Insights: the authori
 
 State checks for these views: loading shows no invented person totals; cached/offline summaries retain person totals and notices; empty periods show no person list; cold errors show retry rather than totals; stale errors retain cached totals with notices. Overview loading/unavailable states do not expose management actions without group data. Older cached summaries without person details omit the list until refreshed. These are audit requirements, not claims of completed browser coverage; focused seeded checks cover context and person lists at 320/1440 and global insights at all six widths.
 
-Canonical audit widths are **320, 390, 768, 895, 896, and 1440px**. The
+Historical route audit widths were **320, 390, 768, 895, 896, and 1440px**. The
 private shell keeps the mobile bottom navigation through 895px and switches to
 the desktop top navigation and two-column group overview at 896px.
 
 | Home / Insights state | 320px | 390px | 768px | 895px | 896px | 1440px |
 | --- | --- | --- | --- | --- | --- | --- |
-| Populated Home groups | Single compact, content-height white linked cards; wrapped names and ISO-coded numeric balances remain readable with no painted inner rows | Same; primary group links precede management | One readable column | One column and bottom navigation | Up to two columns and desktop navigation | Two readable columns; no stretched card heights |
+| Populated Home groups | Single compact, content-height white linked cards; wrapped names and ISO-coded numeric balances remain readable with no painted inner rows | Same; primary group links precede management | Exactly two columns; bottom navigation | Two columns and bottom navigation | Two columns and desktop navigation | Two readable columns; no stretched card heights |
 | Home loading, cached, offline, empty, error | Skeleton/notice, cached/offline status, empty-state creation actions, and retry remain distinct; no inaccessible group links when data is absent | Same | Same | Same | Same | Same |
 | Global and group Insights summary/chart | Route audit only | Focused summary/chart paint, transparent sections, tabs and chart accessibility | Route audit only | Route audit only | Route audit only | Focused summary/chart paint, transparent sections, tabs and chart accessibility |
 
@@ -655,3 +750,45 @@ lifecycle tests cover real captured manual clicks, draft/save refusal and offlin
 installed application. Verification completed: both focused
 Settings tests passed across all seven widths, including all phase fixtures and
 short/long manual failure feedback in header and Settings (Chromium).
+
+## Legacy update recovery and build diagnostics (2026-10-11)
+
+Executed recovery widths: **320, 390, 767, 768, 834, 895, 896, 1024, 1440px**.
+This section does not claim the additional tablet-suite widths were run for recovery.
+
+| View/state | Executed checks |
+| --- | --- |
+| Settings diagnostics closed/open, verified builds | Mouse click, Space close, Enter open; long immutable page/active/waiting IDs readable with no document or component overflow at all nine widths; primary update/check actions precede diagnostics |
+| Diagnostics unavailable / waiting-unverified | Missing page/old-worker identity stays Unavailable; pending identity stays Not yet verified, not a false consent/current-version claim; same disclosure/containment checks |
+| Offline / check failure | Connectivity and retry help stay distinct; recovery anchor explains it needs a connection; full guidance wraps at every width; original 13-phase presentation fixtures also pass at their seven historical widths |
+| Unsaved Settings profile, recovery opened | At 390px the normal anchor opens an isolated new tab (`noopener noreferrer`); original route and typed name remain unchanged before/after recovery-tab closure; instructions explain that recovery is another scoped tab to close |
+| Standalone network recovery HTML | All nine widths: heading, ordered save/finish-writes → close-all → reopen instructions; recovery page explicitly included; normal return link focus and Enter navigation; no buttons/scripts/app boot/IDB database; no horizontal overflow |
+| Offline historical recovery navigation | Actual cache-first historical worker bypasses `/api/`; disconnected recovery navigation rejects instead of displaying a cached app or claiming success (dedicated lifecycle case, not nine separate offline layouts) |
+
+Curated synthetic evidence: `update-recovery-{390,834,1440}.png` (whole standalone
+page) and `update-diagnostics-{390,834,1440}.png` (isolated production component,
+verified long demo build strings, disclosure keyboard-focused/open). No names,
+emails, avatars or real data appear. For the isolated component capture only,
+fixed bottom navigation is temporarily hidden so it cannot obscure the screenshot;
+behavior/containment checks run with normal navigation visible. Mobile/tablet/desktop
+captures were visually inspected.
+
+Regenerate with:
+
+```sh
+UPDATE_RECOVERY_SCREENSHOTS=1 node scripts/test-update-lifecycle-local.mjs
+UPDATE_RECOVERY_SCREENSHOTS=1 BILLSPLIT_E2E_PORT=8799 BILLSPLIT_E2E_PERSIST_DIR=/tmp/bill-split-playwright-recovery-review npm run test:e2e:local -- tests/e2e/update-settings.spec.ts --project=chromium --workers=1
+```
+
+Verification: **42 targeted unit tests**, **12 standalone Chromium lifecycle tests**,
+**4 focused Settings Chromium tests**, and typecheck passed. Initial focused run
+found 320px diagnostics/Settings-action overflow; Settings now stacks its update
+controls, wraps full status/help and bounds build strings. The final rerun passed.
+An initial server preflight rejected an unsupported persistence-directory path;
+the final command uses the repository's required `/tmp/bill-split-playwright-*` path.
+Historical v10/current v11 pending-expense preservation uses a nonempty exact row,
+wire-format payload validated by both pinned historical and current expense schemas
+and financial-total checks. Worker unit tests separately verify first-install
+identity without reload, controller handoff with late old replies ignored, and
+waiting-worker replacement diagnostics. No full authentication/replay suite,
+other browser engine, real-device touch, or screen-reader coverage is claimed.

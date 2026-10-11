@@ -5,6 +5,7 @@ import { legacyUpdates } from './legacy-update-client';
 
 declare const __BUILD__: string;
 declare const __LEGACY__: boolean;
+declare const __UNSUPPORTED__: boolean;
 const loads = Number(sessionStorage.getItem('loads') || 0) + 1;
 sessionStorage.setItem('loads', String(loads));
 document.querySelector('#build')!.textContent = __BUILD__;
@@ -43,9 +44,23 @@ if (!__LEGACY__) {
   button.addEventListener('click', () => applyServiceWorkerUpdate(true));
   document.body.append(button);
 }
-const legacy = __LEGACY__ ? legacyUpdates(registration, () => getReloadSafetyState().operations > 0) : undefined;
+const legacy = __LEGACY__ ? legacyUpdates(registration, __UNSUPPORTED__) : undefined;
+const productionStorage = async () => __LEGACY__
+  // @ts-expect-error fixture-only pinned source resolver
+  ? import('oldest:src/app/idb.ts') : import('../../../src/app/idb');
 Object.assign(window, {
   fixture: {
+    productionOutbox: async () => (await productionStorage()).listOutbox('demo-user'),
+    enqueueProduction: async () => {
+      const storage = await productionStorage();
+      const payload = { description: 'Sample expense', amount_minor: 123, currency: 'USD' as const, date: '2026-01-02', category: 'Other', client_operation_id: 'demo-operation', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 123 }] };
+      const current = await import('../../../src/shared/schemas');
+      // @ts-expect-error fixture-only pinned historical source resolver
+      const historical = await import('oldest:src/shared/schemas.ts');
+      current.expenseInput.parse(payload); historical.expenseInput.parse(payload);
+      current.assertFinancialInput(payload); historical.assertFinancialInput(payload);
+      return storage.saveOutboxItem({ clientOperationId: 'demo-operation', userId: 'demo-user', groupId: 'demo-group', payload, display: { description: payload.description, amountMinor: 123, currency: 'USD', date: payload.date }, createdAt: '2026-01-02T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', status: 'pending', attempts: 0, authEpoch: 0 });
+    },
     check: () => checkForUpdates(),
     state: getServiceWorkerUpdateState,
     safety: getReloadSafetyState,

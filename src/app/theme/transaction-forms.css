@@ -606,6 +606,8 @@ input[inputmode="decimal"] {
   width: min(100%, 34rem);
   max-height: min(90vh, 45rem);
   max-height: min(90dvh, 45rem);
+  max-height: min(calc(100dvh - var(--space-6) - var(--safe-bottom) - var(--safe-top)), 45rem);
+  min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--color-border-strong);

@@ -12,6 +12,9 @@ export type ServiceWorkerUpdateState = Readonly<{
   blockerReason?: string; lastCheck?: number; lastSuccess?: number; error?: string;
   manualError?: string;
   offline?: boolean;
+  pageBuild?: string;
+  activeBuild?: string;
+  waitingBuild?: string;
 }>;
 const initialState: ServiceWorkerUpdateState = Object.freeze({ phase: 'initializing', updateReady: false, applying: false, blocked: false });
 let state = initialState;
@@ -173,6 +176,7 @@ const reconcileWaiting = (show = true, forceIdentity = false) => {
     if (prepared?.worker === old && (!activationIntent || old?.state === 'redundant')) cancelPrepared();
     waiting = next;
     waitingTarget = undefined;
+    setState({ waitingBuild: undefined });
     clearTimeout(waitingIdentity?.timer);
     waitingIdentity = undefined;
   }
@@ -192,6 +196,9 @@ export function checkForUpdates(manual = true): Promise<void> {
   setState({ offline: offline() });
   if (!registration) { phase(typeof navigator === 'undefined' || !navigator.serviceWorker ? 'unsupported' : 'initializing'); return Promise.resolve(); }
   reconcileWaiting(false, manual);
+  if (manual && !state.activeBuild && navigator.serviceWorker.controller) {
+    try { send(navigator.serviceWorker.controller, 'IDENTIFY'); } catch { /* Diagnostics are optional. */ }
+  }
   if (verifyingController) identify(verifyingController, 'controller', manual);
   if (checkPromise) return checkPromise;
   if (!manual && Date.now() < nextCheck) return Promise.resolve();
@@ -312,7 +319,8 @@ const onMessage = (event: MessageEvent) => {
     return;
   }
   if (data.type === 'IDENTITY') {
-    if (worker === waiting && worker === registration?.waiting && worker.state !== 'redundant') { waitingTarget = data.target; clearTimeout(waitingIdentity?.timer); waitingIdentity = undefined; settledPhase(); considerApply(); }
+    if (worker === navigator.serviceWorker.controller) setState({ activeBuild: data.target });
+    if (worker === waiting && worker === registration?.waiting && worker.state !== 'redundant') { waitingTarget = data.target; setState({ waitingBuild: data.target }); clearTimeout(waitingIdentity?.timer); waitingIdentity = undefined; settledPhase(); considerApply(); }
     else if (worker === navigator.serviceWorker.controller && worker === verifyingController && hadController) {
       if (expectedControllerTarget && expectedControllerTarget !== data.target) return;
       clearTimeout(controllerIdentity?.timer); controllerIdentity = undefined;
@@ -366,10 +374,15 @@ const onMessage = (event: MessageEvent) => {
 const onControllerChange = () => {
   const controller = navigator.serviceWorker.controller;
   if (!controller) return;
-  if (!hadController) { hadController = true; return; } // First install is not an update reload.
+  if (!hadController) {
+    hadController = true;
+    try { send(controller, 'IDENTIFY'); } catch { /* Diagnostics are optional. */ }
+    return; // First install is not an update reload.
+  }
   clearRequest();
   waiting = undefined;
   waitingTarget = undefined;
+  setState({ activeBuild: undefined, waitingBuild: undefined });
   // An unprepared late tab must also refresh eventually, but only after its
   // drafts/operations settle. Never trust an unrelated message as activation.
   deferredTarget = undefined;
@@ -404,6 +417,7 @@ export function observeServiceWorkerRegistration(next: ServiceWorkerRegistration
   }
   registration = next;
   pageBuild = document.querySelector?.('meta[name="billsplit-build"]')?.getAttribute('content') ?? undefined;
+  setState({ pageBuild });
   autoApply = options.autoApply ?? configuration.autoApply ?? false;
   safetyIntegrated = options.safetyIntegrated ?? configuration.safetyIntegrated ?? false;
   hadController = Boolean(navigator.serviceWorker.controller);
@@ -427,6 +441,9 @@ export function observeServiceWorkerRegistration(next: ServiceWorkerRegistration
   }));
   listen(navigator.serviceWorker, 'message', onMessage as EventListener);
   listen(navigator.serviceWorker, 'controllerchange', onControllerChange);
+  if (navigator.serviceWorker.controller) {
+    try { send(navigator.serviceWorker.controller, 'IDENTIFY'); } catch { /* Old workers may not support diagnostics. */ }
+  }
   const resume = () => { if (visible()) { void checkForUpdates(false); considerApply(); } };
   listen(window, 'focus', resume);
   listen(window, 'pageshow', resume);
@@ -460,6 +477,7 @@ export function disposeServiceWorkerUpdates() {
   registration = undefined; waiting = undefined; waitingTarget = undefined;
   requested = undefined; activationIntent = undefined; deferredTarget = undefined; verifyingController = undefined; checkPromise = undefined;
   expectedControllerTarget = undefined;
+  pageBuild = undefined;
   manualRevision = undefined; manualExpires = 0;
   retiredAttempts.clear();
   nextCheck = 0; failures = 0; reloaded = false; autoApply = false; safetyIntegrated = false;

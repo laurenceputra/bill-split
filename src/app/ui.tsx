@@ -396,7 +396,29 @@ export function Field({ label, children, className = '', error, errorId }: { lab
 }
 
 export function Money({ amountMinor, currency, tone, size = 'normal', currencyDisplay = 'symbol' }: { amountMinor: number; currency: string; tone?: 'positive' | 'debt'; size?: 'normal' | 'large'; currencyDisplay?: 'symbol' | 'code' }) {
-  return <strong className={`money money--${size}${tone ? ` money--${tone}` : ''}`}>{new Intl.NumberFormat(undefined, { style: 'currency', currency, currencyDisplay }).format(amountMinor / 100)}</strong>;
+  const element = useRef<HTMLElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const text = new Intl.NumberFormat(undefined, { style: 'currency', currency, currencyDisplay }).format(amountMinor / 100);
+  useEffect(() => {
+    const node = element.current;
+    if (!node) return;
+    let disposed = false;
+    const measure = () => { if (!disposed) setOverflowing(node.scrollWidth > node.clientWidth); };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(node);
+    // Font metrics can change the scroll width without resizing the outer box.
+    void document.fonts?.ready.then(measure);
+    window.addEventListener('resize', measure);
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [text, size]);
+  // Only actual scroll targets enter the tab order, including below-threshold
+  // values in narrow columns and browsers without automatic scroll focusability.
+  return <strong ref={element} tabIndex={overflowing ? 0 : undefined} className={`money money--${size}${tone ? ` money--${tone}` : ''}`}>{text}</strong>;
 }
 
 export function Status({ children, tone }: { children: ReactNode; tone: 'positive' | 'debt' | 'warning' | 'neutral' }) {

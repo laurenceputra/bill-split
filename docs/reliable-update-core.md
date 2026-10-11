@@ -26,6 +26,22 @@ For multi-window legacy recovery, save drafts and finish writes, close **all**
 BillSplit tabs and standalone windows, then reopen. Never clear the outbox or
 site data to apply an update.
 
+The direct, public **GET/HEAD `/api/app-update-recovery`** endpoint is handled
+before API authentication. Historical workers exclude `/api/` even for
+cache-first navigations, so this link reaches current network instructions
+without loading the application or opening/upgrading IndexedDB. It is static,
+no-store HTML with a restrictive CSP and no scripts. Query parameters and
+request data are not interpolated. Other methods and sibling paths remain
+ordinary authenticated API routes. Offline navigation fails rather than
+pretending that recovery was performed. Close the recovery page too: it is
+another scoped window and can keep a waiting worker from activating naturally.
+Settings opens the instructions in a separate `noopener noreferrer` tab so an
+unsaved profile stays on its original page; the help explicitly says to close
+that extra scoped tab as part of recovery.
+The endpoint sends no activation messages, unregisters nothing, clears no
+caches/storage, and never forces a reload. Unsupported/silent old clients do
+not consent to the modern two-round handshake.
+
 Deployment smoke check: compare the deployed binary's SHA-256 and byte length to
 the final local `dist/index.html` and generated SW fingerprint; confirm HTTP 200,
 octet-stream, `no-cache, no-transform`, CSP and no redirect. Check GET with Range
@@ -129,6 +145,9 @@ Failures back off; a check deadline cannot be mistaken for installation.
   ready, blocked, applying, check-error, install-error, offline, or deferred;
 - `blockerReason`, `error`, `lastCheck`, and `lastSuccess`;
 - `offline` independently disables discovery without disabling installed application;
+- optional `pageBuild`, `activeBuild`, and `waitingBuild` diagnostics: the page
+  meta tag and identity replies from the actual controller/waiting worker;
+  missing replies remain unavailable, not evidence that the app is current;
 - compatible `updateReady`, `applying`, and `blocked` booleans.
 
 `applyServiceWorkerUpdate(true)` (the default) starts a manual attempt. It waives
@@ -237,6 +256,39 @@ BillSplit tabs and standalone windows, then reopen; refreshing individual tabs
 is not the recovery procedure. Never clear site data or the outbox.
 
 ## Executed verification and scope
+
+Recovery coverage adds a standalone endpoint test and a Chromium historical
+cache-first upgrade scenario. Historical worker sources are vendored verbatim from
+`f0cf823` (pre page protocol) and `53bda1d` (explicit update); the fixture's
+provenance manifest pins full commit IDs, SHA-256 and byte lengths. Only the historical worker's build
+placeholders are finalized. Explicit page update/mutation/session modules and
+their dependencies come from the latter Git tree, not a modern compatibility
+adapter. Full provenance pins are
+`f0cf823c93283ab0af780d3323eacd2f38128f3f` and
+`53bda1d93de0a886427a2a4f6fed48b9b8e8cddc`.
+Production-shaped pending expense storage is written by the actual
+v10 IDB module from `f0cf823`, then read/migrated by current v11 code after
+close-all/reopen. This tests storage preservation, not authenticated replay or
+a full historical App boot. Normal tests require neither Git/history nor network
+retrieval: the manifest is an explicit source path whitelist and every snapshot
+is verified before use. `tests/e2e/fixtures/historical/README.md` documents the
+10-file dependency closure and optional full-history regeneration procedure.
+The historical unsupported page is a minimal harness with no update action;
+it does not claim to render the full historical UI.
+
+Recovery-focused local verification including review follow-up: **42 unit tests**
+(endpoint and page update core), **12 standalone Chromium lifecycle tests**,
+**4 focused Settings Chromium tests** on isolated port 8799, and
+`npm run typecheck` passed. Pending payloads are valid snake-case expense wire
+format with UUID participants and a client operation ID, parsed by both pinned
+historical/current schemas with financial-total checks; the exact nonempty pending
+row is asserted before and after migration. No full authentication/replay suite
+was run. Earlier totals below are previous-work evidence, not rerun here.
+
+Fixture-portability follow-up: **5 provenance unit tests** passed and all **12
+standalone Chromium lifecycle tests** plus typecheck were rerun successfully
+against the self-contained vendored snapshots. No production code changed for
+this follow-up; normal fixture loading no longer shells out to Git.
 
 Current PR verification passed **929 unit tests, 27 integration tests, and 1
 migration test**, plus typecheck and production build.

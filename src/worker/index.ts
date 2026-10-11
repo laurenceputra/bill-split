@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { appUpdateRecoveryResponse } from './app-update-recovery';
 import { accountAvatar } from '../shared/avatar';
 import { zValidator } from '@hono/zod-validator';
 import { createClerkClient } from '@clerk/backend';
@@ -483,6 +484,13 @@ api.onError((error, c) => { const balanceResponse = balanceError(c, error); if (
 export default { async fetch(request: Request, env: Env['Bindings'], ctx: ExecutionContext) {
   const requestId = requestIdFor(request);
   const url = new URL(request.url);
+  // Historical workers exclude /api/ from their cache-first navigation handler.
+  // Keep this exact read-only exception outside authentication and app boot.
+  if (url.pathname === '/api/app-update-recovery' && (request.method === 'GET' || request.method === 'HEAD')) {
+    const headers = new Headers();
+    setSecurityHeaders(headers, requestId, true);
+    return appUpdateRecoveryResponse(request.method, headers);
+  }
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) return api.fetch(request, env, ctx);
   if (url.pathname === '/__billsplit_shell__.bin') {
     const headers = new Headers();

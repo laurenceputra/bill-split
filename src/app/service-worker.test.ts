@@ -26,6 +26,58 @@ function fixture(hasController = true, hasWaiting = false, autoApply = false) {
 beforeEach(() => { vi.useFakeTimers(); recordReloadInteraction(); });
 afterEach(() => { disposeServiceWorkerUpdates(); configureServiceWorkerUpdates({ safetyIntegrated: false, autoApply: false }); vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe('service-worker discovery', () => {
+  it('identifies the first controller without reloading the first install', async () => {
+    const f = fixture(false);
+    f.serviceWorker.controller = f.controller;
+    f.serviceWorker.dispatchEvent(new Event('controllerchange'));
+    expect(f.controller.postMessage).toHaveBeenCalledWith({ protocol, type: 'IDENTIFY' });
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-first' }, f.controller);
+    expect(getServiceWorkerUpdateState().activeBuild).toBe('bill-split-shell-first');
+    expect(f.window.location.reload).not.toHaveBeenCalled();
+  });
+  it('ignores late old controller identities after handoff', () => {
+    const f = fixture();
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-old' }, f.controller);
+    const next = Object.assign(new EventTarget(), { postMessage: vi.fn() });
+    f.serviceWorker.controller = next;
+    f.serviceWorker.dispatchEvent(new Event('controllerchange'));
+    expect(getServiceWorkerUpdateState().activeBuild).toBeUndefined();
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-old' }, f.controller);
+    expect(getServiceWorkerUpdateState().activeBuild).toBeUndefined();
+    f.message({ type: 'IDENTITY', target }, next);
+    expect(getServiceWorkerUpdateState().activeBuild).toBe(target);
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-old' }, f.controller);
+    expect(getServiceWorkerUpdateState().activeBuild).toBe(target);
+  });
+  it('clears waiting diagnostics on replacement and ignores late replaced replies', async () => {
+    const f = fixture(true, true);
+    f.message({ type: 'IDENTITY' });
+    const next = Object.assign(new EventTarget(), { postMessage: vi.fn(), state: 'installed' });
+    f.registration.waiting = next;
+    await checkForUpdates();
+    expect(getServiceWorkerUpdateState().waitingBuild).toBeUndefined();
+    f.message({ type: 'IDENTITY' });
+    expect(getServiceWorkerUpdateState().waitingBuild).toBeUndefined();
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-replacement' }, next);
+    expect(getServiceWorkerUpdateState().waitingBuild).toBe('bill-split-shell-replacement');
+  });
+  it('reports only actual worker identities and never treats silence as readiness', async () => {
+    const f = fixture(true, true);
+    await checkForUpdates();
+    expect(getServiceWorkerUpdateState().activeBuild).toBeUndefined();
+    expect(getServiceWorkerUpdateState().waitingBuild).toBeUndefined();
+    expect(applyServiceWorkerUpdate()).toBe(false);
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-forged' }, new EventTarget());
+    expect(getServiceWorkerUpdateState().activeBuild).toBeUndefined();
+    f.message({ type: 'IDENTITY', target: 'bill-split-shell-current' }, f.controller);
+    expect(getServiceWorkerUpdateState().activeBuild).toBe('bill-split-shell-current');
+    expect(f.window.location.reload).not.toHaveBeenCalled();
+    f.message({ type: 'IDENTITY' });
+    expect(getServiceWorkerUpdateState().waitingBuild).toBe(target);
+    f.registration.waiting = null;
+    await checkForUpdates();
+    expect(getServiceWorkerUpdateState().waitingBuild).toBeUndefined();
+  });
   it('checks startup once, coalesces resume clusters, and allows manual bypass', async () => {
     const f = fixture();
     await checkForUpdates();
