@@ -1,7 +1,7 @@
 import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import type { CreditInput, GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { avatarPreference } from '../shared/avatar';
-import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
+import { clearAllPrivateData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
 import { beginLocalLogoutCleanup, broadcastSessionCoordination, cancelLocalLogoutCleanup, captureAuthInvalidationNonce, captureSessionGeneration, clearSessionLogout, completeLocalLogoutCleanup, consumeAuthInvalidationNonce, getLocallyOwnedLogoutGeneration, getSessionGeneration, getSessionLogoutInProgress, hydrateSessionCoordination, isSessionGenerationCurrent, isSessionLogoutAdopted, recordProfileRevision, rollbackSessionLogout, SessionGenerationMismatchError, startSessionLogout, subscribeSessionCoordination, subscribeSessionLogout } from './session';
@@ -2011,10 +2011,9 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
     // deliberately performed after the bounded wait as well, so a transport
     // which ignores abort cannot strand local private rows.
     await withExclusiveMutationLock(async () => { await outboxQuiescence; });
-    // Logout revokes private trust and cache but deliberately preserves the
-    // durable new-expense outbox. It is user-scoped and cannot replay until
-    // the same internal account is authoritatively verified again.
-    await clearCachedData();
+    // Explicit logout consent covers every account's private local records.
+    // Delete after quiescence so late transports cannot recreate queued rows.
+    await clearAllPrivateData();
   } catch (error) {
     // Keep the current authenticated UI visible when storage is unavailable.
     // Release the lock barrier so retry is possible; the session generation

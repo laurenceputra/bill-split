@@ -655,3 +655,19 @@ lifecycle tests cover real captured manual clicks, draft/save refusal and offlin
 installed application. Verification completed: both focused
 Settings tests passed across all seven widths, including all phase fixtures and
 short/long manual failure feedback in header and Settings (Chromium).
+## Logout privacy — verified Chromium matrix (2026-10-10)
+
+`tests/e2e/logout-privacy.spec.ts` passed five focused browser tests using the local cached-browser wrapper. The responsive test executes **320, 390, 767, 768, 895, 896, and 1440px** (844px viewport height).
+
+| State | Verified at every listed width |
+| --- | --- |
+| Loading | Held identity response exposes no logout action before verification completes. |
+| Online / empty queue | Warning lives inside Account immediately before logout controls and describes both buttons; Profile and Device precede Account; both actions enabled; no horizontal page overflow. |
+| Confirmation / cancellation | Empty queue still opens native confirmation with all-account consent; dismiss returns to Settings. |
+| Revocation error | Accepted logout with synthetic HTTP 503 shows “Logout was not completed”; error layout does not overflow. |
+| Offline | Both logout actions disabled; existing profile remains visible; no overflow. |
+| Cached verification fallback | Seeded matching trust and persisted Demo user identity, failed `/me` transport on reload: cached-profile notice, retained name, disabled logout, no overflow. Shell assets load online in this check; this is not a cold offline-shell reload claim. |
+
+Separate current/all-device behavior tests verify cancellation sends no revocation, preserves durable records from two accounts and local session preference; HTTP 503 preserves those records; accepted HTTP 204 revocation deletes both accounts' durable records, including an uncertain delivery, using fresh IndexedDB connections. These use intercepted revocation responses in the development-auth harness, not real Clerk sign-out or remote-device storage tests. API/outbox/IndexedDB/session unit coverage verifies adopted-tab cleanup, delayed private responses, stale lease completions, mutation quiescence, and nondestructive clear-cache behavior.
+
+Refreshed full-page `settings-mobile.png` (390px) and `settings-desktop.png` (1440px) show the visible privacy warning with constructed Demo user data, no rendered email/hash/identity initials, and a generic demo avatar glyph. Capture hides only the fixed bottom navigation to avoid a content stripe. Native confirmation is browser chrome, not capturable in page screenshots; its meaningful warning state is asserted through Playwright dialog events. Reproduce with the README's `UPDATE_SETTINGS_SCREENSHOTS=1` command. Other browsers, real provider logout, and real remote revocation were not exercised by this focused matrix.
