@@ -104,7 +104,7 @@ test('refund defaults, validation and beneficiary disclosure fit audit widths', 
 });
 
 test('different recipient: settlement changes and curated refund screenshots', async ({ browser }) => {
-  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 }, { serviceWorkers: 'block' });
   const group = '00000000-0000-4000-8000-000000003002';
   const you = '00000000-0000-4000-8000-000000002001';
   const recipient = '00000000-0000-4000-8000-000000002003';
@@ -112,25 +112,46 @@ test('different recipient: settlement changes and curated refund screenshots', a
   try {
     const page = await context.newPage();
     page.setDefaultTimeout(10_000);
-    await page.route(`**/api/groups/${group}`, async (route) => {
+    // Construct complete synthetic responses before first render, never inherit identity fields.
+    const userId = '00000000-0000-4000-8000-000000001001';
+    const members = [
+      { personId: you, name: 'Demo user', role: 'owner', joinedAt: '2026-01-01', avatarMode: 'initials', avatarHash: null },
+      { personId: recipient, name: 'Demo friend', role: 'member', joinedAt: '2026-01-01', avatarMode: 'initials', avatarHash: null },
+    ];
+    await page.route('**/api/me', async (route) => {
       const response = await route.fetch();
-      const data = await response.json();
-      await route.fulfill({ response, json: { ...data, members: data.members.map((member: { personId: string; name: string }) => member.personId === recipient ? { ...member, name: 'Demo friend' } : member) } });
+      await route.fulfill({ response, json: { id: userId, personId: you, name: 'Demo user', email: DEV_EMAIL, avatarMode: 'initials', avatarHash: null } });
+    });
+    await page.route(`**/api/groups/${group}`, async (route) => {
+      await route.fulfill({ json: { group: { id: group, name: 'Sample project', currency: 'USD', createdAt: '2026-01-01', updatedAt: '2026-01-01' }, members, historicalParticipants: members.map((member) => ({ ...member, status: 'active' })), currentPersonId: you, splitDefault: null } });
     });
     await page.route(`**/api/groups/${group}/expenses*`, async (route) => {
-      const response = await route.fetch();
-      const data = await response.json();
-      await route.fulfill({ response, json: { ...data, expenses: data.expenses.map((item: { id: string }) => item.id === expense ? { ...item, description: 'Sample purchase · reimbursement', splits: [{ personId: you, amountMinor: 4200 }, { personId: recipient, amountMinor: 4200 }] } : item) } });
+      await route.fulfill({ json: { expenses: [{ id: expense, groupId: group, description: 'Sample purchase', amountMinor: 8400, currency: 'USD', date: '2026-01-01', createdBy: userId, createdAt: '2026-01-01', updatedAt: '2026-01-01', version: 1, payers: [{ personId: you, amountMinor: 8400 }], splits: [{ personId: you, amountMinor: 4200 }, { personId: recipient, amountMinor: 4200 }], linkedCredits: [] }] } });
     });
     const capture = async (state: string, width: number) => {
-      if (!process.env.REFUND_SCREENSHOTS || (width !== 390 && width !== 1440)) return;
+      if (width !== 390 && width !== 1440) return;
       await page.evaluate(async () => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo(0, 0); await document.fonts.ready; });
+      await expect(page.locator('body')).not.toContainText(/@/);
+      for (const option of await page.locator('select[name^="allocation-"][name$="-person"] option').all()) {
+        await expect(option).toHaveText(/^(Choose a person|You|Demo user|Demo friend)$/);
+      }
+      await expect(page.locator('.refund-application-row select').first().locator('option')).toHaveText([
+        'Choose an expense', '2026-01-01 · Sample purchase · USD',
+      ]);
+      await expect(page.locator('.avatar img')).toHaveCount(0);
+      for (const avatar of await page.locator('.avatar').all()) {
+        await expect(avatar).toHaveAttribute('aria-label', /^(Demo user|Demo friend)$/);
+        await expect(avatar).toHaveText(/^(DU|DF)$/);
+      }
+      await expect(page.locator('.refund-application-row select').first()).toContainText('Sample purchase');
+      if (!process.env.REFUND_SCREENSHOTS) return;
       await page.screenshot({ path: `docs/screenshots/refund-improvements-${state}-${width === 390 ? 'mobile' : 'desktop'}.png`, fullPage: true });
     };
     for (const width of [320, 390, 480, 481, 767, 768, 895, 896, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(`${BASE_URL}/groups/${group}/refund/new`);
       await expect(page.locator('select[name="allocation-recipient-1-person"]')).toHaveValue(you);
+      await page.locator('input[type="date"]').fill('2026-01-02');
       await expect(page.getByText('Defaults to you.', { exact: false })).toBeVisible();
       await capture('default', width);
       await page.getByRole('button', { name: 'Record money back', exact: true }).click();
