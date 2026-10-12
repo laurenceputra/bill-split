@@ -313,9 +313,11 @@ export function projectionMutation(_db: D1Database, _groupId: string, _timestamp
 
 /** Group list readiness is joined only after authorization has scoped groups. */
 export const groupSelect = (requestedGroup = false) => `WITH authorized_groups AS (
-    SELECT DISTINCT gm.group_id,gm.person_id,gm.role
-    FROM group_members gm JOIN groups authorized_group ON authorized_group.id=gm.group_id
-    WHERE gm.user_id=? AND gm.deleted_at IS NULL AND authorized_group.deleted_at IS NULL${requestedGroup ? ' AND gm.group_id=?' : ''}
+    SELECT group_id,person_id,role FROM (
+      SELECT gm.group_id,gm.person_id,gm.role,ROW_NUMBER() OVER (PARTITION BY gm.group_id ORDER BY gm.joined_at,gm.person_id) AS member_rank
+      FROM group_members gm JOIN groups authorized_group ON authorized_group.id=gm.group_id JOIN users viewer ON viewer.id=gm.user_id
+      WHERE gm.user_id=? AND gm.deleted_at IS NULL AND authorized_group.deleted_at IS NULL AND viewer.deleted_at IS NULL${requestedGroup ? ' AND gm.group_id=?' : ''}
+    ) WHERE member_rank=1
   ), scoped_groups AS (SELECT DISTINCT group_id FROM authorized_groups),
   ready_groups AS (
     SELECT scope.group_id FROM scoped_groups scope JOIN ledger_summary_state state ON state.group_id=scope.group_id
@@ -350,17 +352,25 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
     SELECT ledger.group_id,ledger.currency,SUM(ledger.net_minor) AS net_minor FROM ledger
       JOIN authorized_groups balance_member ON balance_member.group_id=ledger.group_id AND balance_member.person_id=ledger.person_id
       GROUP BY ledger.group_id,ledger.currency HAVING SUM(ledger.net_minor)<>0
-  ), ranked_balances AS (
+   ), personal_currencies AS (
+     SELECT scope.group_id,g.currency FROM scoped_groups scope JOIN groups g ON g.id=scope.group_id
+     UNION SELECT group_id,currency FROM authoritative_currencies
+   ), personal_json AS (
+     SELECT group_id,json_group_array(json_object('currency',currency,'netMinor',net_minor)) AS personal_balances
+     FROM (SELECT c.group_id,c.currency,COALESCE(b.net_minor,0) AS net_minor FROM personal_currencies c
+       LEFT JOIN group_balances b ON b.group_id=c.group_id AND b.currency=c.currency ORDER BY c.group_id,c.currency)
+     GROUP BY group_id
+   ), ranked_balances AS (
     SELECT group_id,currency,net_minor,ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY ABS(net_minor) DESC,currency ASC) AS balance_rank FROM group_balances
   ), balance_json AS (
     SELECT group_id,json_group_array(json_object('currency',currency,'net_minor',net_minor)) AS balance_summaries
       FROM (SELECT group_id,currency,net_minor FROM ranked_balances WHERE balance_rank<=2 ORDER BY group_id,balance_rank) GROUP BY group_id
   )
-  SELECT g.*,gm.role,
+   SELECT g.*,gm.role,gm.person_id AS current_person_id,personal_json.personal_balances,
     (SELECT COUNT(*) FROM group_members member_count JOIN people member_person ON member_person.id=member_count.person_id WHERE member_count.group_id=g.id AND member_count.deleted_at IS NULL AND member_person.deleted_at IS NULL) AS member_count,
     (SELECT p.name FROM people p JOIN group_members other_member ON other_member.person_id=p.id
       WHERE other_member.group_id=g.id AND other_member.person_id<>gm.person_id AND other_member.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_name,
     (SELECT u.avatar_mode FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_avatar_mode,
     (SELECT u.email FROM people p JOIN group_members m ON m.person_id=p.id LEFT JOIN users u ON u.id=p.user_id AND u.deleted_at IS NULL WHERE m.group_id=g.id AND m.person_id<>gm.person_id AND m.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY p.name,p.id LIMIT 1) AS counterpart_email,
     COALESCE(balance_json.balance_summaries,'[]') AS balance_summaries
-  FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id LEFT JOIN balance_json ON balance_json.group_id=g.id`;
+   FROM groups g JOIN authorized_groups gm ON gm.group_id=g.id LEFT JOIN balance_json ON balance_json.group_id=g.id LEFT JOIN personal_json ON personal_json.group_id=g.id`;

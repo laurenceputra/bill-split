@@ -28,7 +28,7 @@ export function balanceStatus(netMinor: number): 'owed' | 'owes' | 'settled' {
 
 export function groupBalanceDisplay(summary: GroupBalanceSummary | undefined, defaultCurrency: string): GroupBalanceDisplay {
   if (!summary) return { kind: 'unavailable', label: 'Balance unavailable', currency: defaultCurrency };
-  if (summary.netMinor === 0) return { kind: 'settled', label: 'Settled up', currency: defaultCurrency };
+  if (summary.netMinor === 0) return { kind: 'settled', label: 'Settled up', currency: summary.currency };
   return {
     kind: 'balance',
     label: summary.netMinor > 0 ? 'You are owed' : 'You owe',
@@ -41,5 +41,10 @@ export function groupBalanceDisplays(summaries: GroupBalanceSummary[] | undefine
   if (summaries === undefined) return [groupBalanceDisplay(undefined, defaultCurrency)];
   const nonZero = summaries.filter((summary) => summary.netMinor !== 0);
   if (!nonZero.length) return [{ kind: 'settled', label: 'Settled up', currency: defaultCurrency }];
-  return nonZero.slice(0, 2).map((summary) => groupBalanceDisplay(summary, defaultCurrency));
+  return nonZero.sort((a, b) => Math.abs(b.netMinor) - Math.abs(a.netMinor) || a.currency.localeCompare(b.currency)).slice(0, 2).map((summary) => groupBalanceDisplay(summary, defaultCurrency));
+}
+
+/** Overview cards are a complete ledger view, not the capped Home preview. */
+export function personalBalanceCards(summaries: GroupBalanceSummary[], defaultCurrency: string): GroupBalanceDisplay[] {
+  return summaries.length ? summaries.map((summary) => groupBalanceDisplay(summary, defaultCurrency)) : [{ kind: 'settled', label: 'Settled up', currency: defaultCurrency }];
 }

@@ -220,6 +220,7 @@ describe('scheduled completion migration integration', () => {
           // Assert the 0031/0032 transition above before applying the final
           // aggregate guards, so later migrations cannot mask regressions.
           await cp(join(root, 'migrations', '0033_credit_aggregate_guards.sql'), join(migrationsDir, '0033_credit_aggregate_guards.sql'));
+          await Promise.all(['0034_profile_avatar.sql', '0035_shared_personal_balances.sql'].map((name) => cp(join(root, 'migrations', name), join(migrationsDir, name))));
           run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
           const [preservedCredit] = querySets("SELECT id,amount_minor,(SELECT SUM(amount_minor) FROM credit_applications WHERE credit_id=credits.id) AS applied_minor,(SELECT SUM(amount_minor) FROM credit_allocations WHERE credit_id=credits.id) AS allocated_minor FROM credits WHERE id='credit-upgrade';");
           expect(preservedCredit).toEqual([{ id: 'credit-upgrade', amount_minor: 25, applied_minor: 25, allocated_minor: 25 }]);

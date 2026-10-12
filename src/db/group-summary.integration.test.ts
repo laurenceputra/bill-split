@@ -123,6 +123,49 @@ function databaseWithCreditDefaultRace(expenseId: string) {
 }
 
 describe('group summaries with the in-process local D1 binding', () => {
+  it('selects one deterministic membership and revisions both groups on child moves', async () => {
+    const first = await createFixture('personal-move-first');
+    const second = await createFixture('personal-move-second');
+    await addExpense(first, `${first.groupId}-expense`, 100, '2026-01-01');
+    await addExpense(second, `${second.groupId}-expense`, 100, '2026-01-01');
+    const repo = new Repository(db);
+    await exec('UPDATE group_members SET user_id=?,joined_at=? WHERE group_id=? AND person_id=?', first.userA, '2026-02-01', first.groupId, first.personB);
+    expect(await repo.currentPersonId(first.groupId, first.userA)).toBe(first.personA);
+    expect((await repo.groups(first.userA))[0].personalBalance).toMatchObject({ personId: first.personA, balances: [{ currency: 'USD', netMinor: 100 }] });
+    expect((await repo.balanceSnapshot(first.groupId, first.userA))!.group.personalBalance).toEqual((await repo.groups(first.userA))[0].personalBalance);
+    await exec('DELETE FROM payers WHERE expense_id=?', `${second.groupId}-expense`);
+    const beforeFirst = (await repo.groups(first.userA))[0].personalBalance!.ledgerRevision;
+    const beforeSecond = (await repo.groups(second.userA))[0].personalBalance!.ledgerRevision;
+    await exec('UPDATE payers SET expense_id=? WHERE expense_id=?', `${second.groupId}-expense`, `${first.groupId}-expense`);
+    expect((await repo.groups(first.userA))[0].personalBalance!.ledgerRevision).toBeGreaterThan(beforeFirst);
+    expect((await repo.groups(second.userA))[0].personalBalance!.ledgerRevision).toBeGreaterThan(beforeSecond);
+    await expect(repo.balanceSnapshot(first.groupId, second.userA)).resolves.toBeNull();
+  });
+  it('shares complete personal snapshots across list and balance reads, ready and fallback', async () => {
+    const fixture = await createFixture('personal-snapshot');
+    const repo = new Repository(db);
+    const empty = (await repo.groups(fixture.userA))[0].personalBalance!;
+    expect(empty).toMatchObject({ groupId: fixture.groupId, personId: fixture.personA, defaultCurrency: 'USD', balances: [{ currency: 'USD', netMinor: 0 }] });
+    for (const currency of ['USD', 'EUR', 'GBP']) await addExpense(fixture, `${fixture.groupId}-${currency}`, 100, '2026-01-01', currency);
+    const fallback = (await repo.groups(fixture.userA))[0];
+    expect(fallback.personalBalance!.balances).toEqual([{ currency: 'EUR', netMinor: 100 }, { currency: 'GBP', netMinor: 100 }, { currency: 'USD', netMinor: 100 }]);
+    expect(fallback.balanceSummaries).toHaveLength(2);
+    expect((await repo.balanceSnapshot(fixture.groupId, fixture.userA))!.group.personalBalance).toEqual(fallback.personalBalance);
+    await maintainUntilReady(repo, fixture.groupId);
+    expect((await repo.groups(fixture.userA))[0].personalBalance).toEqual(fallback.personalBalance);
+    const revision = fallback.personalBalance!.ledgerRevision;
+    await exec('UPDATE expenses SET projection_mutation_id=? WHERE id=?', 'marker', `${fixture.groupId}-USD`);
+    await exec('UPDATE expenses SET projection_mutation_id=NULL WHERE id=?', `${fixture.groupId}-USD`);
+    expect((await repo.groups(fixture.userA))[0].personalBalance!.ledgerRevision).toBe(revision);
+    await expect(db.batch([
+      db.prepare('UPDATE payers SET amount_minor=99 WHERE expense_id=?').bind(`${fixture.groupId}-USD`),
+      db.prepare('INSERT INTO groups(id,name,currency,created_at,updated_at) VALUES(?,?,?,?,?)').bind(fixture.groupId, 'duplicate', 'USD', '2026-01-01', '2026-01-01'),
+    ])).rejects.toThrow();
+    expect((await repo.groups(fixture.userA))[0].personalBalance).toEqual(fallback.personalBalance);
+    await exec('UPDATE payers SET amount_minor=99 WHERE expense_id=?', `${fixture.groupId}-USD`);
+    expect((await repo.groups(fixture.userA))[0].personalBalance!.ledgerRevision).toBeGreaterThan(revision);
+    expect((await repo.balanceProjection(fixture.groupId)).ready).toBe(false);
+  });
   it('uses authoritative fallback, publishes a ready projection, and selects the branch from one read snapshot', async () => {
     const fixture = await createFixture('fallback');
     await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');
@@ -169,6 +212,15 @@ describe('group summaries with the in-process local D1 binding', () => {
       { currency: 'USD', personId: fixture.personA, netMinor: 60 },
       { currency: 'USD', personId: fixture.personB, netMinor: -60 },
     ] });
+    const readySnapshot = (await repo.groups(fixture.userA))[0].personalBalance!;
+    await exec('UPDATE credits SET deleted_at=? WHERE group_id=?', '2026-01-03', fixture.groupId);
+    const legacySnapshot = (await repo.groups(fixture.userA))[0].personalBalance!;
+    expect(legacySnapshot.ledgerRevision).toBeGreaterThan(readySnapshot.ledgerRevision);
+    expect(legacySnapshot.balances).toEqual([{ currency: 'USD', netMinor: 100 }]);
+    expect((await repo.balanceProjection(fixture.groupId)).ready).toBe(false);
+    await maintainUntilReady(repo, fixture.groupId);
+    expect((await repo.groups(fixture.userA))[0].personalBalance).toEqual(legacySnapshot);
+    await exec('DELETE FROM ledger_period_build_gc WHERE group_id=?', fixture.groupId);
   });
 
   it('rejects a stale default-allocation snapshot inside the credit write batch', async () => {

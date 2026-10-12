@@ -1,6 +1,7 @@
 import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import type { CreditInput, GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { avatarPreference } from '../shared/avatar';
+import { acceptPersonalBalance, capturePersonalBalanceEpoch, hydratePersonalBalance, persistPersonalBalance } from './personal-balances';
 import { clearAllPrivateData, clearCachedData, isOfflineTrustUsable, normalizeActivity, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readOfflineTrust, readMutationGeneration, reconcileOutboxItems, revokeOfflineTrust, saveGlobalTransactions, saveOfflineTrust, saveVerifiedIdentity, updateOfflineTrustName, updateGroupSnapshotIfGenerationMatches, type GroupSnapshot, type OfflineTrustRecord } from './idb';
 import { allowIdentityVerification, blockResourceIdentity, getResourceSnapshot, invalidateForMutation, patchResourceData, resetResourceIdentity, resourceKeys, seedResource, setResourceAuthLifecycleReady, setResourceIdentity } from './resource-cache';
 import { quiesceOutboxForLogout, resumeOutboxAfterFailedLogout } from './logout-coordination';
@@ -2048,6 +2049,7 @@ export async function clearEverythingForLogout(broadcast = true, receivedGenerat
 }
 
 export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ groups: Group[] }>> {
+  const balanceEpoch = capturePersonalBalanceEpoch();
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   assertRequestGeneration(generation);
@@ -2057,6 +2059,9 @@ export async function getGroups(signal?: AbortSignal): Promise<CachedResult<{ gr
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
     let persisted = true;
     if (result.userId) { const responseUserId = result.userId; persisted = await persistGroupsResponse({ userId: responseUserId, groups: result.data.groups, cachedAt: new Date().toISOString() }, requestGeneration, generation); }
+    if (persisted && identity) for (const group of result.data.groups) {
+      await persistPersonalBalance(identity.user.id, group.personalBalance, requestGeneration, generation, balanceEpoch);
+    }
     return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
@@ -2227,21 +2232,28 @@ export async function getExpenses(id: string, signal?: AbortSignal, filters: Exp
   }
 }
 
-export async function getBalances(id: string, signal?: AbortSignal): Promise<CachedResult<{ balances: Record<string, Balances> }>> {
+export async function getBalances(id: string, signal?: AbortSignal): Promise<CachedResult<{ balances: Record<string, Balances>; personalBalance?: Group['personalBalance']; ledgerRevision?: number }>> {
+  const balanceEpoch = capturePersonalBalanceEpoch();
   const generation = captureSessionGeneration();
   const identity = await requireIdentityForCache(signal);
   const requestMutationGeneration = identity ? (await cacheRead(() => readMutationGeneration(identity.user.id)) ?? 0) : 0;
   try {
-    const result = await apiWithMeta<{ balances: Record<string, Balances> }>(`/groups/${id}/balances`, { signal });
+    const result = await apiWithMeta<{ balances: Record<string, Balances>; personalBalance?: Group['personalBalance']; ledgerRevision?: number }>(`/groups/${id}/balances`, { signal });
     assertRequestGeneration(generation); assertResponseIdentity(result.userId, identity);
-    const persisted = result.userId ? await persistBalanceResponse(result.userId, id, result.data.balances, requestMutationGeneration, generation) : true;
+    result.data.ledgerRevision = result.data.personalBalance?.ledgerRevision;
+    const persisted = result.userId ? await persistBalanceResponse(result.userId, id, result.data.balances, requestMutationGeneration, generation, result.data.ledgerRevision) : true;
+    if (persisted && identity && result.data.personalBalance?.groupId === id) await persistPersonalBalance(identity.user.id, result.data.personalBalance, requestMutationGeneration, generation, balanceEpoch);
+    if (persisted && identity) for (const balance of Object.values(result.data.balances)) {
+      if (balance.personalBalance?.groupId !== id) continue;
+      await persistPersonalBalance(identity.user.id, balance.personalBalance, requestMutationGeneration, generation, balanceEpoch);
+    }
     return persisted ? result.data : { ...result.data, stale: true };
   } catch (error) {
     assertRequestGeneration(generation);
     if (isGroupAuthorizationLoss(error)) { await evictRevokedGroup(id, identity); throw error; }
     if (!isNetwork(error) || !identity) throw error;
     const cached = await cacheRead(() => readGroupSnapshot(identity.user.id, id));
-    if (cached?.balances) return offline({ balances: cached.balances });
+    if (cached?.balances) return offline({ balances: cached.balances, ledgerRevision: cached.balancesLedgerRevision });
     throw error;
   }
 }
@@ -2618,7 +2630,12 @@ export async function getCategorySuggestion(description: string, signal?: AbortS
 }
 
 export async function hydrateGroups(userId: string) {
+  const generation = captureSessionGeneration();
   const cached = await cacheRead(() => readGroups(userId));
+  if (cached) for (const group of cached.groups) {
+    acceptPersonalBalance(userId, group.personalBalance, generation, cacheTimestamp(cached.cachedAt));
+    await hydratePersonalBalance(userId, group.id, generation);
+  }
   return cached ? { data: { groups: cached.groups }, fetchedAt: cacheTimestamp(cached.cachedAt), offline: true } : undefined;
 }
 const cacheTimestamp = (value: string) => { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : 0; };
@@ -2632,6 +2649,7 @@ export async function hydrateIdentity() {
   return undefined;
 }
 export async function hydrateGroup(userId: string, id: string) {
+  await hydratePersonalBalance(userId, id);
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
   const authenticatedPersonId = await cachedPersonIdForUser(userId);
   return cached?.group && cached.members ? { data: { group: cached.group, members: cached.members, currentPersonId: groupCurrentPersonId(cached.members, cached.currentPersonId, authenticatedPersonId), historicalParticipants: cached.historicalParticipants || cached.members.map((member) => ({ ...member, status: member.removedAt ? 'removed' as const : 'active' as const })), splitDefault: cached.splitDefault ?? null }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.group || cached.cachedAt), offline: true } : undefined;
@@ -2641,8 +2659,9 @@ export async function hydrateExpenses(userId: string, id: string) {
   return cached?.expenses ? { data: { expenses: cached.expenses }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.expenses || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateBalances(userId: string, id: string) {
+  await hydratePersonalBalance(userId, id);
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));
-  return cached?.balances ? { data: { balances: cached.balances }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.balances || cached.cachedAt), offline: true } : undefined;
+  return cached?.balances ? { data: { balances: cached.balances, ledgerRevision: cached.balancesLedgerRevision }, fetchedAt: cacheTimestamp(cached.cachedAtByResource?.balances || cached.cachedAt), offline: true } : undefined;
 }
 export async function hydrateSettlements(userId: string, id: string) {
   const cached = await cacheRead(() => readGroupSnapshot(userId, id));

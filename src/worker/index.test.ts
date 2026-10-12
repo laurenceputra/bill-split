@@ -154,6 +154,7 @@ class OverflowStatement extends Statement {
   }
   async all<T>() {
     const max = Number.MAX_SAFE_INTEGER;
+    if (this.sql.includes('WITH authorized_groups')) return { results: [{ id: 'group-1', currency: 'USD', ledger_revision: 1, current_person_id: 'person-a', personal_balances: JSON.stringify([{ currency: 'USD', netMinor: max * 2 }]) }] as T[] };
     if (this.sql.includes('FROM expenses')) return { results: [
       { id: 'expense-1', group_id: 'group-1', description: 'One', amount_minor: max, currency: 'USD', expense_date: '2025-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
       { id: 'expense-2', group_id: 'group-1', description: 'Two', amount_minor: max, currency: 'USD', expense_date: '2025-01-02', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
@@ -634,7 +635,7 @@ describe('worker boundary', () => {
     expect(((await response.json()) as any).error).toMatchObject({ code: 'CONFLICT' });
   });
   it('returns a structured 422 when individually safe expenses overflow an aggregate balance', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new OverflowStatement(sql) } }), {} as ExecutionContext);
+    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new OverflowStatement(sql), batch: (statements: OverflowStatement[]) => Promise.all(statements.map((statement) => statement.all())) } }), {} as ExecutionContext);
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
   });

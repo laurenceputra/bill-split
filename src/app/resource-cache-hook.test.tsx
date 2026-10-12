@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { clearResourceCache, getResourceSnapshot, invalidateResource, refreshVisiblePrivateResources, resetResourceIdentity, resourceViewState, revalidate, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, useResource, type ResourceHydrator, type ResourceLoader, type ResourceOptions, type ResourceSnapshot } from './resource-cache';
+import { acceptPersonalBalance } from './personal-balances';
 
 const renderers: ReactTestRenderer[] = [];
 beforeEach(() => {
@@ -42,6 +43,25 @@ const deferred = <T,>() => {
 };
 
 describe('disabled resource consumers', () => {
+  it('fences a fresh full breakdown by the complete canonical revision while preserving it during refresh', async () => {
+    const key = 'balances:user-a:sample';
+    const cached = { balances: {}, ledgerRevision: 3 };
+    const request = deferred<typeof cached>();
+    let snapshot!: ResourceSnapshot<typeof cached>;
+    const loader = vi.fn(() => request.promise);
+    function Consumer() { snapshot = useResource(key, 'user-a', loader); return null; }
+    seedResource(key, 'user-a', cached);
+    await act(async () => { renderers.push(create(<Consumer />)); });
+    expect(snapshot.stale).toBe(false);
+    await act(async () => { acceptPersonalBalance('user-a', { groupId: 'sample', personId: 'demo', ledgerRevision: 4, defaultCurrency: 'USD', balances: [{ currency: 'USD', netMinor: 0 }] }); });
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(snapshot.data).toEqual(cached);
+    expect(snapshot.stale).toBe(true);
+    expect(snapshot.revalidating).toBe(true);
+    await act(async () => { request.resolve({ balances: {}, ledgerRevision: 4 }); });
+    expect(snapshot.stale).toBe(false);
+    expect(snapshot.data?.ledgerRevision).toBe(4);
+  });
   it.each([false, true])('handles a disabled hydration miss with enabled peer: %s', async (hasPeer) => {
     const hydration = deferred<{ data: string } | undefined>();
     const hydrate = vi.fn(() => hydration.promise);

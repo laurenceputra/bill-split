@@ -1,10 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { applyConfirmedGroup, blockResourceIdentity, clearResourceCache, configureResource, getResourceIdentityEpoch, getResourceSnapshot, initializeForegroundCoordinator, invalidateForMutation, invalidateResource, isResourceFresh, MIN_RESOURCE_FRESHNESS_MS, revalidate, refreshVisiblePrivateResources, resourceKeys, resourceViewState, resetResourceIdentity, seedResource, setResourceAuthLifecycleReady, setResourceIdentity, trackVisibleResource } from './resource-cache';
 import type { GroupResponse } from '../shared/types';
+import * as idb from './idb';
 
 afterEach(() => { setResourceAuthLifecycleReady(true); resetResourceIdentity(); clearResourceCache(); vi.unstubAllGlobals(); });
 
 describe('resource cache', () => {
+  it('holds the persisted invalidation gate until every overlapping ledger operation completes', async () => {
+    const completions: Array<() => void> = [];
+    const persisted = vi.spyOn(idb, 'invalidateCachedGroups').mockImplementation(() => new Promise<void>((resolve) => { completions.push(resolve); }));
+    const userId = 'overlap-user';
+    const key = resourceKeys.groups(userId);
+    const loader = vi.fn(async () => ({ groups: [] }));
+    configureResource(key, userId, loader);
+    const first = invalidateForMutation.expenseChanged('sample-a', undefined, userId);
+    const second = invalidateForMutation.settlementChanged('sample-b', userId);
+    completions[0](); await first;
+    await revalidate(key, userId, { force: true });
+    expect(loader).not.toHaveBeenCalled();
+    // An unrelated, unowned cache operation cannot release the second lease.
+    const unrelated = invalidateForMutation.scheduledExpenseChanged('sample-a', userId);
+    completions[2](); await unrelated;
+    await revalidate(key, userId, { force: true });
+    expect(loader).not.toHaveBeenCalled();
+    completions[1](); await second;
+    await revalidate(key, userId, { force: true });
+    expect(loader).toHaveBeenCalledTimes(1);
+    persisted.mockRestore();
+  });
   it('distinguishes cold loading, no-data errors, and cached data', () => {
     expect(resourceViewState(getResourceSnapshot('view-state-cold', 'user-a'))).toBe('loading');
     const key = 'view-state-error';
@@ -91,6 +114,44 @@ describe('resource cache', () => {
     stop();
     expect(calls).toBe(1);
     expect(getResourceSnapshot<{ expense: { version: number } }>(key, 'user-a').data?.expense.version).toBe(2);
+  });
+
+  it('runs one trailing refresh after invalidation during an in-flight request', async () => {
+    const key = resourceKeys.balances('user-a', 'group-trailing');
+    seedResource(key, 'user-a', 'cached');
+    let resolve!: (value: string) => void;
+    const loader = vi.fn().mockImplementationOnce(() => new Promise<string>((done) => { resolve = done; })).mockResolvedValue('current');
+    configureResource(key, 'user-a', loader);
+    const stop = trackVisibleResource(key, 'user-a');
+    try {
+      const first = revalidate(key, 'user-a', { force: true });
+      invalidateResource(key, 'user-a');
+      invalidateResource(key, 'user-a');
+      expect(loader).toHaveBeenCalledTimes(1);
+      resolve('obsolete');
+      await first;
+      await revalidate(key, 'user-a');
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(getResourceSnapshot(key, 'user-a').data).toBe('current');
+    } finally { stop(); }
+  });
+
+  it('does not revive a queued mutation refresh after an identity switch', async () => {
+    setResourceIdentity('user-a');
+    const key = resourceKeys.balances('user-a', 'group-old-session');
+    let resolve!: (value: string) => void;
+    const loader = vi.fn(() => new Promise<string>((done) => { resolve = done; }));
+    configureResource(key, 'user-a', loader);
+    const stop = trackVisibleResource(key, 'user-a');
+    try {
+      const first = revalidate(key, 'user-a', { force: true });
+      invalidateResource(key, 'user-a');
+      setResourceIdentity('user-b');
+      resolve('obsolete');
+      await first;
+      expect(loader).toHaveBeenCalledTimes(1);
+      expect(getResourceSnapshot(key, 'user-a').data).toBeUndefined();
+    } finally { stop(); }
   });
 
   it('builds account-scoped keys consistently and switches active identity', () => {
