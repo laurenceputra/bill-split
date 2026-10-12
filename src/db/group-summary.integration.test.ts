@@ -123,6 +123,20 @@ function databaseWithCreditDefaultRace(expenseId: string) {
 }
 
 describe('group summaries with the in-process local D1 binding', () => {
+  it('denies balance snapshots to outsiders, removed members, and members of deleted groups', async () => {
+    const fixture = await createFixture('balance-access');
+    const outsider = await createFixture('balance-outsider');
+    await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');
+    const repo = new Repository(db);
+    await expect(repo.balanceSnapshot(fixture.groupId, fixture.userB)).resolves.not.toBeNull();
+    await expect(repo.balanceSnapshot(fixture.groupId, outsider.userA)).resolves.toBeNull();
+    await repo.removeMember(fixture.groupId, fixture.personB, fixture.userA);
+    await expect(repo.balanceSnapshot(fixture.groupId, fixture.userB)).resolves.toBeNull();
+    await expect(repo.balanceSnapshot(fixture.groupId, fixture.userA)).resolves.not.toBeNull();
+    await exec('UPDATE groups SET deleted_at=? WHERE id=?', '2026-01-02', fixture.groupId);
+    await expect(repo.balanceSnapshot(fixture.groupId, fixture.userA)).resolves.toBeNull();
+  });
+
   it('selects one deterministic membership and revisions both groups on child moves', async () => {
     const first = await createFixture('personal-move-first');
     const second = await createFixture('personal-move-second');

@@ -428,12 +428,12 @@ api.get('/api/transactions', async (c) => {
 
 
 api.get('/api/groups/:groupId/balances', async (c) => {
-  const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const groupId = c.req.param('groupId');
-  const snapshot = await x.repo.balanceSnapshot(groupId, c.get('auth').id);
+  const groupId = c.req.param('groupId');
+  const snapshot = await getRepo(c).balanceSnapshot(groupId, c.get('auth').id);
   if (!snapshot) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
   const { members } = snapshot; const projection = snapshot;
   const names = Object.fromEntries(members.map((m) => [m.personId, m.name])); const currencies = snapshot.group.personalBalance!.balances.map((row) => row.currency);
-  const balances: Record<string, { raw: Array<{ personId: string; name: string; netMinor: number; currency: typeof x.group.currency }>; simplified: ReturnType<typeof simplifyDebts> }> = {};
+  const balances: Record<string, { raw: Array<{ personId: string; name: string; netMinor: number; currency: typeof snapshot.group.currency }>; simplified: ReturnType<typeof simplifyDebts> }> = {};
   for (const current of currencies) {
     const net: Record<string, number> = Object.fromEntries(projection.rows.filter((row) => row.currency === current).map((row) => [row.personId, row.netMinor]));
     const raw = members.map((member) => ({ personId: member.personId, name: names[member.personId] ?? 'Removed participant', netMinor: net[member.personId] ?? 0, currency: current }));

@@ -117,6 +117,29 @@ describe('canonical shell endpoint', () => {
 });
 const sameOriginHeaders = { Origin: 'https://split.example', 'Sec-Fetch-Site': 'same-origin' };
 
+describe('balance snapshot authorization', () => {
+  it('returns group not found from the batch without a standalone group precheck', async () => {
+    const prepare = vi.fn((sql: string) => {
+      const statement = new Statement(sql);
+      if (sql.includes('FROM groups')) {
+        statement.first = async () => { throw new Error('Standalone group authorization is forbidden'); };
+        statement.all = async () => { throw new Error('Standalone group read is forbidden'); };
+      }
+      return statement;
+    });
+    const batch = vi.fn(async (_statements: Statement[]) => [
+      { results: [] }, { results: [{ currency: 'USD', person_id: 'other-person', net_minor: 100 }] },
+      { results: [{ person_id: 'other-person', name: 'Demo friend' }] },
+    ]);
+    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare, batch } }), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND', message: 'Group not found' } });
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls[0][0]).toHaveLength(3);
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes('WITH authorized_groups'))).toHaveLength(1);
+  });
+});
+
 class GoneOnUpdateDb {
   expenseReads = 0;
   settlementReads = 0;
