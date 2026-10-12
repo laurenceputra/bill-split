@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
+import { appUpdateRecoveryResponse } from '../../../src/worker/app-update-recovery.ts';
 import { finalizeServiceWorker } from '../../../scripts/finalize-service-worker.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const repository = resolve(root, '../../..');
-export async function createUpdateServer({ historical = false } = {}) {
+// pinned-cache-first-sw.js: verbatim public/sw.js from f0cf823c93283ab0af780d3323eacd2f38128f3f;
+// 10509 bytes, SHA-256 63dbdab430451428ef9df2817bb6e30393cb6fba97575b1ae333006206751f4f.
+export async function createUpdateServer({ historical = false, cacheFirst = false } = {}) {
   const temporary = await mkdtemp(resolve(tmpdir(), 'billsplit-update-'));
   const artifacts = {};
   try {
@@ -22,11 +25,29 @@ export async function createUpdateServer({ historical = false } = {}) {
   let fault;
   const server = createServer(async (request, response) => {
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (pathname === '/api/app-update-recovery' && ['GET', 'HEAD'].includes(request.method)) {
+      const recovery = appUpdateRecoveryResponse(request.method, new Headers({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY' }));
+      response.writeHead(recovery.status, Object.fromEntries(recovery.headers));
+      response.end(await recovery.text()); return;
+    }
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
     response.setHeader('X-Content-Type-Options', 'nosniff');
     if (pathname === '/__billsplit_shell__.bin') response.setHeader('Cache-Control', 'no-cache, no-transform');
     if (pathname === '/sw.js') response.setHeader('Service-Worker-Allowed', '/');
+    if (cacheFirst) {
+      if (pathname === '/sw.js') {
+        const worker = await readFile(resolve(root, 'pinned-cache-first-sw.js'), 'utf8');
+        response.setHeader('Content-Type', 'text/javascript');
+        response.end(worker.replaceAll('__BILLSPLIT_CACHE_VERSION__', 'bill-split-shell-pinned-fixture').replaceAll('__BILLSPLIT_SHELL_ASSETS__', JSON.stringify(['/', '/index.html', '/assets/old-shell.css'])));
+      } else if (pathname === '/assets/old-shell.css') {
+        response.setHeader('Content-Type', 'text/css'); response.end('body { color: black; }');
+      } else {
+        response.setHeader('Content-Type', 'text/html');
+        response.end(`<!doctype html><html><head><link rel="stylesheet" href="/assets/old-shell.css"></head><body><main id="root">${version === 'A' ? 'Cached old shell' : 'Network new shell'}</main></body></html>`);
+      }
+      return;
+    }
     const entry = artifacts[version].assets.find((asset) => asset.endsWith('.js'));
     if ((fault === 'worker-error' && pathname === '/sw.js') || (fault === 'missing-entry' && pathname === entry)) {
       response.writeHead(503); response.end('Controlled unavailable artifact'); return;

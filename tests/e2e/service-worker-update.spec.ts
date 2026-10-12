@@ -54,6 +54,34 @@ test('canonical installs ignore transformed HTML and preserve cached CSP and exa
   }
 });
 
+test('standalone recovery has responsive instructions, a normal return link, and no app boot', async ({ browser }) => {
+  for (const width of [320, 390, 767, 768, 834, 895, 896, 1024, 1440]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 } });
+    try {
+      const page = await context.newPage();
+      const response = await page.goto(`${server.url}/api/app-update-recovery`);
+      expect(response?.headers()['cache-control']).toBe('no-store');
+      await expect(page.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+      await expect(page.getByText(/including this recovery page/)).toBeVisible();
+      await expect(page.getByText(/not an offline recovery tool/)).toBeVisible();
+      await expect(page.locator('script, button, input')).toHaveCount(0);
+      expect(await page.evaluate(async () => (await indexedDB.databases()).length)).toBe(0);
+      const link = page.getByRole('link', { name: 'Return to BillSplit to save work' });
+      await expect(link).toHaveAttribute('href', '/');
+      await link.focus();
+      await expect(link).toBeFocused();
+      const geometry = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+      expect(geometry.scroll).toBeLessThanOrEqual(geometry.width);
+      if (process.env.UPDATE_RECOVERY_SCREENSHOTS === '1' && [390, 834, 1440].includes(width)) {
+        await page.screenshot({ path: `docs/screenshots/update-recovery-${width}.png`, fullPage: true, animations: 'disabled' });
+      }
+      await page.keyboard.press('Enter');
+      await expect(page).toHaveURL(`${server.url}/`);
+      await expect(page.locator('#build')).toHaveText('A');
+    } finally { await context.close(); }
+  }
+});
+
 test('real Update now clicks honor drafts and writes, then apply an installed update offline without idle delay', async ({ page, context }) => {
   await open(page);
   await page.locator('#draft').fill('Demo draft');
@@ -119,6 +147,52 @@ test('multiple historical pages stay waiting; close-all and reopen recovers with
     await expect(reopened.locator('#build')).toHaveText('B');
     await reopened.waitForFunction(() => Boolean((window as any).fixture));
     expect(await fixture(reopened, 'outbox()')).toEqual([{ id: 'queued-operation', status: 'queued', amount: 123 }]);
+  } finally { await historical.close(); }
+});
+
+test('pinned cache-first worker serves old navigation but bypasses network-only script-free recovery', async ({ page, context, request }) => {
+  const historical = await createUpdateServer({ cacheFirst: true });
+  try {
+    await context.addInitScript(() => {
+      const original = indexedDB.open.bind(indexedDB);
+      Object.assign(window, { idbOpenCalls: 0 });
+      indexedDB.open = (...args: Parameters<IDBFactory['open']>) => {
+        (window as any).idbOpenCalls++;
+        return original(...args);
+      };
+    });
+    await page.goto(historical.url);
+    // Registration belongs to the test, not the static shell.
+    await page.evaluate(() => navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }));
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+    historical.publish('B');
+    expect(await (await request.get(historical.url)).text()).toContain('Network new shell');
+    const navigation = await page.goto(`${historical.url}/ordinary-navigation`);
+    expect(navigation?.fromServiceWorker()).toBe(true);
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
+    await expect(page.locator('script')).toHaveCount(0);
+    const recovery = await context.newPage();
+    const requests: string[] = [];
+    recovery.on('request', (req) => requests.push(new URL(req.url()).pathname));
+    const response = await recovery.goto(`${historical.url}/api/app-update-recovery`);
+    expect(response?.fromServiceWorker()).toBe(false);
+    expect(response?.headers()['cache-control']).toBe('no-store');
+    await expect(recovery.getByRole('heading', { name: 'Recover a BillSplit update' })).toBeVisible();
+    await expect(recovery.getByText(/including this recovery page/)).toBeVisible();
+    await expect(recovery.getByText(/not an offline recovery tool/)).toBeVisible();
+    await expect(recovery.locator('script')).toHaveCount(0);
+    expect(await recovery.evaluate(() => Boolean((window as any).fixture))).toBe(false);
+    expect(await recovery.evaluate(() => (window as any).idbOpenCalls)).toBe(0);
+    expect(await recovery.evaluate(() => indexedDB.databases())).toEqual([]);
+    expect(requests).toEqual(['/api/app-update-recovery']);
+    expect(await recovery.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
+    await context.setOffline(true);
+    await page.reload();
+    await expect(page.locator('#root')).toHaveText('Cached old shell');
+    const offline = await context.newPage();
+    await expect(offline.goto(`${historical.url}/api/app-update-recovery`)).rejects.toThrow();
+    await expect(offline.getByRole('heading', { name: 'Recover a BillSplit update' })).toHaveCount(0);
   } finally { await historical.close(); }
 });
 

@@ -115,24 +115,20 @@
 
 .landing-hero__copy {
     margin-inline: auto;
-    text-align: center;
+    text-align: left;
   }
 
   .landing-hero h1,
   .landing-lede {
-    margin-inline: auto;
+    margin-inline: 0;
   }
 
   .landing-actions {
-    justify-content: center;
+    justify-content: flex-start;
   }
 
   .ledger-preview {
     margin-inline: auto;
-  }
-
-  .route-view--expense .modal-sheet:has(.payer-list) {
-    border-radius: var(--radius-lg) var(--radius-lg) var(--radius-md) var(--radius-md);
   }
 
 .group-overview-header .expense-heading__actions {
@@ -325,7 +321,19 @@
   }
 
   .group-cards {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .route-loading--home .route-loading__cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .modal-backdrop {
+    align-items: center;
+  }
+
+  .modal-sheet {
+    border-radius: var(--radius-lg);
   }
 
   .activity-filter {
@@ -346,10 +354,6 @@
 }
 
 @media (min-width: 56rem) {
-  .group-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
 .public-shell {
     padding-left: max(var(--space-6), var(--safe-left));
     padding-right: max(var(--space-6), var(--safe-right));
@@ -401,11 +405,6 @@
 
   .bottom-nav {
     display: none;
-  }
-
-  .modal-sheet:has(.payer-list) {
-    align-self: center;
-    border-radius: var(--radius-lg);
   }
 
 .group-overview-columns {

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { Page, TestInfo } from '@playwright/test';
 import { test, expect, newAuthenticatedContext, seedOfflineTrust, BASE_URL, DEV_EMAIL } from './fixtures';
+import { tabletReferences } from './tablet-evidence';
 
 async function captureHome(page: Page, testInfo: TestInfo, name: string) {
   await expect(page.locator('.card__name').filter({ hasText: 'Demo friend' })).toHaveText('Demo friend');
@@ -22,6 +23,17 @@ async function captureHome(page: Page, testInfo: TestInfo, name: string) {
 const shortId = '00000000-0000-4000-8000-000000003001';
 const longId = '00000000-0000-4000-8000-000000003003';
 const insightsId = '00000000-0000-4000-8000-000000003002';
+
+async function captureTabletHome(page: Page, testInfo: TestInfo, width: number, state = 'loaded') {
+  const name = `home-${state === 'loaded' ? '' : `${state}-`}${width}`;
+  const reference = process.env.UPDATE_TABLET_SCREENSHOTS === '1' && tabletReferences.has(name);
+  if (!reference && process.env.TABLET_SCREENSHOT_ARTIFACTS !== '1') return;
+  await page.evaluate(() => document.fonts.ready);
+  await expect(page.locator('.avatar img')).toHaveCount(0);
+  expect(await page.locator('body').innerText()).not.toMatch(/Dev User|Sam Rivera|Priya|Mateo|[\w.+-]+@[\w.-]+\.[a-z]{2,}/i);
+  for (const avatar of await page.locator('.avatar').all()) expect(await avatar.getAttribute('aria-label')).toMatch(/^Demo /);
+  await page.screenshot({ path: reference ? path.join(process.cwd(), 'docs', 'screenshots', `tablet-${name}.png`) : testInfo.outputPath(`tablet-${name}.png`), animations: 'disabled' });
+}
 
 for (const width of [320, 390, 895, 896, 1440]) {
   test(`Synthetic expense controls own hover and pressed feedback at ${width}px`, async ({ browser }, testInfo) => {
@@ -104,7 +116,7 @@ async function mockAnonymousHome(page: Page, stress = false) {
 }
 
 test('Home cards retain compact, accessible balance geometry across the navigation boundary', async ({ browser }, testInfo) => {
-  for (const width of [320, 390, 768, 895, 896, 1440]) {
+  for (const width of [320, 390, 767, 768, 820, 834, 895, 896, 1024, 1180, 1194, 1440]) {
     const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
     try {
       const page = await context.newPage();
@@ -155,8 +167,8 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       expect(geometry.cards[1].balances).toEqual([expect.stringMatching(/SGD.*5,439\.72/), expect.stringMatching(/EUR.*123\.45/)]);
       for (const balance of geometry.cards.flatMap((card) => card.balances)) expect(balance?.match(/(?:SGD|EUR)/g)).toHaveLength(1);
       expect(geometry.cards[0].box.height).toBeLessThan(geometry.cards[1].box.height);
-      expect(geometry.cards[0].box.top === geometry.cards[1].box.top).toBe(width >= 896);
-      const intercardGap = width >= 896
+      expect(geometry.cards[0].box.top === geometry.cards[1].box.top).toBe(width >= 768);
+      const intercardGap = width >= 768
         ? geometry.cards[1].box.left - geometry.cards[0].box.right
         : geometry.cards[1].box.top - geometry.cards[0].box.bottom;
       expect(intercardGap, JSON.stringify({ width, geometry })).toBeGreaterThan(0);
@@ -168,6 +180,7 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await expect(sort).toHaveValue('name');
       expect(await page.locator('.home-actions').evaluate((actions) => Boolean(actions.compareDocumentPosition(document.querySelector('.home-sort')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
       const device = width === 390 ? 'mobile' : width === 1440 ? 'desktop' : undefined;
+      await captureTabletHome(page, testInfo, width);
       if (device) await captureHome(page, testInfo, `home-sgd-stress-${device}`);
       await sort.selectOption('outstanding');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
@@ -286,12 +299,14 @@ test('Home cards retain compact, accessible balance geometry across the navigati
       await expect(retry).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
       await page.mouse.move(0, 0);
       await page.mouse.up();
+      await captureTabletHome(page, testInfo, width, 'cached-error');
       await context.setOffline(true);
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
       await expect(sort).toHaveValue('outstanding');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${longId}`);
       await help.click();
       await expect(tooltip).toBeVisible();
+      await captureTabletHome(page, testInfo, width, 'offline-help');
       await sort.selectOption('name');
       await expect(cards.first()).toHaveAttribute('href', `/groups/${shortId}`);
       await expect(page.locator('#home-sort-help')).toHaveCount(0);
@@ -342,11 +357,12 @@ for (const [device, width] of [['mobile', 390], ['desktop', 1440]] as const) {
   });
 }
 
-test('Home sort is absent during cold loading, empty and uncached error states', async ({ browser }) => {
-  for (const width of [320, 390, 768, 895, 896, 1440]) {
+test('Home sort is absent during cold loading, empty and uncached error states', async ({ browser }, testInfo) => {
+  for (const width of [320, 390, 767, 768, 820, 834, 895, 896, 1024, 1180, 1194, 1440]) {
     const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
     try {
       const page = await context.newPage();
+      await mockAnonymousHome(page);
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       let failed = false;
@@ -355,20 +371,25 @@ test('Home sort is absent during cold loading, empty and uncached error states',
         await route.fulfill({ status: failed ? 503 : 200, contentType: 'application/json', body: JSON.stringify(failed ? { error: 'Unavailable' } : { groups: [] }) });
       });
       await page.goto('/');
-      await expect(page.locator('.skeleton').first()).toBeVisible();
+      await expect(page.locator('.route-loading--home')).toBeVisible();
+      expect(await page.locator('.route-loading__cards').evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').length)).toBe(width < 768 ? 1 : 2);
       await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+      await captureTabletHome(page, testInfo, width, 'loading');
       release();
       await expect(page.getByText('No groups yet', { exact: true })).toBeVisible();
       await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+      await captureTabletHome(page, testInfo, width, 'empty');
       failed = true;
       // A fresh context avoids a verified empty cache masking the uncached error state.
       const errorContext = await newAuthenticatedContext(browser, DEV_EMAIL, { width, height: 844 }, { serviceWorkers: 'block' });
       try {
         const errorPage = await errorContext.newPage();
+        await mockAnonymousHome(errorPage);
         await errorPage.route('**/api/groups', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Unavailable' }) }));
         await errorPage.goto('/');
         await expect(errorPage.getByRole('alert').first()).toBeVisible();
         await expect(errorPage.getByRole('combobox', { name: 'Sort', exact: true })).toHaveCount(0);
+        await captureTabletHome(errorPage, testInfo, width, 'error');
       } finally { await errorContext.close(); }
     } finally { await context.close(); }
   }

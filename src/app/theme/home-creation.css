@@ -141,6 +141,7 @@
 
 .landing-hero__copy {
   max-width: 38rem;
+  text-align: left;
 }
 
 .landing-hero h1 {
@@ -333,6 +334,7 @@
 }
 
 .group-cards {
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
@@ -391,6 +393,7 @@
 
 .card__balances {
   display: grid;
+  container-type: inline-size;
   min-width: 0;
   gap: var(--space-1);
 }
@@ -426,7 +429,21 @@
 
 .card__balance-money .money {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+}
+
+/* A tablet's two-column card can be narrower than a mobile card. Base the
+   fallback on the balance area, not the viewport or navigation breakpoint. */
+@container (max-width: 20rem) {
+  .card__balance {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+
+  .card__balance-money {
+    justify-content: flex-start;
+  }
 }
 
 .card__balance--settled,

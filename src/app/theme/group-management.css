@@ -225,6 +225,17 @@
    sections stay structural; these selectors opt specific route surfaces in. */
 .route-view {
   min-width: 0;
+  margin-inline: auto;
+}
+
+.route-view--home {
+  width: min(100%, 68rem);
+}
+
+/* History is a reading surface: its heading, controls, notices and results
+   share one centered container, including the Insights tab. */
+.route-view--history {
+  width: min(100%, var(--reading-max));
 }
 
 .management-sections > * {
