@@ -117,6 +117,29 @@ describe('canonical shell endpoint', () => {
 });
 const sameOriginHeaders = { Origin: 'https://split.example', 'Sec-Fetch-Site': 'same-origin' };
 
+describe('balance snapshot authorization', () => {
+  it('returns group not found from the batch without a standalone group precheck', async () => {
+    const prepare = vi.fn((sql: string) => {
+      const statement = new Statement(sql);
+      if (sql.includes('FROM groups')) {
+        statement.first = async () => { throw new Error('Standalone group authorization is forbidden'); };
+        statement.all = async () => { throw new Error('Standalone group read is forbidden'); };
+      }
+      return statement;
+    });
+    const batch = vi.fn(async (_statements: Statement[]) => [
+      { results: [] }, { results: [{ currency: 'USD', person_id: 'other-person', net_minor: 100 }] },
+      { results: [{ person_id: 'other-person', name: 'Demo friend' }] },
+    ]);
+    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare, batch } }), {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'GROUP_NOT_FOUND', message: 'Group not found' } });
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls[0][0]).toHaveLength(3);
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes('WITH authorized_groups'))).toHaveLength(1);
+  });
+});
+
 class GoneOnUpdateDb {
   expenseReads = 0;
   settlementReads = 0;
@@ -154,6 +177,7 @@ class OverflowStatement extends Statement {
   }
   async all<T>() {
     const max = Number.MAX_SAFE_INTEGER;
+    if (this.sql.includes('WITH authorized_groups')) return { results: [{ id: 'group-1', currency: 'USD', ledger_revision: 1, current_person_id: 'person-a', personal_balances: JSON.stringify([{ currency: 'USD', netMinor: max * 2 }]) }] as T[] };
     if (this.sql.includes('FROM expenses')) return { results: [
       { id: 'expense-1', group_id: 'group-1', description: 'One', amount_minor: max, currency: 'USD', expense_date: '2025-01-01', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
       { id: 'expense-2', group_id: 'group-1', description: 'Two', amount_minor: max, currency: 'USD', expense_date: '2025-01-02', created_by: 'user-1', created_at: '', updated_at: '', version: 1 },
@@ -634,7 +658,7 @@ describe('worker boundary', () => {
     expect(((await response.json()) as any).error).toMatchObject({ code: 'CONFLICT' });
   });
   it('returns a structured 422 when individually safe expenses overflow an aggregate balance', async () => {
-    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new OverflowStatement(sql) } }), {} as ExecutionContext);
+    const response = await worker.fetch(new Request('https://split.example/api/groups/group-1/balances', { headers: { 'X-Dev-Email': 'dev@example.com' } }), env({ DB: { prepare: (sql: string) => new OverflowStatement(sql), batch: (statements: OverflowStatement[]) => Promise.all(statements.map((statement) => statement.all())) } }), {} as ExecutionContext);
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({ error: { code: 'BALANCE_OVERFLOW' } });
   });

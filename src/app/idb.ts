@@ -1,4 +1,4 @@
-import type { Activity, Balances, Expense, Group, GroupMember, GroupSplitDefault, HistoricalParticipant, Settlement, Transaction } from '../shared/types';
+import type { Activity, Balances, Expense, Group, GroupMember, GroupSplitDefault, HistoricalParticipant, PersonalBalanceSnapshot, Settlement, Transaction } from '../shared/types';
 import { supportedCurrencies, type ExpenseInput } from '../shared/schemas';
 import { avatarPreference, type AvatarPreference } from '../shared/avatar';
 import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
@@ -82,6 +82,9 @@ export interface CachedGroups {
 }
 
 export interface GroupSnapshot {
+  personalBalance?: PersonalBalanceSnapshot;
+  personalBalanceFetchedAt?: string;
+  balancesLedgerRevision?: number;
   userId: string;
   groupId: string;
   group?: Group;
@@ -539,9 +542,10 @@ export async function invalidateCachedGroups(userId: string, generation = captur
         snapshots.onsuccess = () => {
           for (const row of snapshots.result as GroupSnapshot[]) {
             if (row.userId !== userId || (options.transactionGroupId && row.groupId !== options.transactionGroupId)) continue;
-            const next = { ...row, transactions: undefined, transactionsNextCursor: undefined, transactionsLimit: undefined, cachedAtByResource: { ...row.cachedAtByResource, transactions: staleAt } };
+            const next = { ...row, personalBalanceFetchedAt: staleAt, transactions: undefined, transactionsNextCursor: undefined, transactionsLimit: undefined, cachedAtByResource: { ...row.cachedAtByResource, balances: staleAt, transactions: staleAt } };
             tx.objectStore('groupSnapshots').put(next);
             tx.objectStore('resourceFreshness').put({ userId, resource: 'transactions', resourceKey: `group:${row.groupId}:transactions`, fetchedAt: staleAt });
+            tx.objectStore('resourceFreshness').put({ userId, resource: 'balances', resourceKey: `group:${row.groupId}:balances`, fetchedAt: staleAt });
           }
         };
       }
@@ -624,6 +628,29 @@ export async function updateGroupSnapshotIfGenerationMatches(userId: string, gro
 }
 
 export const readGroupSnapshot = (userId: string, groupId: string) => transaction<GroupSnapshot>('groupSnapshots', 'readonly', (tx) => tx.objectStore('groupSnapshots').get([userId, groupId]));
+
+/** Revision comparison and replacement are atomic across tabs and API sources. */
+export async function savePersonalBalance(userId: string, personalBalance: PersonalBalanceSnapshot, mutationGeneration: number, generation = captureSessionGeneration()) {
+  if (!Number.isSafeInteger(personalBalance.ledgerRevision) || personalBalance.ledgerRevision < 0) return undefined;
+  let accepted: GroupSnapshot | undefined;
+  await transaction(['groupSnapshots', 'mutationGenerations'], 'readwrite', (tx) => {
+    const token = tx.objectStore('mutationGenerations').get(userId);
+    token.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation) || (token.result?.generation ?? 0) !== mutationGeneration) return;
+      const store = tx.objectStore('groupSnapshots');
+      const request = store.get([userId, personalBalance.groupId]);
+      request.onsuccess = () => {
+        if (!isSessionGenerationCurrent(generation)) return;
+        const current = request.result as GroupSnapshot | undefined;
+        if (current?.personalBalance && current.personalBalance.ledgerRevision > personalBalance.ledgerRevision) { accepted = current; return; }
+        const timestamp = new Date().toISOString();
+        accepted = { ...current, userId, groupId: personalBalance.groupId, cachedAt: current?.cachedAt || timestamp, personalBalance, personalBalanceFetchedAt: timestamp };
+        store.put(accepted);
+      };
+    };
+  });
+  return isSessionGenerationCurrent(generation) ? accepted : undefined;
+}
 
 /** Patch cached member labels after a confirmed profile rename. */
 export async function patchCachedMemberName(userId: string, personId: string, name: string, generation = captureSessionGeneration(), profileRevision?: number, updatedAt?: string, avatar?: AvatarPreference) {

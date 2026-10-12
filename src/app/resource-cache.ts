@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { invalidateCachedGroups, updateGroupSnapshot, updateGroupsSnapshot } from './idb';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
-import type { Group, GroupResponse } from '../shared/types';
+import type { Balances, Group, GroupResponse } from '../shared/types';
+import { clearPersonalBalances, getPersonalBalance, stalePersonalBalances, usePersonalBalances } from './personal-balances';
 
 /** The shortest freshness window used by the application. */
 export const MIN_RESOURCE_FRESHNESS_MS = 30_000;
@@ -52,6 +53,42 @@ let coordinatorInstalled = false;
 let coordinatorTimer: ReturnType<typeof setTimeout> | undefined;
 let coordinatorIdentityCheck = false;
 let authResumeSuppressedUntil = 0;
+const pendingInvalidationUsers = new Map<string, number>();
+const invalidatedBalanceGroups = new Map<string, Set<string>>();
+const balanceHintKey = 'billsplit-balance-hint';
+const seenBalanceHints = new Set<string>();
+const balanceChannel = typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(balanceHintKey) : undefined;
+export function receiveBalanceHint(value: unknown) {
+  const hint = value as { id?: string; userId?: string; groupId?: string } | null;
+  if (!hint || typeof hint.id !== 'string' || typeof hint.userId !== 'string' || hint.userId !== activeUserId || typeof hint.groupId !== 'string' || seenBalanceHints.has(hint.id)) return;
+  seenBalanceHints.add(hint.id);
+  if (seenBalanceHints.size > 256) seenBalanceHints.delete(seenBalanceHints.values().next().value!);
+  stalePersonalBalances(hint.userId, hint.groupId);
+  for (const key of [resourceKeys.groups(hint.userId), resourceKeys.balances(hint.userId, hint.groupId)]) {
+    const resource = entries.get(key);
+    if (!resource) continue;
+    resource.generation++; resource.controller?.abort();
+    resource.forcePending = { force: true, reason: 'mutation' };
+    resource.snapshot = stable({ ...resource.snapshot, stale: true }); notify(resource);
+    if (resource.visible > 0) void revalidate(key, hint.userId, resource.forcePending).catch(() => undefined);
+  }
+}
+if (balanceChannel) balanceChannel.onmessage = (event) => receiveBalanceHint(event.data);
+if (typeof window !== 'undefined') window.addEventListener('storage', (event) => { if (event.key === balanceHintKey && event.newValue) { try { receiveBalanceHint(JSON.parse(event.newValue)); } catch { /* Ignore malformed hints. */ } } });
+function broadcastBalanceHint(userId: string, groupId: string) {
+  const hint = { id: crypto.randomUUID(), userId, groupId };
+  seenBalanceHints.add(hint.id); balanceChannel?.postMessage(hint);
+  try { localStorage.setItem(balanceHintKey, JSON.stringify(hint)); } catch { /* Optional cross-tab enhancement. */ }
+}
+let balancePollTimer: ReturnType<typeof setInterval> | undefined;
+function updateBalancePolling() {
+  const eligible = authLifecycleReady && !!activeUserId && online() && isVisible() && [...entries].some(([key, resource]) => resource.visible > 0 && (key.startsWith('groups:') || key.startsWith('balances:')));
+  if (!eligible && balancePollTimer) { clearInterval(balancePollTimer); balancePollTimer = undefined; }
+  if (eligible && !balancePollTimer) balancePollTimer = setInterval(() => {
+    if (!authLifecycleReady || !online() || !isVisible() || !activeUserId) { updateBalancePolling(); return; }
+    for (const [key, resource] of entries) if (resource.visible > 0 && resource.snapshot.userId === activeUserId && (key.startsWith('groups:') || key.startsWith('balances:'))) void revalidate(key, activeUserId, { force: true, reason: 'focus' }).catch(() => undefined);
+  }, 30_000);
+}
 // A browser foreground refresh must wait for Clerk and /api/me. Node tests
 // have no provider, so direct cache tests retain their existing behavior.
 let authLifecycleReady = typeof window === 'undefined';
@@ -85,6 +122,7 @@ export function setResourceIdentity(userId: string | undefined) {
   activeUserId = userId;
   identityEpoch += 1;
   clearResourceCache();
+  clearPersonalBalances(); updateBalancePolling();
   identityListeners.forEach((listener) => listener());
 }
 export function resetResourceIdentity() { if (activeUserId !== undefined) identityEpoch += 1; activeUserId = undefined; clearResourceCache(); identityListeners.forEach((listener) => listener()); }
@@ -104,7 +142,7 @@ export function allowIdentityVerification() {
   identity.snapshot = stable({ ...identity.snapshot, status: 'idle', loading: false, revalidating: false, stale: false, error: undefined });
   notify(identity);
 }
-export function setResourceAuthLifecycleReady(ready: boolean) { authLifecycleReady = ready; }
+export function setResourceAuthLifecycleReady(ready: boolean) { authLifecycleReady = ready; updateBalancePolling(); }
 export const getResourceIdentity = () => activeUserId;
 export const getResourceIdentityEpoch = () => identityEpoch;
 export function useResourceIdentityEpoch() { return useSyncExternalStore(subscribeResourceIdentity, getResourceIdentityEpoch, () => 0); }
@@ -126,14 +164,17 @@ export function subscribeResource<T>(key: ResourceKey, listener: () => void, use
   if (resource.evictionTimer) { clearTimeout(resource.evictionTimer); resource.evictionTimer = undefined; }
   resource.listeners.add(listener);
   resource.visible += 1;
+  updateBalancePolling();
   return () => {
     resource.listeners.delete(listener); resource.visible = Math.max(0, resource.visible - 1);
+    updateBalancePolling();
     if (!resource.visible && !resource.listeners.size && !resource.evictionTimer) resource.evictionTimer = setTimeout(() => { if (!resource.visible && !resource.listeners.size) { resource.controller?.abort(); resource.generation += 1; resource.loader = undefined; resource.hydrate = undefined; resource.evictionTimer = undefined; entries.delete(key); } }, 5 * 60_000);
   };
 }
 
 /** A null key disables this consumer without registering or changing a shared resource. */
 export function useResource<T>(key: ResourceKey | null, userId: string | undefined, loader: ResourceLoader<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, hydrate?: ResourceHydrator<T>, options: ResourceOptions = {}) {
+  usePersonalBalances();
   const resolvedUser = key !== null && isIdentityKey(key) ? 'identity' : userId || activeUserId || '';
   const disabledOffline = !online();
   const disabledSnapshot = useMemo(() => idleSnapshot<T>(resolvedUser), [resolvedUser, disabledOffline]);
@@ -175,7 +216,18 @@ export function useResource<T>(key: ResourceKey | null, userId: string | undefin
     const due = snapshot.fetchedAt !== undefined && !isResourceFresh(snapshot, resource.ttl);
     if (snapshot.status !== 'auth-blocked' && (snapshot.status === 'idle' || (due || snapshot.stale) && !snapshot.revalidating && !snapshot.error && (!snapshot.offline || online()))) void revalidate<T>(key, resolvedUser, resource.forcePending || { reason: 'route' });
   }, [key, resolvedUser, snapshot.status, snapshot.stale, snapshot.revalidating, snapshot.fetchedAt, resource?.ttl, options.skipWhenOffline]);
-  return snapshot;
+  const canonical = key?.startsWith(`balances:${resolvedUser}:`) ? getPersonalBalance(resolvedUser, key.slice(`balances:${resolvedUser}:`.length)) : undefined;
+  const breakdown = snapshot.data as { balances?: Record<string, Balances>; ledgerRevision?: number } | undefined;
+  const breakdownRevision = breakdown?.ledgerRevision ?? Object.values(breakdown?.balances || {})[0]?.personalBalance?.ledgerRevision;
+  const behind = !!canonical && (canonical.stale || (breakdownRevision ?? -1) < canonical.snapshot.ledgerRevision);
+  const refreshedRevision = useRef<number>();
+  useEffect(() => {
+    if (behind && canonical && !canonical.stale && key && !snapshot.revalidating && !snapshot.error && refreshedRevision.current !== canonical.snapshot.ledgerRevision) {
+      refreshedRevision.current = canonical.snapshot.ledgerRevision;
+      void revalidate(key, resolvedUser, { force: true, reason: 'focus' }).catch(() => undefined);
+    }
+  }, [behind, canonical?.snapshot.ledgerRevision, key, resolvedUser, snapshot.revalidating, snapshot.error]);
+  return behind ? { ...snapshot, stale: true } : snapshot;
 }
 
 export function isResourceFresh<T>(snapshot: ResourceSnapshot<T>, ttl = MIN_RESOURCE_FRESHNESS_MS, at = now()) {
@@ -191,6 +243,13 @@ export function seedResource<T>(key: ResourceKey, userId: string, data: T, fetch
 }
 
 export function invalidateResource(key: ResourceKey, userId = activeUserId || '', options: { revalidate?: boolean } = {}) {
+  if (key === resourceKeys.groups(userId) || key.startsWith(`balances:${userId}:`)) {
+    if (key.startsWith(`balances:${userId}:`)) {
+      const groups = invalidatedBalanceGroups.get(userId) || new Set<string>();
+      groups.add(key.slice(`balances:${userId}:`.length)); invalidatedBalanceGroups.set(userId, groups);
+    }
+    stalePersonalBalances(userId, key.startsWith('balances:') ? key.slice(`balances:${userId}:`.length) : undefined);
+  }
   const resource = entry<unknown>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
   resource.generation += 1;
   resource.controller?.abort();
@@ -269,7 +328,9 @@ function invalidateScheduledDetailsForGroup(groupId: string, userId: string) {
   }
 }
 
-export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') { for (const key of keys) invalidateResource(key, userId); }
+export function invalidateResources(keys: Iterable<ResourceKey>, userId = activeUserId || '') {
+  for (const key of keys) invalidateResource(key, userId);
+}
 /** Apply a server-confirmed group-settings response without disturbing ledger resources. */
 export function patchResourceData<T>(key: ResourceKey, userId: string, patch: (data: T) => T) {
   const resource = entries.get(key);
@@ -296,6 +357,9 @@ export function invalidateResourcePrefix(prefix: string, userId = activeUserId |
 }
 
 export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
+  clearPersonalBalances(); pendingInvalidationUsers.clear();
+  invalidatedBalanceGroups.clear();
+  if (balancePollTimer) { clearInterval(balancePollTimer); balancePollTimer = undefined; }
   for (const [key, resource] of entries) {
     if (key === preserveKey) continue;
     if (userId && resource.snapshot.userId !== userId) continue;
@@ -313,6 +377,7 @@ export function clearResourceCache(userId?: string, preserveKey?: ResourceKey) {
 
 export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '', options: RevalidateOptions = {}): Promise<T | undefined> {
   const resource = entry<T>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
+  if (pendingInvalidationUsers.has(userId)) return resource.snapshot.data;
   if (!authLifecycleReady && options.reason !== 'auth-restored') return resource.snapshot.data;
   if (resource.evicted || !resource.loader || !isVisible()) return resource.snapshot.data;
   if (isIdentityKey(key) && resource.snapshot.status === 'auth-blocked' && options.reason !== 'auth-restored') return resource.snapshot.data;
@@ -353,7 +418,18 @@ export async function revalidate<T>(key: ResourceKey, userId = activeUserId || '
     notify(resource);
     if (!hasCurrent) throw error;
     return resource.snapshot.data as T;
-  }).finally(() => { if (requestIsCurrent()) resource.controller = undefined; const pending = resource.forcePending; resource.promise = undefined; if (pending && resource.visible > 0 && isVisible() && requestIsCurrent()) void revalidate(key, resource.snapshot.userId, pending); });
+   }).finally(() => {
+     // A mutation deliberately changes the resource generation while this
+     // request is in flight. Its response must be ignored, but its queued
+     // refresh must still run. Identity/session changes, unlike mutations,
+     // must never revive an old user's request.
+     if (resource.promise !== request) return;
+     resource.controller = undefined;
+     resource.promise = undefined;
+     const pending = resource.forcePending;
+     if (pending && resource.visible > 0 && isVisible() && requestIdentityEpoch === identityEpoch && isSessionGenerationCurrent(requestSessionGeneration) && (isIdentityKey(key) || activeUserId === undefined || activeUserId === requestUserId)) void revalidate(key, resource.snapshot.userId, pending).catch(() => undefined);
+   });
+   const request = resource.promise;
   return resource.promise;
 }
 
@@ -361,7 +437,8 @@ export function trackVisibleResource(key: ResourceKey, userId = activeUserId || 
   const resource = entry<unknown>(key, userId, MIN_RESOURCE_FRESHNESS_MS);
   if (resource.evictionTimer) { clearTimeout(resource.evictionTimer); resource.evictionTimer = undefined; }
   resource.visible += 1;
-  return () => { resource.visible = Math.max(0, resource.visible - 1); };
+  updateBalancePolling();
+  return () => { resource.visible = Math.max(0, resource.visible - 1); updateBalancePolling(); };
 }
 
 function foregroundRefresh(identityCheck = false, forcePrivate = false) {
@@ -394,6 +471,7 @@ export function initializeForegroundCoordinator() {
   window.addEventListener('billsplit-auth-resumed', () => { authResumeSuppressedUntil = Date.now() + 500; });
   const schedule = (identityCheck = false) => { coordinatorIdentityCheck ||= identityCheck; if (coordinatorTimer) clearTimeout(coordinatorTimer); coordinatorTimer = setTimeout(() => { coordinatorTimer = undefined; const check = coordinatorIdentityCheck; coordinatorIdentityCheck = false; foregroundRefresh(check); }, 100); };
   document.addEventListener('visibilitychange', () => {
+    updateBalancePolling();
     if (!isVisible()) {
       for (const resource of entries.values()) if (resource.controller) {
         resource.controller.abort(); resource.generation += 1; resource.forcePending = resource.forcePending?.force ? resource.forcePending : { reason: 'visibility' };
@@ -405,6 +483,8 @@ export function initializeForegroundCoordinator() {
   window.addEventListener('focus', () => { if (isVisible()) schedule(); });
   window.addEventListener('pageshow', () => { if (isVisible()) schedule(); });
   window.addEventListener('online', () => { if (isVisible()) schedule(); });
+  window.addEventListener('online', updateBalancePolling);
+  window.addEventListener('offline', updateBalancePolling);
   window.addEventListener('billsplit-connection-restored', () => { if (isVisible()) schedule(); });
 }
 
@@ -434,8 +514,29 @@ export const resourceKeys = Object.freeze({
 });
 const invalidatePersistedCaches = async (userId: string, generation = captureSessionGeneration(), options: { activity?: boolean; categories?: boolean; groups?: boolean; groupId?: string; detailsGroupId?: string; transactions?: boolean; transactionGroupId?: string } = {}) => {
   try { await invalidateCachedGroups(userId, generation, options); } catch { /* Private cache is an enhancement, not a mutation failure. */ }
+  if (!isSessionGenerationCurrent(generation)) return;
+  // Only the shared-ledger operations acquire the groups gate. Other cache
+  // writes (e.g. split defaults) must not release another operation's lease.
+  if (options.transactionGroupId && !options.groups) {
+    const outstanding = pendingInvalidationUsers.get(userId) || 0;
+    if (outstanding > 1) { pendingInvalidationUsers.set(userId, outstanding - 1); return; }
+    pendingInvalidationUsers.delete(userId);
+  }
+  if (pendingInvalidationUsers.has(userId)) return;
+  const groups = invalidatedBalanceGroups.get(userId) || new Set<string>();
+  if (options.transactionGroupId) groups.add(options.transactionGroupId);
+  invalidatedBalanceGroups.delete(userId);
+  for (const groupId of groups) broadcastBalanceHint(userId, groupId);
+  for (const [key, resource] of entries) if (resource.snapshot.userId === userId && resource.visible > 0 && resource.snapshot.stale) void revalidate(key, userId, { force: true, reason: 'mutation' }).catch(() => undefined);
 };
-export const invalidateForMutation = {
+const invalidateSharedResources = invalidateResources;
+export const invalidateForMutation = (() => {
+  const invalidateResources = (keys: Iterable<ResourceKey>, userId: string) => {
+    const list = [...keys];
+    if (list.includes(resourceKeys.groups(userId))) pendingInvalidationUsers.set(userId, (pendingInvalidationUsers.get(userId) || 0) + 1);
+    invalidateSharedResources(list, userId);
+  };
+  return {
   groupCreated: async (userId?: string, generation?: number) => { if (!userId) return; invalidateResource(resourceKeys.groups(userId), userId); await invalidatePersistedCaches(userId, generation); },
   groupChanged: async (groupId: string, userId?: string, generation?: number) => { if (!userId) return; invalidateResources([resourceKeys.groups(userId), resourceKeys.group(userId, groupId), resourceKeys.members(userId, groupId), resourceKeys.groupInvitations(userId, groupId), resourceKeys.transactions(userId, groupId), resourceKeys.transactions(userId, 'all'), resourceKeys.activity(userId, groupId), resourceKeys.activity(userId, 'all'), resourceKeys.audit(userId, groupId), resourceKeys.balances(userId, groupId), resourceKeys.scheduledExpenses(userId, groupId)], userId); invalidateResourcePrefix(`transactions:${userId}:`, userId); invalidateResourcePrefix(`insights:${userId}:`, userId); invalidateScheduledDetailsForGroup(groupId, userId); await invalidatePersistedCaches(userId, generation, { activity: true, transactions: true, transactionGroupId: groupId }); },
   splitDefaultChanged: async (groupId: string, splitDefault: Parameters<typeof updateGroupSnapshot>[2]['splitDefault'], userId?: string, generation?: number) => {
@@ -464,7 +565,8 @@ export const invalidateForMutation = {
       for (const prefix of ['groups:', 'group:', 'members:', 'expenses:', 'credits:', 'transactions:', 'balances:', 'settlements:', 'scheduled-expenses:', 'scheduled-expense:', 'activity:', 'insights:', 'audit:', 'audit-entity:', 'expense-detail:', 'settlement-detail:', 'credit-detail:']) invalidateResourcePrefix(prefix, userId);
     await invalidatePersistedCaches(userId, generation, { groups: true, activity: true, transactions: true });
   },
-};
+  };
+})();
 
 initializeForegroundCoordinator();
 if (typeof window !== 'undefined') window.addEventListener('billsplit-cache-cleared', () => clearResourceCache());

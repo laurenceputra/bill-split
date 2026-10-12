@@ -2,6 +2,8 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { acceptInvitation, ApiError, api, changeScheduledExpenseStatus, clearAuthRequired, clearEverythingForLogout, completePendingAccountDeletion, convertNamedToPeerGroup, coordinateAuthBootstrap, createGroup, createGroupInvitation, createTargetedGroupInvitation, createScheduledExpense, deleteAccount, deleteClerkUserIfSupported, deleteGroup, discardInvalidPendingAccountDeletion, finalizeSuccessfulClerkSignOut, finishLocalCleanupAfterExternalProviderDeletion, getActivity, getActivityPage, getAuditEntityPage, getAuditPage, getAuthEpoch, getAuthLifecycle, getAuthState, getCategorySuggestion, getConnectionState, getExpenseDetails, getExpensePage, getExpenses, getGlobalTransactionPage, getGroup, getGroupSettlementCsvExportPage, getGroups, getGroupSplitDefaultSuggestion, getOwnerInvitations, getPendingInvitations, getScheduledExpensePage, getScheduledExpenses, getSettlementPage, getSpendingInsightSummary, getSpendingInsightTrends, getTrustedOfflineClerkUserId, hasPendingAccountDeletion, hydrateTransactionOverview, hydrateTransactions, initializeAuthLifecycle, isDefinitivelySignedOut, isMeaningfulClerkSessionTransition, leaveGroup, markAccountDeletionPending, provisionalAddRoute, recoverAfterClerkSignOutFailure, recordSessionActivity, rejectInvitation, removeGroupMember, resetForClerkSessionChange, restoreExpense, restoreSettlement, revokeForClerkSessionChange, sanitizeReturnTo, shouldRevokeForOfflineClerkUser, shouldReverifyTrustedOffline, shouldStartAuthCheck, signalConnectionChecking, subscribeAuthLifecycle, subscribeAuthState, subscribeConnectionState, transferGroupOwnership, updateGroup } from './api';
 import { getTransactionPage, getTransactions } from './api';
+import { getBalances } from './api';
+import { getPersonalBalance } from './personal-balances';
 import { enqueueExpense } from './outbox';
 import { DB_NAME, listOutbox, readActivity, readCategories, readExpenseDetails, readGroups, readLastVerifiedClerkUserId, readOfflineTrust, readResourceFreshness, saveActivity, saveCategories, saveGroups, saveOfflineTrust, saveOutboxItem, saveVerifiedIdentity } from './idb';
 import { readGroupSnapshot, updateGroupSnapshot } from './idb';
@@ -34,6 +36,31 @@ beforeEach(async () => {
 });
 
 describe('frontend API errors and cache fallback', () => {
+  it('preserves balance transport top-level revision and canonical fields', async () => {
+    await establishAuthenticatedMutationSession();
+    const personalBalance = { groupId: 'transport-sample', personId: 'mutation-person', ledgerRevision: 12, defaultCurrency: 'USD', balances: [{ currency: 'USD', netMinor: 0 }] };
+    const payload = { balances: {}, ledgerRevision: 12, personalBalance };
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => path.endsWith('/balances') ? json(payload, 200, 'mutation-user') : json({ id: 'mutation-user', email: 'mutation@example.com', personId: 'mutation-person' }, 200, 'mutation-user', 'clerk-original')));
+    expect(await getBalances('transport-sample')).toMatchObject(payload);
+  });
+  it('shares revision ordering between list and balance responses, including empty maps', async () => {
+    await establishAuthenticatedMutationSession();
+    const personal = (ledgerRevision: number, netMinor = 100) => ({ groupId: 'sample-canonical', personId: 'mutation-person', ledgerRevision, defaultCurrency: 'USD', balances: netMinor === 0 ? [] : [{ currency: 'USD', netMinor }] });
+    let listRevision = 8;
+    let balanceRevision = 3;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => path.endsWith('/balances')
+      ? json({ balances: {}, personalBalance: personal(balanceRevision, balanceRevision === 9 ? 0 : 100) }, 200, 'mutation-user')
+      : path.endsWith('/groups')
+        ? json({ groups: [{ id: 'sample-canonical', name: 'Sample project', currency: 'USD', createdAt: '', updatedAt: '', personalBalance: personal(listRevision) }] }, 200, 'mutation-user')
+        : json({ id: 'mutation-user', email: 'mutation@example.com', personId: 'mutation-person' }, 200, 'mutation-user', 'clerk-original')));
+    await getGroups(); await getBalances('sample-canonical');
+    expect(getPersonalBalance('mutation-user', 'sample-canonical')?.snapshot.ledgerRevision).toBe(8);
+    expect((await readGroupSnapshot('mutation-user', 'sample-canonical'))?.personalBalance?.ledgerRevision).toBe(8);
+    balanceRevision = 9; listRevision = 4;
+    await getBalances('sample-canonical'); await getGroups();
+    expect(getPersonalBalance('mutation-user', 'sample-canonical')?.snapshot.balances).toEqual([]);
+    expect((await readGroupSnapshot('mutation-user', 'sample-canonical'))?.personalBalance?.ledgerRevision).toBe(9);
+  });
   it('cancels update preparation for an adopted remote logout and completes durable cleanup', async () => {
     await establishAuthenticatedMutationSession();
     await saveGroups({ userId: 'mutation-user', groups: [], cachedAt: new Date().toISOString() });

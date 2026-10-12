@@ -16,8 +16,9 @@ export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface Person { id: string; name: string; email?: string | null; createdAt: string }
 export interface GroupBalanceSummary { currency: Currency; netMinor: number }
+export interface PersonalBalanceSnapshot { groupId: string; personId: string; ledgerRevision: number; defaultCurrency: Currency; balances: Array<{ currency: Currency; netMinor: number }> }
 /** kind is optional only for pre-kind offline snapshots; server responses always carry it. */
-export interface Group { id: string; name: string; currency: Currency; kind?: GroupKind; createdAt: string; updatedAt: string; role?: 'owner' | 'member'; memberCount?: number; counterpartName?: string | null; counterpartAvatar?: AvatarPreference; balanceSummaries?: GroupBalanceSummary[] }
+export interface Group { id: string; name: string; currency: Currency; kind?: GroupKind; createdAt: string; updatedAt: string; role?: 'owner' | 'member'; memberCount?: number; counterpartName?: string | null; counterpartAvatar?: AvatarPreference; balanceSummaries?: GroupBalanceSummary[]; personalBalance?: PersonalBalanceSnapshot }
 export interface GroupMember extends AvatarPreference { personId: string; name: string; email?: string | null; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null }
 export type HistoricalParticipantStatus = 'active' | 'removed' | 'deleted';
 export interface HistoricalParticipant { personId: string; name: string; joinedAt: string; role: 'owner' | 'member'; linked?: boolean; removedAt?: string | null; status: HistoricalParticipantStatus }
@@ -104,7 +105,7 @@ export interface AuditDisclosureEvent { entityType: 'expense' | 'settlement' | '
 export interface CursorPage<T> { items: T[]; nextCursor?: string }
 export interface Balance { personId: string; name: string; netMinor: number; currency: Currency }
 export interface PairwiseBalance { fromPersonId: string; fromName: string; toPersonId: string; toName: string; amountMinor: number; currency: Currency }
-export interface Balances { raw: Balance[]; simplified: PairwiseBalance[] }
+export interface Balances { raw: Balance[]; simplified: PairwiseBalance[]; personalBalance?: PersonalBalanceSnapshot }
 
 export type ActivityType = 'expense' | 'settlement' | 'credit' | 'expense_revision' | 'settlement_revision' | 'credit_revision' | 'expense_deleted' | 'settlement_deleted' | 'credit_deleted';
 export interface ActivityBase {

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { balanceStatus, groupBalanceDisplays, personalBalanceDisplay, personalBalances } from './group-balance';
+import { balanceStatus, groupBalanceDisplays, personalBalanceCards, personalBalanceDisplay, personalBalances } from './group-balance';
 
 describe('home group balance formatting', () => {
+  it('ranks the complete canonical map before capping Home, but preserves every overview currency and zero', () => {
+    const balances = [{ currency: 'EUR' as const, netMinor: 100 }, { currency: 'GBP' as const, netMinor: -900 }, { currency: 'USD' as const, netMinor: 500 }];
+    expect(groupBalanceDisplays(balances, 'USD').map((row) => row.currency)).toEqual(['GBP', 'USD']);
+    expect(personalBalanceCards([...balances, { currency: 'CAD', netMinor: 0 }], 'CAD')).toHaveLength(4);
+    expect(personalBalanceCards([{ currency: 'CAD', netMinor: 0 }], 'USD')).toEqual([{ kind: 'settled', label: 'Settled up', currency: 'CAD' }]);
+    expect(balances.map((row) => row.currency)).toEqual(['EUR', 'GBP', 'USD']);
+  });
   it('distinguishes unavailable legacy data, settled groups, and signed balances', () => {
     expect(groupBalanceDisplays(undefined, 'USD')).toEqual([{ kind: 'unavailable', label: 'Balance unavailable', currency: 'USD' }]);
     expect(groupBalanceDisplays([], 'USD')).toEqual([{ kind: 'settled', label: 'Settled up', currency: 'USD' }]);

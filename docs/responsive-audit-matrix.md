@@ -1,5 +1,30 @@
 # Responsive audit matrix
 
+## Shared personal balance verification
+
+At 320px, 767/768px, 895/896px, and desktop, audit the existing Home cards
+(including Outstanding first), group overview, expanded full breakdown, and
+settlement form. Home and overview use the same user/group revisioned complete
+personal snapshot; zero and removed currencies must replace earlier values.
+Legacy caches remain usable without claiming a capped summary is complete.
+
+Cover cold loading, empty/settled, cached offline, background refresh, cold error,
+and cached error. Keep Add expense before management. Full breakdown is a separate
+resource: if its revision trails the personal snapshot, retain its cached display
+with stale status and refresh it; never prefill an actionable stale suggestion.
+Polling must stop while hidden, offline, or authentication is restoring. Cross-tab
+hints contain only an opaque event ID and user/group scope, never balance amounts.
+Verify a dirty settlement draft survives background refresh and pair changes.
+`canonical-balances.spec.ts` checks 320px, 768px, and 1280px canonical-only
+cards with a pending, failed, then offline breakdown, including its expanded
+disclosure. Home ranks the complete map by absolute amount before showing two
+currencies; overview retains all currencies, including a default-currency zero.
+Settlement currency/pair changes update automatic amounts; manually typed amounts
+survive refresh. Settlement edits retain their draft while a newer breakdown is
+pending and must never consume stale/offline suggestions.
+These checks extend the existing matrix; new screenshot captures were not generated
+for this data-source-only change.
+
 ## Boundaries and audit scope
 
 Keep frequent tasks before administration, preserve mobile DOM/focus order,

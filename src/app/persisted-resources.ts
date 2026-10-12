@@ -27,8 +27,8 @@ export async function persistExpenseResponse(userId: string, groupId: string, ex
   return persistGroupResponse(userId, groupId, { expenses }, mutationGeneration, generation);
 }
 
-export async function persistBalanceResponse(userId: string, groupId: string, balances: Record<string, Balances>, mutationGeneration: number, generation: number) {
-  return persistGroupResponse(userId, groupId, { balances }, mutationGeneration, generation);
+export async function persistBalanceResponse(userId: string, groupId: string, balances: Record<string, Balances>, mutationGeneration: number, generation: number, balancesLedgerRevision?: number) {
+  return persistGroupResponse(userId, groupId, { balances, balancesLedgerRevision }, mutationGeneration, generation);
 }
 
 export async function persistSettlementResponse(userId: string, groupId: string, settlements: Settlement[], mutationGeneration: number, generation: number) {

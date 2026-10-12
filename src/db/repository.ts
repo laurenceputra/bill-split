@@ -138,6 +138,7 @@ async function mapGroup(row: Row | null): Promise<Group | null> {
     ...(row.counterpart_name == null ? {} : { counterpartName: text(row.counterpart_name) }),
     ...(row.counterpart_name == null ? {} : { counterpartAvatar: await accountAvatar(row.counterpart_avatar_mode, text(row.counterpart_email)) }),
     ...(balanceSummaries === undefined ? {} : { balanceSummaries }),
+    ...(row.personal_balances == null ? {} : { personalBalance: { groupId: text(row.id), personId: text(row.current_person_id), ledgerRevision: minor(row.ledger_revision), defaultCurrency: currency(row.currency), balances: (JSON.parse(text(row.personal_balances)) as Array<{ currency: unknown; netMinor: unknown }>).map((item) => ({ currency: currency(item.currency), netMinor: minor(item.netMinor) })) } }),
   };
 }
 
@@ -210,6 +211,19 @@ export class Repository {
     const rows = (await this.db.prepare(query.sql).bind(groupId).all<Row>()).results;
     const ready = flag(rows[0]?.read_ready);
     return { ready, rows: rows.filter((row) => row.currency != null).map((row) => ({ currency: currency(row.currency), personId: text(row.person_id), netMinor: minor(row.net_minor) })) };
+  }
+
+  async balanceSnapshot(groupId: string, userId: string) {
+    // D1 batch is a read transaction: authorization, revision, amounts and names
+    // cannot come from different ledger versions.
+    const [groups, projection, members] = await this.db.batch<Row>([
+      this.db.prepare(groupSelect(true)).bind(userId, groupId),
+      this.db.prepare(balanceProjectionQuery().sql).bind(groupId),
+      this.db.prepare('SELECT p.id AS person_id,p.name FROM people p JOIN group_members gm ON gm.person_id=p.id WHERE gm.group_id=? ORDER BY p.name,p.id').bind(groupId),
+    ]);
+    const group = await mapGroup(groups.results[0] ?? null);
+    if (!group) return null;
+    return { group, rows: projection.results.filter((row) => row.currency != null).map((row) => ({ currency: currency(row.currency), personId: text(row.person_id), netMinor: minor(row.net_minor) })), members: members.results.map((row) => ({ personId: text(row.person_id), name: text(row.name) })) };
   }
 
   private async personForUser(user: Row, email: string, t = now()) {
