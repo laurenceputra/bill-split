@@ -13,6 +13,7 @@ import { ActionGroup, Button, Field, FormSurface, Layout, LedgerList, LedgerRow,
 import { defaultRefundApplications, derivedBeneficiaryShares, derivedPayerShares, localBrowserDate, remainingRefundableMinor, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
 import { createPageRequestScope } from './pagination';
 import { historicalParticipantName as historicalName, minorToInput as money } from './form-display';
+import { DateInput } from './date-input';
 
 type Application = CreditApplicationDraft;
 type Allocation = CreditAllocationDraft & { touched?: boolean; personTouched?: boolean; defaultHint?: string };
@@ -623,7 +624,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
            <small id="refund-mode-help" className="refund-form__help">The original payment or bill option is available only with linked expenses and derives payer and cost-reduction shares. If a group member received the money, select the recipient below.</small>
            {linked ? <p className="muted">Currency: {currency} · locked to the first expense</p> : null}
            <div className="field"><label htmlFor="refund-amount">How much? ({currency})</label><AmountControl id="refund-amount" currency={currency} onCurrencyChange={linked ? undefined : setCurrency} required value={amount} onBlur={() => validateBlur('total')} onChange={(event) => { setAmount(event.target.value); setAmountTouched(true); setAmountProvenance('user'); }} aria-describedby="refund-total-error" aria-invalid={Boolean(validationVisible('total') && totalError)} />{validationVisible('total') && totalError ? <small id="refund-total-error" className="field-error">{totalError}</small> : null}<small>Credit total: {amountMinor > 0 ? money(amountMinor) : '—'} {currency} · {amountProvenance === 'default' ? 'Suggested and editable' : 'Entered total'}</small></div>
-          <Field label="Date"><input required type="date" value={date} onBlur={() => validateBlur('date')} aria-invalid={validationVisible('date') && !date} aria-describedby="refund-date-error" onChange={(event) => setDate(event.target.value)} />{validationVisible('date') && !date ? <small id="refund-date-error" className="field-error">Choose a date.</small> : null}</Field>
+          <Field label="Date"><DateInput required value={date} onBlur={() => validateBlur('date')} aria-invalid={validationVisible('date') && !date} aria-describedby="refund-date-error" onChange={(event) => setDate(event.target.value)} />{validationVisible('date') && !date ? <small id="refund-date-error" className="field-error">Choose a date.</small> : null}</Field>
           <Field label="Note (optional)"><textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} /></Field>
           </fieldset>
 

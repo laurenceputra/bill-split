@@ -59,6 +59,16 @@ for (const { width, geometry, locations: selectedLocations } of cases) {
           const input = dates.nth(index);
           if (geometry) await expectContained(input, `${location.name}: initial date ${index}`);
           else await expect(input).toBeVisible();
+          // Instrument the native API: picker chrome is OS-owned and cannot be
+          // inspected reliably. Use a real trusted click well away from its icon.
+          await input.evaluate((element: HTMLInputElement) => {
+            element.dataset.pickerCalls = '0';
+            element.showPicker = () => { element.dataset.pickerCalls = String(Number(element.dataset.pickerCalls) + 1); };
+          });
+          await input.focus();
+          await expect(input).toHaveAttribute('data-picker-calls', '0');
+          await input.click({ position: { x: 12, y: 12 } });
+          await expect(input).toHaveAttribute('data-picker-calls', '1');
           // Schedule preview assumes a valid start date. Test its native empty
           // rendering without sending an invalid draft to that unrelated preview.
           if ((location.repeat || location.schedule) && index === 0) {
@@ -84,6 +94,19 @@ for (const { width, geometry, locations: selectedLocations } of cases) {
           await expect(page).toHaveURL(/from=2030-01-02&to=2030-02-03/);
           await expect(dates.nth(0)).toHaveValue('2030-01-02');
           await expect(dates.nth(1)).toHaveValue('2030-02-03');
+        }
+        if (!geometry && location.filters) {
+          await page.context().setOffline(true);
+          try {
+            for (let index = 0; index < location.count; index += 1) {
+              const input = dates.nth(index);
+              await expect(input).toBeDisabled();
+              await input.evaluate((element) => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+              await expect(input).toHaveAttribute('data-picker-calls', '1');
+            }
+          } finally {
+            await page.context().setOffline(false);
+          }
         }
       });
     }
