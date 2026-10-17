@@ -390,3 +390,20 @@ git diff --check
 WebKit requires its matching installed browser/host dependencies. No browser
 installation is implied by these commands. A runtime exit/connection-refused
 run is not passing evidence; rerun successfully and report its exact scope.
+
+# Whole-field native date activation
+
+`tests/e2e/date-controls.spec.ts` verifies trusted body clicks (away from the
+calendar icon) request the native picker synchronously, while focus alone does
+not. Covers expense create/edit, repeat start/end disclosure, schedule edit,
+refund create/edit and credit alias, settlement create/edit disclosure, group
+and global expanded transaction filters, and group/global custom insights.
+Geometry and body-click coverage samples 320, 390, 767/768, 895/896 and 1440px;
+all route variants also run at 390px. Existing empty/populated values, required
+fields, end-date minimum and custom-range application checks remain intact.
+
+Shared DateInput unit coverage includes disabled/read-only, cancelled clicks,
+missing/throwing picker APIs and native prop forwarding. Offline transaction
+filters retain disabled dates; cached editable forms keep native date editing.
+Loading, empty and error rendering, action order and native date styling are
+unchanged. No custom calendar or focus-triggered popup is introduced.
