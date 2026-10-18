@@ -1,5 +1,54 @@
 # Responsive audit matrix
 
+## Refund balance explanations
+
+Required widths for every row: **320, 390, 767, 768, 895, 896, 1440px**.
+Keep the same mobile DOM order; recording/saving remains before cancellation,
+and editing a saved record remains before deletion. No accounting rules changed.
+
+| View / meaningful state | Responsive and behavior checks |
+| --- | --- |
+| Create: incomplete/invalid draft, default recipient, original split | No projected amounts until complete; validation and primary action remain reachable without horizontal overflow. |
+| Create: complete member receipt, different original payer | Named conditional separate-payment help; current → after-saving balances use owes/is owed/settled, including crossing zero. No pairwise payment instruction. |
+| Create: adjusted beneficiaries, overlapping/multiple recipients | Disclosure remains operable; net effects combine receipt and cost reduction; multi-party help is generalized. |
+| Create: provider offset / standalone | Offset explains payment reduction, not a new receipt; no separate-payment help. Standalone has no invented original payer. |
+| Create/edit: loading, stale, cached offline, cached/cold error | Projection unavailable (never zero); refresh control disabled offline/loading, available online. Reconnect and refresh restore projection only with fresh resources. |
+| Create/edit: loaded response missing person/currency | Explicit balance unavailable for that person/currency, never fabricated settled/zero. |
+| Edit: unchanged and changed saved allocations; currency change | Subtract saved snapshot then add draft, currency by currency. Unchanged edit keeps current balance. Clearly latest-loaded projection after saving, not historical totals. |
+| Edit: background refresh discovers a newer saved revision | Preserve draft and its original optimistic token; show conflict warning and saved-record link, hide projection and transfer guidance. Saving must not silently overwrite the newer revision. Required at all widths above; mounted unit regression verified, responsive conflict layout remains planned. |
+| Saved detail: member receipt, provider offset, historical names | Effects come only from persisted allocations, never current expense splits. Explain receipt versus cost reduction and offset versus member payment; no historical before/after totals. |
+| Saved detail: audit disclosure closed/open, cached/offline/error | Readable snapshot explanations remain distinct from current balances; edit precedes delete, offline writes disabled. Names retain historical/fallback labels. |
+| Saved detail: deleted | Tombstone explicitly has no active effects; restore action only, no active effect list. |
+
+**Verified automated coverage:** `tests/e2e/linked-refund.spec.ts` checks create
+validation, beneficiary disclosure, recipient overlap, sign crossing, cached
+offline suppression and reconnect/reload, missing/error balances,
+unchanged/changed standalone edits (including USD → EUR → USD), saved member
+receipt snapshots, audit disclosure, and deleted records across required widths.
+It checks horizontal overflow and reachable create actions. Unit tests cover zero
+crossings, explicit current-person grammar (including another person named You),
+transfer wording, saved allocations versus changed linked expense splits, and
+provider mode. Mounted fake-clock regressions verify expired saved-credit and
+off-first-page selected expense snapshots: both must refresh before projection or
+guidance returns, either completion order is safe, latest expense snapshots
+replace older ones, and dirty note/applied amount fields are preserved.
+The newer-revision regression changes saved totals and allocations and verifies
+that the preserved v1 draft still submits version 1 after v2 loads, surfaces a
+save conflict, and never presents a safe-looking projection for the stale edit.
+
+**Planned/manual coverage, not claimed as verified:** all-width provider-offset
+saved detail and historical-name layouts; saved-detail cached/offline/error
+variants; delayed initial balance loading; explicit refresh-button recovery from
+errors; and a UI-driven paginated selection followed by TTL expiry (the mounted
+regression currently covers selected detail-loaded expenses outside page one).
+The table above lists audit requirements, not a claim that every combination was
+exercised. No Firefox/WebKit or native-device run is included.
+Synthetic mobile/desktop evidence is refreshed with
+`REFUND_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:e2e:local -- tests/e2e/linked-refund.spec.ts --project=chromium --workers=1`.
+Images: `refund-improvements-*-mobile/desktop.png`,
+`refund-explanations-edit-390/1440.png`, `refund-explanations-detail-390/1440.png`.
+All captures use Demo user / Demo friend / Sample purchase only.
+
 ## Shared personal balance verification
 
 At 320px, 767/768px, 895/896px, and desktop, audit the existing Home cards

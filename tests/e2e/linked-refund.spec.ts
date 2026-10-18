@@ -21,7 +21,7 @@ test('mobile refund applies a linked expense and previews its balance effect', a
     await expect(recipientStatus).toHaveText('Overallocated by 1.00 USD');
     await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
     await page.locator('input[name="allocation-recipient-1-amount"]').fill('42.00');
-    await expect(page.locator('.refund-preview-list')).toContainText('Net balance effect');
+    await expect(page.locator('.refund-preview-list')).toContainText('After saving:');
   } finally {
     await context.close();
   }
@@ -128,6 +128,12 @@ test('different recipient: settlement changes and curated refund screenshots', a
     await page.route(`**/api/groups/${group}/expenses*`, async (route) => {
       await route.fulfill({ json: { expenses: [{ id: expense, groupId: group, description: 'Sample purchase', amountMinor: 8400, currency: 'USD', date: '2026-01-01', createdBy: userId, createdAt: '2026-01-01', updatedAt: '2026-01-01', version: 1, payers: [{ personId: you, amountMinor: 8400 }], splits: [{ personId: you, amountMinor: 4200 }, { personId: recipient, amountMinor: 4200 }], linkedCredits: [] }] } });
     });
+    let balanceMode: 'normal' | 'missing' | 'error' = 'normal';
+    await page.route(`**/api/groups/${group}/balances`, async (route) => {
+      if (balanceMode === 'error') { await route.fulfill({ status: 503, json: { error: 'Synthetic balance error' } }); return; }
+      if (balanceMode === 'missing') { await route.fulfill({ json: { balances: {} } }); return; }
+      await route.fulfill({ json: { balances: { USD: { raw: [{ personId: you, name: 'Demo user', netMinor: -1000, currency: 'USD' }, { personId: recipient, name: 'Demo friend', netMinor: 1000, currency: 'USD' }], simplified: [] }, EUR: { raw: [{ personId: you, name: 'Demo user', netMinor: 300, currency: 'EUR' }, { personId: recipient, name: 'Demo friend', netMinor: -300, currency: 'EUR' }], simplified: [] } }, personalBalance: { groupId: group, personId: you, ledgerRevision: 100, defaultCurrency: 'USD', balances: [{ currency: 'USD', netMinor: -1000 }, { currency: 'EUR', netMinor: 300 }] } } });
+    });
     const capture = async (state: string, width: number) => {
       if (width !== 390 && width !== 1440) return;
       await page.evaluate(async () => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo(0, 0); await document.fonts.ready; });
@@ -164,17 +170,30 @@ test('different recipient: settlement changes and curated refund screenshots', a
       await page.locator('select[name="allocation-recipient-1-person"]').selectOption(recipient);
       const preview = page.locator('.refund-preview-list');
       await expect(preview).toContainText('You');
-      await expect(preview.locator('.refund-preview-person').filter({ has: page.getByText('You', { exact: true }) })).toContainText('The amount you owe decreases, or the amount you are owed increases by 21.00 USD.');
-      await expect(preview.locator('.refund-preview-person').filter({ hasText: 'Demo friend' })).toContainText('The amount you owe increases, or the amount you are owed decreases by 21.00 USD.');
+      await expect(preview.locator('.refund-preview-person').filter({ has: page.getByText('You', { exact: true }) })).toContainText('Current: You owe 10.00 USD → After saving: You are owed 11.00 USD');
+      await expect(preview.locator('.refund-preview-person').filter({ hasText: 'Demo friend' })).toContainText('Current: Demo friend is owed 10.00 USD → After saving: Demo friend owes 11.00 USD');
       await expect(page.locator('.refund-transfer-help')).toContainText('separate payment');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await capture('different-recipient', width);
+      await context.setOffline(true);
+      await expect(page.locator('.refund-preview-section')).toContainText('Balance projection unavailable');
+      await expect(preview).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Record money back', exact: true })).toBeDisabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await capture('offline-balances', width);
+      await context.setOffline(false);
+      // Reconnect can remount authenticated routes while identity is rechecked.
+      await page.goto(`${BASE_URL}/groups/${group}/refund/new`);
+      await page.locator('.refund-application-row select').first().selectOption(expense);
+      await page.locator('#refund-amount').fill('42.00');
+      await page.locator('select[name="allocation-recipient-1-person"]').selectOption(recipient);
+      await expect(preview).toContainText('After saving:');
       await page.getByRole('button', { name: 'Adjust who benefits', exact: true }).click();
       await page.getByRole('button', { name: 'Add recipient', exact: true }).click();
       await page.locator('select[name="allocation-recipient-2-person"]').selectOption(you);
       await page.locator('input[name="allocation-recipient-1-amount"]').fill('21.00');
       await page.locator('input[name="allocation-recipient-2-amount"]').fill('21.00');
-      await expect(preview).toContainText('Your settlement balance is unchanged.');
+      await expect(preview).toContainText('Current: You owe 10.00 USD → After saving: You owe 10.00 USD');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await capture('allocations', width);
       while (await page.getByRole('button', { name: /^Remove affected member allocation/ }).count()) {
@@ -200,6 +219,55 @@ test('different recipient: settlement changes and curated refund screenshots', a
       await page.getByRole('combobox', { name: 'Apply this to', exact: true }).selectOption('standalone');
       await expect(page.getByRole('combobox', { name: 'Currency', exact: true })).toBeVisible();
       await expect(page.locator('.refund-transfer-help')).toHaveCount(0);
+    }
+    const savedId = '00000000-0000-4000-8000-000000009900';
+    let deleted = false;
+    await page.route(`**/api/credits/${savedId}`, async (route) => {
+      await route.fulfill({ json: { credit: { id: savedId, groupId: group, subtype: 'refund', deliveryMode: 'member_reimbursement', amountMinor: 4200, currency: 'USD', date: '2026-01-02', createdBy: userId, createdAt: '2026-01-02', updatedAt: '2026-01-02', deletedAt: deleted ? '2026-01-03' : null, version: 1, applications: [], allocations: [{ personId: recipient, allocationType: 'recipient', amountMinor: 4200 }, { personId: you, allocationType: 'beneficiary', amountMinor: 2100 }, { personId: recipient, allocationType: 'beneficiary', amountMinor: 2100 }] }, history: [] } });
+    });
+    for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`${BASE_URL}/groups/${group}/credit/${savedId}/edit`);
+      const preview = page.locator('.refund-preview-list');
+      await expect(preview).toContainText('Current: You owe 10.00 USD → After saving: You owe 10.00 USD');
+      await page.getByRole('combobox', { name: 'Currency', exact: true }).selectOption('EUR');
+      await expect(preview).toContainText('Current: You owe 10.00 USD → After saving: You owe 31.00 USD');
+      await expect(preview).toContainText('Current: You are owed 3.00 EUR → After saving: You are owed 24.00 EUR');
+      await page.getByRole('combobox', { name: 'Currency', exact: true }).selectOption('USD');
+      await expect(preview).toContainText('Current: You owe 10.00 USD → After saving: You owe 10.00 USD');
+      await page.locator('input[name="allocation-beneficiary-1-amount"]').fill('10.00');
+      await page.locator('input[name="allocation-beneficiary-2-amount"]').fill('32.00');
+      await expect(preview).toContainText('Current: You owe 10.00 USD → After saving: You owe 21.00 USD');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      if (process.env.REFUND_SCREENSHOTS && [390, 1440].includes(width)) await page.screenshot({ path: `docs/screenshots/refund-explanations-edit-${width}.png`, fullPage: true });
+      await page.goto(`${BASE_URL}/groups/${group}/credits/${savedId}`);
+      await expect(page.getByRole('heading', { name: 'Recorded balance effects' })).toBeVisible();
+      await expect(page.getByLabel('Saved refund effects')).toContainText('21.00 USD');
+      await expect(page.getByLabel('Saved refund effects')).not.toContainText('After saving');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      if (process.env.REFUND_SCREENSHOTS && [390, 1440].includes(width)) await page.screenshot({ path: `docs/screenshots/refund-explanations-detail-${width}.png`, fullPage: true });
+      await page.getByText('Audit history', { exact: true }).click();
+      await expect(page.getByText('No audit history.', { exact: true })).toBeVisible();
+      deleted = true;
+      await page.reload();
+      await expect(page.getByText('It has no active balance effects.', { exact: false })).toBeVisible();
+      await expect(page.getByLabel('Saved refund effects')).toHaveCount(0);
+      deleted = false;
+      for (const mode of ['missing', 'error'] as const) {
+        balanceMode = mode;
+        await page.goto(`${BASE_URL}/groups/${group}/refund/new`);
+        await page.locator('.refund-application-row select').first().selectOption(expense);
+        await page.locator('#refund-amount').fill('42.00');
+        if (mode === 'missing') {
+          await expect(page.locator('.refund-preview-list')).toContainText('Balance unavailable (USD); no projection shown.');
+          await expect(page.locator('.refund-preview-list')).not.toContainText('After saving:');
+        } else {
+          await expect(page.locator('.refund-preview-section')).toContainText('Balance projection unavailable');
+          await expect(page.locator('.refund-preview-list')).toHaveCount(0);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      }
+      balanceMode = 'normal';
     }
   } finally { await context.close(); }
 });

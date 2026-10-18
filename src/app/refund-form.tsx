@@ -2,13 +2,14 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useReloadBlocker } from './reload-safety-react';
 import { runProtectedOperation } from './reload-safety';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import type { Currency, Credit, Expense, GroupResponse } from '../shared/types';
+import type { Balances, Currency, Credit, Expense, GroupResponse } from '../shared/types';
+import { projectedRefundBalance, refundBalanceText, refundTransferHelp, savedRefundEffects } from './refund-effects';
 import { type CreditInput } from '../shared/schemas';
 import { AmountControl } from './amount-control';
 import { parseMoney } from '../domain/money';
-import { createCredit, getCreditDetails, getExpenseDetails, getExpensePage, getGroup, getMe, hydrateExpenses, updateCredit, type ExpensePage, ApiError } from './api';
+import { createCredit, getBalances, getCreditDetails, getExpenseDetails, getExpensePage, getGroup, getMe, hydrateExpenses, updateCredit, type ExpensePage, ApiError } from './api';
 import { captureSessionGeneration, isSessionGenerationCurrent } from './session';
-import { invalidateForMutation, revalidate, RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
+import { invalidateForMutation, isResourceFresh, revalidate, RESOURCE_FRESHNESS, resourceKeys, useResource } from './resource-cache';
 import { ActionGroup, Button, Field, FormSurface, Layout, LedgerList, LedgerRow, Loading, Money, PageHeader, SectionHeader, useOnlineStatus } from './ui';
 import { defaultRefundApplications, derivedBeneficiaryShares, derivedPayerShares, localBrowserDate, remainingRefundableMinor, type CreditAllocationDraft, type CreditApplicationDraft } from './credit-form';
 import { createPageRequestScope } from './pagination';
@@ -117,14 +118,6 @@ export function refundApplicationRowsHavePositiveAmounts(rows: Array<Pick<Applic
 
 export type RefundPreviewRow = { personId: string; amountMinor: number; label: string };
 export type RefundPreviewPerson = { personId: string; components: Array<{ label: string; amountMinor: number }>; netMinor: number };
-
-export function refundSettlementEffect(netMinor: number, currency: Currency) {
-  if (netMinor === 0) return 'Your settlement balance is unchanged.';
-  const change = `${money(Math.abs(netMinor))} ${currency}`;
-  return netMinor > 0
-    ? `The amount you owe decreases, or the amount you are owed increases by ${change}.`
-    : `The amount you owe increases, or the amount you are owed decreases by ${change}.`;
-}
 
 export function groupRefundPreviewRows(rows: RefundPreviewRow[]): RefundPreviewPerson[] {
   const grouped = new Map<string, RefundPreviewPerson>();
@@ -303,12 +296,23 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const group = groupResource.data?.group;
   const people = refundAllocationPeople(groupResource.data, loadedCredit);
   const currentPersonId = groupResource.data?.currentPersonId;
+  const balancesResource = useResource<{ balances: Record<string, Balances> }>(resourceKeys.balances(me.data?.id || 'pending', groupId), me.data?.id, (signal) => getBalances(groupId, signal), RESOURCE_FRESHNESS.balances);
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [cursor, setCursor] = useState<string>();
   const [loadingMore, setLoadingMore] = useState(false);
   const [expenseError, setExpenseError] = useState<unknown>();
   const [expenseRetry, setExpenseRetry] = useState(0);
+  // Each selected expense can come from a different page or detail request.
+  // Refreshing page one must not renew the age of retained off-page snapshots.
+  const [expenseSnapshots, setExpenseSnapshots] = useState<Record<string, { fetchedAt: number; offline?: boolean; error?: boolean }>>({});
+  const [previewNow, setPreviewNow] = useState(Date.now);
+  useEffect(() => {
+    // Shared resource stale flags describe invalidation, not elapsed TTL. Keep
+    // mounted previews honest even when the user leaves the draft untouched.
+    const timer = setInterval(() => setPreviewNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
   const [search, setSearch] = useState('');
   const [mode, setMode] = useState<'member_reimbursement' | 'direct_provider_offset'>(loadedCredit?.deliveryMode || 'member_reimbursement');
   const [subtype, setSubtype] = useState<'refund' | 'claim'>(loadedCredit?.subtype || 'refund');
@@ -334,6 +338,9 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const editRoute = Boolean(creditId || initialCredit?.id);
   const [initializationRouteKey, setInitializationRouteKey] = useState(routeKey);
   const [editInitialized, setEditInitialized] = useState(false);
+  // The optimistic token belongs to the draft's initialization, not whichever
+  // saved snapshot a background refresh most recently loaded.
+  const [draftBaseVersion, setDraftBaseVersion] = useState<number>();
   const editCreditReady = !editRoute || Boolean(loadedCredit && (!creditId || loadedCredit.id === creditId));
   const initializing = initializationRouteKey !== routeKey || (editRoute && (!editInitialized || !editCreditReady));
   const previousRouteKey = useRef(routeKey);
@@ -367,8 +374,10 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     loadingCursorRef.current = undefined;
     setInitializationRouteKey(routeKey);
     setEditInitialized(false);
+    setDraftBaseVersion(undefined);
     operationController.rotateAfterUnmount();
     setExpenses([]); setCursor(undefined); setExpenseError(undefined); setError(undefined); setSubmitAttempted(false);
+    setExpenseSnapshots({});
     setApplications(initialRefundApplications(creditId)); setAllocations([]); setAmount(''); setAmountTouched(false); setAmountProvenance('default'); setNote(''); setDate(localBrowserDate());
     setMode('member_reimbursement'); setSubtype('refund'); setCurrency('USD'); setAdjustBenefits(false);
   }, [creditId, routeKey]);
@@ -384,27 +393,50 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       pageScope.current.reset(routeKey);
       cursorRef.current = expenseResource.data.nextCursor;
       loadingCursorRef.current = undefined;
-      setExpenses((current) => uniqueExpenses([...expenseResource.data!.expenses, ...current]));
+      const pageTimestamp = expenseResource.fetchedAt || 0;
+      setExpenses((current) => uniqueExpenses([...expenseResource.data!.expenses.filter((expense) => (expenseSnapshots[expense.id]?.fetchedAt || 0) <= pageTimestamp), ...current]));
+      setExpenseSnapshots((current) => ({ ...current, ...Object.fromEntries(expenseResource.data!.expenses.filter((expense) => (current[expense.id]?.fetchedAt || 0) <= pageTimestamp).map((expense) => [expense.id, { fetchedAt: pageTimestamp, offline: expenseResource.offline || expenseResource.stale || !!expenseResource.error }])) }));
       setCursor(expenseResource.data.nextCursor);
       setLoadingMore(false);
     }
-  }, [expenseResource.data, routeKey]);
+  }, [expenseResource.data, expenseResource.fetchedAt, expenseResource.offline, expenseResource.stale, expenseResource.error, routeKey]);
 
   useEffect(() => {
-    const requestedIds = [...new Set([preselectedExpenseId, ...(loadedCredit?.applications || []).map((application) => application.expenseId)])].filter(Boolean);
-    const missing = requestedIds.filter((expenseId) => !expenses.some((expense) => expense.id === expenseId) && !inFlightExpenses.current.has(expenseId));
+    if (!online) return;
+    const requestedIds = [...new Set([preselectedExpenseId, ...applications.map((application) => application.expenseId), ...(loadedCredit?.applications || []).map((application) => application.expenseId)])].filter(Boolean);
+    const missing = requestedIds.filter((expenseId) => {
+      const snapshot = expenseSnapshots[expenseId];
+      if (!snapshot && expenseResource.data?.expenses.some((expense) => expense.id === expenseId) && !expenseResource.offline && !expenseResource.stale && !expenseResource.error && isResourceFresh(expenseResource, RESOURCE_FRESHNESS.expenseDetail)) return false;
+      return !inFlightExpenses.current.has(expenseId) && !snapshot?.error && (!snapshot || snapshot.offline || Date.now() - snapshot.fetchedAt >= RESOURCE_FRESHNESS.expenseDetail);
+    });
     missing.forEach((expenseId) => {
       const controller = new AbortController();
       inFlightExpenses.current.set(expenseId, controller);
       void getExpenseDetails(expenseId, controller.signal).then((result) => {
         inFlightExpenses.current.delete(expenseId);
-        setExpenses((current) => uniqueExpenses([...current, result.expense]));
+        if (controller.signal.aborted) return;
+        setExpenses((current) => uniqueExpenses([result.expense, ...current]));
+        setExpenseSnapshots((current) => ({ ...current, [expenseId]: { fetchedAt: Date.now(), offline: result.offline || result.stale || result.authoritative === false, error: result.offline || result.stale || result.authoritative === false } }));
       }).catch((cause) => {
         inFlightExpenses.current.delete(expenseId);
-        if (!controller.signal.aborted) setExpenseError(cause);
+        if (!controller.signal.aborted) {
+          setExpenseError(cause);
+          setExpenseSnapshots((current) => ({ ...current, [expenseId]: { fetchedAt: 0, error: true } }));
+        }
       });
     });
-  }, [expenseRetry, expenses, loadedCredit?.applications, preselectedExpenseId]);
+  }, [applications, expenseRetry, expenseSnapshots, loadedCredit?.applications, online, preselectedExpenseId, previewNow]);
+
+  useEffect(() => {
+    if (!online || !me.data?.id) return;
+    for (const [key, snapshot, ttl] of [
+      [resourceKeys.balances(me.data.id, groupId), balancesResource, RESOURCE_FRESHNESS.balances],
+      [resourceKeys.group(me.data.id, groupId), groupResource, RESOURCE_FRESHNESS.group],
+      ...(creditId ? [[resourceKeys.creditDetail(me.data.id, creditId), editResource, RESOURCE_FRESHNESS.expenseDetail] as const] : []),
+    ] as const) {
+      if (snapshot.data && !snapshot.revalidating && !snapshot.error && !isResourceFresh<unknown>(snapshot, ttl)) void revalidate(key, me.data.id, { force: true, reason: 'route' });
+    }
+  }, [previewNow, online, me.data?.id, groupId, creditId, balancesResource, groupResource, editResource]);
 
   useEffect(() => {
     if (initializationRouteKey !== routeKey || !loadedCredit || !editCreditReady || seeded.current === loadedCredit.id) return;
@@ -413,6 +445,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     setAllocations(loadedCredit.allocations.map((allocation) => ({ id: id(), personId: allocation.personId, allocationType: allocation.allocationType, amount: money(allocation.amountMinor), touched: true })));
     setMode(loadedCredit.deliveryMode); setSubtype(loadedCredit.subtype); setCurrency(loadedCredit.currency); setAmount(money(loadedCredit.amountMinor)); setAmountTouched(true); setAmountProvenance('user'); setDate(loadedCredit.date); setNote(loadedCredit.note || '');
     setEditInitialized(true);
+    setDraftBaseVersion(loadedCredit.version);
   }, [editCreditReady, initializationRouteKey, loadedCredit, routeKey]);
 
   const linked = applications.length > 0;
@@ -450,7 +483,8 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     try {
       const page = await getExpensePage(groupId, { limit: 50, cursor: request.cursor }, request.signal);
       if (!pageScope.current.isCurrent(request) || scopeKeyRef.current !== request.key || cursorRef.current !== request.cursor) return;
-      setExpenses((current) => uniqueExpenses([...current, ...page.expenses]));
+      setExpenses((current) => uniqueExpenses([...page.expenses, ...current]));
+      setExpenseSnapshots((current) => ({ ...current, ...Object.fromEntries(page.expenses.map((expense) => [expense.id, { fetchedAt: Date.now() }])) }));
       cursorRef.current = page.nextCursor;
       setCursor(page.nextCursor);
     } catch (cause) {
@@ -463,7 +497,7 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     }
   };
 
-  const retryMissingExpenses = () => { setExpenseError(undefined); setExpenseRetry((value) => value + 1); if (me.data?.id) void revalidate<ExpensePage>(expenseResourceKey, me.data.id, { force: true, reason: 'route' }); };
+  const retryMissingExpenses = () => { setExpenseError(undefined); setExpenseSnapshots({}); setExpenseRetry((value) => value + 1); if (me.data?.id) void revalidate<ExpensePage>(expenseResourceKey, me.data.id, { force: true, reason: 'route' }); };
   const updateApplication = (applicationId: string, patch: Partial<Application>) => setApplications((current) => current.map((application) => application.id === applicationId ? { ...application, ...patch } : application));
   const chooseExpense = (application: Application, expenseId: string) => {
     const nextExpense = expenses.find((expense) => expense.id === expenseId);
@@ -589,7 +623,8 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
       const generation = captureSessionGeneration();
       const mutationUserId = me.data?.id;
       const input = buildRefundInput({ subtype, mode, amountMinor, currency, date, note, linked, adjustBenefits, applications: parsedApplications.map((application) => ({ expenseId: application.expenseId, amountMinor: application.amountMinor })), allocations });
-      const result = loadedCredit ? await updateCredit(loadedCredit.id, { ...input, version: loadedCredit.version }) : await createCredit(groupId, { ...input, client_operation_id: operationController.current() });
+      if (loadedCredit && draftBaseVersion === undefined) return;
+      const result = loadedCredit ? await updateCredit(loadedCredit.id, { ...input, version: draftBaseVersion! }) : await createCredit(groupId, { ...input, client_operation_id: operationController.current() });
       if (!isSessionGenerationCurrent(generation)) return;
       await invalidateForMutation.creditChanged(groupId, mutationUserId, result.credit.id, generation);
       if (!isSessionGenerationCurrent(generation)) return;
@@ -608,12 +643,33 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
   const derivedDisplay = mode === 'member_reimbursement' ? refundBeneficiaryPreviewRows(affectedRows, derivedBeneficiaries, linked, adjustBenefits, currency) : affectedRows.map((allocation) => ({ personId: allocation.personId, amountMinor: (() => { try { return parseMoney(allocation.amount, currency); } catch { return 0; } })() }));
   const sideRows = refundPreviewRows(mode, recipientRows, derivedPayers, derivedBeneficiaries, derivedDisplay, currency);
   const previewPeople = groupRefundPreviewRows(sideRows);
+  const savedEffects = loadedCredit ? savedRefundEffects(loadedCredit) : new Map<string, number>();
+  const previewIds = [...new Set([...previewPeople.map((person) => person.personId), ...savedEffects.keys()])];
+  const selectedExpensesFresh = applications.every((application) => {
+    const snapshot = expenseSnapshots[application.expenseId];
+    return snapshot && !snapshot.offline && !snapshot.error && Date.now() - snapshot.fetchedAt < RESOURCE_FRESHNESS.expenseDetail;
+  });
+  const draftVersionConflict = !!loadedCredit && draftBaseVersion !== undefined && loadedCredit.version !== draftBaseVersion;
+  const balancesReady = !draftVersionConflict && online && isResourceFresh(balancesResource, RESOURCE_FRESHNESS.balances) && !balancesResource.offline && !balancesResource.error && !balancesResource.stale && !balancesResource.revalidating
+    && !groupResource.offline && !groupResource.error && !groupResource.stale
+    && isResourceFresh(groupResource, RESOURCE_FRESHNESS.group)
+    && (!linked || selectedExpensesFresh)
+    && (!editRoute || (isResourceFresh(editResource, RESOURCE_FRESHNESS.expenseDetail) && !editResource.offline && !editResource.error && !editResource.stale && !editResource.revalidating));
+  const transferHelp = balancesReady && !localError && mode === 'member_reimbursement'
+    ? refundTransferHelp(recipientRows.map((row) => row.personId), derivedPayers.map((row) => row.personId), memberLabel, currentPersonId) : undefined;
+  const refreshPreview = () => {
+    if (!online || !me.data?.id) return;
+    setExpenseError(undefined);
+    setExpenseSnapshots({});
+    for (const key of [resourceKeys.balances(me.data.id, groupId), resourceKeys.group(me.data.id, groupId), ...(linked ? [expenseResourceKey] : []), ...(creditId ? [resourceKeys.creditDetail(me.data.id, creditId)] : [])]) void revalidate(key, me.data.id, { force: true, reason: 'route' });
+  };
 
   return <Layout>
     <section className="refund-form" aria-labelledby="refund-form-title">
       <Link to={`/groups/${groupId}`} className="back">← Group</Link>
        <PageHeader className="page-title" headingId="refund-form-title" eyebrow="Online-only ledger action" title={loadedCredit ? 'Edit refund or reimbursement' : 'Record money back'} />
       {!online ? <ConnectionBanner detail="Refunds and payments require a connection. New expenses remain available offline." /> : null}
+      {draftVersionConflict ? <p className="cache-status" role="alert">This refund changed since you started editing. Your draft is preserved, but its balance projection is hidden. Saving still uses your original revision and may be rejected as a conflict. Copy any changes you want to keep, then reopen the editor from the saved refund to review the latest version. <Link to={`/groups/${groupId}/credits/${loadedCredit!.id}`}>View saved refund</Link></p> : null}
        <FormSurface className="refund-form__surface"><form noValidate onChangeCapture={captureDraft} onClickCapture={captureDraft} onSubmit={submit} aria-describedby="refund-form-help refund-form-status">
         <p id="refund-form-help" className="muted">Start with an expense when possible. The original payment or bill adjustment derives payer and affected shares; a member reimbursement requires a confirmed recipient.</p>
           <fieldset><legend>How should this money be recorded?</legend>
@@ -665,11 +721,17 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
             <section className="refund-preview-section"><SectionHeader title="How this affects settlement" />
               <p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} />{linked ? <> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></> : null}</p>
               {localError ? <p className="muted">Complete the required fields with valid amounts to see how this refund changes settlement.</p> : <>
-                <LedgerList className="refund-preview-list" label="Refund preview">{previewPeople.map((person) => <LedgerRow className="refund-preview-person" key={person.personId}><span><strong>{memberLabel(person.personId)}</strong>{person.components.map((component) => <small className="refund-preview-component" key={`${person.personId}-${component.label}`}>{component.label}: <Money amountMinor={component.amountMinor} currency={currency} /></small>)}<small className="refund-preview-net">Net balance effect: <Money amountMinor={person.netMinor} currency={currency} tone={person.netMinor > 0 ? 'positive' : person.netMinor < 0 ? 'debt' : undefined} /></small><small>{refundSettlementEffect(person.netMinor, currency)}</small></span></LedgerRow>)}</LedgerList>
-                <p className="muted">These are changes from this refund, not your total balances or instructions to transfer money between particular people.</p>
+                <p>Receiving money records cash already received; reducing a cost share records who benefits. These can be different people. An original payment or bill adjustment reduces the recorded payment instead of recording a new receipt.</p>
+                {!balancesReady ? <p role="status" className="cache-status">{draftVersionConflict ? 'Balance projection hidden because this draft is based on an older refund revision.' : <>Balance projection unavailable. Latest online balances must finish loading successfully; cached, offline or stale balances are not used. <Button type="button" variant="secondary" disabled={!online || balancesResource.revalidating} onClick={refreshPreview}>Refresh preview data</Button></>}</p> : <LedgerList className="refund-preview-list" label="Refund preview">{previewIds.map((personId) => <LedgerRow className="refund-preview-person" key={personId}><span><strong>{memberLabel(personId)}</strong>{[...new Set([currency, ...(loadedCredit ? [loadedCredit.currency] : [])])].map((unit) => {
+                  const current = balancesResource.data!.balances[unit]?.raw.find((row) => row.personId === personId);
+                  if (!current) return <small key={unit}>Balance unavailable ({unit}); no projection shown.</small>;
+                  const draftEffect = unit === currency ? previewPeople.find((person) => person.personId === personId)?.netMinor || 0 : 0;
+                  const savedEffect = loadedCredit?.currency === unit ? savedEffects.get(personId) || 0 : 0;
+                  return <small className="refund-preview-component" key={unit}>Current: {refundBalanceText(memberLabel(personId), current.netMinor, unit, personId === currentPersonId)} → After saving: {refundBalanceText(memberLabel(personId), projectedRefundBalance(current.netMinor, draftEffect, savedEffect), unit, personId === currentPersonId)}</small>;
+                })}</span></LedgerRow>)}</LedgerList>}
+                <p className="muted">Projection from the latest loaded group balances after saving this draft, not historical balances on the refund date. Other ledger changes may change the result. This is not an instruction to transfer money.</p>
               </>}
-              {linked && mode === 'member_reimbursement' && derivedPayers.some((payer) => recipientRows.some((recipient) => recipient.personId && recipient.personId !== payer.personId)) ? <p className="refund-transfer-help">If the recipient has already transferred, or later transfers, this money to the original payer, record that transfer as a separate payment. This refund records the actual receipt, not that transfer.</p> : null}
-              {!localError && linked && mode === 'member_reimbursement' && derivedPayers.length === 1 && recipientRows.length === 1 && derivedPayers[0].personId !== recipientRows[0].personId && previewPeople.some((person) => person.personId === derivedPayers[0].personId && person.netMinor > 0) ? <p className="muted">{memberLabel(derivedPayers[0].personId)} paid the original expense but did not receive this refund. Their expense share decreases while their original payment stays recorded, so the amount they owe decreases, or the amount they are owed increases.</p> : null}
+              {transferHelp ? <p className="refund-transfer-help">{transferHelp}</p> : null}
             </section>
         {(showValidation && localError) || error ? <p id="refund-form-status" role="alert" className="error">{refundErrorText(error || new Error(localError))}</p> : <p id="refund-form-status" className={submitDisabled ? 'cache-status' : 'sr-only'} role="status" aria-live="polite">{submitDisabled ? statusReason : 'Refund form is ready. Submit is available.'}</p>}
          <ActionGroup className="actions"><Button type="submit" disabled={submitDisabled}>{busy ? 'Saving…' : loadedCredit ? 'Save refund/reimbursement' : 'Record money back'}</Button><Link className="button button--secondary" to={`/groups/${groupId}`}>Cancel</Link></ActionGroup>
