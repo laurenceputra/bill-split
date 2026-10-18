@@ -5,7 +5,7 @@ import { LedgerList, LedgerRow, SectionHeader } from './ui';
 
 export function RefundRecordEffects({ credit, label }: { credit: Credit; label: (id: string) => string }) {
   if (credit.deletedAt) return null;
-  return <section><SectionHeader title="Recorded balance effects" />
+  return <section className="reading-section"><SectionHeader title="Recorded balance effects" />
     <p>These saved allocations describe this refund’s contribution, not historical before-and-after totals or today’s balances.</p>
     <p>{credit.deliveryMode === 'member_reimbursement'
       ? 'Receipt records money already received. Cost-share reductions record who benefits, independently of who received it. Any later transfer between members is a separate payment.'

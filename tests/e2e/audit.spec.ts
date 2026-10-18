@@ -812,40 +812,53 @@ async function populateRefundAuditState(page: Page) {
   await expect(page.locator('input[name="allocation-recipient-1-amount"]')).toHaveValue('42.00');
   await expect(page.locator('.refund-application-status')).toHaveText('Fully applied');
   await expect(page.locator('.refund-preview-person')).toHaveCount(3);
-  await expect(page.locator('.refund-preview-list')).toContainText('Received');
-  await expect(page.locator('.refund-preview-list')).toContainText('Cost reduction');
-  await expect(page.locator('.refund-preview-list')).toContainText('Net balance effect');
+  // fixture.sql already includes the saved 42 USD refund and 10 USD repayment.
+  await expect(page.locator('.refund-preview-person')).toHaveText([
+    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 74.00 USD',
+    'YouCurrent: You are owed 60.00 USD → After saving: You are owed 74.00 USD',
+    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is settled up (USD)',
+  ]);
+  await expect(page.locator('#refund-money-flow')).toContainText('Who actually received the money?');
+  await expect(page.getByLabel('Affected shares', { exact: true })).toContainText('original split');
   await expect(page.getByRole('heading', { name: 'How this affects settlement', exact: true })).toBeVisible();
-  await expect(page.locator('.refund-preview-list')).toContainText('The amount you owe');
+  await expect(page.locator('.refund-preview-section')).toContainText('Receiving money records cash already received; reducing a cost share records who benefits. These can be different people.');
 }
 
 async function populateStandaloneRefundAuditState(page: Page) {
-  const pathSelect = page.getByLabel('Apply this to', { exact: true });
+  const pathSelect = page.getByRole('combobox', { name: 'Apply this to', exact: true });
   await pathSelect.selectOption('standalone');
   await expect(pathSelect).toHaveValue('standalone');
-  await expect(page.getByText('Standalone records do not change an expense.', { exact: true })).toBeVisible();
-  const modeSelect = page.getByLabel('How was it handled?', { exact: true });
-  await expect(modeSelect.locator('option[value="direct_provider_offset"]')).toBeDisabled();
+  await expect(page.getByText('Standalone records do not change an expense.', { exact: false })).toBeVisible();
+  const modeSelect = page.getByRole('combobox', { name: 'How was it handled?', exact: true });
+  await expect(modeSelect.locator('option[value="direct_provider_offset"]')).toHaveJSProperty('disabled', true);
   await expect(page.getByLabel('Affected member 1', { exact: true })).toBeVisible();
   await page.getByLabel('Affected member 1', { exact: true }).selectOption('00000000-0000-4000-8000-000000002004');
   await page.getByLabel('Affected member amount 1 (USD)', { exact: true }).fill('42.00');
   await expect(page.getByLabel('Affected member amount 1 (USD)', { exact: true })).toHaveValue('42.00');
   await expect(page.getByText('Standalone mode requires explicit recipient and affected-member allocations.', { exact: true })).toBeVisible();
+  await expect(page.locator('.refund-preview-person')).toHaveText([
+    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 88.00 USD',
+    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is owed 28.00 USD',
+  ]);
 }
 
 async function populateLinkedDirectProviderRefundAuditState(page: Page) {
-  const pathSelect = page.getByLabel('Apply this to', { exact: true });
+  const pathSelect = page.getByRole('combobox', { name: 'Apply this to', exact: true });
   await pathSelect.selectOption('linked');
   await expect(pathSelect).toHaveValue('linked');
-  await page.getByLabel('Expense 1', { exact: true }).selectOption(ids.dinner);
-  await expect(page.getByLabel('Expense 1', { exact: true })).toHaveValue(ids.dinner);
+  await page.getByRole('combobox', { name: 'Expense 1', exact: true }).selectOption(ids.dinner);
+  await expect(page.getByRole('combobox', { name: 'Expense 1', exact: true })).toHaveValue(ids.dinner);
   await page.getByLabel('How much? (USD)', { exact: true }).fill('42.00');
   await page.getByLabel('Applied amount for expense 1 (USD)', { exact: true }).fill('42.00');
-  const modeSelect = page.getByLabel('How was it handled?', { exact: true });
+  const modeSelect = page.getByRole('combobox', { name: 'How was it handled?', exact: true });
   await modeSelect.selectOption('direct_provider_offset');
   await expect(modeSelect).toHaveValue('direct_provider_offset');
-  await expect(page.locator('.refund-preview-list')).toContainText('Payment reduction');
-  await expect(page.locator('.refund-preview-list')).toContainText('Cost reduction');
+  await expect(page.locator('.refund-preview-person')).toHaveText([
+    'YouCurrent: You are owed 60.00 USD → After saving: You are owed 32.00 USD',
+    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 32.00 USD',
+    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is settled up (USD)',
+  ]);
+  await expect(page.locator('.refund-preview-section')).toContainText('An original payment or bill adjustment reduces the recorded payment instead of recording a new receipt.');
   await expect(page.getByText('Both payer and affected shares are derived from linked expenses.', { exact: true })).toBeVisible();
 }
 
@@ -1072,7 +1085,9 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
   const failures: HarnessFailure[] = [];
   const coverage: Coverage[] = [];
   const artifactDirectory = auditArtifactDirectory('normal');
-  for (const scenario of scenarios) {
+  const requestedScenarios = process.env.AUDIT_SCENARIOS?.split(',');
+  if (requestedScenarios) expect(requestedScenarios.filter((name) => !scenarios.some((scenario) => scenario.name === name)), 'Unknown AUDIT_SCENARIOS').toEqual([]);
+  for (const scenario of scenarios.filter((scenario) => !requestedScenarios || requestedScenarios.includes(scenario.name))) {
     const scenarioViewports = scenario.name === 'group-insights' || scenario.name === 'global-insights' || scenario.name === 'empty-global-insights' || scenario.name === 'custom-insights' || scenario.name === 'invalid-custom-insights' ? insightViewports : viewports;
     for (const viewport of scenarioViewports) {
       const context = await openContext(browser, scenario.auth, viewport);
@@ -1087,12 +1102,30 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
         } catch { /* Ignore non-HTTP request URLs. */ }
       });
       try {
+        if (['record-credit', 'refund-form', 'refund-edit', 'credit-edit-alias', 'refund-detail', 'refund-detail-deleted'].includes(scenario.name)) {
+          // Keep ledger values and freshness metadata from the real fixture API,
+          // but anonymize identities before rendering refund screenshot evidence.
+          await page.route('**/api/**', async (route) => {
+            const response = await route.fetch();
+            if (!response.headers()['content-type']?.includes('application/json')) { await route.fulfill({ response }); return; }
+            const sanitize = (value: unknown): unknown => {
+              if (typeof value === 'string') return value.replaceAll('Dev User', 'Demo user').replaceAll('Sam Rivera', 'Demo friend').replaceAll('Priya Shah', 'Demo participant');
+              if (Array.isArray(value)) return value.map(sanitize);
+              if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, key === 'avatarHash' ? null : sanitize(entry)]));
+              return value;
+            };
+            await route.fulfill({ response, json: sanitize(await response.json()) });
+          });
+        }
         if (scenario.name === 'group-insights' || scenario.name === 'global-insights' || scenario.name === 'empty-global-insights') {
           const scope = scenario.name === 'group-insights' ? 'group' : 'global';
            await page.route('**/api/spending-insights*', (route) => { const fixture = populatedInsightFixture(scope, scenario.name === 'empty-global-insights'); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(new URL(route.request().url()).searchParams.get('view') === 'trends' ? fixture.trends : fixture.summary) }); });
         }
           await page.goto(`${BASE_URL}${scenario.path}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
           await waitForScenarioReady(page, scenario);
+        if (['record-credit', 'refund-form', 'refund-edit', 'credit-edit-alias'].includes(scenario.name)) {
+          await expect.poll(() => observations.some((response) => response.path === apiPaths.balances(ids.rich) && response.status === 200)).toBe(true);
+        }
         if (scenario.auth && !apiHeaders.some((request) => request.path === apiPaths.me && request.headers['x-dev-email'] === scenario.auth)) throw new Error(`Authenticated context did not send X-Dev-Email: ${scenario.auth}`);
         if (!scenario.auth && apiHeaders.some((request) => request.headers['x-dev-email'])) throw new Error('Public landing context sent X-Dev-Email');
         await assertRendered(page, scenario, observations, viewport);
@@ -1148,7 +1181,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
               name: 'refund-form-linked-direct-provider',
               routeSuffix: '[linked direct provider]',
               context: 'RefundForm / linked direct-provider adjustment with derived payer and cost reductions',
-              content: 'Payment reduction',
+              content: 'Current: You are owed 60.00 USD → After saving: You are owed 32.00 USD',
               populate: populateLinkedDirectProviderRefundAuditState,
             }, observations, viewport, artifactDirectory, findings, failures, coverage);
           }
