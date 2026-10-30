@@ -3,7 +3,7 @@ import { useReloadBlocker } from './reload-safety-react';
 import { runProtectedOperation } from './reload-safety';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Balances, Currency, Credit, Expense, GroupResponse } from '../shared/types';
-import { projectedRefundBalance, refundBalanceText, refundTransferHelp, savedRefundEffects } from './refund-effects';
+import { projectedRefundBalance, refundBalanceSummary, refundPairOutcome, refundTransferHelp, savedRefundEffects } from './refund-effects';
 import { type CreditInput } from '../shared/schemas';
 import { AmountControl } from './amount-control';
 import { parseMoney } from '../domain/money';
@@ -657,6 +657,9 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
     && (!editRoute || (isResourceFresh(editResource, RESOURCE_FRESHNESS.expenseDetail) && !editResource.offline && !editResource.error && !editResource.stale && !editResource.revalidating));
   const transferHelp = balancesReady && !localError && mode === 'member_reimbursement'
     ? refundTransferHelp(recipientRows.map((row) => row.personId), derivedPayers.map((row) => row.personId), memberLabel, currentPersonId) : undefined;
+  const previewCurrencies = [...new Set([currency, ...(loadedCredit ? [loadedCredit.currency] : [])])];
+  const effectFor = (personId: string, unit: Currency) => (unit === currency ? previewPeople.find((person) => person.personId === personId)?.netMinor || 0 : 0) - (loadedCredit?.currency === unit ? savedEffects.get(personId) || 0 : 0);
+  const participantIds = [...new Set([...(groupResource.data?.members || []).map((person) => person.personId), ...(groupResource.data?.historicalParticipants || []).map((person) => person.personId), ...Object.values(balancesResource.data?.balances || {}).flatMap((balance) => balance.raw.map((person) => person.personId)), ...previewIds])];
   const refreshPreview = () => {
     if (!online || !me.data?.id) return;
     setExpenseError(undefined);
@@ -718,20 +721,26 @@ export function RefundForm({ initialCredit }: { initialCredit?: Credit } = {}) {
           {!linked && mode === 'member_reimbursement' ? <p className="muted">Standalone mode requires explicit recipient and affected-member allocations.</p> : null}
            </fieldset>
 
-            <section className="refund-preview-section"><SectionHeader title="How this affects settlement" />
-              <p>Refund total: <Money amountMinor={Math.max(0, amountMinor)} currency={currency} />{linked ? <> · Applied: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></> : null}</p>
-              {localError ? <p className="muted">Complete the required fields with valid amounts to see how this refund changes settlement.</p> : <>
-                <p>Receiving money records cash already received; reducing a cost share records who benefits. These can be different people. An original payment or bill adjustment reduces the recorded payment instead of recording a new receipt.</p>
-                {!balancesReady ? <p role="status" className="cache-status">{draftVersionConflict ? 'Balance projection hidden because this draft is based on an older refund revision.' : <>Balance projection unavailable. Latest online balances must finish loading successfully; cached, offline or stale balances are not used. <Button type="button" variant="secondary" disabled={!online || balancesResource.revalidating} onClick={refreshPreview}>Refresh preview data</Button></>}</p> : <LedgerList className="refund-preview-list" label="Refund preview">{previewIds.map((personId) => <LedgerRow className="refund-preview-person" key={personId}><span><strong>{memberLabel(personId)}</strong>{[...new Set([currency, ...(loadedCredit ? [loadedCredit.currency] : [])])].map((unit) => {
+             <section className="refund-preview-section"><SectionHeader title="After saving" />
+               {linked && appliedMinor !== amountMinor ? <p>Applied total: <Money amountMinor={Math.max(0, appliedMinor)} currency={currency} /> · <span className="refund-preview-application-status">{amountMinor > 0 ? applicationStatus.label : 'Enter a refund total to see application status.'}</span></p> : null}
+               {localError ? <p className="muted">Complete the required fields to see your balance preview.</p> : <>
+                 {!balancesReady ? <p role="status" className="cache-status">{draftVersionConflict ? 'Balance projection hidden because this draft is based on an older refund revision.' : <>Balance projection unavailable. Latest online balances must finish loading successfully; cached, offline or stale balances are not used. <Button type="button" variant="secondary" disabled={!online || balancesResource.revalidating} onClick={refreshPreview}>Refresh preview data</Button></>}</p> : <div className="refund-preview-list" role="group" aria-label="Balance preview">{previewCurrencies.map((unit) => {
+                   const pair = refundPairOutcome(participantIds, balancesResource.data!.balances[unit]?.raw, currentPersonId, memberLabel, unit, (personId) => effectFor(personId, unit));
+                   return pair ? <p className="refund-preview-outcome" key={unit}>{previewCurrencies.length > 1 ? <small>{unit}</small> : null}<strong>{pair.outcome}</strong><small className="refund-preview-component">{pair.detail}</small></p> : <LedgerList key={unit} label={`Balance preview (${unit})`}>{previewIds.map((personId) => <LedgerRow className="refund-preview-person" key={personId}><span><strong>{memberLabel(personId)}</strong>{(() => {
                   const current = balancesResource.data!.balances[unit]?.raw.find((row) => row.personId === personId);
                   if (!current) return <small key={unit}>Balance unavailable ({unit}); no projection shown.</small>;
-                  const draftEffect = unit === currency ? previewPeople.find((person) => person.personId === personId)?.netMinor || 0 : 0;
-                  const savedEffect = loadedCredit?.currency === unit ? savedEffects.get(personId) || 0 : 0;
-                  return <small className="refund-preview-component" key={unit}>Current: {refundBalanceText(memberLabel(personId), current.netMinor, unit, personId === currentPersonId)} → After saving: {refundBalanceText(memberLabel(personId), projectedRefundBalance(current.netMinor, draftEffect, savedEffect), unit, personId === currentPersonId)}</small>;
-                })}</span></LedgerRow>)}</LedgerList>}
-                <p className="muted">Projection from the latest loaded group balances after saving this draft, not historical balances on the refund date. Other ledger changes may change the result. This is not an instruction to transfer money.</p>
-              </>}
-              {transferHelp ? <p className="refund-transfer-help">{transferHelp}</p> : null}
+                   const after = projectedRefundBalance(current.netMinor, effectFor(personId, unit));
+                   return <small className="refund-preview-component" key={unit}>{`Current: ${refundBalanceSummary(current.netMinor, unit)} → ${after === current.netMinor ? 'Balance unchanged' : `After saving: ${refundBalanceSummary(after, unit)}`}`}</small>;
+                 })()}</span></LedgerRow>)}</LedgerList>;
+                 })}</div>}
+               </>}
+               <p className="muted">This updates balances; it doesn’t record a payment.</p>
+               <details><summary>How is this calculated?</summary>
+                 <p>The preview applies this draft to the latest loaded group balances. When editing, it removes the saved refund’s effects first. Each currency is calculated separately. Other ledger changes may change the result.</p>
+                 <p>Money received reduces the recipient’s balance; a cost-share reduction increases the beneficiary’s balance. A bill adjustment reduces the original payer’s recorded payment instead of adding a receipt.</p>
+                 <p>Payments between members are recorded separately.</p>
+                 {transferHelp ? <p className="refund-transfer-help">{transferHelp}</p> : null}
+               </details>
             </section>
         {(showValidation && localError) || error ? <p id="refund-form-status" role="alert" className="error">{refundErrorText(error || new Error(localError))}</p> : <p id="refund-form-status" className={submitDisabled ? 'cache-status' : 'sr-only'} role="status" aria-live="polite">{submitDisabled ? statusReason : 'Refund form is ready. Submit is available.'}</p>}
          <ActionGroup className="actions"><Button type="submit" disabled={submitDisabled}>{busy ? 'Saving…' : loadedCredit ? 'Save refund/reimbursement' : 'Record money back'}</Button><Link className="button button--secondary" to={`/groups/${groupId}`}>Cancel</Link></ActionGroup>

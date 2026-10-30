@@ -48,7 +48,7 @@ describe('mounted refund dependency freshness', () => {
     const text = () => renderer.root.findAllByProps({ className: 'refund-preview-component' }).map((row) => row.children.join('')).join('\n');
     try {
       await act(async () => { renderer = create(<MemoryRouter initialEntries={[`/groups/${groupId}/credit/${creditId}/edit`]}><Routes><Route path="/groups/:id/credit/:creditId/edit" element={<RefundForm />} /></Routes></MemoryRouter>); });
-      expect(text()).toContain('Current: You owe 5.00 USD → After saving: You owe 5.00 USD');
+      expect(text()).toContain('Balance unchanged.');
       expect(renderer.root.findAllByProps({ className: 'refund-transfer-help' })).toHaveLength(1);
       await act(async () => renderer.root.findByType('textarea').props.onChange({ target: { value: 'Dirty draft note' } }));
       await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
@@ -74,7 +74,7 @@ describe('mounted refund dependency freshness', () => {
         expect(update.mock.calls[0][1].allocations).toContainEqual({ person_id: 'other', allocation_type: 'recipient', amount_minor: 1000 });
         expect(JSON.stringify(renderer.toJSON())).toContain('Refund changed. Reload and try again.');
       } else {
-        expect(text()).toContain('Current: You owe 5.00 USD → After saving: You owe 5.00 USD');
+        expect(text()).toContain('Balance unchanged.');
       }
       expect(renderer.root.findAllByProps({ className: 'refund-transfer-help' })).toHaveLength(0);
       expect(JSON.stringify(renderer.toJSON())).toContain('30.00');

@@ -814,14 +814,14 @@ async function populateRefundAuditState(page: Page, people = { friend: 'Demo fri
   await expect(page.locator('.refund-preview-person')).toHaveCount(3);
   // fixture.sql already includes the saved 42 USD refund and 10 USD repayment.
   await expect(page.locator('.refund-preview-person')).toHaveText([
-    `${people.friend}Current: ${people.friend} owes 46.00 USD → After saving: ${people.friend} owes 74.00 USD`,
-    'YouCurrent: You are owed 60.00 USD → After saving: You are owed 74.00 USD',
-    `${people.participant}Current: ${people.participant} owes 14.00 USD → After saving: ${people.participant} is settled up (USD)`,
+    `${people.friend}Current: owes USD 46.00 → After saving: owes USD 74.00`,
+    'YouCurrent: owed USD 60.00 → After saving: owed USD 74.00',
+    `${people.participant}Current: owes USD 14.00 → After saving: settled up (USD)`,
   ]);
   await expect(page.locator('#refund-money-flow')).toContainText('Who actually received the money?');
   await expect(page.getByLabel('Affected shares', { exact: true })).toContainText('original split');
-  await expect(page.getByRole('heading', { name: 'How this affects settlement', exact: true })).toBeVisible();
-  await expect(page.locator('.refund-preview-section')).toContainText('Receiving money records cash already received; reducing a cost share records who benefits. These can be different people.');
+  await expect(page.getByRole('heading', { name: 'After saving', exact: true })).toBeVisible();
+  await expect(page.locator('.refund-preview-section')).toContainText('This updates balances; it doesn’t record a payment.');
 }
 
 async function populateStandaloneRefundAuditState(page: Page) {
@@ -837,8 +837,8 @@ async function populateStandaloneRefundAuditState(page: Page) {
   await expect(page.getByLabel('Affected member amount 1 (USD)', { exact: true })).toHaveValue('42.00');
   await expect(page.getByText('Standalone mode requires explicit recipient and affected-member allocations.', { exact: true })).toBeVisible();
   await expect(page.locator('.refund-preview-person')).toHaveText([
-    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 88.00 USD',
-    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is owed 28.00 USD',
+    'Demo friendCurrent: owes USD 46.00 → After saving: owes USD 88.00',
+    'Demo participantCurrent: owes USD 14.00 → After saving: owed USD 28.00',
   ]);
 }
 
@@ -854,11 +854,11 @@ async function populateLinkedDirectProviderRefundAuditState(page: Page) {
   await modeSelect.selectOption('direct_provider_offset');
   await expect(modeSelect).toHaveValue('direct_provider_offset');
   await expect(page.locator('.refund-preview-person')).toHaveText([
-    'YouCurrent: You are owed 60.00 USD → After saving: You are owed 32.00 USD',
-    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 32.00 USD',
-    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is settled up (USD)',
+    'YouCurrent: owed USD 60.00 → After saving: owed USD 32.00',
+    'Demo friendCurrent: owes USD 46.00 → After saving: owes USD 32.00',
+    'Demo participantCurrent: owes USD 14.00 → After saving: settled up (USD)',
   ]);
-  await expect(page.locator('.refund-preview-section')).toContainText('An original payment or bill adjustment reduces the recorded payment instead of recording a new receipt.');
+  await expect(page.locator('.refund-preview-section details')).toContainText('A bill adjustment reduces the original payer’s recorded payment instead of adding a receipt.');
   await expect(page.getByText('Both payer and affected shares are derived from linked expenses.', { exact: true })).toBeVisible();
 }
 
@@ -1170,8 +1170,19 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
             } catch (error) {
               failures.push({ scenarioName: 'refund-form-populated', authState: authState(scenario.auth), route: `${scenario.path} [populated]`, viewport, detail: `Populated refund state could not be validated: ${error instanceof Error ? error.message : String(error)}` });
             }
-            await captureRefundAuditState(page, scenario, {
-              name: 'refund-form-standalone-member',
+             await captureRefundAuditState(page, scenario, {
+               name: 'refund-form-calculation-open',
+               routeSuffix: '[calculation open]',
+               context: 'RefundForm / balance calculation and separate-payment guidance disclosure',
+               content: 'The preview applies this draft to the latest loaded group balances.',
+               populate: async (page) => {
+                 await page.getByText('How is this calculated?', { exact: true }).click();
+                 await expect(page.getByText('Payments between members are recorded separately.', { exact: true })).toBeVisible();
+               },
+             }, observations, viewport, artifactDirectory, findings, failures, coverage);
+             await page.locator('.refund-preview-section details').evaluate((element) => (element as HTMLDetailsElement).open = false);
+             await captureRefundAuditState(page, scenario, {
+               name: 'refund-form-standalone-member',
               routeSuffix: '[standalone member]',
               context: 'RefundForm / standalone member reimbursement with provider adjustment unavailable',
               content: 'Standalone records do not change an expense.',
@@ -1181,7 +1192,7 @@ test('browser audit matrix captures validated routes, geometry, and full-page sc
               name: 'refund-form-linked-direct-provider',
               routeSuffix: '[linked direct provider]',
               context: 'RefundForm / linked direct-provider adjustment with derived payer and cost reductions',
-              content: 'Current: You are owed 60.00 USD → After saving: You are owed 32.00 USD',
+               content: 'Current: owed USD 60.00 → After saving: owed USD 32.00',
               populate: populateLinkedDirectProviderRefundAuditState,
             }, observations, viewport, artifactDirectory, findings, failures, coverage);
           }

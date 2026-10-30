@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Credit } from '../shared/types';
-import { projectedRefundBalance, refundBalanceText, refundTransferHelp, savedRefundEffects } from './refund-effects';
+import { projectedRefundBalance, refundBalanceSummary, refundBalanceText, refundPairOutcome, refundTransferHelp, savedRefundEffects } from './refund-effects';
 import { RefundRecordEffects } from './refund-record-effects';
 
 const credit: Credit = { id: 'refund', groupId: 'demo', subtype: 'refund', deliveryMode: 'member_reimbursement', amountMinor: 1000, currency: 'USD', date: '2026-01-01', createdBy: 'demo', createdAt: '', updatedAt: '', version: 1, applications: [], allocations: [
@@ -12,6 +12,35 @@ const credit: Credit = { id: 'refund', groupId: 'demo', subtype: 'refund', deliv
 ] };
 
 describe('refund explanations', () => {
+  const raw = (net: number) => [{ personId: 'me', name: 'Me', netMinor: net, currency: 'SGD' as const }, { personId: 'alex', name: 'Alex', netMinor: -net, currency: 'SGD' as const }];
+  const pair = (net: number, delta: number, ids = ['me', 'alex']) => refundPairOutcome(ids, raw(net), 'me', () => 'Alex', 'SGD', (id) => id === 'me' ? delta : -delta);
+  it('names the single two-person outcome and compares same-direction amounts', () => {
+    expect(pair(-120000, 20000)).toEqual({ outcome: 'You’ll owe Alex SGD 1,000.00', detail: 'Down from SGD 1,200.00.' });
+    expect(pair(100, 100)).toEqual({ outcome: 'Alex will owe you SGD 2.00', detail: 'Up from SGD 1.00.' });
+    expect(pair(100, 0)?.detail).toBe('Balance unchanged.');
+  });
+  it('keeps larger-group summaries compact without implying a counterparty', () => {
+    expect(refundBalanceSummary(-100000, 'SGD')).toBe('owes SGD 1,000.00');
+    expect(refundBalanceSummary(100, 'EUR')).toBe('owed EUR 1.00');
+    expect(refundBalanceSummary(0, 'USD')).toBe('settled up (USD)');
+    expect(refundBalanceSummary(Number.MAX_SAFE_INTEGER, 'USD')).toBe('owed USD 90,071,992,547,409.91');
+  });
+  it('uses current outcomes for sign crossings and settled states', () => {
+    expect(pair(-100, 200)).toEqual({ outcome: 'Alex will owe you SGD 1.00', detail: 'Currently, you owe Alex SGD 1.00.' });
+    expect(pair(100, -200)?.detail).toBe('Currently, Alex owes you SGD 1.00.');
+    expect(pair(-100, 100)?.outcome).toBe('You and Alex will be settled up');
+    expect(pair(0, -100)?.detail).toBe('Currently, you and Alex are settled up.');
+  });
+  it('requires the entire group and complete opposite raw balances, not just two affected people', () => {
+    expect(pair(-100, 10, ['me', 'alex', 'removed-person'])).toBeUndefined();
+    expect(refundPairOutcome(['me', 'alex'], undefined, 'me', String, 'SGD', () => 0)).toBeUndefined();
+    expect(refundPairOutcome(['me', 'alex'], raw(100).slice(0, 1), 'me', String, 'SGD', () => 0)).toBeUndefined();
+    expect(refundPairOutcome(['me', 'alex'], [raw(100)[0], { ...raw(100)[1], netMinor: 50 }], 'me', String, 'SGD', () => 0)).toBeUndefined();
+    expect(refundPairOutcome(['me', 'alex'], raw(100), 'me', String, 'SGD', () => 100)).toBeUndefined();
+    expect(refundPairOutcome(['me', 'alex'], [...raw(100), { ...raw(100)[0], personId: 'historical' }], 'me', String, 'SGD', () => 0)).toBeUndefined();
+    // An unrelated member actually named You remains the other person.
+    expect(refundPairOutcome(['me', 'alex'], raw(100), 'me', () => 'You', 'SGD', () => 0)?.outcome).toBe('You will owe you SGD 1.00');
+  });
   it.each([[-500, 1000, 500], [500, -1000, -500], [-500, 500, 0], [0, -100, -100], [0, 100, 100]])('projects sign and zero crossings (%i + %i)', (current, effect, result) => {
     expect(projectedRefundBalance(current, effect)).toBe(result);
   });
