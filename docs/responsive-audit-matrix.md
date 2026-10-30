@@ -19,6 +19,7 @@ and editing a saved record remains before deletion. No accounting rules changed.
 | Saved detail: member receipt, provider offset, historical names | Effects come only from persisted allocations, never current expense splits. Explain receipt versus cost reduction and offset versus member payment; no historical before/after totals. |
 | Saved detail: audit disclosure closed/open, cached/offline/error | Readable snapshot explanations remain distinct from current balances; edit precedes delete, offline writes disabled. Names retain historical/fallback labels. |
 | Saved detail: deleted | Tombstone explicitly has no active effects; restore action only, no active effect list. |
+| Inline money: refund summary/applied total, saved detail total, insight Your share/You paid, schedule amount + cadence | At all required widths, amounts share the surrounding prose baseline, including when the detail label wraps. Preserve nowrap, contained horizontal scrolling and overflow-only keyboard focus. Flex/grid amount layouts are unchanged. |
 
 **Verified automated coverage:** `tests/e2e/linked-refund.spec.ts` checks create
 validation, beneficiary disclosure, recipient overlap, sign crossing, cached
@@ -35,6 +36,16 @@ replace older ones, and dirty note/applied amount fields are preserved.
 The newer-revision regression changes saved totals and allocations and verifies
 that the preserved v1 draft still submits version 1 after v2 loads, surfaces a
 save conflict, and never presents a safe-looking projection for the stale edit.
+
+Inline baseline regressions in `linked-refund.spec.ts` (synthetic create/detail)
+and `tablet-layout.spec.ts` (live schedule prose and an insight-shaped fixture
+using a rendered Money clone; the non-personal insight branch is not currently
+mounted by a route) measure actual browser text baselines at all required widths.
+Shared `.money` uses `vertical-align: bottom` to align line boxes despite the
+scroll container's bottom-edge baseline;
+`middle` was visually compared but centers on the font's x-height rather than
+matching text baselines. Existing safe-integer and below-threshold overflow
+browser checks and `money-ui.test.tsx` retain keyboard-scroll/focus coverage.
 
 **Planned/manual coverage, not claimed as verified:** all-width provider-offset
 saved detail and historical-name layouts; saved-detail cached/offline/error

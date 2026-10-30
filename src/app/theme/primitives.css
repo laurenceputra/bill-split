@@ -575,6 +575,9 @@ form > button {
 
 .money {
   display: inline-block;
+  /* Scroll containers use their bottom edge as the inline baseline. Align the
+     line boxes instead, so amounts sit level with surrounding prose. */
+  vertical-align: bottom;
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;

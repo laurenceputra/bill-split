@@ -1,4 +1,5 @@
 import { test, expect, newAuthenticatedContext, BASE_URL, DEV_EMAIL } from './fixtures';
+import { expectInlineMoneyAligned } from './money-alignment';
 
 test('mobile refund applies a linked expense and previews its balance effect', async ({ browser }) => {
   const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 844 });
@@ -168,6 +169,7 @@ test('different recipient: settlement changes and curated refund screenshots', a
       await page.locator('#refund-amount').fill('42.00');
       await page.getByRole('combobox', { name: 'Source', exact: true }).selectOption('claim');
       await page.locator('select[name="allocation-recipient-1-person"]').selectOption(recipient);
+      await expectInlineMoneyAligned(page.locator('.refund-form p .money'));
       const preview = page.locator('.refund-preview-list');
       await expect(preview).toContainText('You');
       await expect(preview.locator('.refund-preview-person').filter({ has: page.getByText('You', { exact: true }) })).toContainText('Current: You owe 10.00 USD → After saving: You are owed 11.00 USD');
@@ -244,6 +246,7 @@ test('different recipient: settlement changes and curated refund screenshots', a
       await expect(page.getByRole('heading', { name: 'Recorded balance effects' })).toBeVisible();
       await expect(page.getByLabel('Saved refund effects')).toContainText('21.00 USD');
       await expect(page.getByLabel('Saved refund effects')).not.toContainText('After saving');
+      await expectInlineMoneyAligned(page.locator('.credit-detail-surface p .money'));
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       if (process.env.REFUND_SCREENSHOTS && [390, 1440].includes(width)) await page.screenshot({ path: `docs/screenshots/refund-explanations-detail-${width}.png`, fullPage: true });
       await page.getByText('Audit history', { exact: true }).click();
