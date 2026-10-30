@@ -798,7 +798,7 @@ async function assertCustomInsightAccessibility(page: Page, invalidFromUrl: bool
   expect(new Set(finalIds).size).toBe(finalIds.length);
 }
 
-async function populateRefundAuditState(page: Page) {
+async function populateRefundAuditState(page: Page, people = { friend: 'Demo friend', participant: 'Demo participant' }) {
   await expect(page.getByText('Defaults to you. Change this if someone else received the money.', { exact: true })).toBeVisible();
   const expenseSelect = page.locator('.refund-application-row select').first();
   await expect(expenseSelect).toBeVisible();
@@ -814,9 +814,9 @@ async function populateRefundAuditState(page: Page) {
   await expect(page.locator('.refund-preview-person')).toHaveCount(3);
   // fixture.sql already includes the saved 42 USD refund and 10 USD repayment.
   await expect(page.locator('.refund-preview-person')).toHaveText([
-    'Demo friendCurrent: Demo friend owes 46.00 USD → After saving: Demo friend owes 74.00 USD',
+    `${people.friend}Current: ${people.friend} owes 46.00 USD → After saving: ${people.friend} owes 74.00 USD`,
     'YouCurrent: You are owed 60.00 USD → After saving: You are owed 74.00 USD',
-    'Demo participantCurrent: Demo participant owes 14.00 USD → After saving: Demo participant is settled up (USD)',
+    `${people.participant}Current: ${people.participant} owes 14.00 USD → After saving: ${people.participant} is settled up (USD)`,
   ]);
   await expect(page.locator('#refund-money-flow')).toContainText('Who actually received the money?');
   await expect(page.getByLabel('Affected shares', { exact: true })).toContainText('original split');
@@ -1398,7 +1398,7 @@ test('refund submission remains enabled online and disabled offline', async ({ b
   for (const viewport of highRiskViewports) {
     await withHighRiskPage(browser, viewport, async (page, context) => {
       await openHighRiskRoute(page, context, `/groups/${ids.rich}/refund/new`);
-      await populateRefundAuditState(page);
+      await populateRefundAuditState(page, { friend: 'Sam Rivera', participant: 'Priya Shah' });
       const refundSubmit = page.getByRole('button', { name: 'Record money back', exact: true });
       await expect(refundSubmit).toBeEnabled();
       await setHighRiskOffline(page, context);
