@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Credit } from '../shared/types';
-import { projectedRefundBalance, refundBalanceSummary, refundBalanceText, refundPairOutcome, refundTransferHelp, savedRefundEffects } from './refund-effects';
+import { projectedRefundBalance, refundBalanceSummary, refundPairOutcome, refundTransferHelp, savedRefundEffects } from './refund-effects';
 import { RefundRecordEffects } from './refund-record-effects';
 
 const credit: Credit = { id: 'refund', groupId: 'demo', subtype: 'refund', deliveryMode: 'member_reimbursement', amountMinor: 1000, currency: 'USD', date: '2026-01-01', createdBy: 'demo', createdAt: '', updatedAt: '', version: 1, applications: [], allocations: [
@@ -50,16 +50,6 @@ describe('refund explanations', () => {
     // A currency change removes USD independently and adds EUR independently.
     expect(projectedRefundBalance(-200, 0, -600)).toBe(400);
     expect(projectedRefundBalance(100, -300, 0)).toBe(-200);
-  });
-  it('uses exact states and current-user grammar with currency labels', () => {
-    expect(refundBalanceText('You', -200, 'USD', true)).toBe('You owe 2.00 USD');
-    expect(refundBalanceText('You', 200, 'EUR', true)).toBe('You are owed 2.00 EUR');
-    expect(refundBalanceText('Demo friend (removed)', 200, 'USD')).toBe('Demo friend (removed) is owed 2.00 USD');
-    expect(refundBalanceText('Demo friend', -200, 'USD')).toBe('Demo friend owes 2.00 USD');
-    expect(refundBalanceText('You', 0, 'USD', true)).toBe('You are settled up (USD)');
-    expect(refundBalanceText('You', -200, 'USD', false)).toBe('You owes 2.00 USD');
-    expect(refundBalanceText('You', 200, 'USD', false)).toBe('You is owed 2.00 USD');
-    expect(refundBalanceText('You', 0, 'USD', false)).toBe('You is settled up (USD)');
   });
   it('uses saved allocations, including overlapping receipt and benefit, without expense reconstruction', () => {
     expect([...savedRefundEffects(credit)]).toEqual([['one', -600], ['two', 600]]);

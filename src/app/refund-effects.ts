@@ -1,5 +1,4 @@
 import type { Balances, Credit, Currency } from '../shared/types';
-import { minorToInput } from './form-display';
 
 /** Saved allocations are the accounting snapshot, even if linked expenses change. */
 export function savedRefundEffects(credit: Credit) {
@@ -8,12 +7,6 @@ export function savedRefundEffects(credit: Credit) {
     effects.set(row.personId, (effects.get(row.personId) || 0) + (row.allocationType === 'recipient' ? -row.amountMinor : row.amountMinor));
   }
   return effects;
-}
-
-export function refundBalanceText(name: string, netMinor: number, currency: Currency, isCurrentPerson = false) {
-  if (netMinor === 0) return `${name} ${isCurrentPerson ? 'are' : 'is'} settled up (${currency})`;
-  const verb = netMinor > 0 ? (isCurrentPerson ? 'are owed' : 'is owed') : (isCurrentPerson ? 'owe' : 'owes');
-  return `${name} ${verb} ${minorToInput(Math.abs(netMinor))} ${currency}`;
 }
 
 export function projectedRefundBalance(current: number, draftEffect: number, savedEffect = 0) {
