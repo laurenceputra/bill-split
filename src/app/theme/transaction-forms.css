@@ -288,6 +288,14 @@ text-align: right;
   font-weight: 700;
 }
 
+.refund-preview-outcome > small {
+  display: block;
+}
+
+.refund-preview-section details > p {
+  margin-top: var(--space-3);
+}
+
 .amount-field > input.amount-input--very-long {
   font-size: clamp(1.15rem, 5vw, 2rem);
   letter-spacing: 0;

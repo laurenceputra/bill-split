@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create } from 'react-test-renderer';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -7,18 +7,88 @@ import { AllocationRows, beneficiaryRowsComplete, beneficiarySnapshotMatches, bu
 import { ApiError } from './api';
 import * as api from './api';
 import * as ui from './ui';
-import { refundOriginalSplitAllowed, refundRecipientStatus, refundSettlementEffect } from './refund-form';
+import { refundOriginalSplitAllowed, refundRecipientStatus } from './refund-form';
 import { resourceKeys, seedResource } from './resource-cache';
 import { getReloadSafetyState } from './reload-safety';
 
 const expense = (id: string, currency: Expense['currency']): Expense => ({ id, groupId: 'group', description: id, amountMinor: 1000, currency, date: '2026-01-01', createdBy: 'user', createdAt: '', updatedAt: '', version: 1, payers: [], splits: [] });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+beforeEach(() => { vi.spyOn(api, 'getBalances').mockResolvedValue({ balances: {} }); });
+
+describe('mounted refund dependency freshness', () => {
+  it.each([
+    ['credit', false], ['expense', false], ['credit', true], ['expense', true],
+  ] as const)('expires saved credit and off-first-page selected details, resolving %s first (new revision: %s) without rebasing dirty input', async (first, changedRevision) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T12:00:00Z'));
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => undefined, removeItem: () => undefined });
+    const navigator = { onLine: true, userAgent: 'test', platform: 'Linux', maxTouchPoints: 0 };
+    vi.stubGlobal('navigator', navigator);
+    vi.stubGlobal('window', { location: { pathname: '/', search: '', hash: '' }, navigator, addEventListener: () => undefined, removeEventListener: () => undefined });
+    vi.spyOn(ui, 'useOnlineStatus').mockReturnValue(true);
+    const userId = 'freshness-user', groupId = 'freshness-group', creditId = 'freshness-credit';
+    const identity = { id: userId, personId: 'you', name: 'Demo user' };
+    seedResource(resourceKeys.identity(), 'identity', identity);
+    vi.spyOn(api, 'getMe').mockResolvedValue(identity as Awaited<ReturnType<typeof api.getMe>>);
+    seedResource(resourceKeys.group(userId, groupId), userId, { group: { id: groupId, name: 'Sample project', currency: 'USD' }, members: [{ personId: 'you', name: 'Demo user' }, { personId: 'other', name: 'Demo friend' }], historicalParticipants: [], currentPersonId: 'you', splitDefault: null });
+    seedResource(resourceKeys.expenses(userId, groupId), userId, { expenses: [expense('first-page', 'USD')], nextCursor: 'second-page' });
+    const original = { ...expense('off-first-page', 'USD'), amountMinor: 2000, payers: [{ personId: 'you', amountMinor: 2000 }], splits: [{ personId: 'you', amountMinor: 2000 }] };
+    const saved: Credit = { id: creditId, groupId, subtype: 'refund', deliveryMode: 'member_reimbursement', amountMinor: 1000, currency: 'USD', date: '2026-01-01', createdBy: userId, createdAt: '', updatedAt: '', version: 1, applications: [{ expenseId: original.id, amountMinor: 1000 }], allocations: [{ personId: 'other', allocationType: 'recipient', amountMinor: 1000 }, { personId: 'you', allocationType: 'beneficiary', amountMinor: 1000 }] };
+    seedResource(resourceKeys.creditDetail(userId, creditId), userId, { credit: saved });
+    const balances = { balances: { USD: { raw: [{ personId: 'you', name: 'Demo user', netMinor: -500, currency: 'USD' as const }, { personId: 'other', name: 'Demo friend', netMinor: 500, currency: 'USD' as const }], simplified: [] } } };
+    seedResource(resourceKeys.balances(userId, groupId), userId, balances);
+    vi.mocked(api.getBalances).mockResolvedValue(balances);
+    let resolveCredit!: (value: Awaited<ReturnType<typeof api.getCreditDetails>>) => void;
+    let resolveExpense!: (value: Awaited<ReturnType<typeof api.getExpenseDetails>>) => void;
+    const creditRequest = new Promise<Awaited<ReturnType<typeof api.getCreditDetails>>>((resolve) => { resolveCredit = resolve; });
+    const expenseRequest = new Promise<Awaited<ReturnType<typeof api.getExpenseDetails>>>((resolve) => { resolveExpense = resolve; });
+    const getCredit = vi.spyOn(api, 'getCreditDetails').mockReturnValue(creditRequest);
+    const getExpense = vi.spyOn(api, 'getExpenseDetails').mockResolvedValueOnce({ expense: original, history: [] }).mockReturnValue(expenseRequest);
+    let renderer!: ReturnType<typeof create>;
+    const text = () => renderer.root.findAllByProps({ className: 'refund-preview-component' }).map((row) => row.children.join('')).join('\n');
+    try {
+      await act(async () => { renderer = create(<MemoryRouter initialEntries={[`/groups/${groupId}/credit/${creditId}/edit`]}><Routes><Route path="/groups/:id/credit/:creditId/edit" element={<RefundForm />} /></Routes></MemoryRouter>); });
+      expect(text()).toContain('Balance unchanged.');
+      expect(renderer.root.findAllByProps({ className: 'refund-transfer-help' })).toHaveLength(1);
+      await act(async () => renderer.root.findByType('textarea').props.onChange({ target: { value: 'Dirty draft note' } }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+      expect(getCredit).toHaveBeenCalledTimes(1);
+      expect(api.getBalances).toHaveBeenCalled();
+      expect(getExpense).toHaveBeenLastCalledWith('off-first-page', expect.any(AbortSignal));
+      expect(getExpense).toHaveBeenCalledTimes(2);
+      expect(text()).toBe('');
+      expect(renderer.root.findAllByProps({ className: 'refund-transfer-help' })).toHaveLength(0);
+      expect(JSON.stringify(renderer.toJSON())).toContain('Balance projection unavailable');
+      const finishCredit = () => resolveCredit({ credit: changedRevision ? { ...saved, version: 2, amountMinor: 2000, applications: [{ expenseId: original.id, amountMinor: 2000 }], allocations: saved.allocations.map((row) => ({ ...row, amountMinor: 2000 })) } : saved, history: [] });
+      const finishExpense = () => resolveExpense({ expense: { ...original, amountMinor: 3000, payers: [{ personId: 'other', amountMinor: 3000 }], splits: [{ personId: 'you', amountMinor: 3000 }] }, history: [] });
+      await act(async () => { if (first === 'credit') finishCredit(); else finishExpense(); });
+      expect(text()).toBe(''); // Both saved credit and selected expense must be fresh.
+      await act(async () => { if (first === 'credit') finishExpense(); else finishCredit(); });
+      if (changedRevision) {
+        expect(text()).toBe('');
+        expect(JSON.stringify(renderer.toJSON())).toContain('This refund changed since you started editing.');
+        expect(JSON.stringify(renderer.toJSON())).toContain('Balance projection hidden because this draft is based on an older refund revision.');
+        const update = vi.spyOn(api, 'updateCredit').mockRejectedValue(new Error('Refund changed. Reload and try again.'));
+        await act(async () => { await renderer.root.findByType('form').props.onSubmit({ preventDefault: () => undefined }); });
+        expect(update).toHaveBeenCalledWith(creditId, expect.objectContaining({ version: 1, amount_minor: 1000, note: 'Dirty draft note' }));
+        expect(update.mock.calls[0][1].allocations).toContainEqual({ person_id: 'other', allocation_type: 'recipient', amount_minor: 1000 });
+        expect(JSON.stringify(renderer.toJSON())).toContain('Refund changed. Reload and try again.');
+      } else {
+        expect(text()).toContain('Balance unchanged.');
+      }
+      expect(renderer.root.findAllByProps({ className: 'refund-transfer-help' })).toHaveLength(0);
+      expect(JSON.stringify(renderer.toJSON())).toContain('30.00');
+      expect(renderer.root.findByType('textarea').props.value).toBe('Dirty draft note');
+      expect(renderer.root.findByProps({ name: 'application-1-amount' }).props.value).toBe('10.00');
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('refund expense picker behavior', () => {
   it('explains signed settlement deltas without assuming current balances or pairwise transfers', () => {
-    expect(refundSettlementEffect(2100, 'USD')).toBe('The amount you owe decreases, or the amount you are owed increases by 21.00 USD.');
-    expect(refundSettlementEffect(-2100, 'USD')).toBe('The amount you owe increases, or the amount you are owed decreases by 21.00 USD.');
-    expect(refundSettlementEffect(0, 'USD')).toBe('Your settlement balance is unchanged.');
     const rows = refundPreviewRows('member_reimbursement', [{ id: 'recipient-receipt', allocationType: 'recipient', personId: 'recipient', amount: '42.00' }], [{ personId: 'originalPayer', amountMinor: 4200 }], [], [{ personId: 'originalPayer', amountMinor: 2100 }, { personId: 'recipient', amountMinor: 2100 }], 'USD');
     expect(groupRefundPreviewRows(rows).map(({ personId, netMinor }) => ({ personId, netMinor }))).toEqual([{ personId: 'recipient', netMinor: -2100 }, { personId: 'originalPayer', netMinor: 2100 }]);
   });

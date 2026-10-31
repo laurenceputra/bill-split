@@ -1,5 +1,75 @@
 # Responsive audit matrix
 
+## Refund balance explanations
+
+Required widths for every row: **320, 390, 767, 768, 895, 896, 1440px**.
+Keep the same mobile DOM order; recording/saving remains before cancellation,
+and editing a saved record remains before deletion. No accounting rules changed.
+
+| View / meaningful state | Responsive and behavior checks |
+| --- | --- |
+| Create: incomplete/invalid draft, default recipient, original split | No projected amounts until complete; validation and primary action remain reachable without horizontal overflow. |
+| Create: complete member receipt, genuine two-person group | One named after-saving outcome per affected currency, with up/down/current outcome subtext for sign crossing and zero. Unchanged amounts say Balance unchanged. Validate complete opposite raw balances. |
+| Create: larger group, including historical/removed or raw-ledger identities, only two affected people | Compact per-person current → after balances, never infer a pairwise debt from the affected subset. |
+| Create/edit: calculation disclosure closed/open | Semantic How is this calculated? disclosure hides calculation and separate-payment guidance by default. Latest-loaded draft projection, not historical totals. Short payment note remains visible; no duplicate refund/applied totals when fully applied. |
+| Create: adjusted beneficiaries, overlapping/multiple recipients | Beneficiary controls remain operable; net effects combine receipt and cost reduction; multi-party help is generalized inside calculation disclosure. |
+| Create: provider offset / standalone | Offset explains payment reduction, not a new receipt; no separate-payment help. Standalone has no invented original payer. |
+| Create/edit: loading, stale, cached offline, cached/cold error | Projection unavailable (never zero); refresh control disabled offline/loading, available online. Reconnect and refresh restore projection only with fresh resources. |
+| Create/edit: loaded response missing person/currency | Explicit balance unavailable for that person/currency, never fabricated settled/zero. |
+| Edit: unchanged and changed saved allocations; currency change | Subtract saved snapshot then add draft, currency by currency. Unchanged edit keeps current balance. Clearly latest-loaded projection after saving, not historical totals. |
+| Edit: background refresh discovers a newer saved revision | Preserve draft and its original optimistic token; show conflict warning and saved-record link, hide projection and transfer guidance. Saving must not silently overwrite the newer revision. Required at all widths above; mounted unit regression verified, responsive conflict layout remains planned. |
+| Saved detail: member receipt, provider offset, historical names | Effects come only from persisted allocations, never current expense splits. Explain receipt versus cost reduction and offset versus member payment; no historical before/after totals. |
+| Saved detail: audit disclosure closed/open, cached/offline/error | Readable snapshot explanations remain distinct from current balances; edit precedes delete, offline writes disabled. Names retain historical/fallback labels. |
+| Saved detail: deleted | Tombstone explicitly has no active effects; restore action only, no active effect list. |
+| Inline money: partially applied refund total, saved detail total, insight Your share/You paid, schedule amount + cadence | At all required widths, amounts share the surrounding prose baseline, including when the detail label wraps. Preserve nowrap, contained horizontal scrolling and overflow-only keyboard focus. Flex/grid amount layouts are unchanged. |
+
+**Verified automated coverage:** `tests/e2e/linked-refund.spec.ts` checks create
+validation, beneficiary and calculation disclosures, recipient overlap, sign crossing/zero, two-person versus historical three-person groups, cached
+offline suppression and reconnect/reload, missing/error balances,
+unchanged/changed standalone edits (including USD → EUR → USD), saved member
+receipt snapshots, audit disclosure, and deleted records across required widths.
+It checks horizontal overflow and reachable create actions. Unit tests cover zero
+crossings, explicit current-person grammar (including another person named You),
+transfer wording, saved allocations versus changed linked expense splits, and
+provider mode. Mounted fake-clock regressions verify expired saved-credit and
+off-first-page selected expense snapshots: both must refresh before projection or
+guidance returns, either completion order is safe, latest expense snapshots
+replace older ones, and dirty note/applied amount fields are preserved.
+The newer-revision regression changes saved totals and allocations and verifies
+that the preserved v1 draft still submits version 1 after v2 loads, surfaces a
+save conflict, and never presents a safe-looking projection for the stale edit.
+The focused Chromium refund suite plus online/offline submission audit pass.
+The broad normal-route refund audit was attempted separately: completed 320/390px
+states (including calculation open) report zero product findings, but Wrangler
+exits unexpectedly at the 768px context, so the remaining broad audit is not
+claimed as verified. Disclosure paragraph spacing is also measured at every
+focused create width in `linked-refund.spec.ts`.
+
+Inline baseline regressions in `linked-refund.spec.ts` (synthetic create/detail)
+and `tablet-layout.spec.ts` (live schedule prose and an insight-shaped fixture
+using a rendered Money clone; the non-personal insight branch is not currently
+mounted by a route) measure actual browser text baselines at all required widths.
+Shared `.money` uses `vertical-align: bottom` to align line boxes despite the
+scroll container's bottom-edge baseline;
+`middle` was visually compared but centers on the font's x-height rather than
+matching text baselines. Existing safe-integer and below-threshold overflow
+browser checks and `money-ui.test.tsx` retain keyboard-scroll/focus coverage.
+
+**Planned/manual coverage, not claimed as verified:** all-width provider-offset
+saved detail and historical-name layouts; saved-detail cached/offline/error
+variants; delayed initial balance loading; explicit refresh-button recovery from
+errors; and a UI-driven paginated selection followed by TTL expiry (the mounted
+regression currently covers selected detail-loaded expenses outside page one).
+The table above lists audit requirements, not a claim that every combination was
+exercised. No Firefox/WebKit or native-device run is included.
+Synthetic mobile/desktop evidence is refreshed with
+`REFUND_SCREENSHOTS=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm run test:e2e:local -- tests/e2e/linked-refund.spec.ts --project=chromium --workers=1`.
+Images: `refund-improvements-*-mobile/desktop.png`,
+`refund-explanations-edit-390/1440.png`, `refund-explanations-detail-390/1440.png`.
+New reference pairs include `refund-improvements-calculation-open-*` and
+`refund-improvements-larger-group-*`.
+All captures use Demo user / Demo friend / Sample purchase only.
+
 ## Shared personal balance verification
 
 At 320px, 767/768px, 895/896px, and desktop, audit the existing Home cards
@@ -109,8 +179,8 @@ normal navigation visible before any capture-only hiding of fixed navigation.
 | Refund / beneficiaries closed/open/original-split reset | Custom snapshot preserved when reopening; supported reset uses read-only server-derived shares; unsupported inactive-share changes blocked with actionable help |
 | Refund / saved edit/historical members | Saved recipients stay manual until Use full total; inactive derived shares must exactly match saved person/type/minor amount, including after reset |
 | Refund / all manual beneficiaries removed | Stable aggregate error separate from total validity; submit focuses Money flow; Add affected member/original split recovery reachable |
-| Refund / money-flow preview | Each person once with received/payment-reduction/cost-reduction and signed net; valid complete drafts only; no inferred pairwise transfer or total balance |
-| Refund / different recipient | Generic Demo friend / Sample purchase; original-payer positive and recipient negative deltas, zero effects, invalid-preview suppression; separate-payment help only where applicable |
+| Refund / balance preview | Valid complete fresh drafts only. Genuine two-person group with complete opposite raw balances gets one named outcome per currency; all other groups get compact per-person current → after balances. Historical/removed/raw identities prevent unsafe pairwise inference. |
+| Refund / different recipient and calculation disclosure closed/open | Generic Demo friend / Sample purchase; sign crossing, settled and unchanged outcomes, invalid-preview suppression; calculation and applicable separate-payment help inside semantic disclosure. |
 | Expense detail / linked refunds | Gross/refunded/net/remaining, linked rows and Add refund in reading order; long notes wrap |
 | Credit/refund detail / active/deleted/restore | Accounting summary before edit/delete/audit; tombstone exposes restore only, disabled offline; conflict feedback adjacent |
 | Settlement / create/edit/detail/tombstone | Balance before online-only form; from/to/date touch-safe; restore/history secondary to accounting summary |
@@ -144,7 +214,7 @@ presentation injection, resource states, and real worker lifecycle behavior.
 | `insight-people.spec.ts` | Person geometry at 320, 390, 639, 640, 768, 895, 896, 1440; group secondary control/context at six canonical widths; focused period/currency/resource states |
 | `transaction-chooser.spec.ts` | 320, 390, 599, 600, 768, 895, 896, 1440 for selected/unselected/offline geometry; targeted 320px loading/removal/cache/empty/error transitions |
 | `control-feedback.spec.ts` | Pure production controls at 320, 390, 895, 896, 1440; deterministic button/auth/install/update/banner props, not provider modal execution |
-| `linked-refund.spec.ts` | 320, 390, 480, 481, 767, 768, 895, 896, 1440; validation/focus, following/reset, beneficiaries, multiple recipients, long decimals and different-recipient preview |
+| `linked-refund.spec.ts` | 320, 390, 480, 481, 767, 768, 895, 896, 1440; validation/focus, following/reset, beneficiaries, multiple recipients, long decimals, named outcomes, calculation disclosure, sign crossing/zero; historical three-person fallback and currency edits at canonical seven widths |
 | `avatar.spec.ts` | 320, 390, 767, 768, 895, 896, 1440; preference/preview/persistence/fallback/loading/error/cached offline restrictions; external avatar requests intercepted |
 | `update-settings.spec.ts` | Original phase/draft presentation at 320, 390, 767, 768, 895, 896, 1440; diagnostics/recovery additionally 834/1024 (nine widths) |
 | `service-worker-update.spec.ts` | Standalone same-origin production-core A/B lifecycle; recovery page at nine recovery widths; not authenticated full-App A/B migration |

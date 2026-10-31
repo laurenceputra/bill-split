@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { Page, TestInfo } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { tabletReferences } from './tablet-evidence';
+import { expectInlineMoneyAligned } from './money-alignment';
 
 const widths = [320, 390, 767, 768, 820, 834, 895, 896, 1024, 1180, 1194, 1440];
 const groupId = '00000000-0000-4000-8000-000000003002';
@@ -95,6 +96,31 @@ test('centered group and History routes retain disclosures and reading width at 
   }
 });
 
+test('inline insight and schedule amounts share the surrounding text baseline', async ({ authenticatedPage: page }) => {
+  for (const width of [320, 390, 767, 768, 895, 896, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/groups/${groupId}`);
+    await expect(page.locator('.schedule-overview-row .money').first()).toBeVisible();
+    await expectInlineMoneyAligned(page.locator('.schedule-overview-row small .money'));
+    // The non-personal InsightCurrencyMetrics branch is not currently mounted
+    // by a route. Exercise its prose shape with a real rendered Money clone and
+    // the shipped styles, without adding a test-only route to the application.
+    await page.locator('.schedule-overview-row .money').first().evaluate((money) => {
+      const metric = document.createElement('div');
+      metric.className = 'insight-metric';
+      metric.dataset.moneyAlignmentFixture = '';
+      for (const label of ['Your share ', 'You paid ']) {
+        const line = document.createElement('span');
+        line.className = 'muted';
+        line.append(label, money.cloneNode(true));
+        metric.append(line);
+      }
+      document.querySelector('.route-view')!.append(metric);
+    });
+    await expectInlineMoneyAligned(page.locator('[data-money-alignment-fixture] .money'));
+  }
+});
+
 test('safe-integer positive and negative money remains contained and keyboard scrollable at 320px', async ({ authenticatedPage: page }, info) => {
   await demoData(page, Number.MAX_SAFE_INTEGER);
   await page.setViewportSize({ width: 320, height: 900 });
@@ -136,7 +162,7 @@ test('below-threshold group money overflow gets keyboard focus only while it nee
   await demoData(page, 999999999999);
   await page.setViewportSize({ width: 320, height: 900 });
   await page.goto(`/groups/${groupId}`);
-  const money = page.locator('.balance-card .money').first();
+  const money = page.locator('.balance-card .money').filter({ hasText: '$9,999,999,999.99' }).first();
   await expect(money).toContainText('$9,999,999,999.99');
   await page.evaluate(() => document.fonts.ready);
   expect(await money.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
