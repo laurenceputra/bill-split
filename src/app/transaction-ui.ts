@@ -4,9 +4,14 @@ export const transactionKey = (transaction: Transaction) => `${transaction.kind}
 
 export const transactionDate = (transaction: Transaction) => transaction.date;
 
-export const transactionTypeLabel = (transaction: Transaction) => transaction.kind === 'expense' ? 'Expense' : transaction.kind === 'settlement' ? 'Payment' : 'Refund/reimbursement';
+export const transactionTypeLabel = (transaction: Transaction) => transaction.kind === 'expense' ? 'Expense' : transaction.kind === 'settlement' ? 'Payment' : transaction.kind === 'debt' ? 'Debt' : 'Refund/reimbursement';
 
-export function transactionTitle(transaction: Transaction): string {
+export function transactionTitle(transaction: Transaction, currentPersonId?: string): string {
+  if (transaction.kind === 'debt') {
+    if (transaction.debtorPersonId === currentPersonId) return `You owe ${transaction.creditorName}`;
+    if (transaction.creditorPersonId === currentPersonId) return `${transaction.debtorName} owes you`;
+    return `${transaction.debtorName} owes ${transaction.creditorName}`;
+  }
   return transaction.kind === 'expense' ? transaction.description : transaction.kind === 'settlement' ? `${transaction.fromName} paid ${transaction.toName}` : transaction.subtype === 'refund' ? 'Money back' : 'Reimbursement';
 }
 

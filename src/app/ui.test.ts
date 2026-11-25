@@ -70,7 +70,7 @@ describe('SplitTransactionControl', () => {
     expect(markup).toMatch(/value="refund" disabled/);
     expect(markup).toMatch(/value="payment" disabled/);
     expect(markup).toMatch(/<select[^>]+aria-describedby=[^>]+disabled/);
-    expect(markup).toContain('More transaction types unavailable: Choose a group first to record a refund or payment.');
+    expect(markup).toContain('More transaction types unavailable: Choose a group first to record a debt, refund, or payment.');
   });
 
   it('does not put current-page semantics on a primary link unless explicitly told it is current', () => {
@@ -85,7 +85,7 @@ describe('SplitTransactionControl', () => {
     expect(markup).toContain('href="/groups/group-1/expense/new"');
     expect(markup).toContain('Refund/reimbursement (online only)');
     expect(markup).toContain('Payment between members (online only)');
-    expect(markup).toContain('title="Refunds and payments require a connection."');
+    expect(markup).toContain('title="Debt, refunds, and payments require a connection."');
     expect(markup).toMatch(/<select[^>]+disabled/);
   });
 

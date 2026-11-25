@@ -1,6 +1,6 @@
 import { zValidator } from '@hono/zod-validator';
 import type { Hono } from 'hono';
-import { assertFinancialInput, currency, date, expenseInput, creditInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
+import { assertFinancialInput, currency, date, debtInput, expenseInput, creditInput, scheduledExpenseInput, scheduledExpenseStatusInput, settlementInput, transactionVersionInput } from '../shared/schemas';
 import { assertLikeSearch, Repository, RepositoryError } from '../db/repository';
 
 type RouteHelpers = {
@@ -29,11 +29,11 @@ export function registerExpenseSettlementRoutes(api: Hono<any>, helpers: RouteHe
     const offsetError = rejectOffset(c); if (offsetError) return offsetError;
     const q = c.req.query(), limit = page(q.limit, 25, 100);
     if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
-     if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement' && q.kind !== 'credit') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense, settlement, or credit');
+     if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement' && q.kind !== 'credit' && q.kind !== 'debt') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense, settlement, credit, or debt');
     if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Currency filter is invalid');
     try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); } catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); }
     try {
-      const result = await x.repo.transactionPage(c.req.param('groupId'), { kind: q.kind as 'expense' | 'settlement' | undefined, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
+      const result = await x.repo.transactionPage(c.req.param('groupId'), { kind: q.kind, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
       return c.json({ transactions: result.items, nextCursor: result.nextCursor });
     } catch (error) { return repositoryError(c, error); }
   });
@@ -66,6 +66,13 @@ export function registerExpenseSettlementRoutes(api: Hono<any>, helpers: RouteHe
   api.post('/api/expenses/:expenseId/restore', zValidator('json', transactionVersionInput), async (c) => { const repo = getRepo(c), expense = await repo.expenseForUser(c.req.param('expenseId'), auth(c).id, true); if (!expense || !expense.deletedAt || Date.now() - Date.parse(expense.deletedAt) > 30 * 24 * 60 * 60 * 1000) return jsonError(c, 404, 'EXPENSE_NOT_FOUND', 'Deleted expense not found'); const x = await authorizedGroup(c, expense.groupId); if (x instanceof Response) return x; try { return c.json({ expense: await x.repo.restoreExpense(c.req.param('expenseId'), x.auth.id, c.req.valid('json').version) }); } catch (error) { return repositoryError(c, error); } });
 
   api.get('/api/groups/:groupId/settlements', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.settlementPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ settlements: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
+  api.post('/api/groups/:groupId/debts', zValidator('json', debtInput), async (c) => {
+    const groupId = c.req.param('groupId');
+    const x = await authorizedGroup(c, groupId);
+    if (x instanceof Response) return x;
+    try { return c.json({ debt: await x.repo.createDebt(groupId, x.auth.id, c.req.valid('json')) }, 201); }
+    catch (error) { return repositoryError(c, error); }
+  });
   api.post('/api/groups/:groupId/settlements', zValidator('json', settlementInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const input = c.req.valid('json'), people = await x.repo.groupPeople(c.req.param('groupId')); if (input.from_person_id === input.to_person_id || !people.includes(input.from_person_id) || !people.includes(input.to_person_id)) return jsonError(c, 400, 'INVALID_SETTLEMENT', 'Settlement participants are invalid'); try { return c.json({ settlement: await x.repo.createSettlement(c.req.param('groupId'), x.auth.id, input) }, 201); } catch (error) { return repositoryError(c, error); } });
   api.get('/api/groups/:groupId/credits', async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; const offsetError = rejectOffset(c); if (offsetError) return offsetError; const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers'); try { const result = await x.repo.creditPage(c.req.param('groupId'), { limit, cursor: q.cursor }); return c.json({ credits: result.items, nextCursor: result.nextCursor }); } catch (error) { return repositoryError(c, error); } });
   api.post('/api/groups/:groupId/credits', zValidator('json', creditInput), async (c) => { const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x; try { return c.json({ credit: await x.repo.createCredit(c.req.param('groupId'), x.auth.id, c.req.valid('json')) }, 201); } catch (error) { return repositoryError(c, error); } });

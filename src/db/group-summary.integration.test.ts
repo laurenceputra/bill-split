@@ -209,6 +209,89 @@ describe('group summaries with the in-process local D1 binding', () => {
     expect(racedDb.raced).toBe(true);
   });
 
+  it('records debts in both directions without representing them as spending or payments', async () => {
+    const fixture = await createFixture('Sample-project');
+    const repo = new Repository(db);
+    const base = { person_id: fixture.personB, amount_minor: 1200, currency: 'USD' as const, date: '2026-01-02', note: 'Sample note', client_operation_id: 'debt-one' };
+    const first = await repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe' });
+    expect(first).toMatchObject({ debtorPersonId: fixture.personA, creditorPersonId: fixture.personB });
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe' })).resolves.toEqual(first);
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'owes_me' })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe', person_id: fixture.personA })).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe', person_id: 'non-member', client_operation_id: 'other' })).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
+    await expect(repo.balanceProjection(fixture.groupId)).resolves.toEqual({ ready: false, rows: [
+      { currency: 'USD', personId: fixture.personA, netMinor: -1200 },
+      { currency: 'USD', personId: fixture.personB, netMinor: 1200 },
+    ] });
+    await maintainUntilReady(repo, fixture.groupId);
+    const second = await repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'owes_me', amount_minor: 2000, client_operation_id: 'debt-two' });
+    expect(second).toMatchObject({ debtorPersonId: fixture.personB, creditorPersonId: fixture.personA });
+    await expect(repo.balanceProjection(fixture.groupId)).resolves.toEqual({ ready: true, rows: [
+      { currency: 'USD', personId: fixture.personA, netMinor: 800 },
+      { currency: 'USD', personId: fixture.personB, netMinor: -800 },
+    ] });
+    expect((await repo.spendingInsights(fixture.userA, fixture.groupId)).summaries).toEqual([]);
+    expect((await repo.settlementPage(fixture.groupId)).items).toEqual([]);
+    await expect(repo.settlementForUser(first.id, fixture.userA, true)).resolves.toBeNull();
+    expect((await repo.groupExportPage(fixture.groupId)).debts.map(({ id }) => id)).toEqual(expect.arrayContaining([first.id, second.id]));
+    expect((await repo.auditPage(fixture.groupId)).items).toEqual(expect.arrayContaining([expect.objectContaining({ entityType: 'debt', entityId: first.id })]));
+    const timeline = await repo.globalTransactionPage(fixture.userA, fixture.groupId, { kind: 'debt', person: fixture.personA, limit: 1 });
+    expect(timeline.items).toHaveLength(1);
+    expect(timeline.nextCursor).toBeDefined();
+    const next = await repo.globalTransactionPage(fixture.userA, fixture.groupId, { kind: 'debt', cursor: timeline.nextCursor });
+    expect([...timeline.items, ...next.items]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'debt', id: first.id, debtorName: 'A', creditorName: 'B' }),
+      expect.objectContaining({ kind: 'debt', id: second.id, debtorName: 'B', creditorName: 'A' }),
+    ]));
+    expect((await repo.globalActivity(fixture.userA, fixture.groupId, { limit: 5 })).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'debt', entityId: first.id, debtorName: 'A', creditorName: 'B' }),
+    ]));
+    const payment = await repo.createSettlement(fixture.groupId, fixture.userA, {
+      from_person_id: fixture.personB, to_person_id: fixture.personA, amount_minor: 800, currency: 'USD', date: base.date,
+      client_operation_id: base.client_operation_id,
+    });
+    expect((await repo.settlementPage(fixture.groupId)).items).toEqual([payment]);
+    expect((await repo.balanceProjection(fixture.groupId)).rows.every((row) => row.netMinor === 0)).toBe(true);
+    await exec("UPDATE group_members SET deleted_at='2026-01-03' WHERE group_id=? AND person_id=?", fixture.groupId, fixture.personB);
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe', client_operation_id: 'removed-member' })).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
+  });
+
+  it('enforces combined debt limits in either write order without putting debts in base projections', async () => {
+    const fixture = await createFixture('Sample-limit');
+    const repo = new Repository(db);
+    const draft = { direction: 'i_owe' as const, person_id: fixture.personB, amount_minor: Math.floor(Number.MAX_SAFE_INTEGER / 4), currency: 'USD' as const, date: '2026-01-02', client_operation_id: 'sample-limit' };
+    const expense = { description: 'Sample expense', amount_minor: 4, currency: draft.currency, date: draft.date, payers: [{ person_id: fixture.personA, amount_minor: 4 }], splits: [{ person_id: fixture.personB, amount_minor: 4 }] };
+    const first = await repo.createExpense(fixture.groupId, fixture.userA, expense);
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, draft)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await repo.deleteExpense(first.id, fixture.userA, first.version);
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...draft, amount_minor: draft.amount_minor + 1 })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await repo.createDebt(fixture.groupId, fixture.userA, draft);
+    await maintainUntilReady(repo, fixture.groupId);
+    expect(await all("SELECT gross_minor FROM ledger_totals WHERE group_id=? AND gross_minor>0", fixture.groupId)).toEqual([]);
+    await expect(repo.createExpense(fixture.groupId, fixture.userA, expense)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await expect(repo.restoreExpense(first.id, fixture.userA, first.version + 1)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const payment = { from_person_id: fixture.personA, to_person_id: fixture.personB, amount_minor: 1, currency: draft.currency, date: draft.date };
+    await expect(repo.createSettlement(fixture.groupId, fixture.userA, { ...payment, from_person_id: fixture.personB, to_person_id: fixture.personA })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const creditId = `${fixture.groupId}-credit`;
+    await exec(`INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,created_by,created_at,updated_at)
+      VALUES(?,?,'refund','member_reimbursement',4,'USD','2026-01-02',?,'2026-01-02','2026-01-02')`, creditId, fixture.groupId, fixture.userA);
+    const allocate = (amount: number) => exec("INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES(?,?,'recipient',?)", creditId, fixture.personA, amount);
+    await expect(allocate(4)).rejects.toThrow('BALANCE_OVERFLOW');
+    await allocate(3);
+    await expect(exec('UPDATE credit_allocations SET amount_minor=4 WHERE credit_id=?', creditId)).rejects.toThrow('BALANCE_OVERFLOW');
+    await exec("UPDATE credits SET deleted_at='2026-01-03' WHERE id=?", creditId);
+    await exec('UPDATE credit_allocations SET amount_minor=4 WHERE credit_id=?', creditId);
+    await expect(exec('UPDATE credits SET deleted_at=NULL WHERE id=?', creditId)).rejects.toThrow('BALANCE_OVERFLOW');
+    const balance = (await repo.groups(fixture.userA)).find((group) => group.id === fixture.groupId)?.personalBalance;
+    expect(balance?.balances).toEqual([{ currency: 'USD', netMinor: -draft.amount_minor }]);
+    const partial = await repo.createSettlement(fixture.groupId, fixture.userA, payment);
+    await expect(repo.updateSettlement(partial.id, fixture.userA, { ...payment, from_person_id: fixture.personB, to_person_id: fixture.personA, version: partial.version })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await repo.deleteSettlement(partial.id, fixture.userA, partial.version);
+    await repo.restoreSettlement(partial.id, fixture.userA, partial.version + 1);
+    await repo.createSettlement(fixture.groupId, fixture.userA, { ...payment, amount_minor: draft.amount_minor - 1 });
+    expect((await repo.balanceProjection(fixture.groupId)).rows.every((row) => row.netMinor === 0)).toBe(true);
+  });
+
   it('includes signed credit allocations in both fallback and ready monthly projections', async () => {
     const fixture = await createFixture('credit-projection');
     await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');

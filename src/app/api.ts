@@ -1,4 +1,4 @@
-import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
+import type { Activity, AuditDisclosureEvent, AuditEvent, Credit, Debt, Expense, Group, GroupInvitation, GroupMember, GroupSplitDefault, GroupResponse, HistoricalParticipant, ScheduledExpense, Settlement, Balances, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import type { CreditInput, GroupSplitDefaultInput, ScheduledExpenseInput, SettlementInput } from '../shared/schemas';
 import { avatarPreference } from '../shared/avatar';
 import { acceptPersonalBalance, capturePersonalBalanceEpoch, hydratePersonalBalance, persistPersonalBalance } from './personal-balances';
@@ -43,7 +43,7 @@ export type AuditPage = { audit: AuditEvent[]; nextCursor?: string };
 export type AuditDisclosurePage = { audit: AuditDisclosureEvent[]; nextCursor?: string };
 export type SpendingInsightSummaryOptions = { from?: string; to?: string; currency?: string; comparisonFrom?: string; comparisonTo?: string };
 export type SpendingInsightTrendOptions = { trendFrom: string; trendTo: string; currency?: string };
-export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; credits?: Credit[]; nextCursor?: { expenses: string | null; settlements: string | null; credits?: string | null } };
+export type GroupExportPage = { version: number; exportedAt: string; group: Group | null; splitDefault: GroupSplitDefault | null; members: GroupMember[]; expenses: Expense[]; settlements: Settlement[]; credits?: Credit[]; debts?: Debt[]; nextCursor?: { expenses: string | null; settlements: string | null; credits?: string | null } };
 export type ExportPage = { version: number; exportedAt: string; groups: GroupExportPage[]; nextCursor?: string };
 const TRANSACTION_HISTORY_PAGE_LIMIT = 25;
 const isSufficientTransactionHistoryPage = (limit: number | undefined) => typeof limit === 'number' && limit >= TRANSACTION_HISTORY_PAGE_LIMIT;
@@ -1120,6 +1120,10 @@ async function restoreProvisionalRouteCache(userId: string, authenticatedPersonI
   if (groupId && pathname.endsWith('/settle')) {
     const cached = await seedGroup(groupId, ['group', 'balances']);
     return Boolean(cached?.group && cached.members && cached.balances && resourceReady(resourceKeys.group(userId, groupId)) && resourceReady(resourceKeys.balances(userId, groupId)));
+  }
+  if (groupId && pathname.endsWith('/debt/new')) {
+    const cached = await seedGroup(groupId, ['group']);
+    return Boolean(cached?.group && cached.members && resourceReady(resourceKeys.group(userId, groupId)));
   }
   const editMatch = pathname.match(/\/expense\/([^/]+)$/);
   if (editMatch && editMatch[1] !== 'new') {

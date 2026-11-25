@@ -24,10 +24,10 @@ export function readTransactionFilters(params: URLSearchParams): TransactionFilt
   return normalizeTransactionFilters(result);
 }
 
-/** Categories are meaningful for all transactions except settlements. */
+/** Categories apply only to expenses. */
 export function normalizeTransactionFilters(filters: TransactionFilters): TransactionFilters {
   const normalized = { ...filters };
-  if (normalized.kind === 'settlement' || normalized.kind === 'credit') delete normalized.category;
+  if (normalized.kind && normalized.kind !== 'expense') delete normalized.category;
   return normalized;
 }
 

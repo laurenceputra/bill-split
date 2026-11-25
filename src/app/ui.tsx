@@ -261,8 +261,8 @@ export function SplitTransactionControl({ groupId, online, compact = false, mobi
   const alternativesAvailable = navigation.options.some((option) => !option.disabled && option.path);
   const menuDisabled = !alternativesAvailable;
   const unavailableReason = navigation.options.some((option) => option.label.includes('(online only)'))
-    ? 'Refunds and payments require a connection.'
-    : 'Choose a group first to record a refund or payment.';
+    ? 'Debt, refunds, and payments require a connection.'
+    : 'Choose a group first to record a debt, refund, or payment.';
   const menuLabel = menuDisabled ? `More transaction types unavailable: ${unavailableReason}` : 'Choose transaction type';
   const menuTitle = menuDisabled ? unavailableReason : 'Choose transaction type';
   const descriptionId = `${selectId}-description`;

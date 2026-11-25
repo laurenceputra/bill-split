@@ -7,6 +7,8 @@ import { beginProtectedOperation } from './reload-safety';
 
 export const DB_NAME = 'bill-split-local';
 export const DB_VERSION = 11;
+const DEBT_RETRY_DB_NAME = 'bill-split-debt-retries';
+const DEBT_RETRY_STORE = 'submissionKeys';
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -142,7 +144,7 @@ export interface CachedExpenseDetails {
 }
 export interface CachedCategories { userId: string; categories: string[]; fetchedAt: string }
 
-const activityTypes = ['expense', 'settlement', 'credit', 'expense_revision', 'settlement_revision', 'credit_revision', 'expense_deleted', 'settlement_deleted', 'credit_deleted'] as const;
+const activityTypes = ['expense', 'settlement', 'credit', 'debt', 'expense_revision', 'settlement_revision', 'credit_revision', 'expense_deleted', 'settlement_deleted', 'credit_deleted'] as const;
 const isActivityType = (value: unknown): value is Activity['type'] => typeof value === 'string' && (activityTypes as readonly string[]).includes(value);
 export const validActivityEntityId = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
 
@@ -193,6 +195,11 @@ export function normalizeActivity(value: unknown): Activity[] {
       ...(typeof (row.groupId ?? row.group_id) === 'string' ? { groupId: String(row.groupId ?? row.group_id) } : {}),
       ...(typeof (row.groupName ?? row.group_name) === 'string' ? { groupName: String(row.groupName ?? row.group_name) } : {}),
     };
+    if (row.type === 'debt') return [{
+      ...base, type: 'debt',
+      debtorName: typeof row.debtorName === 'string' && row.debtorName ? row.debtorName : 'Unknown member',
+      creditorName: typeof row.creditorName === 'string' && row.creditorName ? row.creditorName : 'Unknown member',
+    }];
     return [{ ...base, ...(settlement ? { fromName: typeof (row.fromName ?? row.from_name) === 'string' ? String(row.fromName ?? row.from_name) : null, toName: typeof (row.toName ?? row.to_name) === 'string' ? String(row.toName ?? row.to_name) : null } : {}) } as Activity];
   });
 }
@@ -231,16 +238,20 @@ export class IndexedDBUnavailableError extends Error {
 
 const available = () => typeof indexedDB !== 'undefined';
 
-function open(waitForUnblocked = false): Promise<IDBDatabase> {
+function open(waitForUnblocked = false, debtRetries = false): Promise<IDBDatabase> {
   if (!available()) return Promise.reject(new IndexedDBUnavailableError());
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = debtRetries ? indexedDB.open(DEBT_RETRY_DB_NAME, 1) : indexedDB.open(DB_NAME, DB_VERSION);
     let releaseUpgrade: (() => void) | undefined;
     let rejectedWhileBlocked = false;
     request.onupgradeneeded = (event) => {
       try { releaseUpgrade = beginProtectedOperation('Upgrading offline storage'); }
       catch (error) { request.transaction?.abort(); reject(error); return; }
       const database = request.result;
+      if (debtRetries) {
+        database.createObjectStore(DEBT_RETRY_STORE);
+        return;
+      }
       // Keep this store and its legacy key intact. Older builds wrote `form` here.
       if (!database.objectStoreNames.contains('recent')) database.createObjectStore('recent');
       if (!database.objectStoreNames.contains('identities')) database.createObjectStore('identities', { keyPath: 'key' });
@@ -294,10 +305,10 @@ function open(waitForUnblocked = false): Promise<IDBDatabase> {
 
 /** Own the actual transaction, not a request promise or a caller's deadline.
  * In particular, a bubbling request error is not yet a transaction abort. */
-async function openForWrite() {
+async function openForWrite(debtRetries = false) {
   const release = beginProtectedOperation('Saving offline data');
   try {
-    const db = await open(true);
+    const db = await open(true, debtRetries);
     return {
       close: () => db.close(),
       transaction: (stores: string | string[], mode: IDBTransactionMode) => {
@@ -312,8 +323,8 @@ async function openForWrite() {
   } catch (error) { release(); throw error; }
 }
 
-async function transaction<T>(stores: string | string[], mode: IDBTransactionMode, action: (tx: IDBTransaction) => IDBRequest<T> | void): Promise<T | undefined> {
-  const db = await (mode === 'readwrite' ? openForWrite() : open());
+async function transaction<T>(stores: string | string[], mode: IDBTransactionMode, action: (tx: IDBTransaction) => IDBRequest<T> | void, debtRetries = false): Promise<T | undefined> {
+  const db = await (mode === 'readwrite' ? openForWrite(debtRetries) : open(false, debtRetries));
   return new Promise((resolve, reject) => {
     let result: T | undefined;
     const tx = db.transaction(stores, mode);
@@ -327,6 +338,9 @@ async function transaction<T>(stores: string | string[], mode: IDBTransactionMod
   });
 }
 
+const debtRetryTransaction = (action: (store: IDBObjectStore) => void) =>
+  transaction(DEBT_RETRY_STORE, 'readwrite', (tx) => action(tx.objectStore(DEBT_RETRY_STORE)), true);
+
 export async function saveRecent(value: unknown, generation = captureSessionGeneration()) {
   assertSessionGeneration(generation);
   await transaction('recent', 'readwrite', (tx) => { if (isSessionGenerationCurrent(generation)) tx.objectStore('recent').put(value, 'form'); });
@@ -334,6 +348,31 @@ export async function saveRecent(value: unknown, generation = captureSessionGene
 
 export async function readRecent<T>(): Promise<T | undefined> {
   return transaction<T>('recent', 'readonly', (tx) => tx.objectStore('recent').get('form'));
+}
+
+/** Persist only a digest and operation ID, not an offline debt draft or queue. */
+export async function claimDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, generation: number): Promise<string> {
+  const key = [userId, groupId, fingerprint];
+  let operationId: string | undefined;
+  await debtRetryTransaction((store) => {
+    const current = store.get(key);
+    current.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      operationId = typeof current.result === 'string' ? current.result : crypto.randomUUID();
+      if (current.result !== operationId) store.put(operationId, key);
+    };
+  });
+  assertSessionGeneration(generation);
+  if (!operationId) throw new IndexedDBUnavailableError('Could not keep a safe retry key for this entry.');
+  return operationId;
+}
+
+export async function forgetDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, operationId: string, generation: number) {
+  const key = [userId, groupId, fingerprint];
+  await debtRetryTransaction((store) => {
+    const current = store.get(key);
+    current.onsuccess = () => { if (isSessionGenerationCurrent(generation) && current.result === operationId) store.delete(key); };
+  });
 }
 
 export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>, generation = captureSessionGeneration()) => {
@@ -702,6 +741,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         }]));
         const transactions = row.transactions?.map((item) => item.kind === 'settlement'
           ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+          : item.kind === 'debt' ? { ...item, debtorName: replace(item.debtorPersonId, item.debtorName), creditorName: replace(item.creditorPersonId, item.creditorName) }
           : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
           tx.objectStore('groupSnapshots').put({ ...row, ...(group ? { group } : {}), ...(members ? { members } : {}), ...(historicalParticipants ? { historicalParticipants } : {}), ...(balances ? { balances } : {}), ...(transactions ? { transactions } : {}), ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
       }
@@ -713,6 +753,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) return;
        const transactions = row.transactions.map((item) => item.kind === 'settlement'
         ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+        : item.kind === 'debt' ? { ...item, debtorName: replace(item.debtorPersonId, item.debtorName), creditorName: replace(item.creditorPersonId, item.creditorName) }
         : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
         tx.objectStore('globalTransactions').put({ ...row, transactions, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
     };
@@ -820,7 +861,7 @@ export const saveCategories = (value: CachedCategories, generation = captureSess
 };
 export const readCategories = (userId: string) => transaction<CachedCategories>('categories', 'readonly', (tx) => tx.objectStore('categories').get(userId));
 
-/** Remove private cached data without touching the durable expense outbox. */
+/** Remove private cached data without touching unresolved mutation keys or the expense outbox. */
 export async function clearCachedData() {
   await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
     for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
@@ -829,9 +870,9 @@ export async function clearCachedData() {
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
-  });
+  const stores = ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox'];
+  await transaction(stores, 'readwrite', (tx) => { for (const store of stores) tx.objectStore(store).clear(); });
+  await debtRetryTransaction((store) => { store.clear(); });
 }
 
 export const saveOutboxItem = async (item: ExpenseOutboxItem, generation = captureSessionGeneration(), expectedAuthEpoch?: number, allowed: () => boolean = () => true) => {

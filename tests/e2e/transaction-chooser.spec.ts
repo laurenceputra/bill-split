@@ -16,7 +16,7 @@ async function checkGeometry(page: Page, width: number) {
   for (const [index, box] of geometry.boxes.entries()) {
     for (const next of geometry.boxes.slice(index + 1)) expect(box.right <= next.left + 1 || next.right <= box.left + 1 || box.bottom <= next.top + 1 || next.bottom <= box.top + 1).toBe(true);
   }
-  if (width <= 599) expect(geometry.boxes.slice(0, 3).every((box, index) => index === 0 || box.top >= geometry.boxes[index - 1].bottom)).toBe(true);
+  if (width <= 599) expect(geometry.boxes.slice(0, 4).every((box, index) => index === 0 || box.top >= geometry.boxes[index - 1].bottom)).toBe(true);
 }
 
 async function refreshGroups(page: Page) {
@@ -53,14 +53,15 @@ for (const outcome of ['removed', 'failed'] as const) {
       if (outcome === 'removed') {
         await expect(select).toHaveValue('');
         await expect(select.locator('option')).toHaveCount(2);
-        await expect(page.locator('.chooser-options button:disabled')).toHaveCount(3);
+        await expect(page.locator('.chooser-options button:disabled')).toHaveCount(4);
         await expect(page.locator('.chooser-options a')).toHaveCount(0);
       } else {
         await expect(select).toHaveValue(firstId);
-        await expect(page.locator('.chooser-options a')).toHaveCount(3);
+        await expect(page.locator('.chooser-options a')).toHaveCount(4);
         await expect(page.locator('.chooser-options a').nth(0)).toHaveAttribute('href', `/groups/${firstId}/expense/new`);
-        await expect(page.locator('.chooser-options a').nth(1)).toHaveAttribute('href', `/groups/${firstId}/refund/new`);
-        await expect(page.locator('.chooser-options a').nth(2)).toHaveAttribute('href', `/groups/${firstId}/settle`);
+        await expect(page.locator('.chooser-options a').nth(1)).toHaveAttribute('href', `/groups/${firstId}/debt/new`);
+        await expect(page.locator('.chooser-options a').nth(2)).toHaveAttribute('href', `/groups/${firstId}/refund/new`);
+        await expect(page.locator('.chooser-options a').nth(3)).toHaveAttribute('href', `/groups/${firstId}/settle`);
         await expect(page.getByRole('status').filter({ hasText: 'Showing cached groups; refresh is unavailable.' })).toHaveCount(1);
       }
     } finally { await context.close(); }
@@ -122,14 +123,14 @@ test('scoped chooser waits for a cold lookup and retains cached actions during r
     await expect(page.getByText('This group is unavailable.', { exact: false })).toHaveCount(0);
     await expect(page.locator('.chooser-options')).toHaveCount(0);
     release();
-    await expect(page.locator('.chooser-options a')).toHaveCount(3);
+    await expect(page.locator('.chooser-options a')).toHaveCount(4);
     gate = new Promise<void>((resolve) => { release = resolve; });
     await refreshGroups(page);
     await expect.poll(() => requests).toBe(2);
     await expect(page.locator('.chooser-options [data-primary-action]')).toHaveAttribute('href', `/groups/${secondId}/expense/new`);
     await expect(page.getByText('This group is unavailable.', { exact: false })).toHaveCount(0);
     release();
-    await expect(page.locator('.chooser-options a')).toHaveCount(3);
+    await expect(page.locator('.chooser-options a')).toHaveCount(4);
   } finally { release(); await context.close(); }
 });
 
@@ -152,20 +153,21 @@ test('compact chooser selects one group, preserves destinations and survives off
       await expect(select).toHaveValue('');
       await expect(select.locator('option')).toHaveText(['Choose a group', 'Alpha family', 'Zebra household and shared care expenses with a very long group name']);
       await expect(actions).toHaveCount(1);
-      await expect(actions.locator('button:disabled')).toHaveCount(3);
+      await expect(actions.locator('button:disabled')).toHaveCount(4);
       await checkGeometry(page, width);
       for (const id of [firstId, secondId]) {
         await select.selectOption(id);
         await expect(actions.getByRole('link', { name: 'Add expense', exact: true })).toHaveAttribute('href', `/groups/${id}/expense/new`);
+        await expect(actions.getByRole('link', { name: 'Record debt', exact: true })).toHaveAttribute('href', `/groups/${id}/debt/new`);
         await expect(actions.getByRole('link', { name: 'Refund/reimbursement', exact: true })).toHaveAttribute('href', `/groups/${id}/refund/new`);
         await expect(actions.getByRole('link', { name: 'Payment between members', exact: true })).toHaveAttribute('href', `/groups/${id}/settle`);
       }
       await checkGeometry(page, width);
       await context.setOffline(true);
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
-      await expect(actions.locator('button:disabled')).toHaveCount(2);
+      await expect(actions.locator('button:disabled')).toHaveCount(3);
       await expect(actions.getByRole('link', { name: 'Add expense' })).toBeVisible();
-      await expect(page.getByRole('status').filter({ hasText: 'Refunds and payments are online-only' })).toHaveCount(1);
+      await expect(page.getByRole('status').filter({ hasText: 'Debt, refunds, and payments are online-only' })).toHaveCount(1);
       await checkGeometry(page, width);
     } finally { await context.close(); }
   }

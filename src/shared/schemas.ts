@@ -10,7 +10,7 @@ export const currency = z.enum(supportedCurrencies, { errorMap: () => ({ message
 export const date = z.string().refine((value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
-  return parsed.toISOString().slice(0, 10) === value;
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }, 'Date must be a real calendar date in YYYY-MM-DD format');
 const safeMinor = z.number().int().nonnegative().refine(Number.isSafeInteger, 'Amount must be a safe integer');
 export const personInput = z.object({ name: z.string().trim().min(1).max(120), email: z.string().trim().email().max(320).optional().nullable() });
@@ -38,6 +38,11 @@ export const expenseInput = z.object({
   payers: z.array(payerInput).min(1).max(100), splits: z.array(splitInput).min(1).max(100), client_operation_id: z.string().trim().min(1).max(100).optional()
 });
 export const settlementInput = z.object({ from_person_id: id, to_person_id: id, amount_minor: z.number().int().positive().refine(Number.isSafeInteger), currency, date, note: z.string().max(500).optional().nullable(), version: z.number().int().positive().optional(), client_operation_id: z.string().trim().min(1).max(100).optional() });
+export const debtInput = settlementInput.pick({ amount_minor: true, currency: true, date: true, note: true }).extend({
+  direction: z.enum(['i_owe', 'owes_me']),
+  person_id: id,
+  client_operation_id: z.string().trim().min(1).max(100),
+}).strict();
 const creditApplicationInput = z.object({ expense_id: id, amount_minor: z.number().int().positive().refine(Number.isSafeInteger) });
 const creditAllocationInput = z.object({ person_id: id, allocation_type: z.enum(['recipient', 'beneficiary']), amount_minor: z.number().int().positive().refine(Number.isSafeInteger) });
 export const creditInput = z.object({
@@ -99,6 +104,7 @@ export const groupSplitDefaultInput = z.union([
 export type GroupSplitDefaultInput = z.infer<typeof groupSplitDefaultInput>;
 export type ExpenseInput = z.infer<typeof expenseInput>;
 export type SettlementInput = z.infer<typeof settlementInput>;
+export type DebtInput = z.infer<typeof debtInput>;
 export type CreditInput = z.infer<typeof creditInput>;
 export type FriendInput = z.infer<typeof friendInput>;
 export type GroupCreationInput = z.infer<typeof groupCreationInput>;
