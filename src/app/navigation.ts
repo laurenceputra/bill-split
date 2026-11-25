@@ -8,6 +8,7 @@ export type NavigationRoute =
   | 'settle'
   | 'new-expense'
   | 'add-transaction'
+  | 'debt-create'
   | 'refund-create'
   | 'refund-edit'
   | 'edit-expense'
@@ -19,7 +20,7 @@ export type NavigationRoute =
 export type NavigationSection = 'groups' | 'activity' | 'add' | 'settle' | 'settings';
 
 export type TransactionNavigationOption = {
-  value: 'refund' | 'payment';
+  value: 'debt' | 'refund' | 'payment';
   label: string;
   path?: string;
   disabled: boolean;
@@ -112,6 +113,7 @@ export function getTransactionNavigation(groupId?: unknown, online = true): Tran
     primaryLabel: scoped ? 'Add expense' : 'Add transaction',
     primaryAriaLabel: scoped ? 'Add expense' : 'Add transaction',
     options: [
+      { value: 'debt', label: `Record debt${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/debt/new` : undefined, disabled: !scoped || !online },
       { value: 'refund', label: `Refund/reimbursement${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/refund/new` : undefined, disabled: !scoped || !online },
       { value: 'payment', label: `Payment between members${unavailableReason}`, path: scoped ? `/groups/${validGroupId}/settle` : undefined, disabled: !scoped || !online },
     ],
@@ -157,6 +159,7 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
   else if (group && segments[2] === 'activity' && segments.length === 3) route = 'activity';
   else if (group && segments[2] === 'settle' && segments.length === 3) route = 'settle';
   else if (group && segments[2] === 'add' && segments.length === 3) route = 'add-transaction';
+  else if (group && segments[2] === 'debt' && segments[3] === 'new' && segments.length === 4) route = 'debt-create';
   else if (group && ((segments[2] === 'expense' && segments[3] === 'new') || (segments[2] === 'scheduled-expense' && segments[3] === 'new')) && segments.length === 4) route = 'new-expense';
   else if (group && ((segments[2] === 'refund' || segments[2] === 'credit') && segments[3] === 'new' && segments.length === 4)) route = 'refund-create';
   else if (group && ((segments[2] === 'refund' || segments[2] === 'credit') && segments[3] && segments[4] === 'edit' && segments.length === 5)) route = 'refund-edit';
@@ -169,13 +172,13 @@ export function getNavigationContext(pathname: string, search = ''): NavigationC
     route === 'settings' ? 'settings' :
     route === 'activity' ? 'activity' :
     route === 'settle' ? 'settle' :
-     route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'refund-create' || route === 'refund-edit' ? 'add' :
+     route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'debt-create' || route === 'refund-create' || route === 'refund-edit' ? 'add' :
     'groups';
   const canonicalActivityPath = path === '/activity' ? `${path}${search}` : group ? `/activity?group=${encodeURIComponent(group.id)}&view=changes` : '/activity';
   const contextualPath = group
     ? route === 'activity' ? group.activityPath
       : route === 'settle' ? group.settlePath
-       : route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'refund-create' ? group.addPath
+       : route === 'new-expense' || route === 'edit-expense' || route === 'add-transaction' || route === 'debt-create' || route === 'refund-create' ? group.addPath
        : route === 'expense-detail' || route === 'credit-detail' ? path
             : group.overviewPath
     : route === 'settings' ? '/settings' : undefined;

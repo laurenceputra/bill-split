@@ -415,13 +415,13 @@ api.get('/api/transactions', async (c) => {
   const offsetError = rejectOffset(c); if (offsetError) return offsetError;
   const limit = page(q.limit, 25, 100);
   if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
-  if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement' && q.kind !== 'credit') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense, settlement, or credit');
+  if (q.kind !== undefined && q.kind !== 'expense' && q.kind !== 'settlement' && q.kind !== 'credit' && q.kind !== 'debt') return jsonError(c, 400, 'INVALID_FILTER', 'Transaction kind must be expense, settlement, credit, or debt');
   if (q.currency !== undefined && !currency.safeParse(q.currency).success) return jsonError(c, 400, 'INVALID_FILTER', 'Currency filter is invalid');
   try { if (q.from) date.parse(q.from); if (q.to) date.parse(q.to); assertLikeSearch(q.q); }
   catch (error) { if (error instanceof RepositoryError) return repositoryError(c, error); return jsonError(c, 400, 'INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates'); }
   if (q.group && (await authorizedGroup(c, q.group)) instanceof Response) return jsonError(c, 404, 'GROUP_NOT_FOUND', 'Group not found');
   try {
-    const result = await getRepo(c).globalTransactionPage(c.get('auth').id, q.group || undefined, { kind: q.kind as 'expense' | 'settlement' | undefined, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
+    const result = await getRepo(c).globalTransactionPage(c.get('auth').id, q.group || undefined, { kind: q.kind, q: q.q, person: q.person, category: q.category, from: q.from, to: q.to, currency: q.currency, limit, cursor: q.cursor });
     return c.json({ transactions: result.items, nextCursor: result.nextCursor });
   } catch (error) { return repositoryError(c, error); }
 });
@@ -466,7 +466,7 @@ api.get('/api/groups/:groupId/audit', async (c) => { const x = await authorizedG
 api.get('/api/groups/:groupId/audit/:entityType/:entityId', async (c) => {
   const x = await authorizedGroup(c, c.req.param('groupId')); if (x instanceof Response) return x;
   const entityType = c.req.param('entityType');
-   if (entityType !== 'expense' && entityType !== 'settlement' && entityType !== 'credit') return jsonError(c, 400, 'INVALID_AUDIT_ENTITY', 'Audit entity type must be expense, settlement, or credit');
+   if (entityType !== 'expense' && entityType !== 'settlement' && entityType !== 'credit' && entityType !== 'debt') return jsonError(c, 400, 'INVALID_AUDIT_ENTITY', 'Audit entity type must be expense, settlement, credit, or debt');
   const offsetError = rejectOffset(c); if (offsetError) return offsetError;
   const q = c.req.query(), limit = page(q.limit, 50, 100); if (limit < 1) return jsonError(c, 400, 'INVALID_PAGINATION', 'Pagination values must be finite non-negative integers');
   try {

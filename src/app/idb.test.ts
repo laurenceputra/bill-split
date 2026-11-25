@@ -400,6 +400,13 @@ describe('user-scoped IndexedDB', () => {
     expect(await readMutationGeneration('user-a')).toBe(1);
   });
 
+  it('persists debtor and creditor labels when debt activity is read from cache', async () => {
+    const timestamp = '2026-01-01T12:00:00Z';
+    const debt = { type: 'debt' as const, id: 'demo-entry', entityId: 'demo-entry', amountMinor: 1250, currency: 'USD' as const, transactionDate: '2026-01-01', label: null, createdAt: timestamp, debtorName: 'Demo user', creditorName: 'Demo friend' };
+    await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [debt], fetchedAt: timestamp });
+    expect((await readActivity('user-a', 'group-a'))?.activity).toEqual([expect.objectContaining(debt)]);
+  });
+
   it('normalizes legacy activity rows without entity fields during cache hydration', async () => {
     const timestamp = new Date().toISOString();
     await saveActivity({ userId: 'user-a', groupId: 'group-a', activity: [{ type: 'expense', id: 'legacy-event', label: 'Old lunch', createdAt: timestamp } as never], fetchedAt: timestamp });

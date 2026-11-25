@@ -6,6 +6,14 @@ const expense: Transaction = { kind: 'expense', id: 'e-1', groupId: 'g-1', descr
 const settlement: Transaction = { kind: 'settlement', id: 's-1', groupId: 'g-1', amountMinor: 500, currency: 'USD', date: '2026-01-02', note: '  Paid back  ', fromPersonId: 'p-1', toPersonId: 'p-2', fromName: 'Former A', toName: 'Former B', createdAt: '2026-01-02T00:00:00Z' };
 
 describe('transaction row helpers', () => {
+  it('labels debt as an obligation from either viewer perspective, never a payment', () => {
+    const debt: Transaction = { kind: 'debt', id: 'd-1', groupId: 'g-1', amountMinor: 1250, currency: 'USD', date: '2026-01-01', createdAt: '2026-01-01T00:00:00Z', debtorPersonId: 'p-1', creditorPersonId: 'p-2', debtorName: 'Demo user', creditorName: 'Demo friend' };
+    expect(transactionTypeLabel(debt)).toBe('Debt');
+    expect(transactionTitle(debt, 'p-1')).toBe('You owe Demo friend');
+    expect(transactionTitle(debt, 'p-2')).toBe('Demo user owes you');
+    expect(transactionTitle(debt, 'p-3')).toBe('Demo user owes Demo friend');
+  });
+
   it('keeps expense and settlement identities distinct', () => {
     expect(transactionKey(expense)).toBe('expense:e-1');
     expect(transactionKey(settlement)).toBe('settlement:s-1');

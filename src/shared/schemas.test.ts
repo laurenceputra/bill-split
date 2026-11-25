@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { assertFinancialInput, categorySuggestionInput, currencyOptions, expenseInput, friendInput, groupCreationInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
+import { assertFinancialInput, categorySuggestionInput, currencyOptions, debtInput, expenseInput, friendInput, groupCreationInput, groupSplitDefaultInput, scheduledExpenseInput, supportedCurrencies } from './schemas';
 import { BalanceOverflowError } from './money';
 
 const base = { description: 'Lunch', amount_minor: 1000, currency: 'USD' as const, date: '2025-01-01', payers: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }], splits: [{ person_id: '00000000-0000-4000-8000-000000000001', amount_minor: 1000 }] };
+it('validates a debt direction, safe positive amount and calendar date without accepting payment fields', () => {
+  const valid = { direction: 'i_owe', person_id: base.payers[0].person_id, amount_minor: 1250, currency: 'USD', date: '2026-04-20', client_operation_id: 'demo-debt' };
+  expect(debtInput.safeParse(valid).success).toBe(true);
+  expect(debtInput.safeParse({ ...valid, direction: 'owes_me', note: 'Sample note' }).success).toBe(true);
+  for (const invalid of [{ direction: 'payment' }, { amount_minor: 0 }, { amount_minor: Number.MAX_SAFE_INTEGER + 1 }, { date: '2026-99-99' }, { currency: 'JPY' }, { from_person_id: base.payers[0].person_id }, { client_operation_id: undefined }]) {
+    expect(debtInput.safeParse({ ...valid, ...invalid }).success).toBe(false);
+  }
+});
 describe('financial input', () => {
   it('bounds category suggestion descriptions to the expense contract', () => {
     expect(categorySuggestionInput.parse({ description: '  Lunch  ' }).description).toBe('Lunch');

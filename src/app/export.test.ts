@@ -19,6 +19,20 @@ describe('paged export collection', () => {
 });
 
 describe('two-stream group export collection', () => {
+  it('keeps debts separate from settlements across a shared cursor', async () => {
+    const debt = { id: 'debt-1', groupId: 'demo-group', debtorPersonId: 'demo-user', creditorPersonId: 'demo-friend', amountMinor: 1250, currency: 'USD' as const, date: '2026-04-20', createdAt: '', updatedAt: '', version: 1 };
+    const first = { group: { id: 'demo-group' }, members: [], expenses: [], settlements: [], debts: [debt] };
+    const second = { ...first, settlements: [{ id: 'payment-1' }], debts: [debt, { ...debt, id: 'debt-2' }] };
+    const group = await collectPagedGroupExport(async ({ settlementCursor }) => settlementCursor
+      ? second : { ...first, nextCursor: { expenses: null, settlements: 'next-transfer' } }, new AbortController().signal);
+    expect(group.settlements.map(({ id }) => id)).toEqual(['payment-1']);
+    expect(group.debts?.map(({ id }) => id)).toEqual(['debt-1', 'debt-2']);
+    const [accountGroup] = await collectPagedAccountExport(async (cursor) => cursor
+      ? { groups: [second] } : { groups: [first], nextCursor: 'next-transfer' }, new AbortController().signal);
+    expect(accountGroup.debts?.map(({ id }) => id)).toEqual(['debt-1', 'debt-2']);
+    expect(accountGroup.settlements.map(({ id }) => id)).toEqual(['payment-1']);
+  });
+
   it('does not restart an exhausted stream when the other has more pages', async () => {
     const calls: Array<{ expenseCursor?: string | null; settlementCursor?: string | null }> = [];
     const result = await collectPagedGroupExport(async (cursors) => {

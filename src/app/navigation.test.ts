@@ -67,6 +67,7 @@ describe('getNavigationContext', () => {
       primaryLabel: 'Add expense',
       primaryAriaLabel: 'Add expense',
       options: [
+        { value: 'debt', label: 'Record debt', path: '/groups/group%2F123/debt/new', disabled: false },
         { value: 'refund', label: 'Refund/reimbursement', path: '/groups/group%2F123/refund/new', disabled: false },
         { value: 'payment', label: 'Payment between members', path: '/groups/group%2F123/settle', disabled: false },
       ],

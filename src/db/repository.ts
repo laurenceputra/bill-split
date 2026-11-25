@@ -1,6 +1,6 @@
-import { groupSplitDefaultInput, supportedCurrencies, type CreditInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
+import { groupSplitDefaultInput, supportedCurrencies, type CreditInput, type DebtInput, type ExpenseInput, type GroupSplitDefaultInput, type ScheduledExpenseInput, type SettlementInput } from '../shared/schemas';
 import type { D1Database } from '@cloudflare/workers-types';
-import type { Activity, AuditEvent, Credit, CreditTransaction, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
+import type { Activity, AuditEvent, Credit, CreditTransaction, Debt, Expense, Group, GroupBalanceSummary, GroupInvitation, GroupMember, GroupSplitDefault, ScheduledExpense, ScheduledExpenseStatus, Settlement, SpendingInsightSummaryResponse, SpendingInsightTrends, Transaction } from '../shared/types';
 import { BalanceOverflowError, checkedAddMinor, checkedMinor } from '../shared/money';
 import { firstOccurrenceOnOrAfter, localDateForTimeZone, nextCalendarDate, nextOccurrenceDate, recurrenceDefinition, compareDates } from '../domain/recurrence';
 import { generatedExpenseInput } from '../domain/scheduled-expense';
@@ -77,7 +77,7 @@ export const decodeTransactionCursor = (value: string | undefined): TransactionC
     const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
     const parsed = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)))) as Partial<TransactionCursor>;
     const keys = Object.keys(parsed).sort().join(','), expectedKeys = 'createdAt,date,id,kind,version';
-    if (keys !== expectedKeys || parsed.version !== 1 || typeof parsed.date !== 'string' || !isCalendarDate(parsed.date) || typeof parsed.createdAt !== 'string' || !parsed.createdAt || parsed.createdAt.length > 128 || !Number.isFinite(Date.parse(parsed.createdAt)) || (parsed.kind !== 'expense' && parsed.kind !== 'settlement' && parsed.kind !== 'credit') || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200) throw new Error('invalid cursor');
+    if (keys !== expectedKeys || parsed.version !== 1 || typeof parsed.date !== 'string' || !isCalendarDate(parsed.date) || typeof parsed.createdAt !== 'string' || !parsed.createdAt || parsed.createdAt.length > 128 || !Number.isFinite(Date.parse(parsed.createdAt)) || (parsed.kind !== 'expense' && parsed.kind !== 'settlement' && parsed.kind !== 'credit' && parsed.kind !== 'debt') || typeof parsed.id !== 'string' || !parsed.id || parsed.id.length > 200) throw new Error('invalid cursor');
     return { version: 1, date: parsed.date, createdAt: parsed.createdAt, kind: parsed.kind, id: parsed.id };
   } catch { throw new RepositoryError('INVALID_CURSOR', 'The transaction pagination cursor is invalid'); }
 };
@@ -1455,7 +1455,7 @@ export class Repository {
     if (opts.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     assertLikeSearch(opts.q);
     for (const value of [opts.from, opts.to]) if (value !== undefined && !isCalendarDate(value)) throw new RepositoryError('INVALID_DATE', 'Date filters must be real YYYY-MM-DD dates');
-     if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement' && opts.kind !== 'credit') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
+     if (opts.kind !== undefined && opts.kind !== 'expense' && opts.kind !== 'settlement' && opts.kind !== 'credit' && opts.kind !== 'debt') throw new RepositoryError('INVALID_PAGINATION', 'Transaction kind is invalid');
     const cursor = decodeTransactionCursor(opts.cursor);
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
     const args: unknown[] = [];
@@ -1476,7 +1476,7 @@ export class Repository {
       SELECT s.id,s.group_id,${groupName},NULL,s.amount_minor,s.currency,s.settlement_date AS transaction_date,
         NULL,NULL,s.note,s.from_person_id,s.to_person_id,
         COALESCE(from_person.name,'Deleted account'),COALESCE(to_person.name,'Deleted account'),
-         s.created_by,s.created_at,s.client_operation_id,'settlement' AS kind,NULL AS subtype,NULL AS delivery_mode
+         s.created_by,s.created_at,s.client_operation_id,s.entry_kind AS kind,NULL AS subtype,NULL AS delivery_mode
       FROM settlements s JOIN groups g ON g.id=s.group_id${userId === undefined ? '' : ' JOIN group_members authorized_member ON authorized_member.group_id=s.group_id AND authorized_member.user_id=? AND authorized_member.deleted_at IS NULL'}
       LEFT JOIN people from_person ON from_person.id=s.from_person_id
       LEFT JOIN people to_person ON to_person.id=s.to_person_id
@@ -1494,7 +1494,7 @@ export class Repository {
     if (opts.to) { sql += ' AND tr.transaction_date<=?'; args.push(opts.to); }
     if (opts.person) {
          sql += ` AND ((tr.kind='expense' AND (tr.id IN (SELECT expense_id FROM payers WHERE person_id=?) OR tr.id IN (SELECT expense_id FROM splits WHERE person_id=?)))
-         OR (tr.kind='settlement' AND (tr.from_person_id=? OR tr.to_person_id=?)) OR (tr.kind='credit' AND tr.id IN (SELECT credit_id FROM credit_allocations WHERE person_id=?)))`;
+         OR (tr.kind IN ('settlement','debt') AND (tr.from_person_id=? OR tr.to_person_id=?)) OR (tr.kind='credit' AND tr.id IN (SELECT credit_id FROM credit_allocations WHERE person_id=?)))`;
        args.push(opts.person, opts.person, opts.person, opts.person, opts.person);
     }
     if (cursor) {
@@ -1532,6 +1532,13 @@ export class Repository {
        }
      }
     const items: Transaction[] = pageRows.map((row) => {
+       if (row.kind === 'debt') return {
+         kind: 'debt', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }),
+         amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.transaction_date),
+         note: row.note == null ? null : text(row.note), createdAt: text(row.created_at),
+         debtorPersonId: text(row.to_person_id), creditorPersonId: text(row.from_person_id),
+         debtorName: text(row.to_name), creditorName: text(row.from_name),
+       };
        if (text(row.kind) === 'settlement') return {
          kind: 'settlement', id: text(row.id), groupId: text(row.group_id), ...(row.group_name == null ? {} : { groupName: text(row.group_name) }), amountMinor: minor(row.amount_minor), currency: currency(row.currency),
         date: text(row.transaction_date), note: row.note == null ? null : text(row.note), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id),
@@ -1712,8 +1719,8 @@ export class Repository {
     const user = await this.db.prepare('SELECT deleted_at FROM users WHERE id=?').bind(userId).first<Row>();
     if (user?.deleted_at != null) throw new RepositoryError('AUTH_IDENTITY_CONFLICT', 'This BillSplit account has been deleted and cannot mutate data');
   }
-  private activeMutationGuard(groupId: string, userId: string) {
-    return { sql: 'EXISTS (SELECT 1 FROM group_members auth_member JOIN groups auth_group ON auth_group.id=auth_member.group_id JOIN people auth_person ON auth_person.id=auth_member.person_id JOIN users auth_user ON auth_user.id=auth_member.user_id WHERE auth_member.group_id=? AND auth_member.user_id=? AND auth_member.deleted_at IS NULL AND auth_person.deleted_at IS NULL AND auth_group.deleted_at IS NULL AND auth_user.deleted_at IS NULL)', args: [groupId, userId] };
+  private activeMutationGuard(groupId: string, userId: string, personId?: string) {
+    return { sql: `EXISTS (SELECT 1 FROM group_members auth_member JOIN groups auth_group ON auth_group.id=auth_member.group_id JOIN people auth_person ON auth_person.id=auth_member.person_id JOIN users auth_user ON auth_user.id=auth_member.user_id WHERE auth_member.group_id=? AND auth_member.user_id=? AND auth_member.deleted_at IS NULL AND auth_person.deleted_at IS NULL AND auth_group.deleted_at IS NULL AND auth_user.deleted_at IS NULL${personId === undefined ? '' : ' AND auth_member.person_id=?'})`, args: [groupId, userId, ...(personId === undefined ? [] : [personId])] };
   }
   private activeCreatorGuard(groupId: string, userId: string) {
     return { sql: `EXISTS (SELECT 1 FROM users schedule_creator WHERE schedule_creator.id=? AND schedule_creator.deleted_at IS NULL)
@@ -1741,8 +1748,8 @@ export class Repository {
     };
   }
   private activeParticipantGuard(groupId: string, ids: string[]) { return this.creditParticipantGuard(groupId, ids); }
-  private auditInsert(event: { groupId: string; entityType: 'expense' | 'settlement' | 'credit'; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
-    const table = event.entityType === 'expense' ? 'expenses' : event.entityType === 'settlement' ? 'settlements' : 'credits';
+  private auditInsert(event: { groupId: string; entityType: AuditEvent['entityType']; entityId: string; version: number; action: 'create' | 'update' | 'delete' | 'restore'; actorId: string; occurredAt: string; before?: unknown; after?: unknown; revisionId?: string; mutationMarker?: string }) {
+    const table = event.entityType === 'expense' ? 'expenses' : event.entityType === 'credit' ? 'credits' : 'settlements';
     // Resolve the actor's person and name in the same D1 batch as the
     // mutation. The name is a snapshot; emails are intentionally never
     // selected or written to the audit table.
@@ -1838,18 +1845,26 @@ export class Repository {
 
   private mapSettlement(row: Row): Settlement { return { id: text(row.id), groupId: text(row.group_id), fromPersonId: text(row.from_person_id), toPersonId: text(row.to_person_id), amountMinor: minor(row.amount_minor), currency: currency(row.currency), date: text(row.settlement_date), note: row.note == null ? null : text(row.note), createdAt: text(row.created_at), updatedAt: text(row.updated_at), deletedAt: row.deleted_at == null ? null : text(row.deleted_at), version: number(row.version) || 1 }; }
   async settlementPage(groupId: string, options: { limit?: number; cursor?: string; offset?: number } = {}) {
+    const page = await this.balanceTransferPage(groupId, options, true);
+    return { items: page.rows.map((row) => this.mapSettlement(row)), nextCursor: page.nextCursor };
+  }
+  private async balanceTransferPage(groupId: string, options: { limit?: number; cursor?: string; offset?: number }, paymentsOnly: boolean) {
     if (options.offset !== undefined) throw new RepositoryError('INVALID_PAGINATION', 'Offset pagination is no longer supported; use the cursor');
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100), cursor = decodeLedgerCursor(options.cursor);
-    let sql = 'SELECT * FROM settlements WHERE group_id=? AND deleted_at IS NULL'; const args: unknown[] = [groupId];
+    let sql = `SELECT * FROM settlements WHERE group_id=? AND deleted_at IS NULL${paymentsOnly ? " AND entry_kind='settlement'" : ''}`; const args: unknown[] = [groupId];
     if (cursor) { sql += ' AND (settlement_date<? OR (settlement_date=? AND created_at<?) OR (settlement_date=? AND created_at=? AND id<?))'; args.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.id); }
     sql += ' ORDER BY settlement_date DESC,created_at DESC,id DESC LIMIT ?'; args.push(limit + 1);
     const rows = (await this.db.prepare(sql).bind(...args).all<Row>()).results, pageRows = rows.length > limit ? rows.slice(0, limit) : rows, last = pageRows[pageRows.length - 1];
-    return { items: pageRows.map((row) => this.mapSettlement(row)), nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.settlement_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
+    return { rows: pageRows, nextCursor: rows.length > limit && last ? encodeLedgerCursor({ date: text(last.settlement_date), createdAt: text(last.created_at), id: text(last.id) }) : undefined };
   }
-  async settlement(id: string, includeDeleted = false) { const row = await this.db.prepare(`SELECT * FROM settlements WHERE id=?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`).bind(id).first<Row>(); return row ? this.mapSettlement(row) : null; }
+  private async balanceTransfer(id: string, kind: 'settlement' | 'debt', includeDeleted = false) {
+    const row = await this.db.prepare(`SELECT * FROM settlements WHERE id=? AND entry_kind=?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`).bind(id, kind).first<Row>();
+    return row ? this.mapSettlement(row) : null;
+  }
+  async settlement(id: string, includeDeleted = false) { return this.balanceTransfer(id, 'settlement', includeDeleted); }
   async settlementForUser(id: string, userId: string, includeDeleted = false) {
     const row = await this.db.prepare(`SELECT s.* FROM settlements s JOIN groups g ON g.id=s.group_id JOIN group_members gm ON gm.group_id=g.id
-      WHERE s.id=? AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL${includeDeleted ? '' : ' AND s.deleted_at IS NULL'}`).bind(id, userId).first<Row>();
+      WHERE s.id=? AND s.entry_kind='settlement' AND g.deleted_at IS NULL AND gm.user_id=? AND gm.deleted_at IS NULL${includeDeleted ? '' : ' AND s.deleted_at IS NULL'}`).bind(id, userId).first<Row>();
     return row ? this.mapSettlement(row) : null;
   }
   private settlementParticipantGuard(groupId: string, ids: string[]) {
@@ -1864,25 +1879,44 @@ export class Repository {
     };
   }
   async createSettlement(groupId: string, userId: string, input: SettlementInput) {
-    const hash = stableJson(input), operation = input.client_operation_id ? await this.operation('settlement.create', userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
-    if (!operation.claim) { const existing = await this.settlement(operation.id); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
-    const id = operation.id, t = now(), actor = this.activeMutationGuard(groupId, userId), participants = this.settlementParticipantGuard(groupId, [input.from_person_id, input.to_person_id]);
+    return this.createBalanceTransfer(groupId, userId, input, 'settlement');
+  }
+  private mapDebt({ fromPersonId, toPersonId, ...entry }: Settlement): Debt {
+    return { ...entry, debtorPersonId: toPersonId, creditorPersonId: fromPersonId };
+  }
+  async createDebt(groupId: string, userId: string, input: DebtInput) {
+    const self = await this.currentPersonId(groupId, userId);
+    if (!self) throw new RepositoryError('MEMBER_REQUIRED', 'Active group membership is required to record debt');
+    if (self === input.person_id) throw new RepositoryError('MEMBER_REQUIRED', 'Select another active member');
+    const { direction, person_id, ...fields } = input;
+    // Balance transfers credit their from-side and debit their to-side.
+    // This is an obligation, not a payment, so the credited side is the creditor.
+    return this.mapDebt(await this.createBalanceTransfer(groupId, userId, {
+      ...fields, from_person_id: direction === 'i_owe' ? person_id : self, to_person_id: direction === 'i_owe' ? self : person_id,
+    }, 'debt', self));
+  }
+  private async createBalanceTransfer(groupId: string, userId: string, input: SettlementInput, kind: 'settlement' | 'debt', actorPersonId?: string) {
+    const operationKind = `${kind}.create`;
+    const hash = stableJson(input), operation = input.client_operation_id ? await this.operation(operationKind, userId, groupId, input.client_operation_id, hash) : { id: uid(), claim: true };
+    if (!operation.claim) { const existing = await this.balanceTransfer(operation.id, kind); if (existing && existing.groupId === groupId) return existing; throw new RepositoryError('DATABASE_ERROR', 'Idempotency result is unavailable'); }
+    const id = operation.id, t = now(), actor = this.activeMutationGuard(groupId, userId, actorPersonId), ids = [input.from_person_id, input.to_person_id];
+    const participants = kind === 'debt' ? this.activeParticipantGuard(groupId, ids) : this.settlementParticipantGuard(groupId, ids);
     const after: Settlement = { id, groupId, fromPersonId: input.from_person_id, toPersonId: input.to_person_id, amountMinor: input.amount_minor, currency: input.currency, date: input.date, note: input.note ?? null, createdAt: t, updatedAt: t, deletedAt: null, version: 1 };
     const statements = [
-      ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind('settlement.create', userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
-       this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, id, ...actor.args, ...participants.args),
-        this.auditInsert({ groupId, entityType: 'settlement', entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after, mutationMarker: id }),
+      ...(input.client_operation_id ? [this.db.prepare(`INSERT INTO idempotency_keys(kind,user_id,group_id,operation_id,request_hash,entity_id,created_at) SELECT ?,?,?,?,?,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind(operationKind, userId, groupId, input.client_operation_id, hash, id, t, ...actor.args, ...participants.args)] : []),
+       this.db.prepare(`INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at,client_operation_id,version,projection_mutation_id,entry_kind) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,1,?,? WHERE ${actor.sql} AND ${participants.sql}`).bind(id, groupId, input.from_person_id, input.to_person_id, input.amount_minor, input.currency, input.date, input.note ?? null, userId, t, t, kind === 'settlement' && input.client_operation_id ? `${groupId}:${input.client_operation_id}` : null, id, kind, ...actor.args, ...participants.args),
+        this.auditInsert({ groupId, entityType: kind, entityId: id, version: 1, action: 'create', actorId: userId, occurredAt: t, after: kind === 'debt' ? this.mapDebt(after) : after, mutationMarker: id }),
          ...this.boundSettlementProjectionDelta(id, groupId, input.currency, input.from_person_id, input.to_person_id, input.amount_minor, 1, t, undefined, input.date),
         this.projectionMutation(groupId, t, 'settlements', id),
     ];
     try { await this.db.batch(statements); } catch (error) {
       if (Repository.isBalanceOverflow(error)) throw Repository.balanceOverflow();
       if (!input.client_operation_id || !Repository.isUnique(error)) throw error;
-      const existing = await this.existingClaim('settlement.create', userId, groupId, input.client_operation_id);
+      const existing = await this.existingClaim(operationKind, userId, groupId, input.client_operation_id);
       if (!existing) throw error; if (text(existing.request_hash) !== hash) throw new RepositoryError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used with a different payload');
-      const found = await this.settlement(text(existing.entity_id)); if (found && found.groupId === groupId) return found; throw error;
+      const found = await this.balanceTransfer(text(existing.entity_id), kind); if (found && found.groupId === groupId) return found; throw error;
     }
-     const created = await this.settlement(id); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', 'The submitting user or settlement participants are not valid for this group'); } return created;
+     const created = await this.balanceTransfer(id, kind); if (!created) { await this.throwIfDeleted(userId); throw new RepositoryError('MEMBER_REQUIRED', kind === 'debt' ? 'Select another active member of this group' : 'The submitting user or settlement participants are not valid for this group'); } return created;
   }
   async updateSettlement(id: string, userId: string, input: SettlementInput) {
     if (!input.version) throw new RepositoryError('CONFLICT', 'A record version is required'); const old = await this.settlementForUser(id, userId); if (!old) throw new RepositoryError('CONFLICT', 'The record was deleted by another request'); if (old.version !== input.version) throw new RepositoryError('CONFLICT', 'The record was changed by another request'); const t = now(), next = input.version + 1, revisionId = uid(), actor = this.activeMutationGuard(old.groupId, userId), participants = this.settlementParticipantGuard(old.groupId, [input.from_person_id, input.to_person_id]);
@@ -2092,7 +2126,7 @@ export class Repository {
       Number.isSafeInteger(parsedAmount) ? `Amount ${text(currencyValue)} ${(parsedAmount / 100).toFixed(2)}` : '',
       typeof value('date', 'expense_date') === 'string' || typeof value('settlementDate', 'settlement_date') === 'string' ? `Date ${text(value('date', 'expense_date') ?? value('settlementDate', 'settlement_date'))}` : '',
       entityType === 'expense' && typeof value('notes', 'notes') === 'string' && value('notes', 'notes') ? `Notes “${value('notes', 'notes')}”` : '',
-       (entityType === 'settlement' || entityType === 'credit') && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',
+       entityType !== 'expense' && typeof value('note', 'note') === 'string' && value('note', 'note') ? `Note “${value('note', 'note')}”` : '',
       value('fromPersonId', 'from_person_id') !== undefined || value('toPersonId', 'to_person_id') !== undefined ? 'Participants updated' : '',
       value('deletedAt', 'deleted_at') != null ? 'Marked deleted' : '',
     ].filter(Boolean);
@@ -2281,7 +2315,7 @@ export class Repository {
         SELECT 'expense' AS type,e.id,e.id AS entity_id,1 AS entity_active,e.group_id,e.description AS label,e.amount_minor,e.currency,e.expense_date AS transaction_date,NULL AS from_name,NULL AS to_name,e.created_at
         FROM expenses e WHERE e.deleted_at IS NULL
         UNION ALL
-         SELECT 'settlement',s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
+         SELECT s.entry_kind,s.id,s.id,0,s.group_id,s.note,s.amount_minor,s.currency,s.settlement_date,p_from.name,p_to.name,s.created_at
          FROM settlements s LEFT JOIN people p_from ON p_from.id=s.from_person_id LEFT JOIN people p_to ON p_to.id=s.to_person_id WHERE s.deleted_at IS NULL
          UNION ALL
          SELECT 'credit',c.id,c.id,1,c.group_id,c.note,c.amount_minor,c.currency,c.credit_date,NULL,NULL,c.created_at
@@ -2295,7 +2329,7 @@ export class Repository {
     `).bind(...binds).all<Row>()).results;
     const mapped = rows.map((row) => ({ type: text(row.type) as Activity['type'], id: text(row.id), entityId: text(row.entity_id), entityActive: row.entity_active === true || number(row.entity_active) === 1,
       groupId: text(row.group_id), groupName: text(row.group_name), amountMinor: row.amount_minor == null ? null : minor(row.amount_minor), currency: row.currency == null ? null : currency(row.currency), transactionDate: text(row.transaction_date), label: row.label == null ? null : text(row.label),
-       ...(text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}), createdAt: text(row.created_at) })) as Activity[];
+       ...(row.type === 'debt' ? { debtorName: text(row.to_name) || 'Deleted account', creditorName: text(row.from_name) || 'Deleted account' } : text(row.type).startsWith('settlement') ? { fromName: row.from_name == null ? null : text(row.from_name), toName: row.to_name == null ? null : text(row.to_name) } : {}), createdAt: text(row.created_at) })) as Activity[];
     const hasMore = rows.length > limit, items = hasMore ? mapped.slice(0, limit) : mapped, last = items[items.length - 1];
     return { items, nextCursor: hasMore && last ? encodeLedgerCursor({ date: last.transactionDate, createdAt: last.createdAt, id: last.id }) : undefined };
   }
@@ -2319,15 +2353,17 @@ export class Repository {
   }
   async groupExportPage(groupId: string, options: { limit?: number; expenseCursor?: string | null; settlementCursor?: string | null; creditCursor?: string | null } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
-    const [g, members, splitDefault, expenses, settlements, credits] = await Promise.all([
+    const [g, members, splitDefault, expenses, transfers, credits] = await Promise.all([
       this.db.prepare('SELECT * FROM groups WHERE id=? AND deleted_at IS NULL').bind(groupId).first<Row>().then(mapGroup),
       this.members(groupId),
       this.getGroupSplitDefault(groupId),
       options.expenseCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.expensePage(groupId, { limit, cursor: options.expenseCursor }),
-      options.settlementCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.settlementPage(groupId, { limit, cursor: options.settlementCursor }),
+      options.settlementCursor === null ? Promise.resolve({ rows: [], nextCursor: undefined }) : this.balanceTransferPage(groupId, { limit, cursor: options.settlementCursor }, false),
       options.creditCursor === null ? Promise.resolve({ items: [], nextCursor: undefined }) : this.creditPage(groupId, { limit: 100, cursor: options.creditCursor }),
     ]);
-    return { version: 1, exportedAt: now(), group: g, splitDefault, members, expenses: expenses.items, settlements: settlements.items, credits: credits.items, nextCursor: expenses.nextCursor || settlements.nextCursor || credits.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: settlements.nextCursor ?? null, credits: credits.nextCursor ?? null } : undefined };
+    const settlements = transfers.rows.filter((row) => row.entry_kind !== 'debt').map((row) => this.mapSettlement(row));
+    const debts = transfers.rows.filter((row) => row.entry_kind === 'debt').map((row) => this.mapDebt(this.mapSettlement(row)));
+    return { version: 1, exportedAt: now(), group: g, splitDefault, members, expenses: expenses.items, settlements, debts, credits: credits.items, nextCursor: expenses.nextCursor || transfers.nextCursor || credits.nextCursor ? { expenses: expenses.nextCursor ?? null, settlements: transfers.nextCursor ?? null, credits: credits.nextCursor ?? null } : undefined };
   }
   async exportPage(userId: string, options: { groupCursor?: string; limit?: number } = {}) {
     const limit = Math.min(Math.max(options.limit ?? 1, 1), 2);
@@ -2362,7 +2398,7 @@ export class Repository {
       groups.push(group);
       const continuation = group.nextCursor;
       if (continuation) {
-        // Do not advance to another group until both streams in this group
+        // Do not advance to another group until all streams in this group
         // are exhausted. This is the cursor boundary that prevents truncation.
          nextCursor = encodeExportCursor({ groupId, expenseCursor: continuation.expenses, settlementCursor: continuation.settlements, creditCursor: continuation.credits });
         break;

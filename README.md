@@ -352,6 +352,14 @@ atomically by the refund amount and each gross expense, including edit capacity
 after excluding the record being edited. Refunds are online-only and appear in
 transaction history, JSON export, and the existing `credits.csv` export.
 
+In **Add → Record debt**, choose who owes whom, select another active member,
+and enter a currency and amount. The preview describes this entry, not the
+group's resulting balance. Recording debt requires a connection and never
+sends money. Entries affect balances in their own currency; they do not
+increase expense spending or count as payments. Record repayments separately
+under **Payment between members**. Migration `0036_recorded_debts.sql` adds
+the debt discriminator and a distinct audit event type.
+
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points
 totaling 10,000), or shares (exact is not allowed). Group owners retain admin
@@ -394,6 +402,7 @@ Important endpoints include:
 - `DELETE /api/account` with the exact JSON confirmation `{"confirmation":"DELETE MY ACCOUNT"}`. Deletion is blocked with a structured conflict containing only the active owned-group count. Eligible deletion soft-leaves non-owned memberships, revokes pending invitations, pseudonymizes every invitation history row addressed to the deleted email, removes private category/idempotency data, clears the Clerk linkage, and pseudonymizes the user/person while retaining financial rows and audit actor-name snapshots for referential integrity.
 - `GET/POST /api/groups/:id/expenses`, `GET/PUT/DELETE /api/expenses/:id`
 - `GET/POST /api/groups/:id/settlements`, `GET/PUT/DELETE /api/settlements/:id`, and versioned restore endpoints
+- `POST /api/groups/:id/debts` records an obligation between the signed-in group member and another active member. The required operation ID makes unchanged retries safe. Debt appears as its own transaction kind in History and as `debts` in JSON exports; it is not a settlement or an expense.
 - `GET/POST /api/groups/:id/credits`, `GET/PUT/DELETE /api/credits/:id`, and versioned restore endpoints
 - `GET/POST /api/groups/:id/scheduled-expenses`, `GET/PUT /api/scheduled-expenses/:id`, and pause/resume/cancel actions
 - balances (raw and deterministic simplified debts), activity, versioned JSON export, group JSON/expense CSV/settlement CSV export

@@ -142,7 +142,7 @@ export interface CachedExpenseDetails {
 }
 export interface CachedCategories { userId: string; categories: string[]; fetchedAt: string }
 
-const activityTypes = ['expense', 'settlement', 'credit', 'expense_revision', 'settlement_revision', 'credit_revision', 'expense_deleted', 'settlement_deleted', 'credit_deleted'] as const;
+const activityTypes = ['expense', 'settlement', 'credit', 'debt', 'expense_revision', 'settlement_revision', 'credit_revision', 'expense_deleted', 'settlement_deleted', 'credit_deleted'] as const;
 const isActivityType = (value: unknown): value is Activity['type'] => typeof value === 'string' && (activityTypes as readonly string[]).includes(value);
 export const validActivityEntityId = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && !['undefined', 'null'].includes(value.trim().toLowerCase());
 
@@ -193,6 +193,11 @@ export function normalizeActivity(value: unknown): Activity[] {
       ...(typeof (row.groupId ?? row.group_id) === 'string' ? { groupId: String(row.groupId ?? row.group_id) } : {}),
       ...(typeof (row.groupName ?? row.group_name) === 'string' ? { groupName: String(row.groupName ?? row.group_name) } : {}),
     };
+    if (row.type === 'debt') return [{
+      ...base, type: 'debt',
+      debtorName: typeof row.debtorName === 'string' && row.debtorName ? row.debtorName : 'Unknown member',
+      creditorName: typeof row.creditorName === 'string' && row.creditorName ? row.creditorName : 'Unknown member',
+    }];
     return [{ ...base, ...(settlement ? { fromName: typeof (row.fromName ?? row.from_name) === 'string' ? String(row.fromName ?? row.from_name) : null, toName: typeof (row.toName ?? row.to_name) === 'string' ? String(row.toName ?? row.to_name) : null } : {}) } as Activity];
   });
 }
@@ -702,6 +707,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         }]));
         const transactions = row.transactions?.map((item) => item.kind === 'settlement'
           ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+          : item.kind === 'debt' ? { ...item, debtorName: replace(item.debtorPersonId, item.debtorName), creditorName: replace(item.creditorPersonId, item.creditorName) }
           : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
           tx.objectStore('groupSnapshots').put({ ...row, ...(group ? { group } : {}), ...(members ? { members } : {}), ...(historicalParticipants ? { historicalParticipants } : {}), ...(balances ? { balances } : {}), ...(transactions ? { transactions } : {}), ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
       }
@@ -713,6 +719,7 @@ export async function patchCachedMemberName(userId: string, personId: string, na
         if (!isProfileRevisionNewer(profileRevision, row.profileRevision)) return;
        const transactions = row.transactions.map((item) => item.kind === 'settlement'
         ? { ...item, fromName: replace(item.fromPersonId, item.fromName), toName: replace(item.toPersonId, item.toName) }
+        : item.kind === 'debt' ? { ...item, debtorName: replace(item.debtorPersonId, item.debtorName), creditorName: replace(item.creditorPersonId, item.creditorName) }
         : item.kind === 'expense' ? { ...item, payerNames: item.payerNames?.map((label, index) => replace(item.payerPersonIds?.[index], label)), splitNames: item.splitNames?.map((label, index) => replace(item.splitPersonIds?.[index], label)) } : item);
         tx.objectStore('globalTransactions').put({ ...row, transactions, ...(profileRevision === undefined ? {} : { profileRevision }), ...(updatedAt ? { profileUpdatedAt: updatedAt } : {}) });
     };
