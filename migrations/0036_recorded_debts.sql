@@ -1,6 +1,5 @@
 -- Debts never enter the payment table or its monthly materialization.
--- An older Worker can keep maintaining that base materialization on rollback
--- without reading or reclassifying debt as payments.
+-- A pre-debt Worker would omit debt from balances; see the rollback runbook.
 CREATE TABLE debts (
   id TEXT PRIMARY KEY,
   group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -32,15 +31,29 @@ END;
 -- The ordinary ledger guards remain intact. These additional guards also
 -- enforce the combined limit on writes made by a pre-debt Worker, independent
 -- of monthly projection state. Two-sided movements use the settlement bound.
+-- Reserve additional settlement capacity equal to the absolute net across
+-- members from debts and payments. A payment reducing both sides' transfer
+-- balances by x uses 2*x gross and releases 2*x reserve. Edits, restores and
+-- unrelated payments cannot spend capacity held for those balances. Expenses
+-- and credits retain their ordinary gross weights and cannot use the reserve.
+CREATE VIEW debt_payment_net AS
+  SELECT group_id,currency,person_id,SUM(net_minor) AS net_minor FROM (
+    SELECT group_id,currency,person_id,net_minor FROM debt_balance_contributions
+    UNION ALL SELECT group_id,currency,from_person_id,amount_minor FROM settlements WHERE deleted_at IS NULL
+    UNION ALL SELECT group_id,currency,to_person_id,-amount_minor FROM settlements WHERE deleted_at IS NULL
+  ) GROUP BY group_id,currency,person_id;
+
 CREATE VIEW ledger_gross_with_debts AS
   SELECT group_id,currency,amount_minor AS magnitude FROM expenses WHERE deleted_at IS NULL
   UNION ALL SELECT group_id,currency,amount_minor*2 FROM settlements WHERE deleted_at IS NULL
   UNION ALL SELECT c.group_id,c.currency,a.amount_minor FROM credits c JOIN credit_allocations a ON a.credit_id=c.id WHERE c.deleted_at IS NULL
-  UNION ALL SELECT group_id,currency,amount_minor*2 FROM debts;
+  UNION ALL SELECT group_id,currency,amount_minor*2 FROM debts
+  UNION ALL SELECT group_id,currency,ABS(net_minor) FROM debt_payment_net;
 
-CREATE TRIGGER debts_ledger_limit_insert BEFORE INSERT ON debts
-WHEN COALESCE((SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency),0)
-  > 9007199254740991-NEW.amount_minor*2
+-- Check transfer writes against the authoritative post-write net. Removing
+-- a transfer cannot increase gross plus reserve (triangle inequality).
+CREATE TRIGGER debts_ledger_limit_insert AFTER INSERT ON debts
+WHEN (SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency)>9007199254740991
 BEGIN SELECT RAISE(ABORT,'BALANCE_OVERFLOW'); END;
 
 CREATE TRIGGER debt_limit_expense_insert BEFORE INSERT ON expenses
@@ -53,15 +66,13 @@ WHEN NEW.deleted_at IS NULL AND EXISTS (SELECT 1 FROM debts WHERE group_id=NEW.g
     - CASE WHEN OLD.deleted_at IS NULL AND OLD.group_id=NEW.group_id AND OLD.currency=NEW.currency THEN OLD.amount_minor ELSE 0 END
     > 9007199254740991-NEW.amount_minor
 BEGIN SELECT RAISE(ABORT,'BALANCE_OVERFLOW'); END;
-CREATE TRIGGER debt_limit_settlement_insert BEFORE INSERT ON settlements
+CREATE TRIGGER debt_limit_settlement_insert AFTER INSERT ON settlements
 WHEN NEW.deleted_at IS NULL AND EXISTS (SELECT 1 FROM debts WHERE group_id=NEW.group_id AND currency=NEW.currency)
-  AND (SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency)>9007199254740991-NEW.amount_minor*2
+  AND (SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency)>9007199254740991
 BEGIN SELECT RAISE(ABORT,'BALANCE_OVERFLOW'); END;
-CREATE TRIGGER debt_limit_settlement_update BEFORE UPDATE OF group_id,currency,amount_minor,deleted_at ON settlements
+CREATE TRIGGER debt_limit_settlement_update AFTER UPDATE OF group_id,currency,from_person_id,to_person_id,amount_minor,deleted_at ON settlements
 WHEN NEW.deleted_at IS NULL AND EXISTS (SELECT 1 FROM debts WHERE group_id=NEW.group_id AND currency=NEW.currency)
-  AND (SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency)
-    - CASE WHEN OLD.deleted_at IS NULL AND OLD.group_id=NEW.group_id AND OLD.currency=NEW.currency THEN OLD.amount_minor*2 ELSE 0 END
-    > 9007199254740991-NEW.amount_minor*2
+  AND (SELECT SUM(magnitude) FROM ledger_gross_with_debts WHERE group_id=NEW.group_id AND currency=NEW.currency)>9007199254740991
 BEGIN SELECT RAISE(ABORT,'BALANCE_OVERFLOW'); END;
 CREATE TRIGGER debt_limit_credit_allocation_insert BEFORE INSERT ON credit_allocations
 WHEN EXISTS (SELECT 1 FROM credits c WHERE c.id=NEW.credit_id AND c.deleted_at IS NULL

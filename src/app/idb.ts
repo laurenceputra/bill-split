@@ -6,7 +6,9 @@ import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationC
 import { beginProtectedOperation } from './reload-safety';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 12;
+export const DB_VERSION = 11;
+const DEBT_RETRY_DB_NAME = 'bill-split-debt-retries';
+const DEBT_RETRY_STORE = 'submissionKeys';
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -236,16 +238,20 @@ export class IndexedDBUnavailableError extends Error {
 
 const available = () => typeof indexedDB !== 'undefined';
 
-function open(waitForUnblocked = false): Promise<IDBDatabase> {
+function open(waitForUnblocked = false, debtRetries = false): Promise<IDBDatabase> {
   if (!available()) return Promise.reject(new IndexedDBUnavailableError());
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = debtRetries ? indexedDB.open(DEBT_RETRY_DB_NAME, 1) : indexedDB.open(DB_NAME, DB_VERSION);
     let releaseUpgrade: (() => void) | undefined;
     let rejectedWhileBlocked = false;
     request.onupgradeneeded = (event) => {
       try { releaseUpgrade = beginProtectedOperation('Upgrading offline storage'); }
       catch (error) { request.transaction?.abort(); reject(error); return; }
       const database = request.result;
+      if (debtRetries) {
+        database.createObjectStore(DEBT_RETRY_STORE);
+        return;
+      }
       // Keep this store and its legacy key intact. Older builds wrote `form` here.
       if (!database.objectStoreNames.contains('recent')) database.createObjectStore('recent');
       if (!database.objectStoreNames.contains('identities')) database.createObjectStore('identities', { keyPath: 'key' });
@@ -259,7 +265,6 @@ function open(waitForUnblocked = false): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('categories')) database.createObjectStore('categories', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('globalTransactions')) database.createObjectStore('globalTransactions', { keyPath: 'userId' });
-      if (!database.objectStoreNames.contains('debtSubmissionKeys')) database.createObjectStore('debtSubmissionKeys');
       if (!database.objectStoreNames.contains('expenseOutbox')) {
         const store = database.createObjectStore('expenseOutbox', { keyPath: ['userId', 'clientOperationId'] });
         store.createIndex('userId', 'userId', { unique: false });
@@ -300,10 +305,10 @@ function open(waitForUnblocked = false): Promise<IDBDatabase> {
 
 /** Own the actual transaction, not a request promise or a caller's deadline.
  * In particular, a bubbling request error is not yet a transaction abort. */
-async function openForWrite() {
+async function openForWrite(debtRetries = false) {
   const release = beginProtectedOperation('Saving offline data');
   try {
-    const db = await open(true);
+    const db = await open(true, debtRetries);
     return {
       close: () => db.close(),
       transaction: (stores: string | string[], mode: IDBTransactionMode) => {
@@ -318,8 +323,8 @@ async function openForWrite() {
   } catch (error) { release(); throw error; }
 }
 
-async function transaction<T>(stores: string | string[], mode: IDBTransactionMode, action: (tx: IDBTransaction) => IDBRequest<T> | void): Promise<T | undefined> {
-  const db = await (mode === 'readwrite' ? openForWrite() : open());
+async function transaction<T>(stores: string | string[], mode: IDBTransactionMode, action: (tx: IDBTransaction) => IDBRequest<T> | void, debtRetries = false): Promise<T | undefined> {
+  const db = await (mode === 'readwrite' ? openForWrite(debtRetries) : open(false, debtRetries));
   return new Promise((resolve, reject) => {
     let result: T | undefined;
     const tx = db.transaction(stores, mode);
@@ -332,6 +337,9 @@ async function transaction<T>(stores: string | string[], mode: IDBTransactionMod
     tx.onabort = () => { db.close(); reject(tx.error || new IndexedDBUnavailableError()); };
   });
 }
+
+const debtRetryTransaction = (action: (store: IDBObjectStore) => void) =>
+  transaction(DEBT_RETRY_STORE, 'readwrite', (tx) => action(tx.objectStore(DEBT_RETRY_STORE)), true);
 
 export async function saveRecent(value: unknown, generation = captureSessionGeneration()) {
   assertSessionGeneration(generation);
@@ -346,8 +354,7 @@ export async function readRecent<T>(): Promise<T | undefined> {
 export async function claimDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, generation: number): Promise<string> {
   const key = [userId, groupId, fingerprint];
   let operationId: string | undefined;
-  await transaction('debtSubmissionKeys', 'readwrite', (tx) => {
-    const store = tx.objectStore('debtSubmissionKeys');
+  await debtRetryTransaction((store) => {
     const current = store.get(key);
     current.onsuccess = () => {
       if (!isSessionGenerationCurrent(generation)) return;
@@ -362,8 +369,7 @@ export async function claimDebtSubmissionKey(userId: string, groupId: string, fi
 
 export async function forgetDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, operationId: string, generation: number) {
   const key = [userId, groupId, fingerprint];
-  await transaction('debtSubmissionKeys', 'readwrite', (tx) => {
-    const store = tx.objectStore('debtSubmissionKeys');
+  await debtRetryTransaction((store) => {
     const current = store.get(key);
     current.onsuccess = () => { if (isSessionGenerationCurrent(generation) && current.result === operationId) store.delete(key); };
   });
@@ -864,9 +870,9 @@ export async function clearCachedData() {
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox', 'debtSubmissionKeys'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox', 'debtSubmissionKeys']) tx.objectStore(storeName).clear();
-  });
+  const stores = ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox'];
+  await transaction(stores, 'readwrite', (tx) => { for (const store of stores) tx.objectStore(store).clear(); });
+  await debtRetryTransaction((store) => { store.clear(); });
 }
 
 export const saveOutboxItem = async (item: ExpenseOutboxItem, generation = captureSessionGeneration(), expectedAuthEpoch?: number, allowed: () => boolean = () => true) => {

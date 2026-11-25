@@ -27,7 +27,31 @@ describe('user-scoped IndexedDB', () => {
     await forgetDebtSubmissionKey('demo-user', 'demo-group', 'demo-digest', 'different-operation', generation);
     expect(await claim()).toBe(operation);
     await forgetDebtSubmissionKey('demo-user', 'demo-group', 'demo-digest', operation, generation);
-    expect(await claim()).not.toBe(operation);
+    const replacement = await claim();
+    expect(replacement).not.toBe(operation);
+    await clearAllPrivateData();
+    expect(await claim()).not.toBe(replacement);
+  });
+
+  it('preserves the shared v11 database for older tabs while claiming debt retry keys', async () => {
+    await saveRecent('shared preference');
+    await saveOutboxItem(expense('shared-operation'));
+    const openV11 = () => new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 11);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+      request.onupgradeneeded = () => { request.transaction?.abort(); reject(new Error('Expected the existing shared v11 database')); };
+    });
+    const olderTab = await openV11();
+    try {
+      await claimDebtSubmissionKey('demo-user', 'demo-group', 'demo-digest', captureSessionGeneration());
+      const rollbackTab = await openV11();
+      try {
+        expect(rollbackTab.objectStoreNames.contains('debtSubmissionKeys')).toBe(false);
+        expect(await readRecent()).toBe('shared preference');
+        expect(await listOutbox('user-a')).toEqual([expect.objectContaining({ clientOperationId: 'shared-operation' })]);
+      } finally { rollbackTab.close(); }
+    } finally { olderTab.close(); }
   });
   it('does not turn an idle snapshot read into an indefinite reload blocker', async () => {
     await saveRecent('snapshot');

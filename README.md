@@ -359,9 +359,19 @@ sends money. Entries affect balances in their own currency; they do not
 increase expense spending or count as payments. Record repayments separately
 under **Payment between members**. Migration `0036_recorded_debts.sql` adds
 separate debt storage and a distinct audit event type. New Workers layer debt
-balances over the ordinary ledger projection; older Workers can maintain their
-base projection without misclassifying debts as payments, but do not display
-debt entries or their balance effects.
+balances over the ordinary ledger projection.
+
+**Rollback after enabling recorded debt:** retain a tested debt-aware Worker
+and frontend as the rollback artifact. Do not roll live ledger traffic back
+to a pre-debt Worker: it silently omits debts from balances and may accept
+settlements based on those incomplete balances. The database amount guards
+do not detect that mistake. If a pre-debt deployment is unavoidable, put
+the app and API behind an enforced maintenance gate first (including direct
+Worker access). Keep balance reads and all settlement mutations unavailable;
+if you cannot isolate those surfaces, keep the whole app and API offline.
+Do not rely on hiding a button in the frontend or remove migration 0036.
+Restore a debt-aware build and verify an existing debt appears in both the
+group and personal balances before reopening traffic.
 
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points
