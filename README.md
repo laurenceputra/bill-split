@@ -358,7 +358,10 @@ group's resulting balance. Recording debt requires a connection and never
 sends money. Entries affect balances in their own currency; they do not
 increase expense spending or count as payments. Record repayments separately
 under **Payment between members**. Migration `0036_recorded_debts.sql` adds
-the debt discriminator and a distinct audit event type.
+separate debt storage and a distinct audit event type. New Workers layer debt
+balances over the ordinary ledger projection; older Workers can maintain their
+base projection without misclassifying debts as payments, but do not display
+debt entries or their balance effects.
 
 Active group members may save or update one optional shared party split default
 from new one-off expense creation, using equal, percentage (integer basis points

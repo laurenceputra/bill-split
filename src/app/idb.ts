@@ -6,7 +6,7 @@ import { assertSessionGeneration, captureSessionGeneration, isSessionGenerationC
 import { beginProtectedOperation } from './reload-safety';
 
 export const DB_NAME = 'bill-split-local';
-export const DB_VERSION = 11;
+export const DB_VERSION = 12;
 
 export type OutboxStatus = 'pending' | 'syncing' | 'auth-required' | 'failed';
 
@@ -259,6 +259,7 @@ function open(waitForUnblocked = false): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('expenseDetails')) database.createObjectStore('expenseDetails', { keyPath: ['userId', 'expenseId'] });
       if (!database.objectStoreNames.contains('categories')) database.createObjectStore('categories', { keyPath: 'userId' });
       if (!database.objectStoreNames.contains('globalTransactions')) database.createObjectStore('globalTransactions', { keyPath: 'userId' });
+      if (!database.objectStoreNames.contains('debtSubmissionKeys')) database.createObjectStore('debtSubmissionKeys');
       if (!database.objectStoreNames.contains('expenseOutbox')) {
         const store = database.createObjectStore('expenseOutbox', { keyPath: ['userId', 'clientOperationId'] });
         store.createIndex('userId', 'userId', { unique: false });
@@ -339,6 +340,33 @@ export async function saveRecent(value: unknown, generation = captureSessionGene
 
 export async function readRecent<T>(): Promise<T | undefined> {
   return transaction<T>('recent', 'readonly', (tx) => tx.objectStore('recent').get('form'));
+}
+
+/** Persist only a digest and operation ID, not an offline debt draft or queue. */
+export async function claimDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, generation: number): Promise<string> {
+  const key = [userId, groupId, fingerprint];
+  let operationId: string | undefined;
+  await transaction('debtSubmissionKeys', 'readwrite', (tx) => {
+    const store = tx.objectStore('debtSubmissionKeys');
+    const current = store.get(key);
+    current.onsuccess = () => {
+      if (!isSessionGenerationCurrent(generation)) return;
+      operationId = typeof current.result === 'string' ? current.result : crypto.randomUUID();
+      if (current.result !== operationId) store.put(operationId, key);
+    };
+  });
+  assertSessionGeneration(generation);
+  if (!operationId) throw new IndexedDBUnavailableError('Could not keep a safe retry key for this entry.');
+  return operationId;
+}
+
+export async function forgetDebtSubmissionKey(userId: string, groupId: string, fingerprint: string, operationId: string, generation: number) {
+  const key = [userId, groupId, fingerprint];
+  await transaction('debtSubmissionKeys', 'readwrite', (tx) => {
+    const store = tx.objectStore('debtSubmissionKeys');
+    const current = store.get(key);
+    current.onsuccess = () => { if (isSessionGenerationCurrent(generation) && current.result === operationId) store.delete(key); };
+  });
 }
 
 export const saveVerifiedIdentity = (value: Omit<VerifiedIdentity, 'key'>, generation = captureSessionGeneration()) => {
@@ -827,7 +855,7 @@ export const saveCategories = (value: CachedCategories, generation = captureSess
 };
 export const readCategories = (userId: string) => transaction<CachedCategories>('categories', 'readonly', (tx) => tx.objectStore('categories').get(userId));
 
-/** Remove private cached data without touching the durable expense outbox. */
+/** Remove private cached data without touching unresolved mutation keys or the expense outbox. */
 export async function clearCachedData() {
   await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories'], 'readwrite', (tx) => {
     for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories']) tx.objectStore(storeName).clear();
@@ -836,8 +864,8 @@ export async function clearCachedData() {
 
 /** Remove every private record, including expenses waiting to sync. */
 export async function clearAllPrivateData() {
-  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox'], 'readwrite', (tx) => {
-    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox']) tx.objectStore(storeName).clear();
+  await transaction(['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox', 'debtSubmissionKeys'], 'readwrite', (tx) => {
+    for (const storeName of ['recent', 'identities', 'clerkIdentities', 'offlineTrust', 'groups', 'groupSnapshots', 'resourceFreshness', 'mutationGenerations', 'activity', 'globalTransactions', 'expenseDetails', 'categories', 'expenseOutbox', 'debtSubmissionKeys']) tx.objectStore(storeName).clear();
   });
 }
 

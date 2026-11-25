@@ -11,7 +11,7 @@ resulting balance, since other obligations may offset it.
 | Global/scoped Add chooser: unselected, selected, cached, offline | Keep Add expense first; Record debt is separate from Refund/reimbursement and Payment between members. Require a selected scope and connection for debt. |
 | Debt form: loading, no other active members, cold error | Distinguish loading from an empty group; do not show a form without another active participant. Retry a failed group load. |
 | Debt form: incomplete/invalid, I owe someone, Someone owes me | Member excludes self; amount and currency are explicit; date defaults to today, note is optional. The exact direction precedes the reachable submit action; no horizontal overflow at narrow or breakpoint widths. |
-| Debt form: cached group/offline, saving, save error and retry | Keep draft visible; do not queue debt offline; prevent double submission; retain fields and use the same operation ID on an unchanged retry. |
+| Debt form: cached group/offline, saving, save error and retry | Keep the current draft visible; do not queue debt offline; prevent double submission; use the same operation ID when retrying unchanged details, including after a reload. |
 | History: both debt directions; transaction filter open/closed; Changes | Debt rows identify who owes whom (not who paid). The Debts filter does not accept expense categories. Rows retain the directional label in cached History. |
 | Group overview: recent debt entry; full balance breakdown closed/open | Recent transactions show who owes whom. The existing breakdown explains that debts adjust net balances without implying money was sent. |
 

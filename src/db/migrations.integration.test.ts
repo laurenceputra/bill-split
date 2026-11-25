@@ -258,6 +258,29 @@ describe('scheduled completion migration integration', () => {
        expect(mutationLegacy).toEqual([{ group_id: 'group-1', currency: 'USD', person_id: 'person-1', net_minor: 100 }]);
        expect(mutationProjection).toEqual([{ status: 'ready', ledger_totals_ready: 0, reconciliation_due: 0 }]);
 
+      // Upgrade a populated 0035 database, including the existing payment and
+      // its audit snapshot. Old settlement queries must still see only payments.
+      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `
+        INSERT INTO settlements(id,group_id,from_person_id,to_person_id,amount_minor,currency,settlement_date,note,created_by,created_at,updated_at)
+          VALUES('demo-payment','group-1','person-1','person-2',50,'USD','2026-01-05','Sample payment','user-1','2026-01-05','2026-01-05');
+        INSERT INTO audit_events(id,group_id,entity_type,entity_id,version,action,actor_id,actor_person_id,actor_name,occurred_at,after_json)
+          VALUES('demo-payment-audit','group-1','settlement','demo-payment',1,'create','user-1','person-1','Demo user','2026-01-05','{"amountMinor":50}');
+      `, '--yes']);
+      const legacyRows = "SELECT * FROM settlements ORDER BY id; SELECT * FROM audit_events ORDER BY id;";
+      const beforeDebtMigration = querySets(legacyRows);
+      await cp(join(root, 'migrations', '0036_recorded_debts.sql'), join(migrationsDir, '0036_recorded_debts.sql'));
+      run(['d1', 'migrations', 'apply', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath]);
+      expect(querySets(legacyRows)).toEqual(beforeDebtMigration);
+      run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `
+        INSERT INTO debts(id,group_id,debtor_person_id,creditor_person_id,amount_minor,currency,debt_date,created_by,created_at)
+          VALUES('demo-debt','group-1','person-1','person-2',75,'USD','2026-01-06','user-1','2026-01-06');
+        UPDATE settlements SET amount_minor=0 WHERE id='demo-debt';
+      `, '--yes']);
+      expect(querySets(legacyRows)).toEqual(beforeDebtMigration);
+      expect(querySets("SELECT person_id,net_minor FROM debt_balance_contributions WHERE group_id='group-1' ORDER BY person_id;")).toEqual([[
+        { person_id: 'person-1', net_minor: -75 }, { person_id: 'person-2', net_minor: 75 },
+      ]]);
+
       run(['d1', 'execute', 'bill-split-migration', '--local', '--persist-to', persistDir, '--config', configPath, '--command', `INSERT INTO group_split_defaults(group_id,method,person_ids_json,values_json,updated_at) VALUES('group-1','equal','["person-1"]',NULL,'2026-01-01'); UPDATE groups SET deleted_at='2026-02-01' WHERE id='group-1';`, '--yes']);
        const [defaultRows, foreignKeyRows, deletedLegacy] = querySets("SELECT group_id FROM group_split_defaults WHERE group_id='group-1'; PRAGMA foreign_key_check; SELECT group_id,currency,person_id,net_minor FROM group_balance_projection;");
       expect(defaultRows).toEqual([]);

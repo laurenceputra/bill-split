@@ -256,6 +256,34 @@ describe('group summaries with the in-process local D1 binding', () => {
     await expect(repo.createDebt(fixture.groupId, fixture.userA, { ...base, direction: 'i_owe', client_operation_id: 'removed-member' })).rejects.toMatchObject({ code: 'MEMBER_REQUIRED' });
   });
 
+  it('enforces combined debt limits in either write order without putting debts in base projections', async () => {
+    const fixture = await createFixture('Sample-limit');
+    const repo = new Repository(db);
+    const draft = { direction: 'i_owe' as const, person_id: fixture.personB, amount_minor: Math.floor(Number.MAX_SAFE_INTEGER / 2), currency: 'USD' as const, date: '2026-01-02', client_operation_id: 'sample-limit' };
+    const expense = { description: 'Sample expense', amount_minor: 2, currency: draft.currency, date: draft.date, payers: [{ person_id: fixture.personA, amount_minor: 2 }], splits: [{ person_id: fixture.personB, amount_minor: 2 }] };
+    const first = await repo.createExpense(fixture.groupId, fixture.userA, expense);
+    await expect(repo.createDebt(fixture.groupId, fixture.userA, draft)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await repo.deleteExpense(first.id, fixture.userA, first.version);
+    await repo.createDebt(fixture.groupId, fixture.userA, draft);
+    await maintainUntilReady(repo, fixture.groupId);
+    expect(await all("SELECT gross_minor FROM ledger_totals WHERE group_id=? AND gross_minor>0", fixture.groupId)).toEqual([]);
+    await expect(repo.createExpense(fixture.groupId, fixture.userA, expense)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await expect(repo.restoreExpense(first.id, fixture.userA, first.version + 1)).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    await expect(repo.createSettlement(fixture.groupId, fixture.userA, { from_person_id: fixture.personA, to_person_id: fixture.personB, amount_minor: 1, currency: draft.currency, date: draft.date })).rejects.toMatchObject({ code: 'BALANCE_OVERFLOW' });
+    const creditId = `${fixture.groupId}-credit`;
+    await exec(`INSERT INTO credits(id,group_id,subtype,delivery_mode,amount_minor,currency,credit_date,created_by,created_at,updated_at)
+      VALUES(?,?,'refund','member_reimbursement',2,'USD','2026-01-02',?,'2026-01-02','2026-01-02')`, creditId, fixture.groupId, fixture.userA);
+    const allocate = (amount: number) => exec("INSERT INTO credit_allocations(credit_id,person_id,allocation_type,amount_minor) VALUES(?,?,'recipient',?)", creditId, fixture.personA, amount);
+    await expect(allocate(2)).rejects.toThrow('BALANCE_OVERFLOW');
+    await allocate(1);
+    await expect(exec('UPDATE credit_allocations SET amount_minor=2 WHERE credit_id=?', creditId)).rejects.toThrow('BALANCE_OVERFLOW');
+    await exec("UPDATE credits SET deleted_at='2026-01-03' WHERE id=?", creditId);
+    await exec('UPDATE credit_allocations SET amount_minor=2 WHERE credit_id=?', creditId);
+    await expect(exec('UPDATE credits SET deleted_at=NULL WHERE id=?', creditId)).rejects.toThrow('BALANCE_OVERFLOW');
+    const balance = (await repo.groups(fixture.userA)).find((group) => group.id === fixture.groupId)?.personalBalance;
+    expect(balance?.balances).toEqual([{ currency: 'USD', netMinor: -draft.amount_minor }]);
+  });
+
   it('includes signed credit allocations in both fallback and ready monthly projections', async () => {
     const fixture = await createFixture('credit-projection');
     await addExpense(fixture, `${fixture.groupId}-expense`, 100, '2026-01-01');

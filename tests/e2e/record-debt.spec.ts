@@ -198,3 +198,42 @@ test('record debt shows loading, empty, offline and cold group error states', as
     await expect(page.getByRole('button', { name: 'Record debt' })).toBeDisabled();
   } finally { await context.close(); }
 });
+
+test('reuses a durable debt key after a committed response is dropped and the route is reloaded', async ({ browser }) => {
+  const context = await newAuthenticatedContext(browser, DEV_EMAIL, { width: 390, height: 900 }, { serviceWorkers: 'block' });
+  try {
+    const page = await context.newPage();
+    const { groupPath, friendId } = await demoLedger(page);
+    const operationIds: string[] = [];
+    let firstDebtId: string | undefined;
+    await page.route(`**/api${groupPath}/debts`, async (route) => {
+      operationIds.push(route.request().postDataJSON().client_operation_id);
+      if (operationIds.length !== 1) return route.continue();
+      const committed = await route.fetch();
+      expect(committed.status()).toBe(201);
+      firstDebtId = (await committed.json()).debt.id;
+      await route.abort('connectionreset');
+    });
+    const submit = page.getByRole('button', { name: 'Record debt', exact: true });
+    const fill = async () => {
+      await page.getByLabel('Member').selectOption(friendId!);
+      await page.getByLabel('Amount (USD)').fill('12.50');
+      await page.getByLabel('Date').fill('2026-04-20');
+      await page.getByLabel('Note (optional)').fill('Sample note');
+      await expect(submit).toBeEnabled();
+    };
+    await page.goto(`${groupPath}/debt/new`);
+    await fill();
+    await submit.click();
+    await expect(page.locator('#debt-form-error')).toContainText('Could not confirm the debt was saved');
+    expect(firstDebtId).toBeTruthy();
+    page.once('dialog', (dialog) => void dialog.accept());
+    await page.reload();
+    await fill();
+    await submit.click();
+    await expect(page.getByRole('list', { name: 'Transactions', exact: true }).getByText('Debt · You owe Demo friend')).toHaveCount(1);
+    expect(operationIds).toEqual([operationIds[0], operationIds[0]]);
+    const result = await page.request.get(`${BASE_URL}/api${groupPath}/transactions?kind=debt`);
+    expect((await result.json()).transactions).toEqual([expect.objectContaining({ id: firstDebtId, amountMinor: 1250 })]);
+  } finally { await context.close(); }
+});

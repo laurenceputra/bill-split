@@ -4,6 +4,8 @@ import { APPLICATION_SESSION_IDLE_MS } from '../shared/session-policy';
 import { claimOutboxItem, clearAllPrivateData, clearCachedData, DB_NAME, DB_VERSION, invalidateCachedGroups, isOfflineTrustUsable, listOutbox, OFFLINE_TRUST_MAX_AGE_MS, patchCachedMemberName, readActivity, readCategories, readExpenseDetails, readGlobalTransactions, readGroupSnapshot, readGroups, readLastVerifiedClerkUserId, readLastVerifiedIdentity, readMutationGeneration, readOfflineTrust, readRecent, readResourceFreshness, recoverStaleSyncing, removeOutboxIfOwned, revokeOfflineTrust, saveActivity, saveCategories, saveExpenseDetails, saveExpenseDetailsIfGenerationMatches, saveGlobalTransactions, saveGroups, saveGroupsIfGenerationMatches, saveLastVerifiedClerkUserId, saveOfflineTrust, saveOutboxItem, saveRecent, saveVerifiedIdentity, updateGroupSnapshot, updateGroupSnapshotIfGenerationMatches, updateGroupsSnapshot, updateOfflineTrustName } from './idb';
 import { hydrateActivity, hydrateGlobalTransactions, hydrateTransactions } from './api';
 import { acquireReloadGate, getReloadSafetyState, releaseReloadGate } from './reload-safety';
+import { claimDebtSubmissionKey, forgetDebtSubmissionKey } from './idb';
+import { captureSessionGeneration } from './session';
 
 const user = (userId: string) => ({ userId, email: `${userId}@example.com`, personId: `person-${userId}`, verifiedAt: new Date().toISOString() });
 const expense = (operation: string, userId = 'user-a') => ({ clientOperationId: operation, userId, groupId: 'group-a', payload: { description: 'Lunch', amount_minor: 100, currency: 'USD' as const, date: '2026-01-01', payers: [{ person_id: 'person-a', amount_minor: 100 }], splits: [{ person_id: 'person-a', amount_minor: 100 }], client_operation_id: operation }, display: { description: 'Lunch', amountMinor: 100, currency: 'USD', date: '2026-01-01' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'syncing' as const, attempts: 1 });
@@ -13,6 +15,20 @@ beforeEach(async () => {
 });
 
 describe('user-scoped IndexedDB', () => {
+  it('retains an unresolved debt key across opens and isolates it by user, group and payload', async () => {
+    const generation = captureSessionGeneration();
+    const claim = (userId = 'demo-user', groupId = 'demo-group', fingerprint = 'demo-digest') => claimDebtSubmissionKey(userId, groupId, fingerprint, generation);
+    const operation = await claim();
+    await clearCachedData();
+    expect(await claim()).toBe(operation);
+    expect(await claim('demo-friend')).not.toBe(operation);
+    expect(await claim('demo-user', 'other-group')).not.toBe(operation);
+    expect(await claim('demo-user', 'demo-group', 'other-digest')).not.toBe(operation);
+    await forgetDebtSubmissionKey('demo-user', 'demo-group', 'demo-digest', 'different-operation', generation);
+    expect(await claim()).toBe(operation);
+    await forgetDebtSubmissionKey('demo-user', 'demo-group', 'demo-digest', operation, generation);
+    expect(await claim()).not.toBe(operation);
+  });
   it('does not turn an idle snapshot read into an indefinite reload blocker', async () => {
     await saveRecent('snapshot');
     const db = await new Promise<IDBDatabase>((resolve) => { const request = indexedDB.open(DB_NAME, DB_VERSION); request.onsuccess = () => resolve(request.result); });

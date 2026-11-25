@@ -72,6 +72,9 @@ export const balanceProjectionQuery = () => ({
       SELECT group_id,currency,person_id,net_minor FROM ready_ledger
       UNION ALL
       SELECT group_id,currency,person_id,net_minor FROM authoritative_ledger
+      UNION ALL
+      SELECT debt.group_id,debt.currency,debt.person_id,debt.net_minor
+      FROM debt_balance_contributions debt JOIN requested_group requested ON requested.group_id=debt.group_id
     ),
     grouped AS (
       SELECT currency,person_id,SUM(net_minor) AS net_minor FROM ledger
@@ -341,6 +344,9 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
   ), ledger AS (
     SELECT ready_ledger.group_id,ready_ledger.currency,ready_ledger.person_id,ready_ledger.net_minor FROM ready_ledger
     UNION ALL
+    SELECT debt.group_id,debt.currency,debt.person_id,debt.net_minor
+      FROM debt_balance_contributions debt JOIN authorized_groups member ON member.group_id=debt.group_id AND member.person_id=debt.person_id
+    UNION ALL
     SELECT currencies.group_id,currencies.currency,member.person_id,
       COALESCE((SELECT SUM(p.amount_minor) FROM expenses e JOIN payers p ON p.expense_id=e.id WHERE e.group_id=currencies.group_id AND e.currency=currencies.currency AND e.deleted_at IS NULL AND p.person_id=member.person_id),0)
       -COALESCE((SELECT SUM(s.amount_minor) FROM expenses e JOIN splits s ON s.expense_id=e.id WHERE e.group_id=currencies.group_id AND e.currency=currencies.currency AND e.deleted_at IS NULL AND s.person_id=member.person_id),0)
@@ -355,6 +361,7 @@ export const groupSelect = (requestedGroup = false) => `WITH authorized_groups A
    ), personal_currencies AS (
      SELECT scope.group_id,g.currency FROM scoped_groups scope JOIN groups g ON g.id=scope.group_id
      UNION SELECT group_id,currency FROM authoritative_currencies
+     UNION SELECT scope.group_id,debt.currency FROM scoped_groups scope JOIN debts debt ON debt.group_id=scope.group_id
    ), personal_json AS (
      SELECT group_id,json_group_array(json_object('currency',currency,'netMinor',net_minor)) AS personal_balances
      FROM (SELECT c.group_id,c.currency,COALESCE(b.net_minor,0) AS net_minor FROM personal_currencies c

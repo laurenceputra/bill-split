@@ -12,7 +12,7 @@ import { ACCOUNT_DELETION_CONFIRMATION } from '../shared/schemas';
 import { allocationMetadataByPerson, allocationSplits, allocationStateFromSplits, amountFieldClass, amountInputClass, amountInputLength, currentPayerSelection, effectiveGroupSplitDefault, formServerVersion, groupSplitDefaultFromDraft, groupSplitDefaultSummary, hasNewerServerVersion, isCurrentSplitDefaultSave, isExpenseConflict, isSplitDefaultSaveLockedForScope, manuallySetSettlementEditAmount, neutralAllocationPreview, normalizeSinglePayer, previewAllocation, releaseSplitDefaultSaveLock, resolveGroupSplitDefault, settlementAmountForPair, settlementEditAmountState, settlementSuggestion, settlementSuggestionFingerprint, settlementSuggestionForPair, splitDefaultChoiceState, splitDefaultSaveOutcome, transitionSettlementEditAmount, type AllocationState, type FormSaveFence, type SettlementEditAmountState } from './form-helpers';
 import { ActionGroup, AuthLoadingShell, Avatar, AvatarStack, Button, Disclosure, EmptyState, Field, FormSurface, GroupInsightsControl, InstallAction, Layout, LedgerList, LedgerRow, Loading, MacroSection, Modal, Money, PageHeader, PublicShell, SectionHeader, Skeleton, SplitTransactionControl, Status, Surface, connectionStatusLabel, useAuthLifecycle, useConnectionState, useOnlineStatus } from './ui';
 import { discardOutboxItem, enqueueExpense, flushOutbox, getOutboxSnapshot, initializeOutbox, retryOutboxItem, statusLabel, subscribeOutbox, type ExpenseOutboxItem } from './outbox';
-import { clearCachedData } from './idb';
+import { claimDebtSubmissionKey, clearCachedData, forgetDebtSubmissionKey } from './idb';
 import { applyConfirmedGroup, getResourceSnapshot, invalidateForMutation, invalidateResource, revalidate, RESOURCE_FRESHNESS, resourceKeys, resourceViewState, useResource, useResourceIdentityEpoch, type ResourceSnapshot } from './resource-cache';
 import { balanceStatus, groupBalanceDisplays, personalBalanceCards, personalBalances } from './group-balance';
 import { creditDetailPath, expenseDetailPath, getNavigationContext, getTransactionNavigation, settlementDetailPath, transactionActivityPath } from './navigation';
@@ -790,7 +790,7 @@ function DebtCreateRoute() {
   return <DebtCreatePage key={id} groupId={id} />;
 }
 
-function DebtCreatePage({ groupId }: { groupId: string }) {
+export function DebtCreatePage({ groupId }: { groupId: string }) {
   const nav = useNavigate();
   const online = useOnlineStatus();
   const me = useResource(resourceKeys.identity(), '', (signal) => getMe({ signal }), RESOURCE_FRESHNESS.expenses, hydrateIdentity);
@@ -805,7 +805,6 @@ function DebtCreatePage({ groupId }: { groupId: string }) {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
-  const operationIds = useRef(new Map<string, string>());
   const submitting = useRef(false);
   const dirty = direction !== 'i_owe' || Boolean(personId || selectedCurrency || amount || note) || date !== today();
   useReloadBlocker(dirty && !busy, 'Unsaved debt entry');
@@ -821,30 +820,33 @@ function DebtCreatePage({ groupId }: { groupId: string }) {
   const unavailable = !online || resource.offline || me.offline;
   const back = `/groups/${encodeURIComponent(groupId)}/add`;
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting.current || unavailable || !userId || !member) return;
     const draft = { direction, person_id: member.personId, amount_minor: amountMinor, currency, date, note: note.trim() || null };
-    const fingerprint = JSON.stringify(draft);
-    const client_operation_id = operationIds.current.get(fingerprint) || operationId();
-    const parsed = debtInput.safeParse({ ...draft, client_operation_id });
+    const parsed = debtInput.omit({ client_operation_id: true }).safeParse(draft);
     if (!parsed.success) { setError(new Error(amountMinor === undefined ? 'Enter a positive amount with up to two decimal places.' : 'Enter a valid debt date and note.')); return; }
-    operationIds.current.set(fingerprint, client_operation_id);
     submitting.current = true;
-    return runProtectedOperation(async () => {
-      setBusy(true); setError(undefined);
-      const generation = captureSessionGeneration();
-      try {
-        await api(`/groups/${encodeURIComponent(groupId)}/debts`, { method: 'POST', body: JSON.stringify(parsed.data) });
+    const generation = captureSessionGeneration();
+    try {
+      await runProtectedOperation(async () => {
+        setBusy(true); setError(undefined);
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(parsed.data)));
+        const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+        const client_operation_id = await claimDebtSubmissionKey(userId, groupId, fingerprint, generation);
         if (!isSessionGenerationCurrent(generation)) return;
+        await api(`/groups/${encodeURIComponent(groupId)}/debts`, { method: 'POST', body: JSON.stringify({ ...parsed.data, client_operation_id }) });
+        if (!isSessionGenerationCurrent(generation)) return;
+        await forgetDebtSubmissionKey(userId, groupId, fingerprint, client_operation_id, generation).catch(() => undefined);
         await invalidateForMutation.debtChanged(groupId, userId, generation);
         if (isSessionGenerationCurrent(generation)) nav(`/activity?group=${encodeURIComponent(groupId)}&view=transactions`);
-      } catch (cause) {
-        if (isSessionGenerationCurrent(generation)) setError(cause instanceof ApiError && cause.networkFailure ? new Error('Could not confirm the debt was saved. Reconnect and retry the same entry to avoid a duplicate.') : cause);
-      } finally {
-        if (isSessionGenerationCurrent(generation)) { submitting.current = false; setBusy(false); }
-      }
-    }, 'Recording debt');
+      }, 'Recording debt');
+    } catch (cause) {
+      if (isSessionGenerationCurrent(generation)) setError(cause instanceof ApiError && cause.networkFailure ? new Error('Could not confirm the debt was saved. Reconnect and retry with the same details to avoid a duplicate.') : cause);
+    } finally {
+      submitting.current = false;
+      if (isSessionGenerationCurrent(generation)) setBusy(false);
+    }
   };
 
   return <Layout>
